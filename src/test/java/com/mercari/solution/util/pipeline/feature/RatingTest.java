@@ -121,6 +121,63 @@ public class RatingTest {
         Assertions.assertTrue((Double) drifting.read(state, "winner", "mu") > 27.63523138347365);
     }
 
+    /**
+     * What the field size does to the two Bayesian updates under the default parameters — the table of the module
+     * documentation ("Field size decides what the uncertainty is worth"), pinned here so the two cannot drift apart.
+     * One contest of k fresh players without ties: bradleyTerry adds up each player's k − 1 pairs (the winner's move
+     * and the collapse of sigma grow with the field), plackettLuce's normaliser grows with the field (sigma barely
+     * shrinks; the winner's is the largest of the contest, the last player's the smallest).
+     *
+     * <p>The documented moves are rounded to one decimal, so the tolerance is a little wider than half that digit
+     * (two of them land within 0.005 of the rounding boundary).
+     */
+    @Test
+    public void testFieldSizeUnderTheDefaults() {
+        // k → {bradleyTerry winner move, sigma, plackettLuce winner move, winner's sigma, last player's sigma}
+        final Map<Integer, double[]> documented = Map.of(
+                2, new double[]{2.6, 8.07, 2.6, 8.07, 8.07},
+                4, new double[]{7.9, 7.50, 2.8, 8.26, 8.08},
+                8, new double[]{18.4, 6.22, 2.3, 8.32, 8.18},
+                16, new double[]{39.5, 1.89, 1.7, 8.33, 8.25});
+        for (final Map.Entry<Integer, double[]> e : documented.entrySet()) {
+            final int k = e.getKey();
+            final List<Rating.Entry> contest = freshContest(k);
+            final Rating bt = rating(Rating.Method.bradleyTerry, true, null), pl = rating(Rating.Method.plackettLuce, true, null);
+            final Rating.State btState = new Rating.State(), plState = new Rating.State();
+            bt.update(btState, contest);
+            pl.update(plState, contest);
+            final double[] d = e.getValue();
+            Assertions.assertEquals(d[0], (Double) bt.read(btState, "p1", "delta"), 0.06, "bradleyTerry winner, k = " + k);
+            for (int i = 1; i <= k; i++) Assertions.assertEquals(d[1], (Double) bt.read(btState, "p" + i, "sigma"), 0.006, "bradleyTerry sigma, k = " + k);
+            Assertions.assertEquals(d[2], (Double) pl.read(plState, "p1", "delta"), 0.06, "plackettLuce winner, k = " + k);
+            Assertions.assertEquals(d[3], (Double) pl.read(plState, "p1", "sigma"), 0.006, "plackettLuce winner's sigma, k = " + k);
+            Assertions.assertEquals(d[4], (Double) pl.read(plState, "p" + k, "sigma"), 0.006, "plackettLuce last player's sigma, k = " + k);
+        }
+        // a larger beta softens bradleyTerry's collapse at k = 16 (sigma 7.8) and halves the move (+19.8) without
+        // curing it: the move is still 2.4 prior standard deviations
+        final List<Rating.Entry> field = freshContest(16);
+        final double sigma = Rating.defaultSigma(Rating.defaultMu(Rating.Method.bradleyTerry));
+        final Rating wide = Rating.of(Rating.Method.bradleyTerry, true, null, null, 2 * sigma, null, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State wideState = new Rating.State();
+        wide.update(wideState, field);
+        Assertions.assertEquals(7.8, (Double) wide.read(wideState, "p1", "sigma"), 0.05);
+        Assertions.assertEquals(19.8, (Double) wide.read(wideState, "p1", "delta"), 0.06, "the move is halved, not cured");
+        Assertions.assertTrue((Double) wide.read(wideState, "p1", "delta") > 2 * sigma, "still more than two prior standard deviations");
+        // and no beta makes plackettLuce's sigma shrink there: the shrink is largest as beta → 0 (the normaliser is
+        // dominated by k · sigma²), and even there the last player keeps 8.22 of the 8.33 it started with
+        final Rating narrow = Rating.of(Rating.Method.plackettLuce, true, null, null, sigma / 100, null, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State narrowState = new Rating.State();
+        narrow.update(narrowState, field);
+        Assertions.assertEquals(8.22, (Double) narrow.read(narrowState, "p16", "sigma"), 0.01, "within 1.5% of the prior after a contest, whatever beta");
+    }
+
+    /** One contest of k fresh players, p1 first (ascending outcomes: the smaller the better). */
+    private static List<Rating.Entry> freshContest(final int k) {
+        final List<Rating.Entry> contest = new ArrayList<>();
+        for (int i = 1; i <= k; i++) contest.add(entry("p" + i, i));
+        return contest;
+    }
+
     @Test
     public void testContestProperties() {
         for (final Rating.Method method : Rating.Method.values()) {

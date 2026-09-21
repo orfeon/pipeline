@@ -343,6 +343,37 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
   a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
   applied in the order of their context key.
+- **Field size decides what the uncertainty is worth.** The default parameters are the customary ones of these
+  models, which come from games of a handful of players; in a large field both Bayesian updates still follow
+  the paper to the letter, but behave differently. What one contest of `k` fresh players does to the winner's
+  `mu` and to `sigma` (8.33 before) — `bradleyTerry` moves every player's `sigma` alike, `plackettLuce` by the
+  place, so there the winner's and the last player's are given:
+
+  | `k` | `bradleyTerry` winner / `sigma` | `plackettLuce` winner / `sigma` (winner – last) |
+  |---|---|---|
+  | 2 | +2.6 / 8.07 | +2.6 / 8.07 |
+  | 4 | +7.9 / 7.50 | +2.8 / 8.26 – 8.08 |
+  | 8 | +18.4 / 6.22 | +2.3 / 8.32 – 8.18 |
+  | 16 | +39.5 / 1.89 | +1.7 / 8.33 – 8.25 |
+
+  `bradleyTerry` adds up the `k − 1` pairs of every player, so in a large field one contest moves `mu` by
+  several prior standard deviations and collapses `sigma`; with the small default `tau` it never reopens, and
+  **the first contest decides the rating** for good. A larger `beta` softens both without curing either
+  (`beta: 2 · sigma` at `k = 16`: `sigma` 7.8 and a move of +19.8, still 2.4 prior standard deviations).
+  Above some eight players prefer `plackettLuce` or `elo`, whose `kFactor` is shared over the opponents and
+  does not grow with the field. `plackettLuce` has the opposite property: its normaliser `c² = Σ(σ² + β²)`
+  grows with the field, so a contest barely shrinks `sigma` — at `k = 16` by 1.0% for the last player and
+  0.03% for the winner, and no `beta` takes the last player past 1.5% (the smaller the `beta` the more it
+  shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays only as slowly as `sigma` does, but
+  **`sigma` is little more than a function of the contest count**: read `count` for "how well do we know this
+  player", and treat `sigma` as a feature in small contests only.
+- **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
+  pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
+  gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
+  stretch out of the training window, or read the rating relative to its contest with a **scale-free** context
+  op over it (`zscore`, `rank`): a `gapToBest` is in `mu` units, so it drifts with the spread exactly like `mu`
+  itself, and a contest whose players are all still at the prior has no spread at all (`zscore` reads null
+  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
 - Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`),
@@ -990,6 +1021,23 @@ Two context ops fit a small model over the rows of the group and hand each row i
   is still running; once the remaining rows are all 0 they share the place in equal parts, so every place is
   taken by exactly one row and in a group with at most `k` rows everyone is within the first k. Columns:
   `{block}_{field}_harville_top{k}` (`as` replaces the field segment). `excludeSelf` has no effect.
+- **A residual does not remove its regressors from the model.** The residual is `field − a − b · against`
+  within the group, so a model that is given the residual **and** `field` (or anything monotone in it within the
+  group, such as its `zscore`) can rebuild `against`'s position in the group from the two. That is harmless when
+  `against` is a feature anyway — and it defeats the purpose when `against` is kept out of the features **on
+  purpose**: a market or baseline that enters the model as an offset / initial score (the setup the `softmax`
+  op and `output.roles.baseline` serve) comes back in through the residual, and the gain it shows is the
+  baseline's, not the score's. There, check the residual against a control that holds `against` itself: if
+  the control does as well, the residual carries the baseline. Emit the residual **without** the raw field and
+  the model has nothing to rebuild `against` from: `output.exclude` when the field is a column this transform
+  computes, `output.passThrough` (`keys` / `none`) when it is an input field — `exclude` matches emitted
+  columns only and never drops a pass-through input (it reports `output.exclude.unmatched` instead).
+- **Choosing `discount`.** The stronger a row, the more plain Harville overstates its probability of finishing
+  within the first three. `[0.81, 0.65]` (the example above) is a measured starting point for fields of eight
+  to eighteen: on one such dataset it had the best log loss of the within-first-three probabilities among the
+  variants tried, where plain Harville put the strongest rows ten points above their realised rate. The best
+  exponents depend on the field size and on the domain: fit the two numbers outside the pipeline against
+  realised placings when they matter.
 - **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
   without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
   in one `top` are one pass, not one per place. `maxGroupSize` (default 64) is read by `harville` only: a group
