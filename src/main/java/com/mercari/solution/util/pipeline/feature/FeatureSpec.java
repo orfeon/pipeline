@@ -159,6 +159,25 @@ public class FeatureSpec implements Serializable {
         public Duration tauPer;
         /** rating (bradleyTerry): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
         public String pairs;
+        /**
+         * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is
+         * the sum of its members', a contest's change is shared among them by their part of the team's variance).
+         */
+        public List<TeamMember> with = new ArrayList<>();
+        /** rating with a team: the readouts of the whole team ({@code mu} = the members' sum, {@code sigma} = its uncertainty). */
+        public List<String> team = new ArrayList<>();
+        /** rating: {@code with} / {@code team} were declared but are not a list of members / of readout names. */
+        public String withInvalid;
+    }
+
+    /** A member of a rating team: an {@code entities[].name} and its own prior / drift (null = the op's). */
+    public static class TeamMember implements Serializable {
+        public String entity;
+        public Double mu;
+        public Double sigma;
+        public Double tau;
+        /** Keys other than entity / mu / sigma / tau (reported, so a misspelled parameter does not silently default). */
+        public List<String> unknown = new ArrayList<>();
     }
 
     /**
@@ -1201,6 +1220,26 @@ public class FeatureSpec implements Serializable {
         op.scale = doubleOf(o, "scale", diagnostics, loc);
         op.tauPer = Json.duration(o, "tauPer", null, diagnostics, loc);
         op.pairs = Json.string(o, "pairs");
+        if (o.has("with") && !o.get("with").isJsonNull()) {
+            for (final JsonElement m : arrayOf(o.get("with"))) {
+                final TeamMember member = new TeamMember();
+                if (m.isJsonPrimitive()) {
+                    member.entity = m.getAsString();   // `with: [agent]`: the op's prior and drift
+                } else if (m.isJsonObject()) {
+                    final JsonObject mo = m.getAsJsonObject();
+                    member.entity = Json.string(mo, "entity");
+                    member.mu = doubleOf(mo, "mu", diagnostics, loc);
+                    member.sigma = doubleOf(mo, "sigma", diagnostics, loc);
+                    member.tau = doubleOf(mo, "tau", diagnostics, loc);
+                    for (final String key : mo.keySet()) if (!List.of("entity", "mu", "sigma", "tau").contains(key)) member.unknown.add(key);
+                } else {
+                    op.withInvalid = "with must list entity names or {entity, mu, sigma, tau} members: " + m;
+                    continue;
+                }
+                op.with.add(member);
+            }
+        }
+        op.team = Json.strings(o, "team");
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");

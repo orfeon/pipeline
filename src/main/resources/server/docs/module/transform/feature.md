@@ -398,7 +398,57 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   op over it (`zscore`, `rank`): a `gapToBest` is in `mu` units, so it drifts with the spread exactly like `mu`
   itself, and a contest whose players are all still at the prior has no spread at all (`zscore` reads null
   there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
-- Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
+- **Teams (`with`).** A rating gives the whole result of a row to the one entity it rates, so an entity that
+  always appears in company — an agent selling for sellers, a driver in a car — is rated for the company it
+  keeps: its rating is mostly theirs. `with` rates the row as a **team** instead, the block's entity together
+  with other entities of the same row, each with a rating of its own:
+
+  ```yaml
+  entities:
+    - {name: seller, keys: [seller_id]}
+    - {name: agent, keys: [agent_id]}
+  features:
+    - name: skill
+      scope: sequence
+      entity: seller                                  # the rated player, as before
+      ops:
+        - type: rating
+          field: final_price
+          context: session
+          order: descending
+          as: duo                                     # required with a team
+          with: [{entity: agent, mu: 0, sigma: 4}]    # or just [agent]: the op's prior and drift
+          funcs: [mu, sigma, count]                   # read for every member
+          team: [mu, sigma]                           # the row's whole strength (optional)
+  # skill_all_duo_mu / _sigma / _count              the seller — the names of a rating without a team
+  # skill_all_duo_agent_mu / _sigma / _count        the agent
+  # skill_all_duo_team_mu / _sigma                  seller + agent
+  ```
+
+  The team's strength is the sum of its members' (`mu = Σ mu_j`, `sigma² = Σ sigma_j²`, the noise `beta` once per
+  team); the contest is rated between the teams exactly as between players, and a team's change is **shared among
+  its members by their part of its variance** — the well-known member hardly moves, the uncertain one takes the
+  update (a settled seller of `sigma` 2 next to a new agent of `sigma` 8.33 keeps 5% of it). Because an agent works
+  with many sellers, what it adds beyond them separates out over the contests. Under `tauPer` every member drifts
+  on its own clock, so the member that stayed away takes the larger part.
+  - **A member's prior is a statement.** `mu`, `sigma` and `tau` of a member default to the op's. For a member
+    that is an *effect on top of* the rated player, declare `mu: 0` and a `sigma` the size of that effect: `sigma`
+    is what decides the shares (above: the seller takes `8.33² / (8.33² + 4²)` = 81% of every change while both
+    are new).
+  - **Read a member relative to its contest, or read the team.** Only the sum is identified — every seller up
+    and every agent down by the same amount changes no expectation — so the members' levels can shift against
+    each other over a long replay. `team: [mu, sigma]` is what the contests pin down ("this seller with this
+    agent"); a member's `mu` is comparable among the members of its entity at one time: feed it to a context
+    block (`zscore`, `gapToBest`).
+  - A row without one of the members' keys joins no contest and reads null for that member and for the team;
+    its other members still read. A member never rated reads its prior, so a known seller with a new agent
+    reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its
+    shares. The rows of one and the same team are not compared with each other.
+  - `plackettLuce` / `bradleyTerry` only: `elo` keeps no variance to share by. The state, the stage key (global,
+    or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member.
+- Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
+  twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
+  or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown, a `tauPer` that is not positive or comes without `tau`),

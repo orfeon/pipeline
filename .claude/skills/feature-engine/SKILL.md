@@ -141,7 +141,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   player last competed (`Player.lastMillis` = the run event time) and `read(state, player, func, nowMillis)` adds the drift up to
   the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `Pairs` (`all` / `adjacent` /
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
-  (`withTeam`, pure layer only so far): an `Entry` holds the state keys of its members (`teamOf(row)`, pool-prefixed), the rules
+  (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in
+  `validateRatingTeam` under the one code `sequence.rating.with`; `SequenceEvaluator.readRating` picks member / team): an `Entry` holds the state keys of its members (`teamOf(row)`, pool-prefixed), the rules
   run on the summed `(m, v)` unchanged and return `Ω` / raw `Δ`, and `update` shares them by `v_j / v` (clamp AFTER the share).
   A rating without a team must stay bit-identical — `testPlayerArithmeticIsUnchangedByTeams` compares it bit for bit with
   `PlayersOnly`, a FROZEN copy of the pre-team update inside `RatingTest` (an oracle in the same JVM, not recorded numbers:

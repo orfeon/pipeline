@@ -75,6 +75,9 @@ public class SequenceEvaluator implements Serializable {
         String weightBy;
         /** rating: the update rule and its keys, or null. Its running state is a {@link Rating.State}, not a summary. */
         Rating rating;
+        /** rating: the team member the column reads (0 = the rated player), or the whole team. */
+        int ratingMember;
+        boolean ratingTeam;
         /**
          * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
          * components of a dynamics channel (one state, read out once per component column).
@@ -488,6 +491,8 @@ public class SequenceEvaluator implements Serializable {
             // pointer serves. Nothing here re-derives that contract — a column that breaks it is rejected by
             // checkWindowContract rather than quietly routed to a scan path that cannot honour it either.
             plan.rating = Rating.of(c.coordinates);
+            plan.ratingTeam = "team".equals(c.coordinates.get("readout"));
+            plan.ratingMember = c.coordinates.get("memberIndex") == null ? 0 : Integer.parseInt(c.coordinates.get("memberIndex"));
             plan.incremental = !forceScan;
         }
         return plan;
@@ -542,7 +547,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.incremental && state != null) {
             // a rating's running state is a Rating.State the fold pointer advances, not a summary
             if (plan.rating != null) {
-                return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func, nowMillis);
+                return readRating(plan, advanceRating(plan, state, nowMillis, history), row, nowMillis);
             }
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
@@ -572,6 +577,12 @@ public class SequenceEvaluator implements Serializable {
         }
         final String subkey = plan.equality == null ? "" : FeatureValues.toText(row.get(plan.equality.selfField()));
         return subkey == null ? null : cs.bySubkey.get(subkey);
+    }
+
+    /** A rating column's value for a row: the rating of the member it reads — the rated player unless told otherwise — or of the row's whole team. */
+    private static Object readRating(final ColumnPlan plan, final Rating.State ratings, final Map<String, Object> row, final long nowMillis) {
+        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis);
+        return plan.rating.read(ratings, plan.ratingMember, plan.rating.memberKey(row, plan.ratingMember), plan.func, nowMillis);
     }
 
     /**
@@ -736,7 +747,7 @@ public class SequenceEvaluator implements Serializable {
             }
             case "rating" -> {
                 // the reference the running state is equal to: every visible contest folded from scratch
-                return plan.rating.read(plan.rating.replay(window), plan.rating.player(row), plan.func, nowMillis);
+                return readRating(plan, plan.rating.replay(window), row, nowMillis);
             }
             case "barrier" -> {
                 // a future window on the mirrored clock: the nearest event is the window's newest, so the path runs
