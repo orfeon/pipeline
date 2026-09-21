@@ -2409,6 +2409,136 @@ public class FeatureTransformTest {
         Assertions.assertEquals(2.0, json.get("edf").getAsDouble(), 1e-3);
     }
 
+    private static final String ADDITIVE_BLOCKS = """
+                    - name: by_price
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {lambda: 1000000000}
+                      outputs: [curve, residual]
+                    - name: by_quantity
+                      scope: population
+                      type: smooth
+                      input: quantity
+                      target: by_price_resid
+                      range: [1, 4]
+                      segments: 3
+                      penalty: {lambda: 1000000000}
+                    - name: additive
+                      scope: row
+                      expr: "by_price + by_quantity"
+                """.replaceAll("(?m)^", "    ");
+
+    /**
+     * An additive fit by hand: the second curve is fitted on what the first leaves, one fit stage later, and a row
+     * column sums the two — evaluated in the second fit stage, where both curves exist.
+     */
+    @Test
+    public void testRowColumnOverChainedFits() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", ADDITIVE_BLOCKS + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            final Set<Double> sums = new HashSet<>();
+            for (final MElement row : rows) {
+                final Double first = row.getAsDouble("f_by_price"), second = row.getAsDouble("f_by_quantity");
+                Assertions.assertNotNull(first);
+                Assertions.assertNotNull(second);
+                final Double sum = row.getAsDouble("f_additive");
+                Assertions.assertNotNull(sum);
+                Assertions.assertEquals(first + second, sum, 1e-9);
+                sums.add(sum);
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            // the curves vary with start_price / quantity: an all-zero (vacuously equal) sum would not catch a regression
+            Assertions.assertTrue(sums.size() > 1, sums::toString);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * The same shape in both engine modes, over fits whose models do not depend on the order the rows were combined in
+     * (quantile knots and edges — the moments of a curve are sums, equal across runs only to the last bits).
+     */
+    @Test
+    public void testRowColumnOverChainedFitsParallelMatchesLinear() throws java.io.IOException {
+        final String blocks = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                    - name: q_bin
+                      scope: population
+                      type: discretize
+                      input: price_q
+                      bins: 3
+                    - name: q_both
+                      scope: row
+                      expr: "price_q + q_bin"
+                """.replaceAll("(?m)^", "    ");
+        // "_Partial" pins that the parallel graph really did fan out: equal outputs prove nothing if it fell back to the chain
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks + "      output:\n"), 6, List.of("_Partial"), List.of());
+    }
+
+    /**
+     * A row column over a fitted column AND a keyed column of a LATER stage (a seller's past mean of the fitted
+     * column itself, so the keyed stage cannot precede the fit): it is evaluated in that keyed stage, where the fitted
+     * value is an ordinary field of the row.
+     */
+    private static final String FIT_AND_KEYED_BLOCKS = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                    - name: qhist
+                      scope: sequence
+                      entity: seller
+                      windows:
+                        - {maxEvents: 3}
+                      ops:
+                        - {type: aggregate, field: price_q, funcs: [mean]}
+                    - name: q_mix
+                      scope: row
+                      expr: "price_q + qhist_n3_price_q_mean"
+                """.replaceAll("(?m)^", "    ");
+
+    @Test
+    public void testRowColumnOverFitAndLaterKeyedStage() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", FIT_AND_KEYED_BLOCKS + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Set<Double> sums = new HashSet<>();
+            int count = 0;
+            for (final MElement row : rows) {
+                final Double q = row.getAsDouble("f_price_q"), past = row.getAsDouble("f_qhist_n3_price_q_mean");
+                Assertions.assertNotNull(q);
+                if (past == null) {
+                    // a seller's first listing has no history: the sum has nothing to add
+                    Assertions.assertNull(row.getPrimitiveValue("f_q_mix"));
+                } else {
+                    Assertions.assertEquals(q + past, row.getAsDouble("f_q_mix"), 1e-12);
+                    sums.add(q + past);
+                }
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            // s1 has three listings with a history, s2 one
+            Assertions.assertTrue(sums.size() > 1, sums::toString);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testRowColumnOverFitAndLaterKeyedStageParallelMatchesLinear() throws java.io.IOException {
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", FIT_AND_KEYED_BLOCKS + "      output:\n"), 6, List.of("_Partial"), List.of());
+    }
+
     /**
      * The same curve under {@code fit.mode: forward} with a heavy FIRST-difference penalty — what is left is a
      * constant, the mean target of the readable rows. final_price is known PT30M + P6D after its event, so B (Jan 3)

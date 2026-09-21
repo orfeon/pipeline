@@ -780,8 +780,9 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
   (`smooth.fit.mode`). The artifact `<planHash>/<block>.smooth.json` holds the whole-input curve (range, segments,
   degree, penalty order, λ, edf, σ², n, coefficients) for a static serving run.
 - Several keys are several blocks; chain them through the residual (`target: <previous>_resid`) for an additive
-  fit by hand. `method: isotonic` / `rff`, several inputs in one block (additive / tensor smooths) and
-  category-varying curves are not implemented (`smooth.method`).
+  fit by hand — each link is a fit stage of its own, and a row `expr` summing the curves (`by_price + by_quantity`)
+  is the additive prediction, evaluated in the last of those stages. `method: isotonic` / `rff`, several inputs in
+  one block (additive / tensor smooths) and category-varying curves are not implemented (`smooth.method`).
 
 ### Sequences of values (population, types: transitionStats, spectralEmbedding)
 
