@@ -3186,7 +3186,11 @@ public final class FeaturePlanCompiler {
 
     /** A block-level {@code fit.align} on a type whose fit has no gauge to align (a curve, quantile knots, level statistics). */
     private void warnAlignIgnored(final FeatureDef def, final String codePrefix) {
-        final JsonObject defFit = parseJsonObject(def.fitJson);
+        warnAlignIgnored(def, parseJsonObject(def.fitJson), codePrefix);
+    }
+
+    /** {@link #warnAlignIgnored(FeatureDef, String)} where the block's {@code fit} is already parsed. */
+    private void warnAlignIgnored(final FeatureDef def, final JsonObject defFit, final String codePrefix) {
         if (defFit != null && defFit.has("align")) {
             diagnostics.warning(codePrefix + ".fit.align", def.location(), "fit.align is not implemented for " + def.type + " and ignored (svd / spectralEmbedding take it)");
         }
@@ -3197,8 +3201,11 @@ public final class FeaturePlanCompiler {
         return switch (align) {
             case Alignment.NONE -> "; the " + what + " of every block are oriented on their own (fit.align none): they flip and mix from block to block";
             case Alignment.SIGN -> "; the " + what + " of every block are sign-flipped towards those of the block before (fit.align sign): close eigenvalues still mix";
-            default -> "; the " + what + " of every block are rotated into those of the block before (fit.align procrustes, the default), so a column continues across"
-                    + " blocks — it is a stable coordinate of the fitted subspace rather than its k-th eigenvector";
+            case Alignment.PROCRUSTES -> "; the " + what + " of every block are rotated into those of the block before (fit.align procrustes, the default), so a column continues across"
+                    + " blocks — it is a stable coordinate of the fitted subspace rather than its k-th eigenvector (an svd's columns are then no longer uncorrelated,"
+                    + " and the first no longer carries the most variance)";
+            // a mode added to Alignment.MODES without a clause here: name it rather than claim the default's meaning
+            default -> "; the " + what + " of every block are brought into those of the block before (fit.align " + align + ")";
         };
     }
 
@@ -3264,7 +3271,7 @@ public final class FeaturePlanCompiler {
                         + fitted + " on the whole input; drop the block's fit.mode to walk it forward with the rest of the spec");
             }
         } else if (defFit != null) {
-            warnAlignIgnored(def, codePrefix);
+            warnAlignIgnored(def, defFit, codePrefix);
             if (defFit.has("window")) diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");
             if (defFit.has("minRows")) diagnostics.warning(codePrefix + ".fit.minRows", loc, "fit.minRows is not implemented for " + def.type + " and ignored (smooth / svd / quantileTransform / spectralEmbedding take it)");
         }
@@ -3434,7 +3441,7 @@ public final class FeaturePlanCompiler {
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
-        if (hintedBlocks.add("encoding.fit.align:" + def.name)) warnAlignIgnored(def, "encoding");
+        if (defFit != null && defFit.has("align") && hintedBlocks.add("encoding.fit.align:" + def.name)) warnAlignIgnored(def, defFit, "encoding");
         // an encoding has no row floor: a level too thin to stand on its own is shrunk towards its parent instead
         if (defFit != null && defFit.has("minRows") && hintedBlocks.add("encoding.fit.minRows:" + def.name)) {
             diagnostics.warning("encoding.fit.minRows", loc, "fit.minRows is not implemented for encoding and ignored"

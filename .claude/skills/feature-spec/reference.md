@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row \| time, purge, embargo}` (time: every block is a fold, a row reads all blocks but its own, the purge on both sides and the embargo after the purge — purge defaults to the target label's horizon; more than half the blocks left out → run-time warning + counter `timeFold_<level>_excludedOverHalf`), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row \| time, purge, embargo}` (time: every block is a fold, a row reads all blocks but its own, the purge on both sides and the embargo after the purge — purge defaults to the target label's horizon; more than half the blocks left out → run-time warning + counter `timeFold_<level>_excludedOverHalf`), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd) + `minRows` (lookup fits: the fewest rows a fit is solved from) + `align: procrustes \| sign \| none` (forward `svd` / `spectralEmbedding`: how each fit is brought into the coordinates of the one before it), `artifact: {uri, refit, id}` or the URI string |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -277,9 +277,13 @@ extreme rows do not become outliers. `clip` changes the plan hash (the artifact 
 `inputs: [numeric fields]` (the vector) or `input: <array field>` (an input field declared
 `type: array<float64>` in the sources contract — no feature op produces an array; then `rank` is required), `rank`
 (default min(d, 8)), `center` (default true), `standardize` (default false),
-`fit: {artifact}` and, for the walk-forward fit, `fit: {mode: forward, blocks, window, minBlocks | minHistory}` —
+`fit: {artifact}` and, for the walk-forward fit, `fit: {mode: forward, blocks, window, minBlocks | minHistory, minRows, align}` —
 a block with no `fit.mode` of its own inherits a top-level `fit: {mode: forward}`. Output
-float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance. A vector with a missing
+float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance — under `forward` each fit is
+rotated into the coordinates of the fit before it (`fit.align: procrustes` (default) `| sign | none`), so a column
+continues across blocks as a stable coordinate of the fitted subspace rather than its k-th eigenvector; the columns
+are then neither uncorrelated nor ordered by variance (`align: none` restores both, and the per-fit flipping that
+goes with them). A vector with a missing
 component → null scores. An array input must have one length (other lengths are skipped, read null and are
 warned about at run time; `rank` above the array length is capped with a warning and the surplus columns read
 null). Fitted from (n, Σx, Σxxᵀ): no row leaves the workers.

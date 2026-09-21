@@ -36,8 +36,9 @@ final class Alignment {
         final double[][] m = new double[k][k];
         for (int row = 0; row < a.size(); row++) {
             final double[] x = a.get(row), y = b.get(row);
+            final int shared = Math.min(k, y.length);
             for (int i = 0; i < k; i++) {
-                for (int j = 0; j < Math.min(k, y.length); j++) m[i][j] += x[i] * y[j];
+                for (int j = 0; j < shared; j++) m[i][j] += x[i] * y[j];
             }
         }
         return m;

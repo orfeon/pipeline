@@ -486,6 +486,7 @@ filesystems (`gs://`, `s3://`, relative local paths).
     minBlocks: 1                                  # rows with fewer preceding blocks (with data for the key) read nothing
     minHistory: P180D                             # alternative to minBlocks: the minimum history, rounded up to blocks
     minRows: 200                                  # smooth / svd / quantileTransform / spectralEmbedding: a fit over fewer rows is not solved
+    align: procrustes                             # svd / spectralEmbedding: procrustes (default) | sign | none — see "Alignment of forward fits"
     window: P2Y                                   # optional: a row reads the blocks within this range only (rounded up to blocks)
     artifact: {uri: "gs://bucket/features"}       # optional: the whole-input totals, for a static serving run
 ```
@@ -523,6 +524,10 @@ to estimate the noise from); the other types have no floor. `minRows: 0` switche
 emptied (`forward fit over … change point(s), n of them with fewer than fit.minRows …`). Encodings ignore it: a thin
 level is shrunk towards its parent instead (`encoding.fit.minRows` warning on a block that declares one). Part of the
 plan hash when declared. A fit the floor empties writes no artifact, so a later run with enough rows still fits.
+
+**`align`** decides how the consecutive fits of an `svd` / `spectralEmbedding` block are brought into one coordinate
+system (`procrustes` by default) — see *Alignment of forward fits* under *SVD / PCA*; the other fits have no such
+freedom and ignore it (`<type>.fit.align` warning on a block that declares one).
 
 A `type: svd`, `type: quantileTransform`, `type: smooth` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
 *Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
@@ -705,7 +710,9 @@ of blocks over a few million rows is seconds.
 
 The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
 whole-input moments and projected onto the leading `rank` right singular vectors, giving decorrelated scores
-ordered by explained variance (`<name>_0` carries the most). The fit needs only (n, Σx, Σxxᵀ), accumulated
+ordered by explained variance (`<name>_0` carries the most) — both hold for a static fit and for a forward
+fit with `fit.align: none`; under the default forward alignment the columns are a rotated basis of the same
+subspace, so they are neither uncorrelated nor ordered (see *Alignment of forward fits*). The fit needs only (n, Σx, Σxxᵀ), accumulated
 relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
 Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
 the vector length, tens to a few hundred). Components of a static fit are oriented so the largest loading is positive (a
@@ -753,7 +760,11 @@ cannot: a rotation inside a near-degenerate eigenspace and a swap of order are o
 are those of the unrotated fit — but a column is then **a stable coordinate of the fitted subspace, not its k-th
 eigenvector**: an svd's `variances` are the data's variance along the rotated directions (unsorted), and an embedding's
 `eigenvalues` are the spectrum of the fitted components rather than one value per column (the artifact says
-`alignment: procrustes`). The chain runs **forward in time only** — a fit aligned to a later one would carry a trace
+`alignment: procrustes`). Two properties of an unaligned svd therefore go: the score columns are **no longer
+uncorrelated** with one another (their covariance is `Rᵀ Λ R`, diagonal only when `R` is a permutation of signs), and
+`<name>_0` no longer carries the most variance. Both matter only to a consumer that relies on them (an unregularised
+linear fit on the scores, "the first component"); a tree model or a ridge reads the stable columns and prefers them.
+`fit: {align: none}` keeps the unaligned pair. The chain runs **forward in time only** — a fit aligned to a later one would carry a trace
 of rows it may not read — and skips the change points that have no fit (`minRows`, an empty window). The whole-input
 model, which a static serving run loads in place of the forward fits a training run read, is aligned last, to the end
 of the chain, so serving continues the columns the consumer's model was trained on. A component the previous fit did

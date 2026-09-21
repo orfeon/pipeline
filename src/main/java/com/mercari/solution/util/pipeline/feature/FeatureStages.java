@@ -1047,7 +1047,8 @@ public final class FeatureStages {
          * into the coordinates of the last fitted one before it — never the other way: a fit aligned to a later one
          * would carry a trace of rows it may not read. The whole-input model, which a static serving run loads in
          * place of the forward fits a training run read, is aligned last, to the end of that chain, so that serving
-         * continues the columns the consumer's model was trained on.
+         * continues the columns the consumer's model was trained on — and when an artifact from an earlier run is
+         * kept instead of rewritten, the run warns that its coordinates are not this chain's.
          */
         @Override
         default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
@@ -1057,6 +1058,7 @@ public final class FeatureStages {
             final boolean floored = belowFloor(whole);
             M total = fitAbove(whole, true);
             TreeMap<Long, M> byBlock = null;
+            boolean chained = false;
             if (forward() != null) {
                 final int[] emptied = {0};
                 byBlock = series.models(forward().windowBlocks(), state -> {
@@ -1070,7 +1072,12 @@ public final class FeatureStages {
                     if (previous != null) point.setValue(alignTo(previous, point.getValue()));
                     previous = point.getValue();
                 }
-                if (previous != null && !total.isEmpty()) total = alignTo(previous, total);
+                if (previous != null && !total.isEmpty()) {
+                    // alignTo returns the fit itself when it aligns nothing, so identity says whether the chain moved it
+                    final M end = alignTo(previous, total);
+                    chained = end != total;
+                    total = end;
+                }
                 LOG.info("{} {}: forward fit over {} block(s), {} change point(s){}", artifact().name(), block(), parts.size(), byBlock.size(),
                         emptied[0] == 0 ? "" : ", " + emptied[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
             }
@@ -1079,6 +1086,12 @@ public final class FeatureStages {
             } else if (artifactUri() != null && floored) {
                 LOG.warn("{} {}: the whole-input fit is below fit.minRows {}, so no artifact is written under {}; a run with enough rows writes it",
                         artifact().name(), block(), minRows(), artifactUri());
+            } else if (artifactUri() != null && chained) {
+                // an artifact written before (by an earlier version, or by a run whose chain ended elsewhere) is kept
+                // as it is, so a serving run would read it in coordinates this run's rows never saw: say so once
+                LOG.warn("{} {}: an artifact already exists under {} and is kept, so it holds the coordinates of the run that wrote it while this run's forward fits"
+                                + " were aligned to one another (fit.align); set fit.artifact.refit before serving from it",
+                        artifact().name(), block(), artifactUri());
             }
             return new ForwardModel<>(total, byBlock, forward() == null ? null : series.observed());
         }

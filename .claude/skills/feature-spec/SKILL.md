@@ -268,7 +268,9 @@ The three forward knobs, all in the plan hash:
   coordinates of the fit before it, so a score / coordinate column means the same thing in every block; without it
   (`none`) the columns flip sign and mix whenever the largest loading changes hands or two eigenvalues cross, and a
   model trained across blocks reads them as noise. `sign` only flips (each column stays the k-th eigenvector, close
-  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three.
+  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three. What
+  `procrustes` costs: an svd's columns are no longer uncorrelated and `_0` no longer carries the most variance — set
+  `none` only if a consumer depends on that (an unregularised linear fit on the scores), and expect the flipping back.
 
 Reading the plan: `fit.mode.forward` (info) states per block what it reads, `windowBlocks` / `minBlocks` /
 `forwardLagMillis` are in the column coordinates — an **outcome** input delays the readable blocks by its settlement

@@ -256,7 +256,8 @@ public class AlignmentTest {
         Assertions.assertEquals(0, distance(chained.byBlock().get(0L), free.byBlock().get(0L)), 0);
         // the whole-input model reads the same state as the last prefix: it ends the chain
         Assertions.assertEquals(0, distance(chained.total(), chained.byBlock().get(7L)), 1e-9);
-        Assertions.assertTrue(distance(free.total(), chained.total()) > 1e-3 || worstFree < 1e-3);
+        // the whole-input state is the same either way, so the two totals differ only by the chain's rotation
+        Assertions.assertTrue(distance(free.total(), chained.total()) > 1e-3, "the chain must move the whole-input model");
 
         // walk-forward: later blocks leave the earlier fits untouched
         final Map<Long, Svd.Moments> head = new TreeMap<>();

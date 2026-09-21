@@ -20,6 +20,11 @@ import java.util.List;
  * d is the vector length, tens to a few hundred). The components' sign is fixed (largest-magnitude loading
  * positive) so a re-fit on the same data reproduces the same scores.
  *
+ * <p>A forward fit replaces that rule by {@link #alignTo}, which rotates each fit into the coordinates of the one
+ * before it: the columns then span the same subspace but are no longer its eigenvectors, so the scores are neither
+ * uncorrelated nor ordered by variance (and {@link #variances} are per column, unsorted). {@code fit.align: none}
+ * keeps the per-fit rule.
+ *
  * <p>A vector with a missing component (null / NaN) or a length other than the fitted one takes no part in the
  * fit and maps to null scores. A fit with fewer than two vectors has no components and maps every vector to null
  * (the artifact is still written).
@@ -34,9 +39,9 @@ public final class Svd implements Serializable, FitArtifact.Model {
     public final double[] mean;
     /** Per-dimension divisor (ones unless {@code standardize: true}: the standard deviation, or the RMS when {@code center: false}). */
     public final double[] scale;
-    /** {@code rank × dimension} loadings, ordered by decreasing variance. */
+    /** {@code rank × dimension} loadings, ordered by decreasing variance (in no order once {@link #alignment} rotated them). */
     public final double[][] components;
-    /** Variance of each component (the eigenvalues of the fitted covariance / correlation matrix). */
+    /** Variance of each component (the eigenvalues of the fitted covariance / correlation matrix; {@code Σ_i R_ij² λ_i} once rotated). */
     public final double[] variances;
     /** Trace of the fitted matrix: Σ variances over every dimension. */
     public final double totalVariance;
