@@ -525,8 +525,15 @@ public class RatingTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("agent", agent), "one pool twice");
         Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam(null, agent));
         Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 0d, 0d))), "sigma 0");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("seller", List.of(new Rating.Member("agent", List.of(), 0d, 3d, 0d))), "no key fields: every row would be one member");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("seller", List.of(new Rating.Member("agent", null, 0d, 3d, 0d))), "no key fields");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("seller", List.of()), "a team needs a member besides the rated player");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("sel\u0001ler", agent), "a separator inside a pool would let two pools meet on one state key");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.withTeam("seller", agent), "the whole team is declared at once");
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.update(new Rating.State(), List.of(entry("a", 1), entry("b", 2))), "a player in a rating of teams");
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), "count", 0L));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), null, 0L), "no readout named");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, List.of(sellerX), "mu", 0L), "a team of one in a rating of teams of two");
     }
 
     /**

@@ -5,9 +5,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -118,7 +120,12 @@ public final class Rating implements Serializable {
     /** The team readouts: the sum of the members' ratings and the uncertainty of that sum. */
     public static final List<String> TEAM_FUNCS = List.of("mu", "sigma");
 
-    /** Between a pool and a key in a state key, and between the members in a team's identity: neither occurs in a key. */
+    /**
+     * Between a pool and a key in a state key ({@link #memberKey}), and between the members in a team's identity
+     * ({@link #id}). A key from {@link FeatureValues#key} carries {@code U+0001} itself (it terminates every
+     * component) but is length-prefixed, so a concatenation of keys stays unambiguous whatever the data holds. What
+     * could make two pools meet on one state key is a separator inside a <b>pool</b>, which {@link #withTeam} rejects.
+     */
     private static final char POOL_SEPARATOR = '\u0001', MEMBER_SEPARATOR = '\u0002';
 
     private final Method method;
@@ -227,13 +234,28 @@ public final class Rating implements Serializable {
         if (method == Method.elo) {
             throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce");
         }
+        // the whole team is declared at once: a second call would otherwise drop the members the first one added
+        if (members.size() > 1) {
+            throw new IllegalArgumentException("this rating already has a team of " + members.size() + " members: withTeam declares the whole team at once");
+        }
+        if (with == null || with.isEmpty()) {
+            throw new IllegalArgumentException("a team needs at least one member besides the rated player");
+        }
         final List<Member> team = new ArrayList<>();
         team.add(new Member(pool, playerKeys, mu, sigma, tau));
         team.addAll(with);
-        final java.util.Set<String> pools = new java.util.HashSet<>();
+        final Set<String> pools = new HashSet<>();
         for (final Member member : team) {
+            if (member == null) throw new IllegalArgumentException("a team holds no null member");
             if (member.pool() == null || member.pool().isEmpty()) throw new IllegalArgumentException("every member of a team needs a pool (the namespace of its keys)");
+            if (member.pool().indexOf(POOL_SEPARATOR) >= 0 || member.pool().indexOf(MEMBER_SEPARATOR) >= 0) {
+                throw new IllegalArgumentException("a pool cannot hold the key separators U+0001 / U+0002 (two pools would meet on one state key): '" + member.pool() + "'");
+            }
             if (!pools.add(member.pool())) throw new IllegalArgumentException("two members of one team share the pool '" + member.pool() + "'");
+            // an empty key list would name every row the same member; a null one fails per row, deep in the fold
+            if (member.keys() == null || member.keys().isEmpty()) {
+                throw new IllegalArgumentException("a member needs the key fields that name it: " + member);
+            }
             if (!(member.sigma() > 0) || !(member.tau() >= 0) || !Double.isFinite(member.mu())) {
                 throw new IllegalArgumentException("a member needs a finite mu, sigma > 0 and tau >= 0: " + member);
             }
@@ -260,17 +282,13 @@ public final class Rating implements Serializable {
 
     /** The team a row is rated as — the state keys of its members — or null when a member is missing: the row joins no contest. */
     public List<String> teamOf(final Map<String, Object> row) {
-        if (members.size() == 1) {
-            final String player = memberKey(row, 0);
-            return player == null ? null : List.of(player);
-        }
-        final List<String> team = new ArrayList<>(members.size());
-        for (int j = 0; j < members.size(); j++) {
+        final String[] team = new String[members.size()];
+        for (int j = 0; j < team.length; j++) {
             final String key = memberKey(row, j);
             if (key == null) return null;
-            team.add(key);
+            team[j] = key;
         }
-        return team;
+        return List.of(team);
     }
 
     /** What makes two rows the same team: all their members (a player's own rows, in a rating without a team). */
@@ -373,17 +391,18 @@ public final class Rating implements Serializable {
         // a contest needs two distinct players (teams); the entries are sorted by them, so the ends decide it
         if (n < 2 || ids[0].equals(ids[n - 1])) return;
 
-        // pre-contest ratings per entry (the variance already carries the drift): a team is the sum of its members
-        final double[][] mus = new double[n][k], variances = new double[n][k];
+        // pre-contest ratings per entry (the variance already carries the drift): a team is the sum of its members.
+        // The per-member values are held flat (index i * k + j): one array rather than one per entry
+        final double[] mus = new double[n * k], variances = new double[n * k];
         final double[] m = new double[n], v = new double[n];
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
                 final Player p = state.players.get(entries.get(i).members().get(j));
-                mus[i][j] = p == null ? members.get(j).mu() : p.mu;
-                variances[i][j] = drifted(members.get(j), p, millis, true);
+                mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
+                variances[i * k + j] = drifted(members.get(j), p, millis, true);
                 // the first member starts the sums (not 0 +): a team of one is its member to the last bit
-                m[i] = j == 0 ? mus[i][j] : m[i] + mus[i][j];
-                v[i] = j == 0 ? variances[i][j] : v[i] + variances[i][j];
+                m[i] = j == 0 ? mus[i * k + j] : m[i] + mus[i * k + j];
+                v[i] = j == 0 ? variances[i * k + j] : v[i] + variances[i * k + j];
             }
         }
         // Ω and Δ per entry: the change of its mu, and the part of its variance the contest takes away
@@ -403,10 +422,10 @@ public final class Rating implements Serializable {
                 final String key = entries.get(i).members().get(j);
                 Change c = changes.get(key);
                 if (c == null) {
-                    c = new Change(members.get(j), mus[i][j], variances[i][j]);
+                    c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
                     changes.put(key, c);
                 }
-                final double share = variances[i][j] / v[i];
+                final double share = variances[i * k + j] / v[i];
                 c.change += share * dMu[i];
                 c.factor *= Math.max(1 - share * deltas[i], KAPPA);
             }
@@ -579,7 +598,13 @@ public final class Rating implements Serializable {
      */
     public Double readTeam(final State state, final List<String> team, final String func, final long nowMillis) {
         if (team == null) return null;
-        if (!TEAM_FUNCS.contains(func)) throw new IllegalArgumentException("unknown team readout: " + func + " (available: " + TEAM_FUNCS + ")");
+        // func null first: TEAM_FUNCS is an immutable list, whose contains(null) throws
+        if (func == null || !TEAM_FUNCS.contains(func)) {
+            throw new IllegalArgumentException("unknown team readout: " + func + " (available: " + TEAM_FUNCS + ")");
+        }
+        if (team.size() != members.size()) {
+            throw new IllegalArgumentException("a team of " + team.size() + " read from a rating of teams of " + members.size());
+        }
         double sum = 0;
         for (int j = 0; j < members.size(); j++) {
             final Member m = members.get(j);
