@@ -140,7 +140,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   feeds it run by run from the fold pointer, `replay` is the scan reference. Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
   `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
-  entries sorted by player, and the contests of one event time are applied in context-key order).
+  entries sorted by player, and the contests of one event time are applied in context-key order. On the scan path
+  (`forceScan` only — production runs the fold pointer) it reads every contest of its window from the start, so
+  `unbounded()` calls it unbounded whatever `tailSize()` would say and the key's history stays pinned; a window that
+  evicts is implemented on neither path — no inverse for the running state, and truncation would split a contest for
+  `replay` — so `SequenceEvaluator.checkWindowContract` fails a rating column carrying `maxAge` / `maxEvents` / a
+  filter at `setup()` rather than replaying it; the check is deliberately not in `plan()`, which the compile layer
+  calls through `unboundedReason()`).
 
 ### Evaluators (`Serializable`, Beam-free, one instance per stage DoFn)
 

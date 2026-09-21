@@ -312,6 +312,11 @@ public class SequenceEvaluator implements Serializable {
     }
 
     private static boolean unbounded(final ColumnPlan plan, final OutputColumn c) {
+        // a rating on the scan path replays every visible contest from the start of its window — no bounded tail
+        // exists for it, whatever tailSize() would make of its coordinates. With checkWindowContract in force this
+        // says exactly what the general rule below already says (a rating carries no maxAge / maxEvents / filter, so
+        // tailSize is null); it is stated so that admitting one of those cannot silently make a rating trimmable.
+        if (plan.rating != null) return !plan.incremental;
         return !plan.incremental && !hasMaxAge(plan) && tailSize(plan, c) == null;
     }
 
@@ -406,7 +411,29 @@ public class SequenceEvaluator implements Serializable {
                     conditions.put(text, Filter.parse(text.replace("$self.", FeatureValues.SELF_PREFIX)));
                 }
             }
-            plans.put(c.canonicalName, plan(c));
+            final ColumnPlan plan = plan(c);
+            checkWindowContract(c, plan);
+            plans.put(c.canonicalName, plan);
+        }
+    }
+
+    /**
+     * The window contracts this evaluator cannot honour, checked once per column when a stage is about to RUN it.
+     * It deliberately sits outside {@link #plan}: the compile layer calls that through {@link #unboundedReason} to
+     * describe a column, where an exception would replace a diagnostic with a crash of the compiler.
+     *
+     * <p>A {@code rating} carries no eviction: its running state cannot take an update back ({@link #advanceRating}
+     * only folds forward), and truncating the scan window would hand {@link Rating#replay} a contest cut in half.
+     * The compiler therefore admits the unbounded, filter-less window only (`sequence.rating.window`); a column that
+     * arrives here carrying one is a compile layer that relaxed the rule without implementing it.
+     */
+    private static void checkWindowContract(final OutputColumn c, final ColumnPlan plan) {
+        if (plan.rating == null) return;
+        if (plan.maxEvents != null || plan.filterText != null || hasMaxAge(plan)) {
+            throw new IllegalStateException("rating column " + c.canonicalName + " carries a window this evaluator cannot honour"
+                    + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window — admitting one means"
+                    + " implementing the eviction the running state lacks (advanceRating) and keeping the contests of a truncated"
+                    + " window whole (select / Rating.replay)");
         }
     }
 
@@ -457,9 +484,11 @@ public class SequenceEvaluator implements Serializable {
                 && (!hasMaxAge(plan) || plan.summary.family().invertible());
         if ("rating".equals(c.operator)) {
             // not a summary (an update reads the state the earlier contests left), yet a running state all the same:
-            // the compiler admits the unbounded, filter-less window only, which the fold pointer serves
+            // the compiler admits the unbounded, filter-less window only (`sequence.rating.window`), which the fold
+            // pointer serves. Nothing here re-derives that contract — a column that breaks it is rejected by
+            // checkWindowContract rather than quietly routed to a scan path that cannot honour it either.
             plan.rating = Rating.of(c.coordinates);
-            plan.incremental = !forceScan && plan.maxEvents == null && plan.filterText == null && !hasMaxAge(plan);
+            plan.incremental = !forceScan;
         }
         return plan;
     }
@@ -731,12 +760,19 @@ public class SequenceEvaluator implements Serializable {
         }
     }
 
-    /** Window selection for the scan path: binary-searched bounds, list views instead of copies. */
+    /**
+     * Window selection for the scan path: binary-searched bounds, list views instead of copies. The window never
+     * spans a trimmed entry, so a readout may walk it from its own start (the {@link Rating} replay does) instead of
+     * only touching a bounded tail: both bounds clamp to the {@link History#base()}, and {@link History#trim} never
+     * moves that base past any column's {@link #columnRetainFrom} (the watermark is their minimum), so the entries a
+     * column can need are all held. The clamp is the identity for a bounded-tail column — the trimmed prefix is by
+     * construction outside the tail it reads — so narrowing the view cannot change what such a column returns.
+     */
     protected List<Past> select(final ColumnPlan plan, final Map<String, Object> row, final long nowMillis, final List<Past> history) {
         final long nearEdge = nowMillis - plan.shiftMillis;
         // rows sharing the current timestamp are excluded upstream (history holds strictly-past rows only)
         final int hi = upperBound(history, nearEdge);
-        final int lo = !hasMaxAge(plan) ? 0 : lowerBound(history, farEdge(plan, nowMillis));
+        final int lo = !hasMaxAge(plan) ? base(history) : lowerBound(history, farEdge(plan, nowMillis));
         if (lo >= hi) return List.of();
         List<Past> ranged = history.subList(lo, hi);
         if (plan.filterText != null) {
@@ -759,9 +795,14 @@ public class SequenceEvaluator implements Serializable {
         return ranged;
     }
 
+    /** First readable index of a history: its {@link History#base()}, or 0 for a plain list (the tests' oracle). */
+    static int base(final List<Past> history) {
+        return history instanceof History h ? h.base() : 0;
+    }
+
     /** First index whose millis >= bound. */
     static int lowerBound(final List<Past> history, final long bound) {
-        int lo = history instanceof History h ? h.base() : 0, hi = history.size();
+        int lo = base(history), hi = history.size();
         while (lo < hi) {
             final int mid = (lo + hi) >>> 1;
             if (history.get(mid).millis() < bound) lo = mid + 1;
@@ -772,7 +813,7 @@ public class SequenceEvaluator implements Serializable {
 
     /** First index whose millis > bound. */
     static int upperBound(final List<Past> history, final long bound) {
-        int lo = history instanceof History h ? h.base() : 0, hi = history.size();
+        int lo = base(history), hi = history.size();
         while (lo < hi) {
             final int mid = (lo + hi) >>> 1;
             if (history.get(mid).millis() <= bound) lo = mid + 1;
