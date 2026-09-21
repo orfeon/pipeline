@@ -24,9 +24,10 @@ import java.util.TreeSet;
  *
  * <p>The fit state is the pair counts ({@link PairCounts}): a sum of per-row contributions, hence a
  * {@link Summary} monoid — one {@code Combine} per time block, merged over the blocks a row may read
- * ({@link BlockSeries}) — and the small symmetric eigenproblem (one row per value) is solved on one worker with the
- * Jacobi rotation of {@link Svd}. Components are oriented so their largest loading is positive: a re-fit on the same
- * data reproduces the columns.
+ * ({@link BlockSeries}) — and the symmetric eigenproblem (one row per value) is solved on one worker for its
+ * {@code rank} leading components only ({@link SymmetricEigen}: the Jacobi rotation of {@link Svd} up to a small
+ * vocabulary, a restarted block Krylov iteration beyond). Components are oriented so their largest loading is
+ * positive: a re-fit on the same data reproduces the columns.
  *
  * <p>The {@code maxValues} vocabulary cap is applied by the engine before the pairs are counted (the
  * co-occurrence-mass pre-pass of FeatureStages.vocabularyView), because the state is quadratic in the values it
@@ -364,7 +365,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
                 for (int r = 0; r < start.length; r++) start[r][i] = warm.embedding[row][r];
             }
         }
-        final SymmetricEigen.Result eigen = SymmetricEigen.leading(ppmi, k, true, start);
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(ppmi, k, true, start, warn);
         final double[][] embedding = new double[v][k];
         final double[] eigenvalues = new double[k];
         for (int r = 0; r < k; r++) {

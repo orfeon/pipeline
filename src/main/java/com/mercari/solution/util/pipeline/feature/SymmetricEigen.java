@@ -48,7 +48,8 @@ final class SymmetricEigen {
     static final double TOLERANCE = 1e-12;
 
     /**
-     * @param values   the {@code k} leading eigenvalues (by decreasing magnitude, or value for a PSD matrix)
+     * @param values   the leading eigenvalues (by decreasing magnitude, or value for a PSD matrix): {@code k} of
+     *                 them, or every one of them when the matrix has fewer rows than {@code k}
      * @param vectors  their unit eigenvectors, one per row
      * @param restarts Krylov restarts taken; 0 = the full decomposition answered
      */
@@ -64,10 +65,19 @@ final class SymmetricEigen {
      * @param warm        start vectors of length {@code d} (any number, not necessarily orthonormal), or null
      */
     static Result leading(final double[][] a, final int k, final boolean byMagnitude, final double[][] warm) {
-        return leading(a, k, byMagnitude, warm, MAX_RESTARTS);
+        return leading(a, k, byMagnitude, warm, true);
     }
 
-    static Result leading(final double[][] a, final int k, final boolean byMagnitude, final double[][] warm, final int maxRestarts) {
+    /**
+     * @param loud whether a hand-over to the full decomposition is reported: a forward fit solves one model per
+     *             change point, and every one of them meets the same spectrum — only the whole-input fit reports,
+     *             as it does for everything else it could say about the fit
+     */
+    static Result leading(final double[][] a, final int k, final boolean byMagnitude, final double[][] warm, final boolean loud) {
+        return leading(a, k, byMagnitude, warm, loud, MAX_RESTARTS);
+    }
+
+    static Result leading(final double[][] a, final int k, final boolean byMagnitude, final double[][] warm, final boolean loud, final int maxRestarts) {
         final int d = a.length;
         final int m = Math.min(d, Math.max(2 * k, k + 8));
         // the iteration pays when its spaces are small next to the matrix
@@ -132,6 +142,17 @@ final class SymmetricEigen {
             final double[][] xr = combine(basis, ritz, kept, d), yr = combine(images, ritz, kept, d);
             double worst = 0;
             for (int i = 0; i < Math.min(k, kept); i++) {
+                // V is orthonormal to rounding and no further — its last directions are deliberately kept at that
+                // level — so x = V w need not come out exactly unit, and the residual below does not pin its length
+                // ((Ax − θx) scales with x). Normalise it here, which is also what the caller receives: Spectral
+                // scales a whole coordinate column by the vector and Svd projects rows onto it.
+                final double length = Math.sqrt(dot(xr[i], xr[i]));
+                if (length > 0) {
+                    for (int l = 0; l < d; l++) {
+                        xr[i][l] /= length;
+                        yr[i][l] /= length;
+                    }
+                }
                 double residual = 0;
                 for (int l = 0; l < d; l++) {
                     final double r = yr[i][l] - ritz[0][i] * xr[i][l];
@@ -150,8 +171,10 @@ final class SymmetricEigen {
             }
             x = xr;
         }
-        LOG.info("leading eigenpairs: the block Krylov iteration ({} of {} directions) had not settled after {} restart(s); using the full decomposition",
-                m, d, maxRestarts);
+        if (loud) {
+            LOG.info("leading eigenpairs: the block Krylov iteration ({} of {} directions) had not settled after {} restart(s); using the full decomposition",
+                    m, d, maxRestarts);
+        }
         return dense(a, k, byMagnitude);
     }
 

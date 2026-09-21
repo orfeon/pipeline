@@ -714,8 +714,9 @@ ordered by explained variance (`<name>_0` carries the most) — both hold for a 
 fit with `fit.align: none`; under the default forward alignment the columns are a rotated basis of the same
 subspace, so they are neither uncorrelated nor ordered (see *Alignment of forward fits*). The fit needs only (n, Σx, Σxxᵀ), accumulated
 relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
-Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
-the vector length, tens to a few hundred). Components of a static fit are oriented so the largest loading is positive (a
+Combine over the rows, no row leaves the workers — and solves the d × d covariance on the driver for its `rank`
+leading components (d = the vector length, tens to a few hundred; beyond 128 dimensions by the same block Krylov
+iteration `spectralEmbedding` uses, which hands over to the full decomposition if it does not settle). Components of a static fit are oriented so the largest loading is positive (a
 re-fit reproduces the scores). A vector with a missing component (null / NaN) takes no part in the fit and
 reads null scores. An array input must have one length: vectors of another length are skipped (and read
 null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array

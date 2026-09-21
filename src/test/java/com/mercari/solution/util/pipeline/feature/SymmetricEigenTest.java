@@ -48,7 +48,11 @@ public class SymmetricEigenTest {
     }
 
     private static void assertSamePairs(final double[][] a, final SymmetricEigen.Result result, final int k, final boolean byMagnitude) {
-        final double[][] full = Svd.jacobi(a, byMagnitude);
+        assertSamePairs(a, result, k, Svd.jacobi(a, byMagnitude));
+    }
+
+    /** The reference decomposition of a few hundred rows is the slow path this class exists to avoid: pass it in when it is already at hand. */
+    private static void assertSamePairs(final double[][] a, final SymmetricEigen.Result result, final int k, final double[][] full) {
         Assertions.assertEquals(k, result.values().length);
         for (int i = 0; i < k; i++) {
             Assertions.assertEquals(full[0][i], result.values()[i], 1e-9, "eigenvalue " + i);
@@ -131,10 +135,11 @@ public class SymmetricEigenTest {
         }
         final SymmetricEigen.Result fresh = SymmetricEigen.leading(next, 6, true, null);
         final SymmetricEigen.Result warm = SymmetricEigen.leading(next, 6, true, cold.vectors());
-        assertSamePairs(next, warm, 6, true);
+        final double[][] full = Svd.jacobi(next, true);
+        assertSamePairs(next, warm, 6, full);
         Assertions.assertTrue(warm.restarts() < fresh.restarts(), warm.restarts() + " warm vs " + fresh.restarts() + " cold");
         // a start that is no help — vectors of another length, a repeated vector — is ignored or replaced, not trusted
-        assertSamePairs(next, SymmetricEigen.leading(next, 6, true, new double[][]{new double[7], cold.vectors()[0], cold.vectors()[0]}), 6, true);
+        assertSamePairs(next, SymmetricEigen.leading(next, 6, true, new double[][]{new double[7], cold.vectors()[0], cold.vectors()[0]}), 6, full);
     }
 
     @Test
@@ -168,7 +173,7 @@ public class SymmetricEigenTest {
         final double[] slow = new double[300];
         for (int i = 0; i < slow.length; i++) slow[i] = (i % 2 == 0 ? 1 : -1) * Math.pow(0.999, i);
         final double[][] hard = withSpectrum(slow, 8);
-        final SymmetricEigen.Result handed = SymmetricEigen.leading(hard, 3, true, null, 1);
+        final SymmetricEigen.Result handed = SymmetricEigen.leading(hard, 3, true, null, true, 1);
         Assertions.assertEquals(0, handed.restarts());
         assertSamePairs(hard, handed, 3, true);
     }
