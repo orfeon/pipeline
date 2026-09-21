@@ -141,7 +141,8 @@ other than `maxEvents` / `maxAge` / `filter` / `clock` / `as` are rejected. `clo
 and `fit.blocks: {size: <ticks>, clock: <calendar>}` count on it too; availability stays on wall time. Window token in names: `n5`, `365d`,
 `365d_n5`, `all` — or the window's `as:`. A `filter` has no token: a filter-only window is `all`, so next to
 the unconditional window it must be named (`windows: [{}, {filter: "category = $self.category", as: byCategory}]`
-→ `<block>_all_…` and `<block>_byCategory_…`; unnamed = `column.duplicate`).
+→ `<block>_all_…` and `<block>_byCategory_…`; unnamed = `column.duplicate`). One name is one window: two windows
+of a block may share an `as:` only if they select the same rows (`window.as`).
 
 | op | keys | output name / type |
 |---|---|---|

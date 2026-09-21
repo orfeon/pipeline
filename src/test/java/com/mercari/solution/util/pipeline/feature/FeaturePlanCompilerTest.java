@@ -1403,6 +1403,43 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: sequence\n" + " ".repeat(12) + "as: grade-path"))), "encoding.keySet.as"));
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: 5events}")), "window.as"));
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: _hidden}")), "window.as"));
+
+        // one name is one window: two windows of a block that select different rows must not share it — the hidden
+        // level statistics of the block are shared by the name, wherever the emitted names happen not to collide
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: pool}\n      - {maxAge: P30D, as: pool}")), "window.as"));
+        Assertions.assertFalse(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: pool}\n      - {maxEvents: 5, as: pool}")), "window.as"));
+    }
+
+    /**
+     * A window's {@code as} is a display name, not part of the window: an {@code additive} lattice requires its
+     * main-effect keySets to declare the same windows, and naming one of them declares the same window.
+     */
+    @Test
+    public void testWindowNameIsNotPartOfTheWindow() {
+        final String cross = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - {keys: [seller_id], windows: [{maxAge: P365D}]}
+                      - {keys: [category], windows: [{maxAge: P365D}]}
+                      - keys: [seller_id, category]
+                        structure: cross
+                        windows: [{maxAge: P365D}]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {scale: logit}
+            """;
+        final FeaturePlan plain = compile(SOURCES, withEncoding(cross));
+        Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
+        final String crossWindow = "structure: cross\n" + " ".repeat(12) + "windows: [{maxAge: P365D}]";
+        Assertions.assertTrue(cross.contains(crossWindow), cross);
+        final FeaturePlan named = compile(SOURCES, withEncoding(cross.replace(crossWindow, crossWindow.replace("P365D}", "P365D, as: lastYear}"))));
+        Assertions.assertFalse(named.getDiagnostics().hasErrors(), named::describe);
+        Assertions.assertNotNull(named.getColumn("enc__seller_id_category__lastYear__e1__mean"), named::describe);
+        // a window that really differs is still rejected, named or not
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(cross.replace("- {keys: [category], windows: [{maxAge: P365D}]}",
+                "- {keys: [category], windows: [{maxAge: P30D}]}"))), "encoding.hierarchy.additive"));
     }
 
     @Test
@@ -1477,6 +1514,19 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(jointDistribution, "encoding.stat.static"), jointDistribution::describe);
         Assertions.assertTrue(jointDistribution.getDiagnostics().getMessages().stream().filter(m -> m.level() == Diagnostics.Level.error).allMatch(m -> "encoding.stat.static".equals(m.code())),
                 "no second, contradicting diagnostic (the old 'use backoff' hint led to this same error): " + jointDistribution.describe());
+
+        // the fit a joint column reads is identified by the keys, the window and the target — a keySet's `as` renames
+        // its columns, not the fit. The same keys twice share one solve: right with the same lattice and shrinkage,
+        // and rejected when they differ (the second keySet's columns would be filled from the first's model)
+        final String cellKeySet = " ".repeat(10) + "- keys: [seller_id, category]\n" + " ".repeat(12) + "structure: cross\n";
+        Assertions.assertTrue(joint.contains(cellKeySet), joint);
+        final FeaturePlan shared = compile(SOURCES, withEncoding(joint.replace(cellKeySet, cellKeySet + cellKeySet + " ".repeat(12) + "as: cell2\n")));
+        Assertions.assertFalse(shared.getDiagnostics().hasErrors(), shared::describe);
+        Assertions.assertEquals("enc__seller_id_category__e1", column(shared, "enc__cell2__e1__mean").getCoordinates().get("joint"));
+        final FeaturePlan conflicting = compile(SOURCES, withEncoding(joint.replace(cellKeySet,
+                cellKeySet + cellKeySet + " ".repeat(12) + "as: cell2\n" + " ".repeat(12) + "shrinkage: {scale: logit, estimator: joint, priorWeight: 50}\n")));
+        Assertions.assertTrue(conflicting.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "encoding.shrinkage.joint".equals(m.code()) && m.level() == Diagnostics.Level.error), conflicting::describe);
     }
 
     @Test

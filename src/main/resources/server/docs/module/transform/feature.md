@@ -897,9 +897,14 @@ event and weighs it by how similar it is to the current row instead:
   `- {keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2], structure: sequence, as: gradePath}`
   emits `<block>__gradePath__<target>__<stat>` instead of a name that repeats every lag column — and it lets
   one block declare the same keys twice (a raw statistic next to its shrunk lattice). Only the emitted names
-  change; the hidden level statistics keep their key-derived names (the keySets of a block share them).
+  change; the hidden level statistics keep their key-derived names (the keySets of a block share them) — and so
+  does the `estimator: joint` fit, so the same keys twice under `joint` read one solve: with the same lattice
+  and shrinkage that is the point, and when they differ it is an error (`encoding.shrinkage.joint`; declare
+  them in separate blocks).
 - Both are names of letters, digits and `_` starting with a letter (`window.as`, `encoding.keySet.as`). They
-  are part of the spec, so renaming changes the plan hash like any other rename of an output.
+  are part of the spec, so renaming changes the plan hash like any other rename of an output. One window name
+  is one window: two windows of a block named the same must select the same rows (same `maxAge` / `maxEvents` /
+  `clock` / `filter`), since the statistics behind the name are shared (`window.as`).
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
   `values` when the output goes to a sink such as BigQuery or straight into a model. An encoding target's

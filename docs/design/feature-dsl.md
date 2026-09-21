@@ -726,8 +726,12 @@ may be left unbounded:
   token (a condition has no short canonical spelling), so a filter-only window is `all` like the
   unconditional one; **`as:` on a window element names the segment** and is what lets both stand in one
   block (the statistic over everything next to the one per `$self` pool). An encoding keySet takes `as:`
-  the same way for the `{keys}` axis. Both rename emitted columns only: the coordinates, and the hidden
-  level statistics the keySets of a block share by their keys, are those of the unnamed declaration.
+  the same way for the `{keys}` axis. A name changes what a column is called, not what it reads: the bounds
+  the window selects by, and the hidden level statistics the keySets of a block share by their keys, are
+  those of the unnamed declaration (a window's `{window}` coordinate and the state keys derived from the
+  token do carry the name, like the column names themselves). A name is the block's, so two windows of one
+  block that select different rows may not share it, and a keySet's name does not rename the joint fit its
+  columns read (the same keys twice under `estimator: joint` are one solve).
 - **Execution plan**: several windows on one entity and order share one sort (several frames over
   one `PARTITION BY ... ORDER BY` in SQL; several range reads of one per-entity timestamped buffer
   in the engine). Nested windows (same filter, different far edge) are computed from differences of

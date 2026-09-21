@@ -25,8 +25,12 @@ import java.util.regex.Pattern;
 public final class Clock implements Serializable {
 
     public static final List<String> BUILT_IN = List.of("time", "events");
-    /** A clock's name rides into generated column names (the window token {@code 20business}), so it is an identifier. */
-    private static final Pattern NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+    /**
+     * A name that rides into generated column names (a clock in the window token {@code 20business}, a window's or a
+     * keySet's {@code as}), so it is an identifier: letters, digits and {@code _} starting with a letter (a leading
+     * {@code _} marks an intermediate column).
+     */
+    static final Pattern NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     static final long DAY_MILLIS = 86_400_000L;
 
     private final String name;
