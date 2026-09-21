@@ -517,8 +517,9 @@ rows. **`minRows`** is the floor in rows for the lookup fits (`smooth`, `svd`, `
 the whole input's under `static` — that fewer rows contributed to is not solved, and the rows that would read it
 read null. It counts the rows that entered the fit (a key and a target for a curve, a complete vector for svd, a
 non-null value for a quantile transform, a value with at least one previous value for an embedding). Default: a
-`smooth` needs as many rows as it has coefficients (`segments + degree` — with fewer, the penalty alone decides the
-curve); the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
+`smooth` needs one row more than it has coefficients (`segments + degree + 1` — with fewer the penalty alone decides
+the curve, and with exactly as many the unpenalised fit interpolates the rows, leaving no residual degree of freedom
+to estimate the noise from); the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
 emptied (`forward fit over … change point(s), n of them with fewer than fit.minRows …`). Encodings ignore it: a thin
 level is shrunk towards its parent instead (`encoding.fit.minRows` warning on a block that declares one). Part of the
 plan hash when declared. A fit the floor empties writes no artifact, so a later run with enough rows still fits.
@@ -797,7 +798,7 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
   `forward` the moments are kept per time block and the curve is re-solved for every block window a row may read —
   the complete blocks within `fit.window` whose **targets are known at predictAt** (the target's settlement and
   ingestion lag delays the readable blocks, as for a forward encoding), the row's own block excluded; `minBlocks` /
-  `minHistory` / `minRows` as for svd (a curve's default `minRows` is its number of coefficients — see *Forward
+  `minHistory` / `minRows` as for svd (a curve's default `minRows` is one more than its coefficients — see *Forward
   block fits*), and `λ` is re-chosen per window under `reml`. **Without `fit.window` the curve is fitted on the
   whole history**: once years of blocks have accumulated one more block hardly moves it, so it is close to a fixed
   non-linear transform of the key. To follow a relation that drifts, declare a rolling `fit.window` (`P730D`,

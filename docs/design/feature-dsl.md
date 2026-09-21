@@ -964,7 +964,7 @@ read* — and the model is what the merged state of those blocks solves to:
 | `mode: forward` | the complete blocks before the row whose inputs are known at predictAt — never the row's own block |
 | `mode: forward` + `window: P2Y` | of those, the blocks within the window (rounded up to whole blocks): the fit forgets |
 | `minBlocks: n` / `minHistory: P180D` | the row reads null until that many preceding blocks carry data |
-| `minRows: n` | lookup fits only (`smooth` / `svd` / `quantileTransform` / `spectralEmbedding`): a fit — one window's, or the whole input's under `static` — that fewer rows contributed to is not solved, and its rows read null. Blocks are cut from the epoch, so an input's first block is a fraction of one. Default: a `smooth` needs as many rows as it has coefficients, the others have no floor; `0` = off |
+| `minRows: n` | lookup fits only (`smooth` / `svd` / `quantileTransform` / `spectralEmbedding`): a fit — one window's, or the whole input's under `static` — that fewer rows contributed to is not solved, and its rows read null. Blocks are cut from the epoch, so an input's first block is a fraction of one. Default: a `smooth` needs one row more than it has coefficients, the others have no floor; `0` = off |
 | `mode: fold` | every fold but the row's own (not leak-free in time: other folds include later events) |
 | `mode: fold` + `fold: {by: time, purge, embargo}` | every block but `[b − purge, b + purge + embargo]` around the row's block `b` — the purged, embargoed cross-validation of time series (the purge is two-sided: label windows overlap both ways; the embargo is an extra buffer after it); `purge` defaults to the horizon of the label the target reads |
 

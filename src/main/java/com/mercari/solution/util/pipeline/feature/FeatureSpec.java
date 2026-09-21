@@ -458,7 +458,7 @@ public class FeatureSpec implements Serializable {
         /**
          * The fewest rows a lookup fit (smooth / svd / quantileTransform / spectralEmbedding) is solved from; a fit —
          * the whole input's, or one time-block window's under forward — with fewer contributes null. Null = the type's
-         * default (smooth: its number of coefficients; the others: no floor), 0 = no floor.
+         * default (smooth: one more than its coefficients; the others: no floor), 0 = no floor.
          */
         public Integer minRows;
         /**

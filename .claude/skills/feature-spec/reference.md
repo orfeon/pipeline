@@ -303,14 +303,15 @@ statistics (it shares the svd blocks' Combine; no row leaves the workers); `segm
 `forward` the readable blocks are delayed by the target's settlement + ingestion lag and λ is re-chosen per window;
 without `fit.window` the curve is fitted on the whole history and soon stops moving — declare a rolling window
 (`P730D`) to follow a relation that drifts. Missing key → null; a fit over fewer rows than `fit.minRows` (default:
-the number of coefficients, `segments + degree`; `0` = off, which leaves only the hard guard of ≤ `penalty.order`
+one more than the coefficients, `segments + degree + 1`; `0` = off, which leaves only the hard guard of ≤ `penalty.order`
 rows) → null for the rows that read it; a fit the floor emptied writes no artifact. Artifact
 `<block>.smooth.json` (λ, edf, σ², coefficients, and `limit: polynomial | unpenalised` when REML could not tell its
 best strength from an end of its search — λ is then that end, a fixed number; compare curves, not strengths, when you
 reproduce a fit). `outputs: [residual]` alone (no curve column) is the form for a key known only after the event: its
 curve cannot be an output, its residual is an encoding target like any other. A curve per category: mask the key
 with a row `expr` (`cond ? key : null` — a row without a key takes no part in the fit), fit one block per mask, pick
-the row's own with another `expr`.
+the row's own with another `expr`. An additive fit by hand chains blocks through the residual (`target: <previous>_resid`),
+and a row `expr` summing the curves is its prediction.
 
 ### `type: transitionStats` (always expanding)
 

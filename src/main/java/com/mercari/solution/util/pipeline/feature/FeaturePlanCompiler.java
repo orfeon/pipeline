@@ -2856,9 +2856,11 @@ public final class FeaturePlanCompiler {
         }
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "smooth", "the curve is fitted", "penalised regression solved from the moments of the whole input", true);
         if (!valid) return;
-        // fewer rows than coefficients leave the curve to the penalty alone: the default floor of a curve
-        final int minRows = fitSpec.minRows == null ? segments + degree : fitSpec.minRows;
-        final String minRowsPhrase = minRowsPhrase(minRows, fitSpec.minRows == null ? "the number of coefficients" : null);
+        // the default floor of a curve is one row more than it has coefficients. With fewer rows the penalty alone decides
+        // the curve; with exactly as many, the unpenalised end of the search interpolates them — edf = n, no residual
+        // degree of freedom, σ² = RSS / (n − edf) undefined — and REML has nothing to weigh the penalty against
+        final int minRows = fitSpec.minRows == null ? segments + degree + 1 : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, fitSpec.minRows == null ? "one more than the " + (segments + degree) + " coefficients" : null);
         final boolean forward = fitSpec.mode == FitMode.forward;
         final String what = "smooth fits " + (segments + degree) + " B-spline coefficients of degree " + degree + " over [" + lo + ", " + hi + "] (difference penalty of order " + order
                 + ", strength " + (Smooth.REML.equals(lambda) ? "chosen by REML" : lambda) + ") from the moments of (basis, target)";

@@ -2409,6 +2409,47 @@ public class FeatureTransformTest {
         Assertions.assertEquals(2.0, json.get("edf").getAsDouble(), 1e-3);
     }
 
+    /**
+     * A whole-input fit the fit.minRows floor empties is NOT persisted: a later run adopts an existing artifact instead
+     * of fitting, so a stored empty model would turn "not enough rows yet" into "never". Six rows are fewer than the
+     * nine a curve of eight coefficients asks for by default: every row reads null and the artifact directory stays
+     * without a curve — while the same block with the floor switched off writes it ({@link #testSmooth}).
+     */
+    @Test
+    public void testFlooredFitWritesNoArtifact() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: price_curve
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      fit: {artifact: "%s"}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                Assertions.assertNull(row.getPrimitiveValue("f_price_curve"));
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+        final List<String> written = new ArrayList<>();
+        final java.io.File root = new java.io.File(dir);
+        if (root.exists()) {
+            try (java.util.stream.Stream<java.nio.file.Path> files = java.nio.file.Files.walk(root.toPath())) {
+                files.filter(p -> p.getFileName().toString().endsWith(".smooth.json")).forEach(p -> written.add(p.toString()));
+            }
+        }
+        Assertions.assertTrue(written.isEmpty(), written::toString);
+    }
+
     private static final String ADDITIVE_BLOCKS = """
                     - name: by_price
                       scope: population
@@ -2600,7 +2641,7 @@ public class FeatureTransformTest {
             Assertions.assertEquals(50.0, byKey.get("C/s2").getAsDouble("f_price_curve"), 1e-3);
             Assertions.assertEquals(63.4, byKey.get("D/s1").getAsDouble("f_price_curve"), 1e-3);
             // fit.minRows: three rows behind C are fewer than 4 — no curve — and the five behind D are enough; without a
-            // declared floor a curve needs as many rows as it has coefficients (8), which no window of this input holds
+            // declared floor a curve needs one row more than it has coefficients (8 + 1), which no window of this input holds
             Assertions.assertNull(byKey.get("C/s1").getPrimitiveValue("f_price_floor"));
             Assertions.assertNull(byKey.get("C/s2").getPrimitiveValue("f_price_floor"));
             Assertions.assertEquals(63.4, byKey.get("D/s1").getAsDouble("f_price_floor"), 1e-3);

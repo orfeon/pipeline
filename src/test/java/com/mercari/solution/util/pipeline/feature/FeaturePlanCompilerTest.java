@@ -2193,9 +2193,10 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
-     * {@code fit.minRows}: the fewest rows a lookup fit is solved from. A curve defaults to its number of coefficients
-     * (fewer rows leave it to the penalty alone), the other types to no floor; a block's own value wins over the
-     * top-level one, 0 switches the floor off, and the types without a summary fit say that they ignore it.
+     * {@code fit.minRows}: the fewest rows a lookup fit is solved from. A curve defaults to one row more than its
+     * coefficients (fewer leave it to the penalty alone, as many are interpolated), the other types to no floor; a
+     * block's own value wins over the top-level one, 0 switches the floor off, and the types that do not take it —
+     * discretize / factorization, and an encoding, which shrinks a thin level instead — say that they ignore it.
      */
     @Test
     public void testFitMinRows() {
@@ -2214,9 +2215,9 @@ public class FeaturePlanCompilerTest {
             """;
         final FeaturePlan defaults = compile(SOURCES, withEncoding(blocks));
         Assertions.assertFalse(defaults.getDiagnostics().hasErrors(), defaults::describe);
-        Assertions.assertEquals("9", column(defaults, "price_curve").getCoordinates().get("minRows"), "segments 6 + degree 3");
+        Assertions.assertEquals("10", column(defaults, "price_curve").getCoordinates().get("minRows"), "segments 6 + degree 3, and one row to spare");
         Assertions.assertNull(column(defaults, "price_q").getCoordinates().get("minRows"));
-        Assertions.assertTrue(defaults.describe().contains("fewer than 9 row(s)"), defaults::describe);
+        Assertions.assertTrue(defaults.describe().contains("fewer than 10 row(s)"), defaults::describe);
 
         final FeaturePlan declared = compile(SOURCES, withEncoding(blocks
                 .replace("        segments: 6\n", "        segments: 6\n        fit: {minRows: 0}\n")
@@ -2249,6 +2250,19 @@ public class FeaturePlanCompilerTest {
                     fit: {minRows: 50}
             """;
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(binned)), "discretize.fit.minRows"));
+        final String encoded = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: sold, stats: [mean]}
+                    fit: {minRows: 50}
+            """;
+        final FeaturePlan encoding = compile(SOURCES, withEncoding(encoded));
+        Assertions.assertFalse(encoding.getDiagnostics().hasErrors(), encoding::describe);
+        Assertions.assertTrue(hasCode(encoding, "encoding.fit.minRows"), encoding::describe);
     }
 
     /**
