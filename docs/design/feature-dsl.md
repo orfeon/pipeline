@@ -1135,7 +1135,15 @@ weight of each step follows the §5.5 weights rule (default `varianceComponents`
 closed form `w = n/(n+λ)`). Parent self-contamination is avoided by `shrinkage.leaveNodeOut`
 (default true) uniformly for every lattice kind — subtracting the child's sufficient statistics from the
 parent's, which keeps the combiner structure and the single pass (for well-observed keySets the
-difference to "full" is negligible). Availability propagation (§6.1) is unchanged: each level's
+difference to "full" is negligible). The child is the **effective leaf** of the row — the deepest level of
+the chain that has rows: a row whose declared leaf is empty (an unseen key, a null key component, the
+missing older steps of a `structure: sequence` path) backs off to a coarser level, and that level's
+statistics are the ones its ancestors contain. Subtracting the (empty) declared leaf instead would shrink the
+level toward ancestors that still hold its own rows, and the row would not read what the lattice declared
+from that level reads. A lattice containing an `additive` entry keeps its **declared** leaf: the main-effect
+chains behind that entry subtract the cell they generalise (an empty cell has nothing to subtract), and a
+coarser level of the chain — a coarse cross — is contained in no main-effect level, so subtracting it there
+would drop a main effect. Availability propagation (§6.1) is unchanged: each level's
 aggregate is the max of its contributing rows' availability and the interpolation is a per-row
 composition.
 

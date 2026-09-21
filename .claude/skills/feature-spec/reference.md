@@ -229,7 +229,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     priorWeight: 20
     family: gaussian | betaBinomial | gammaPoisson | dirichletMultinomial   # derived from the stat; conjugate families need scale identity
     scale: identity | logit | log                # required with additive
-    leaveNodeOut: true
+    leaveNodeOut: true                           # the leaf's rows leave every ancestor; in a chain the leaf = the deepest level that has rows (an unseen / null-keyed leaf backs off, and the level it backs off to is what is subtracted); a lattice with additive keeps the declared cell
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
   fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, fold: {by: time, purge: P20D, embargo: P7D}, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
