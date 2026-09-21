@@ -26,7 +26,7 @@ launch and monitoring).
    outcome).
 2. A **feature spec** states intent: features in four scopes — `row` (the row itself), `context` (rows
    co-occurring in one event), `sequence` (the entity's strictly-past rows), `population` (learned:
-   encodings, factorization, discretize, quantileTransform, svd, smooth).
+   encodings, factorization, discretize, quantileTransform, svd, smooth, transitionStats, spectralEmbedding).
 3. The compiler derives **when every output column is available** and rejects, at assembly, any
    emitted column that would need information after `predictAt`. History windows are shifted back by
    the outcome's settlement + ingestion lag automatically. Leak safety is a type check, not a review.
@@ -176,6 +176,8 @@ parameters:
 | rank normalisation of a skewed value (uniform or normal score) | `population`, `type: quantileTransform` (`bins`, `distribution`, `clip`) | static, or `fit.mode: forward` (walk-forward ranks for a drifting field; inherited from a top-level forward fit); out of range clamps to 0 / 1; `clip: 0.001` when the normal score feeds an expr / svd |
 | decorrelated low-rank summary of several numeric features (e.g. a lag window) | `population`, `type: svd` (`inputs`, `rank`) | static, or `fit: {mode: forward, blocks, window}` for walk-forward components under drift (inherited from a top-level forward fit when the block declares no mode); fitted from sufficient statistics only |
 | the non-linear effect of a numeric field on the target (a curve over an age / a weight / an interval) without bin edges, and targets *net of* it | `population`, `type: smooth` (`input`, `target`, `range`, `penalty`) | the curve `<name>` is a feature; `outputs: [residual]` gives `<name>_resid` = target − curve, an outcome — use it as another encoding's target (`targets: [{field: <name>_resid}]`) or as `output.roles.label`. Penalty strength by REML unless declared. `range` is required (keys beyond it are clamped) unless the input is a uniform `quantileTransform` column (knots at the quantiles). Use `fit.mode: forward` for training sets: a static curve has seen every row's own target |
+| what state an entity moves to next, given where it is (grade / class / plan / regime transitions) | `population`, `type: transitionStats` (`sequenceOf: {entity, field}`, `emit: [{toValueProb: v}]`, `order`, `blend`) | sugar for a lag + an expanding shrunk `distribution` encoding: strictly past, always expanding; `blend: {perEntity: true, priorWeight}` = the entity's own transitions shrunk toward everyone's; the first event of an entity reads the marginal |
+| numeric coordinates for a high-cardinality categorical state, without a target | `population`, `type: spectralEmbedding` (`sequenceOf`, `cooccur.window`, `rank`) | values that precede / follow the same values land close; `of: previous` when the field is an outcome (the row's own value would be a violation); static or `fit.mode: forward`; vocabulary capped by `maxValues` (default 256), a value beyond it reads null |
 
 Difference to the previous row of the entity: `lag` the past value, then subtract in a row `expr` —
 sequence ops never see the current row.
@@ -239,7 +241,7 @@ answers one question: *which rows shaped the numbers this row reads?*
 | `static` | the whole input, its own row and the test period included | serving configs (load the artifact), and quantities that do not drift. Not a label leak for `svd` / `quantileTransform` over pre-event fields, but a drifting field is placed in a distribution it could not have been placed in at the time |
 | `fold` (encoding only) | the other folds | classical out-of-fold target encoding; other folds contain later events, so it is not leak-free in time |
 
-`svd`, `quantileTransform` and `smooth` support `static | forward`, `discretize` and `factorization` only `static`
+`svd`, `quantileTransform`, `smooth` and `spectralEmbedding` support `static | forward` (`transitionStats` is always expanding), `discretize` and `factorization` only `static`
 (`smooth` consumes a target: under `static` a training row's own target shapes the curve it reads). **A block
 without its own `fit.mode` follows a top-level `fit: {mode: forward}`** (svd, quantileTransform, smooth, encodings), so one
 line at the top walks the whole spec forward; `fit: {mode: static}` on a block opts it out (the plan says so:

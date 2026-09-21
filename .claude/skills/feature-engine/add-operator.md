@@ -96,7 +96,7 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
 
 ## Recipe E — population type with a static fit (worked example: `discretize`)
 
-The pattern `quantileTransform` and `svd` follow, and the one for `spectralEmbedding` / `transitionStats`: fitted once
+The pattern `quantileTransform`, `svd`, `smooth` and `spectralEmbedding` follow: fitted once
 over the whole input (or loaded from an artifact), applied per row by lookup.
 
 1. **Model class** (pure Java, `Serializable`, like `Discretization`): `fit...(...)`, `apply` /
@@ -115,7 +115,7 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
      block declares no mode of its own), `blocks` / `minBlocks` / `minHistory` / `window` are
      read into the spec, and the columns get the forward coordinates via `forwardCoordinates(c, null,
      inputs, def, fitSpec)` plus `predictOffsetMillis` — the engine side is a `BlockSeries<S>` fitted per
-     change point (`SvdSpec` as a `SummaryFitBlock` — `contribution` / `solve` — is the template);
+     change point (`SvdSpec` as a `ForwardFitBlock` — `contribution` / `fit` — is the template);
    - `diagnostics.info("fit.mode.static", loc, ...)` including `artifactPhrase(fitSpec)` and the
      outcome-like caveat when the input is an outcome;
    - `newColumn(...)`, `c.fitted = true`, coordinates `fit=static`, the parameters, `field`,
@@ -132,9 +132,21 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    (svd's moments, quantileTransform's values) implement `SummaryFitBlock<T, S, M>` instead of `fit`:
    `family()` / `familyName()` / `stateClass()` / `contributionCoder()`, `contribution(row)` → (time
    block — 0 under static —, value) or null, `solve(parts, planHash)` (merge the per-time-block states
-   through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. The stage then fits every
+   through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. **When the model is solved from
+   the state and persisted as JSON** (svd / quantileTransform / smooth / spectralEmbedding), implement
+   `ForwardFitBlock<T, S, M>` rather than spelling that out: declare `artifact()` (a `FitArtifact.Json`
+   constant on the model class, which implements `FitArtifact.Model` = `isEmpty` / `describe` / `toJson`),
+   `forward()`, `predictOffsetMillis()` and `fit(state, loud)` — and the artifact path / existence / read, the
+   whole-input-plus-change-point `solve`, the `modelFor(model, values)` lookup and `timeBlock(row)` come with
+   it (`adopt(model)` is the hook for a parameter the artifact must not fix, e.g. the quantile clip). The stage then fits every
    such block together — one extraction pass and one `Combine.perKey` per family, one side input for
-   all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. Register it once in `staticFitBlocks`
+   all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. **When the state is
+   only bounded once something of the input is known** (spectralEmbedding: the pair counts are quadratic in
+   the values counted, so the `maxValues` vocabulary cannot wait for the solve), override `prepare(fitInput,
+   prefix)` to build the side input and return a copy of the spec carrying it, `extractionViews()` to declare
+   it, and `contribution(row, views)` to filter with it (`SpectralSpec` + `vocabularyView` is the template:
+   rank the values the way the solve would, so the bounded state fits the same model). The plain blocks reach
+   the solve, so a view travels only to the ParDo that declares it. Register it once in `staticFitBlocks`
    (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
    `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the
@@ -143,6 +155,10 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    `[basis(x), y]`, so it contributes that vector to `Svd.SUMMARY` under the family name `Moments` and shares the
    svd blocks' Combine — no new state, coder or merge law to test. A target-consuming block lists the target in
    `fitInputs()` and passes it to `forwardCoordinates` (its availability is the forward lag).
+   **When the type is a composition of blocks that exist**, write no engine code at all: build the synthetic
+   `FeatureDef`s and call their expanders (`expandCompress` → `expandSvd`; `sequencePath` → `expandSequence` for the
+   lag path; `expandTransitionStats` → `expandEncoding` with a `naming` template that gives the columns the type's
+   own names). Pin the equivalence in an e2e test — the sugar and the explicit blocks side by side, value for value.
 6. Docs: a `### <Type> (population, type: <type>)` section in `feature.md` (example, fit semantics,
    artifact file, out-of-range behaviour), and remove the type from the *Limitations* list.
 7. Tests: `FeaturePlanCompilerTest.test<Type>Expansion` (coordinates, `fit` stage before the keyed

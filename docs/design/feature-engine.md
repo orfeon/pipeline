@@ -694,8 +694,7 @@ roughly linear in the input).
 `estimator: joint` under `fit.mode: expanding` (row-local replay cannot hold the cell table), a variance-components
 λ for a shrunk `distribution`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
-consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
-types: they need the per-entity value sequence, i.e. a keyed pass before the fit); the general sequence
+consumption is not modelled); the general sequence
 form's `probabilistic` dynamics (`sequence.dynamics.family`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
 bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
 keeps the exact values (decision 11); the run-time availability
@@ -1112,7 +1111,11 @@ Only the monoid law is used (a range is *merged*, not differenced), which is wha
 state (an eigendecomposition, quantile knots) is fitted once per **change point** — every observed block and,
 under a window, the index at which a block leaves (`changePoints`) — and a row reads the floor entry of its
 usable block (`lookup`), the rule `JointFit` already used for its per-block solutions. The artifact keeps the
-whole-input model (what a static serving run loads); a forward fit is re-fitted every run.
+whole-input model (what a static serving run loads); a forward fit is re-fitted every run. Without a window the
+readable state is a prefix that grows by one block per change point, so `models` merges only the entering block into
+one running state: B merges instead of B²/2 — the same prefix scan `VarianceComponents.forwardSeries` does per key,
+and what makes a year of weekly blocks affordable for a family whose part is large (pair counts, gathered values)
+rather than a fixed-size matrix. A fit therefore reads the state it is given and keeps nothing.
 
 `type: svd` and `type: quantileTransform` are on it. The encoding levels still carry their own
 `ForwardBlocks.Series` (prefix arrays of `KeyStats` + the per-block λ); moving them onto
@@ -1146,6 +1149,36 @@ recorded in §9.2). A block that fits an empty input too (quantileTransform: n =
 empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
 have no summary state, discretize gathers the same values as the quantile transform and can join its family.
 
+**One fit geometry, four types: `ForwardFitBlock`.** svd, quantileTransform, smooth and spectralEmbedding differ only
+in what a row contributes, how a state becomes a model and which columns it fills; the geometry around that is the
+same for all of them, so it is declared once. A `ForwardFitBlock<T, S, M>` (a `SummaryFitBlock` whose model is
+`ForwardModel<M>` = total + byBlock + observed) asks for `artifact()`, `forward()`, `predictOffsetMillis()` and
+`fit(state, loud)` and supplies the rest: `artifactPath` / `artifactExists` / `readArtifact` from its
+`FitArtifact.Json`, the `solve` that fits the whole input (a static fit is one block, fitted as it stands — a fit
+reads the state and keeps nothing) plus one model per change point and writes the artifact once, the `modelFor`
+lookup a row does (`toEpochMillis` → `usableBlock` → `BlockSeries.lookup`) and the `timeBlock(row)` a contribution
+is keyed by. `loud` is the whole-input fit, which reports what it fitted; a per-change-point fit is quiet because an
+empty or short window at a leave point is normal. Two hooks cover the exceptions: `adopt(model)` (quantileTransform
+takes the config's clip, not the artifact's) and `prepare` / `extractionViews` (below).
+
+**One JSON artifact, four types: `FitArtifact.Json`.** The same four persist their model as
+`<planHash>/<block>.<extension>.json` — the manifest header plus the model's own members. `FitArtifact.Json<T>`
+holds the path, the existence check, the write and the read with its "nothing was fitted" warning; a model class
+implements `FitArtifact.Model` (`isEmpty` / `describe` / `toJson`) and declares one constant naming the extension,
+how JSON becomes a model, which columns read null when it is empty and what to re-fit on (`Svd.ARTIFACT`).
+
+**A state that must be bounded before it accumulates.** Every other summary state is bounded by its declaration (a
+d×d matrix, 8 bytes per row); the co-occurrence counts of `spectralEmbedding` are quadratic in the *values* they
+hold, so a high-cardinality field dies in the accumulator long before `maxValues` is consulted in the solve. A block
+may therefore declare a side input for its extraction: `prepare(fitInput, prefix)` builds it and returns a copy of
+the spec carrying it, `extractionViews()` declares it to the extraction ParDo, and `contribution(row, views)` reads
+it. `SpectralSpec` uses it for the vocabulary (`vocabularyView`: one extra pass ranks the values by the same
+co-occurrence mass the solve ranks by, `Sum.longsPerKey` → `Top.of(maxValues)` → a map view), so the pairs it counts
+are exactly the cells the unfiltered solve would have kept — the same model, a state bounded by the cap
+(`SpectralTest.testVocabularyPrePassEqualsTheFitsOwnCap`). `PairCounts` keeps a hard ceiling that names the cause
+should a caller accumulate unfiltered. Under `forward` the vocabulary is global while the counts stay per block,
+which the `fit.mode.forward` diagnostic states.
+
 **A family is reused, not re-declared: `type: smooth`.** The smooth curve of a target over a numeric key (spec §5.6,
 the linear-basis class; `Smooth`) needs `XᵀX`, `Xᵀy` and `yᵀy` of a B-spline design — which are the blocks of the
 second-moment matrix of the vector `z = [B_0(x) … B_{m−1}(x), y]`. `SmoothSpec` therefore contributes `z` to
@@ -1162,6 +1195,21 @@ knots must exist before the one pass over the rows, so the range is declared (qu
 (PAVA is not a sum of contributions — it would gather per-key (x, n, Σy) like the quantile transform's values), `rff`,
 several smooth terms in one block (one λ per term makes REML a multi-dimensional search) and category-varying curves
 (spec §5.6, the tensor with a key lattice — `joint` territory).
+
+**The sequence-of-values types need no engine of their own.** `transitionStats` and `spectralEmbedding` were deferred
+as "needing the per-entity value sequence before the fit". That sequence is a `lag`: `FeaturePlanCompiler.sequencePath`
+expands a synthetic sequence block under the population block's name (as `expandCompress` builds a synthetic svd
+block), and the scheduler places it like any keyed column — one stage ahead of whatever reads it as a key or a fit
+input. `transitionStats` is then *only* a compile-time desugaring into an expanding distribution encoding over the
+chain `(entity, path) → (path) → suffixes → global` (Dirichlet-Multinomial, `blend.priorWeight` = λ; naming template
+`{block}_{target}` with the target named `to`): there is no `transitionStats` operator at run time, and the e2e test
+pins "sugar == the explicit lag + encoding blocks" value for value. `spectralEmbedding` adds one model (`Spectral`)
+and one summary family of its own (`Spectral.SUMMARY`, family name `PairCounts`: nested sorted maps of unordered pair
+counts, a monoid — sorted so the sums and the vocabulary order never depend on the arrival order), contributed as
+`String[]{value, lag values…}` by `SpectralSpec`; the PPMI matrix and the Jacobi eigendecomposition (`Svd.jacobi`)
+run in `solve`, per change point under forward. The eigenproblem is dense in the distinct values, hence `maxValues`
+(default 256, at most 1024) by co-occurrence mass. With these two, every population type the catalog registers is
+implemented; `population.unsupported` remains for types registered ahead of their implementation.
 
 #### 9.6.4 Vector operators and their three supplies
 

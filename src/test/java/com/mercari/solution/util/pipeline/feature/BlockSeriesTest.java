@@ -71,6 +71,27 @@ public class BlockSeriesTest {
         Assertions.assertNull(new BlockSeries<>(Summary.Summaries.MOMENTS, Map.of()).total());
     }
 
+    /**
+     * The prefix series merges only the entering block, so it must still equal the window state at every change
+     * point — and leave the parts themselves untouched (a part is read by the whole-input fit too).
+     */
+    @Test
+    public void testPrefixSeriesEqualsWindowsAndKeepsParts() {
+        final Map<Long, Summary.Moments.State> parts = new TreeMap<>();
+        for (long block = 0; block < 12; block++) parts.put(block * 3, moments(block + 1, block + 2));
+        final BlockSeries<Summary.Moments.State> series = new BlockSeries<>(Summary.Summaries.MOMENTS, parts);
+        final TreeMap<Long, Double> prefix = series.models(0, s -> s.sum);
+        Assertions.assertEquals(series.changePoints(0), prefix.navigableKeySet());
+        for (final long at : series.changePoints(0)) {
+            Assertions.assertEquals(sum(series.window(at, 0)), prefix.get(at), 1e-12, "block " + at);
+        }
+        Assertions.assertEquals(sum(series.total()), prefix.lastEntry().getValue(), 1e-12);
+        // the running state is a copy: every part still holds its own two values
+        for (final Map.Entry<Long, Summary.Moments.State> part : parts.entrySet()) {
+            Assertions.assertEquals(2, part.getValue().n, "block " + part.getKey());
+        }
+    }
+
     /** A non-invertible family (extrema) is served by merging the range: the algebra needs the monoid law only. */
     @Test
     public void testNonInvertibleFamily() {

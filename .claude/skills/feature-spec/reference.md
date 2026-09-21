@@ -300,6 +300,31 @@ statistics (it shares the svd blocks' Combine; no row leaves the workers); `segm
 Missing key → null; a fit with ≤ `penalty.order` rows → null everywhere. Artifact `<block>.smooth.json` (λ, edf,
 σ², coefficients).
 
+### `type: transitionStats` (always expanding)
+
+`sequenceOf: {entity, field}` (an `entities[].name` and a categorical field), `order` (previous values that make
+the state, 1..4, default 1), `emit: [{toValueProb: <value>}, distribution]` (required), `blend: {perEntity: true,
+priorWeight: 20}` (optional; absent or `perEntity: false` = transitions pooled over entities). Output float64
+`<name>_to_<value>` = P(next value = value | the entity's previous value(s)), and the map `<name>_to` for
+`distribution`. Sugar for a `lag` of the entity plus an expanding `encoding` with `stats: [distribution]` keyed on
+the state and shrunk along `(entity, state) → (state) → shorter states → marginal` with `priorWeight` as the
+pseudo-count — same values, same leak checks (`transitionStats.expansion` info shows the expansion). 0 = the value
+has no mass, null = nothing known yet; a first event reads the marginal. Intermediate columns
+`<name>_all_prev_lag<i>` hold the state.
+
+### `type: spectralEmbedding` (static, or forward per time block)
+
+`sequenceOf: {entity, field}`, `cooccur: {window: 2, weighting: ppmi}` (steps back that co-occur, 1..8), `rank`
+(default 8), `of: current | previous` (which value of the row is embedded; `previous` for an outcome field),
+`maxValues` (vocabulary cap by co-occurrence mass, 2..1024, default 256), `fit` as for svd. Output float64
+`<name>_0 .. <name>_{rank−1}`: the value's coordinates from the PPMI matrix of the co-occurrence counts
+(eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive). No target is read. Null for
+a missing / unseen / capped value — including one the cap keeps but whose every partner it dropped (no co-occurrence
+row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. The
+cap is applied before the counts are accumulated (an extra pass ranks the values by co-occurrence mass; under
+`fit.mode: forward` over the whole input, the counts per block), so a high-cardinality field costs a pass, not the
+worker's memory. Artifact `<block>.spectral.json`.
+
 ## Availability expressions
 
 | expression | meaning |

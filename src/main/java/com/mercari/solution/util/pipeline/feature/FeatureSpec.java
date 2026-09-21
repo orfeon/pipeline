@@ -309,6 +309,27 @@ public class FeatureSpec implements Serializable {
         public String penaltyLambda;
         /** smooth: keys of the {@code penalty} block other than {@code order} / {@code lambda}. */
         public List<String> penaltyUnknown = new ArrayList<>();
+        // spectralEmbedding / transitionStats: the values an entity takes one after another ({@code rank} shared with svd)
+        /** {@code sequenceOf.entity} / {@code sequenceOf.field}. */
+        public String sequenceEntity;
+        public String sequenceField;
+        /** spectralEmbedding: {@code cooccur.window} (steps back that count as co-occurring) / {@code cooccur.weighting}. */
+        public Integer cooccurWindow;
+        public String cooccurWeighting;
+        /** spectralEmbedding: which value of the row is embedded — {@code current} (default) | {@code previous}. */
+        public String embedOf;
+        /** spectralEmbedding: vocabulary cap (null = the default). */
+        public Integer maxValues;
+        /** transitionStats: how many previous values make the state (null = 1). */
+        public Integer order;
+        /** transitionStats {@code emit}: the {@code toValueProb} values, and whether the whole {@code distribution} map is emitted. */
+        public List<String> emitValues = new ArrayList<>();
+        public boolean emitDistribution;
+        /** transitionStats {@code blend}: null when the block is absent. */
+        public Boolean blendPerEntity;
+        public Double blendPriorWeight;
+        /** Entries / keys of {@code sequenceOf}, {@code cooccur}, {@code emit}, {@code blend} that were not understood. */
+        public List<String> sequenceUnknown = new ArrayList<>();
 
         public String location() {
             return "features." + name;
@@ -907,6 +928,56 @@ public class FeatureSpec implements Serializable {
             } else {
                 // a bare `penalty: 2` would otherwise be dropped and the defaults used silently
                 diagnostics.error("smooth.penalty", loc, "penalty must be an object {order, lambda}: " + o.get("penalty"));
+            }
+        }
+        // a block declared in another shape than an object would otherwise be dropped without a word (the
+        // defaults would then decide the state, the window or the shrinkage): it is reported like an unknown key
+        if (o.has("sequenceOf") && !o.get("sequenceOf").isJsonNull()) {
+            if (o.get("sequenceOf").isJsonObject()) {
+                final JsonObject sequenceOf = o.getAsJsonObject("sequenceOf");
+                def.sequenceEntity = Json.string(sequenceOf, "entity");
+                def.sequenceField = Json.string(sequenceOf, "field");
+                for (final String key : sequenceOf.keySet()) if (!List.of("entity", "field").contains(key)) def.sequenceUnknown.add("sequenceOf." + key);
+            } else {
+                def.sequenceUnknown.add("sequenceOf " + o.get("sequenceOf"));
+            }
+        }
+        if (o.has("cooccur") && !o.get("cooccur").isJsonNull()) {
+            if (o.get("cooccur").isJsonObject()) {
+                final JsonObject cooccur = o.getAsJsonObject("cooccur");
+                def.cooccurWindow = Json.integer(cooccur, "window");
+                def.cooccurWeighting = Json.string(cooccur, "weighting");
+                for (final String key : cooccur.keySet()) if (!List.of("window", "weighting").contains(key)) def.sequenceUnknown.add("cooccur." + key);
+            } else {
+                def.sequenceUnknown.add("cooccur " + o.get("cooccur"));
+            }
+        }
+        def.embedOf = Json.string(o, "of");
+        def.maxValues = Json.integer(o, "maxValues");
+        def.order = Json.integer(o, "order");
+        if (o.has("emit") && !o.get("emit").isJsonNull()) {
+            // emit: [distribution, {toValueProb: good}, ...] — a bare map is one entry
+            for (final JsonElement e : arrayOf(o.get("emit"))) {
+                if (e.isJsonPrimitive() && "distribution".equals(e.getAsString())) {
+                    def.emitDistribution = true;
+                } else if (e.isJsonObject() && e.getAsJsonObject().size() == 1 && e.getAsJsonObject().has("toValueProb")) {
+                    for (final JsonElement value : arrayOf(e.getAsJsonObject().get("toValueProb"))) {
+                        if (value.isJsonPrimitive()) def.emitValues.add(value.getAsString());
+                        else def.sequenceUnknown.add("emit " + value);
+                    }
+                } else {
+                    def.sequenceUnknown.add("emit " + e);
+                }
+            }
+        }
+        if (o.has("blend") && !o.get("blend").isJsonNull()) {
+            if (o.get("blend").isJsonObject()) {
+                final JsonObject blend = o.getAsJsonObject("blend");
+                def.blendPerEntity = Json.bool(blend, "perEntity", true);
+                def.blendPriorWeight = doubleOf(blend, "priorWeight", diagnostics, loc);
+                for (final String key : blend.keySet()) if (!List.of("perEntity", "priorWeight").contains(key)) def.sequenceUnknown.add("blend." + key);
+            } else {
+                def.sequenceUnknown.add("blend " + o.get("blend"));
             }
         }
         if (o.has("task") && o.get("task").isJsonObject()) {

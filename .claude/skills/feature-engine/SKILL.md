@@ -1,6 +1,6 @@
 ---
 name: feature-engine
-description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, quantileTransform, svd, smooth, key-set structures flat / hierarchy / cross / sequence, and the backlog spectralEmbedding / transitionStats / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
+description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, quantileTransform, svd, smooth, transitionStats, spectralEmbedding, key-set structures flat / hierarchy / cross / sequence, and the backlog nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
 ---
 
 # Feature transform engine
@@ -81,7 +81,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   `outputName` (`_` for intermediates + `output.prefix` + canonical); `block` / `scope` / `operator`
   / `fieldType`; **`coordinates` (a `Map<String,String>`) is the whole contract with the engine** —
   the evaluators rebuild their plans from it (`SequenceEvaluator.plan`, the static-fit specs enumerated by
-  `staticFitBlocks` — `fmSpecs` / `discretizeSpecs` / `quantileTransformSpecs` / `svdSpecs` / `smoothSpecs` / `jointSpecs` — and
+  `staticFitBlocks` — `fmSpecs` / `discretizeSpecs` / `quantileTransformSpecs` / `svdSpecs` / `smoothSpecs` / `spectralSpecs` / `jointSpecs` — and
   `fitLevels`) and it is exported as `feature.coord.*` schema options;
   `inputs` (read from the row itself) vs `pastInputs` (read from past rows — what the keyed stage
   projects into the history); `availableAt` / `computeAt` / `status` (`staticSafe` /
@@ -120,7 +120,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → Jacobi eigendecomposition, `<block>.svd.json`), `Smooth` (`type: smooth`: a P-spline of a
   target over a numeric key — uniform B-splines on a declared range, difference penalty, λ by REML — solved from the
   `Svd.Moments` of `[B(x), y]`, read through their centred form with the target centred; `<block>.smooth.json`; a
-  *reused* family, engine doc §9.6.3), `Factorization`
+  *reused* family, engine doc §9.6.3), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
+  values — the `PairCounts` summary, sorted maps so nothing depends on arrival order — → PPMI → `Svd.jacobi` →
+  coordinates `sqrt(|λ|) · v` by decreasing |λ|, vocabulary capped by co-occurrence mass; `<block>.spectral.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from
@@ -289,7 +291,7 @@ reads what the compile layer wrote into each column's `coordinates`.
      `SvdSpec`, `JointSpec` — one per keySet × window × target with `estimator: joint`, cells
      aggregated per key then solved on one worker by `JointFit`: `fit(fitInput)` → one side-input
      model, or `readArtifact` at `@Setup`; fold / forward joint models always re-fit; the blocks whose fit
-     state is a `Summary` family — `SvdSpec`, `QuantileTransformSpec`, `SmoothSpec` (the svd family again) — are `SummaryFitBlock`s fitted
+     state is a `Summary` family — `SvdSpec`, `QuantileTransformSpec`, `SmoothSpec` (the svd family again), `SpectralSpec` (pair counts) — are `SummaryFitBlock`s (all four `ForwardFitBlock`s: one shared fit geometry and one shared `FitArtifact.Json`) fitted
      together by `fitSummaryBlocks`: one `_Fit<Family>_Extract` pass + one `_Fit<Family>_Combine` per family
      keyed by (block, time block), `_Group` by block, `_Solve`, and ONE `_FitModelsView` list side input for
      all of them, so the stage's step count does not grow with the block count) → `FitApplyDoFn`
@@ -449,9 +451,10 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
 - discretize `tree` / `optimal` (`discretize.method`): supervised, consumes a target — the spec ties
   the fit rule to the encoding keyed on the bins (two-stage target consumption) which the compiler
   does not model.
-- `spectralEmbedding` / `transitionStats` (`population.unsupported`; they need the per-entity value
-  sequence before the fit):
-  follow the static-fit block recipe in [add-operator.md](add-operator.md).
+- (`spectralEmbedding` / `transitionStats` are implemented: both stand on `FeaturePlanCompiler.sequencePath`, a
+  synthetic `lag` block expanded under the population block's name. `transitionStats` is a compile-time desugaring
+  into an expanding distribution encoding — no run-time operator; `spectralEmbedding` is a `SummaryFitBlock` over
+  `Spectral.SUMMARY` pair counts. A new sequence-of-values type starts from the same path columns.)
 - factorization `variant: bayesian`, `fit.cadence / window / warmStart` (fit boundaries).
 - `runtimeFilter` columns (`atRowCreation`, `event_date THH:MM`): per-row availability filtering.
 - Streaming keyed stages (stateful DoFn + timers) and the stateful wave merge (§9.4.6).

@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), transitionStats, spectralEmbedding, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -836,6 +836,23 @@ deterministic ops in sequence (§7).
 family × flat lattice × `weights: fixed`). Once the shrinkage block exists, `blend` becomes sugar for a
 shrinkage reference so the shrinkage implementation and vocabulary live in one place (and
 `weights: varianceComponents` becomes available to it).
+
+**As implemented**, both types stand on one observation: what an entity's value was one, two, … steps ago is an
+ordinary `lag` column, so "the per-entity value sequence" needs no keyed pass of its own. The block expands that lag
+under its own name (intermediate columns, most recent first) and then:
+
+- `transitionStats` is a **desugaring** into an expanding `encoding`: `stats: [distribution]` of the field keyed on
+  the state — the lag path, `order` steps long — and shrunk along `(entity, state) → (state) → shorter states →
+  marginal` (the entity level only with `blend.perEntity`; `blend.priorWeight` is λ). `emit` is `{toValueProb: v}`
+  (a column `<name>_to_<v>`) or `distribution` (the map `<name>_to`). The n-gram readout once planned for the
+  counts summary is this lag path: an n-gram *is* the tuple of the last n values, and as key columns it gets the
+  suffix back-off of `structure: sequence` for free. It is always expanding — a value distribution has no static
+  form (§5.3) — and a row reads exactly what the explicit blocks would read.
+- `spectralEmbedding` is a fitted block like `svd`: a row contributes its value with its lag values to a pair-count
+  summary (unordered pairs within `cooccur.window` steps), the counts become a PPMI matrix, and the eigenvectors of
+  largest |eigenvalue| scaled by `sqrt(|eigenvalue|)` are the coordinates (`rank` columns; the vocabulary is capped
+  by co-occurrence mass). `of: current | previous` chooses the embedded value — `previous` when the field is an
+  outcome. `fit.mode: static | forward`.
 
 ```yaml
 - name: lag_svd

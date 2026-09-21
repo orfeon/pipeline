@@ -1,7 +1,9 @@
 package com.mercari.solution.util.pipeline.feature;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.avro.Schema;
 import org.apache.avro.file.DataFileReader;
@@ -11,11 +13,13 @@ import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.Serializable;
 import java.time.Instant;
 import java.util.*;
 
@@ -84,6 +88,58 @@ public final class FitArtifact {
         manifest.addProperty("block", block);
         manifest.addProperty("createdAt", Instant.now().toString());
         return manifest;
+    }
+
+    /**
+     * A solved model that can be persisted as its own JSON artifact ({@link Json}): the components of an svd, the
+     * knots of a quantile transform, the coefficients of a smooth curve, the coordinates of a spectral embedding.
+     */
+    public interface Model {
+        /** Nothing was fitted (too few rows, no values): every column of the block reads null. */
+        boolean isEmpty();
+        /** What a log line says about this model, e.g. {@code "dimension 4, rank 2, n=1000"}. */
+        String describe();
+        /** The model's own members; {@link Json#write} adds them next to the manifest header. */
+        JsonObject toJson();
+    }
+
+    /**
+     * The JSON artifact of one {@link Model} class, stored as {@code <artifactUri>/<planHash>/<block>.<extension>.json}
+     * — the manifest header plus the model's own members. Every static-fit population type persists its model this
+     * way, so the path, the existence check, the write and the read with its "nothing was fitted" warning live here
+     * once; a model class declares only what differs (the name in the log, the extension, how JSON becomes a model,
+     * which columns read null when it is empty and what to re-fit on).
+     */
+    public record Json<T extends Model>(String name, String extension, SerializableFunction<JsonObject, T> fromJson,
+                                        String columns, String advice) implements Serializable {
+
+        public String path(final String artifactUri, final String planHash, final String block) {
+            return directory(artifactUri, planHash) + "/" + block + "." + extension + ".json";
+        }
+
+        public boolean exists(final String artifactUri, final String planHash, final String block) {
+            return ResourceUtil.exists(path(artifactUri, planHash, block));
+        }
+
+        public void write(final String artifactUri, final String planHash, final String block, final T model) {
+            final String path = path(artifactUri, planHash, block);
+            final JsonObject json = manifest(planHash, block);
+            for (final Map.Entry<String, JsonElement> e : model.toJson().entrySet()) json.add(e.getKey(), e.getValue());
+            ResourceUtil.writeString(path, json.toString());
+            LOG.info("wrote {} artifact {} ({})", name, path, model.describe());
+        }
+
+        public T read(final String artifactUri, final String planHash, final String block) {
+            final String path = path(artifactUri, planHash, block);
+            final T model = fromJson.apply(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
+            if (model.isEmpty()) {
+                LOG.warn("loaded {} artifact {} without a fitted model ({}): {} of block '{}' read null for every row;"
+                        + " re-fit it {} (fit.artifact.refit: true)", name, path, model.describe(), columns, block, advice);
+            } else {
+                LOG.info("loaded {} artifact {} ({})", name, path, model.describe());
+            }
+            return model;
+        }
     }
 
     /** Composite map key used in memory and in side inputs: {@code level + (char) 1 + key}. */
