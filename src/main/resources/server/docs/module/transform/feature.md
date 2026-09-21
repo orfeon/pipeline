@@ -299,6 +299,8 @@ features:
     ops:
       - {type: rating, field: final_price, context: session, order: descending}             # skill_all_final_price_rating_mu / _sigma
       - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}  # skill_all_elo_mu ...
+      - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P30D, as: rested}                 # the uncertainty reopens with the time away
+      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, as: bt}       # large fields: a contest weighs like one game
   - name: field                        # the rating against the others of the same session: an ordinary context block
     scope: context
     context: session
@@ -321,7 +323,22 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty).
   Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
   default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
-  default `sigma / 100`); elo: `kFactor` (32), `scale` (400).
+  default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
+  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
+  (32), `scale` (400).
+- **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
+  months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
+  is the very thing that makes a strength uncertain. With `tauPer: P30D` the variance grows by `tau² · Δt /
+  tauPer` over the time `Δt` since the player's **previous contest** (as the ratings know it: a contest whose
+  outcome is not yet available has not happened), and nothing on a first contest — the prior is the whole
+  uncertainty already. The `sigma` a row reads carries the drift **up to the row**, so a returning player reads
+  wide before the contest that will narrow it again; `mu` does not move. `tau` must then be declared (the
+  default is sized for one contest): choose it from how far a strength wanders — with the default prior
+  (`sigma` 8.33), `tau: 2, tauPer: P30D` takes a settled player (`sigma` 3) to 7 after ten months away.
+  Size `tauPer` well above the outcome's availability lag (`settlementLag` + `ingestionLag` + the `predictAt`
+  offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
+  that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
+  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` only; the period is wall time.
 - **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
   (the rating's change in its last contest, null before the first). An entity never rated reads the prior
   (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
@@ -360,13 +377,20 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   several prior standard deviations and collapses `sigma`; with the small default `tau` it never reopens, and
   **the first contest decides the rating** for good. A larger `beta` softens both without curing either
   (`beta: 2 · sigma` at `k = 16`: `sigma` 7.8 and a move of +19.8, still 2.4 prior standard deviations).
-  Above some eight players prefer `plackettLuce` or `elo`, whose `kFactor` is shared over the opponents and
-  does not grow with the field. `plackettLuce` has the opposite property: its normaliser `c² = Σ(σ² + β²)`
-  grows with the field, so a contest barely shrinks `sigma` — at `k = 16` by 1.0% for the last player and
-  0.03% for the winner, and no `beta` takes the last player past 1.5% (the smaller the `beta` the more it
-  shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays only as slowly as `sigma` does, but
-  **`sigma` is little more than a function of the contest count**: read `count` for "how well do we know this
-  player", and treat `sigma` as a feature in small contests only.
+  Above some eight players choose the pairing instead: **`pairs: mean`** divides the sums by the number of
+  opponents — a contest weighs like one game whatever the field (at `k = 16`: winner +2.6, every `sigma` 8.07,
+  the two-player values), the normalisation `elo` applies to `kFactor` — and **`pairs: adjacent`** is the
+  paper's partial-pair update: a player meets its rank neighbours only (the opponents sharing its outcome and
+  those at the nearest better and the nearest worse one), so fresh equals in the middle of the field do not
+  move in their first contest (ends ±2.6 / 8.07, middle 0 / 7.79) and the ratings separate over the following
+  ones. Both keep `sigma` a usable "how well do we know this player": it narrows by a few percent per contest
+  instead of collapsing in one. `plackettLuce` and `elo` are the other way out of a large field — `elo`'s
+  `kFactor` is shared over the opponents and does not grow with it either. `plackettLuce` has the opposite
+  property: its normaliser `c² = Σ(σ² + β²)` grows with the field, so a contest barely shrinks `sigma` — at
+  `k = 16` by 1.0% for the last player and 0.03% for the winner, and no `beta` takes the last player past 1.5%
+  (the smaller the `beta` the more it shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays
+  only as slowly as `sigma` does, but **`sigma` is little more than a function of the contest count**: read
+  `count` for "how well do we know this player", and treat `sigma` as a feature in small contests only.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
@@ -376,7 +400,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
 - Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
-  method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`),
+  method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
+  `bradleyTerry` or unknown, a `tauPer` that is not positive or comes without `tau`),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
   segment with different parameters — they would share one running state; name them apart with `as`).
 

@@ -1461,6 +1461,9 @@ public final class FeaturePlanCompiler {
         if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
 
+    /** The largest {@code tauPer} the {@code tauPerMillis} coordinate can carry (a millisecond count). */
+    private static final Duration MAX_TAU_PER = Duration.ofMillis(Long.MAX_VALUE);
+
     /**
      * The sequence {@code rating} op: the block's entity is the rated player, {@code field} the outcome of a contest
      * and {@code context} the contest (the rows of one group at one event time). One running state per op × window,
@@ -1501,13 +1504,36 @@ public final class FeaturePlanCompiler {
             if (op.sigma != null) foreign.add("sigma");
             if (op.beta != null) foreign.add("beta");
             if (op.tau != null) foreign.add("tau");
+            if (op.tauPer != null) foreign.add("tauPer");
         } else {
             if (op.kFactor != null) foreign.add("kFactor");
             if (op.scale != null) foreign.add("scale");
         }
         if (!foreign.isEmpty()) {
             diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce: elo takes mu, kFactor, scale"
-                    : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau"));
+                    : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau, tauPer"));
+            valid = false;
+        }
+        if (op.pairs != null && method != Rating.Method.bradleyTerry) {
+            // elo already shares kFactor over the opponents, and plackettLuce has no pairs: it reads the whole ranking
+            diagnostics.error("sequence.rating.parameter", loc, "pairs chooses the opponents of a bradleyTerry update (" + String.join(" | ", Rating.PAIRS) + "): " + methodName + " has none");
+            valid = false;
+        } else if (op.pairs != null && !Rating.PAIRS.contains(op.pairs)) {
+            diagnostics.error("sequence.rating.parameter", loc, "unknown pairs: " + op.pairs + " (available: " + String.join(" | ", Rating.PAIRS) + ")");
+            valid = false;
+        }
+        // the coordinate is a millisecond count, so the DURATION being non-zero is not enough: one that rounds to 0 ms
+        // (or does not fit in millis at all, where toMillis() would throw instead of reporting) would silently fall
+        // back to the per-contest drift — with a tau this very check makes the spec size for a whole period
+        final long tauPerMillis = op.tauPer == null || op.tauPer.compareTo(MAX_TAU_PER) > 0 ? 0L : op.tauPer.toMillis();
+        if (op.tauPer != null && tauPerMillis <= 0) {
+            diagnostics.error("sequence.rating.parameter", loc, "tauPer must be a positive duration of at least one millisecond,"
+                    + " and no longer than a millisecond count holds (the time tau is the drift of): " + op.tauPer);
+            valid = false;
+        } else if (op.tauPer != null && !elo && op.tau == null) {
+            // the default tau (sigma / 100) is the drift of ONE CONTEST: spread over a period it would age nothing
+            diagnostics.error("sequence.rating.parameter", loc, "tauPer makes tau the drift per " + op.tauPer + " of absence (variance += tau² · Δt / tauPer): declare tau with it"
+                    + " — the default (sigma / 100) is sized for one contest");
             valid = false;
         }
         if (op.mu != null && !Double.isFinite(op.mu)
@@ -1546,6 +1572,8 @@ public final class FeaturePlanCompiler {
             shared.put("sigma", Double.toString(sigma));
             shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
+            if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
+            if (method == Rating.Method.bradleyTerry && op.pairs != null) shared.put("pairs", op.pairs);
         }
         shared.put("context", contest.name());
         // what a past row brings to its contest: the outcome, the player and the contest it belongs to

@@ -178,6 +178,135 @@ public class RatingTest {
         return contest;
     }
 
+    private static final long DAY = Duration.ofDays(1).toMillis();
+
+    private static Rating timed(final Rating.Method method, final double tau, final long tauPerMillis) {
+        return Rating.of(method, true, null, null, null, tau, null, null, tauPerMillis, null, List.of("p"), List.of("c"), "y");
+    }
+
+    /**
+     * {@code tauPer}: the drift runs on the time since the player's last contest, not per contest. A first contest
+     * adds nothing (the prior is the whole uncertainty), an absence reopens the variance by tau² · Δt / tauPer — for
+     * the next contest and for a read alike — and two contests of one time drift nothing between them.
+     */
+    @Test
+    public void testDriftInTime() {
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce)) {
+            final Rating rating = timed(method, 2d, 30 * DAY);
+            final Rating.State state = new Rating.State();
+            final long t0 = 1_700_000_000_000L;
+            rating.update(state, List.of(entry("a", 1), entry("b", 2)), t0);
+            // the first contest of both: the driftless two-player values
+            Assertions.assertEquals(27.63523138347365, (Double) rating.read(state, "a", "mu", t0), 1e-9, method.name());
+            final double sigma0 = 8.065506316323548;
+            Assertions.assertEquals(sigma0, (Double) rating.read(state, "a", "sigma", t0), 1e-9, method.name());
+            // read 300 days later: ten periods of drift on the variance, the rating itself untouched
+            final long later = t0 + 300 * DAY;
+            Assertions.assertEquals(Math.sqrt(sigma0 * sigma0 + 4d * 10), (Double) rating.read(state, "a", "sigma", later), 1e-9, method.name());
+            Assertions.assertEquals(27.63523138347365, (Double) rating.read(state, "a", "mu", later), 1e-9, method.name());
+            Assertions.assertEquals(sigma0, (Double) rating.read(state, "a", "sigma"), 1e-9, "a read without a time is the state itself");
+            // a player never rated reads the prior whenever it is read
+            Assertions.assertEquals(25d / 3, (Double) rating.read(state, "z", "sigma", later), 0d, method.name());
+
+            // the contest held then enters with that variance: the update of a per-contest rating whose tau² is the
+            // same 40 on the same ratings
+            final Rating reference = rating(method, true, Math.sqrt(40d));
+            final Rating.State copy = new Rating.State();
+            for (final String name : List.of("a", "b")) {
+                final Rating.Player from = state.players.get(name), to = new Rating.Player();
+                to.mu = from.mu;
+                to.sigma = from.sigma;
+                copy.players.put(name, to);
+            }
+            reference.update(copy, List.of(entry("a", 2), entry("b", 1)));
+            rating.update(state, List.of(entry("a", 2), entry("b", 1)), later);
+            for (final String name : List.of("a", "b")) {
+                Assertions.assertEquals(copy.players.get(name).mu, state.players.get(name).mu, 1e-12, method.name());
+                Assertions.assertEquals(copy.players.get(name).sigma, state.players.get(name).sigma, 1e-12, method.name());
+            }
+            // no time has passed: a second contest at the same time drifts nothing, and the read is the state
+            final double before = state.players.get("a").sigma;
+            Assertions.assertEquals(before, (Double) rating.read(state, "a", "sigma", later), 1e-12, method.name());
+            final Rating still = rating(method, true, 0d);
+            final Rating.State stillCopy = new Rating.State();
+            for (final String name : List.of("a", "b")) {
+                final Rating.Player from = state.players.get(name), to = new Rating.Player();
+                to.mu = from.mu;
+                to.sigma = from.sigma;
+                stillCopy.players.put(name, to);
+            }
+            still.update(stillCopy, List.of(entry("a", 1), entry("b", 2)));
+            rating.update(state, List.of(entry("a", 1), entry("b", 2)), later);
+            Assertions.assertEquals(stillCopy.players.get("a").sigma, state.players.get("a").sigma, 1e-12, method.name());
+            // the longer the absence, the wider: a rested player is read wider than a busy one
+            Assertions.assertTrue((Double) rating.read(state, "a", "sigma", later + 200 * DAY) > (Double) rating.read(state, "a", "sigma", later + 20 * DAY));
+            // a drift in time needs the time
+            Assertions.assertThrows(IllegalStateException.class, () -> rating.update(state, List.of(entry("a", 1), entry("b", 2))));
+        }
+    }
+
+    /**
+     * bradleyTerry's pairings on a field of sixteen fresh players: {@code mean} weighs the contest like one game — the
+     * winner's move and everyone's sigma are those of a two-player contest — {@code adjacent} pairs the rank
+     * neighbours (the ends have one, the others a better and a worse one: no move between equals, twice the
+     * shrinkage), and ties are neighbours of each other and of both sides, whatever the order of the entries.
+     */
+    @Test
+    public void testBradleyTerryPairs() {
+        final java.util.function.Function<Rating.Pairs, Rating> bt = pairs ->
+                Rating.of(Rating.Method.bradleyTerry, true, null, null, null, null, null, null, null, pairs, List.of("p"), List.of("c"), "y");
+        final Rating.State two = new Rating.State();
+        bt.apply(Rating.Pairs.all).update(two, List.of(entry("w", 1), entry("l", 2)));
+        final double move = (Double) bt.apply(null).read(two, "w", "delta"), sigma = (Double) bt.apply(null).read(two, "w", "sigma");
+        final double prior = 25d / 3, v = prior * prior + Math.pow(prior / 100, 2), shrinkOfOne = 1 - sigma * sigma / v;
+
+        final List<Rating.Entry> field = new ArrayList<>();
+        for (int i = 1; i <= 16; i++) field.add(entry("p" + i, i));
+        final Rating.State mean = new Rating.State(), adjacent = new Rating.State(), all = new Rating.State();
+        bt.apply(Rating.Pairs.mean).update(mean, field);
+        bt.apply(Rating.Pairs.adjacent).update(adjacent, field);
+        bt.apply(Rating.Pairs.all).update(all, field);
+        // the numbers the module documentation quotes for k = 16: winner +2.6 / sigma 8.07, adjacent's middle 0 / 7.79
+        Assertions.assertEquals(2.6, move, 0.05);
+        Assertions.assertEquals(8.07, sigma, 0.005);
+        Assertions.assertEquals(7.79, adjacent.players.get("p8").sigma, 0.005);
+        Assertions.assertEquals(move, mean.players.get("p1").delta, 1e-12);
+        Assertions.assertEquals(-move, mean.players.get("p16").delta, 1e-12);
+        Assertions.assertEquals(15 * move, all.players.get("p1").delta, 1e-9, "the full-pair update is fifteen games");
+        for (int i = 1; i <= 16; i++) Assertions.assertEquals(sigma, mean.players.get("p" + i).sigma, 1e-12, "p" + i);
+        Assertions.assertEquals(move, adjacent.players.get("p1").delta, 1e-12);
+        Assertions.assertEquals(-move, adjacent.players.get("p16").delta, 1e-12);
+        Assertions.assertEquals(sigma, adjacent.players.get("p1").sigma, 1e-12);
+        Assertions.assertEquals(0d, adjacent.players.get("p8").delta, 1e-12, "one better and one worse neighbour of equal strength");
+        Assertions.assertEquals(Math.sqrt(v * (1 - 2 * shrinkOfOne)), adjacent.players.get("p8").sigma, 1e-12);
+
+        // ties: 1, 2, 2, 3, 5 — the winner meets both players at 2, a player at 2 the other one (a draw), the winner and
+        // the player at 3; the player at 5 meets the player at 3 alone (the nearest better outcome, not the next rank)
+        final List<Rating.Entry> tied = List.of(entry("a", 1), entry("b", 2), entry("c", 2), entry("d", 3), entry("e", 5));
+        final Rating.State tiedState = new Rating.State();
+        bt.apply(Rating.Pairs.adjacent).update(tiedState, tied);
+        Assertions.assertEquals(2 * move, tiedState.players.get("a").delta, 1e-12);
+        Assertions.assertEquals(0d, tiedState.players.get("b").delta, 1e-12, "a win, a draw and a loss among equals");
+        Assertions.assertEquals(tiedState.players.get("b").sigma, tiedState.players.get("c").sigma, 0d);
+        Assertions.assertEquals(Math.sqrt(v * (1 - 3 * shrinkOfOne)), tiedState.players.get("b").sigma, 1e-12);
+        Assertions.assertEquals(-move, tiedState.players.get("d").delta, 1e-12, "two losses against the players at 2, one win");
+        Assertions.assertEquals(-move, tiedState.players.get("e").delta, 1e-12);
+        // the entries arrive in any order, and a player never meets its own rows
+        for (final Rating.Pairs pairs : Rating.Pairs.values()) {
+            final List<Rating.Entry> rows = new ArrayList<>(tied);
+            rows.add(entry("a", 4));
+            final Rating.State ordered = new Rating.State(), shuffled = new Rating.State();
+            bt.apply(pairs).update(ordered, rows);
+            final List<Rating.Entry> other = new ArrayList<>(rows);
+            Collections.shuffle(other, new Random(5));
+            bt.apply(pairs).update(shuffled, other);
+            for (final String name : ordered.players.keySet()) {
+                Assertions.assertEquals(ordered.players.get(name).mu, shuffled.players.get(name).mu, 0d, pairs + " " + name);
+                Assertions.assertEquals(ordered.players.get(name).sigma, shuffled.players.get(name).sigma, 0d, pairs + " " + name);
+            }
+        }
+    }
+
     @Test
     public void testContestProperties() {
         for (final Rating.Method method : Rating.Method.values()) {
@@ -357,6 +486,12 @@ public class RatingTest {
         cases.put("      - {type: rating, field: final_price, context: session, sigma: -1}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, mu: 0}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: category, context: session}", "sequence.op.type");
+        cases.put("      - {type: rating, field: final_price, context: session, pairs: mean}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, method: elo, pairs: mean}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, method: bradleyTerry, pairs: nearest}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, method: elo, tauPer: P30D}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, tauPer: P30D}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, tau: 2, tauPer: PT0S}", "sequence.rating.parameter");
         // two ops of one block on the same segment with different parameters: they would share one running state
         cases.put("      - {type: rating, field: final_price, context: session, funcs: [mu]}\n"
                 + "      - {type: rating, field: final_price, context: session, method: elo, funcs: [count]}", "sequence.rating.as");
@@ -380,10 +515,30 @@ public class RatingTest {
      */
     @Test
     public void testIncrementalMatchesScanAndTrimmed() {
-        final FeaturePlan plan = compile(SPEC);
+        assertIncrementalMatchesScanAndTrimmed(SPEC, 9);
+    }
+
+    /** The drift in time (the state keeps each player's last contest time; a read adds the drift up to the row) and the pairings. */
+    @Test
+    public void testIncrementalMatchesScanAndTrimmedWithDriftAndPairs() {
+        final String ops = "      - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P1D, as: pl, funcs: [mu, sigma, count, delta]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n";
+        final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
+        final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(Long.toString(DAY), plan.getColumn("skill_all_pl_sigma").getCoordinates().get("tauPerMillis"));
+        Assertions.assertNull(plan.getColumn("skill_all_pl_sigma").getCoordinates().get("pairs"));
+        Assertions.assertEquals("adjacent", plan.getColumn("skill_all_adj_mu").getCoordinates().get("pairs"));
+        Assertions.assertNull(plan.getColumn("skill_all_adj_mu").getCoordinates().get("tauPerMillis"));
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 8);
+    }
+
+    private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {
+        final FeaturePlan plan = compile(spec);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
-        Assertions.assertEquals(9, columns.size(), plan::describe);
+        Assertions.assertEquals(expectedColumns, columns.size(), plan::describe);
         final SequenceEvaluator evaluator = new SequenceEvaluator(columns), trimmedEvaluator = new SequenceEvaluator(columns);
         evaluator.setup();
         trimmedEvaluator.setup();

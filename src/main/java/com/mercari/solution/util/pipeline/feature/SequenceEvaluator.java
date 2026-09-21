@@ -542,7 +542,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.incremental && state != null) {
             // a rating's running state is a Rating.State the fold pointer advances, not a summary
             if (plan.rating != null) {
-                return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func);
+                return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func, nowMillis);
             }
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
@@ -736,7 +736,7 @@ public class SequenceEvaluator implements Serializable {
             }
             case "rating" -> {
                 // the reference the running state is equal to: every visible contest folded from scratch
-                return plan.rating.read(plan.rating.replay(window), plan.rating.player(row), plan.func);
+                return plan.rating.read(plan.rating.replay(window), plan.rating.player(row), plan.func, nowMillis);
             }
             case "barrier" -> {
                 // a future window on the mirrored clock: the nearest event is the window's newest, so the path runs

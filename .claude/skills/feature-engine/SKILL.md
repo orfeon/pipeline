@@ -137,7 +137,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   Weng–Lin `bradleyTerry` / `plackettLuce` updates over a pool of players — a running state that is *not* a
   `Summary`, because a contest reads the ratings the earlier ones left: no merge, no inverse. `fold(state, run)` takes
   the rows of ONE event time and splits them into contests by the context keys; `SequenceEvaluator.advanceRating`
-  feeds it run by run from the fold pointer, `replay` is the scan reference. Its columns are *pooled*
+  feeds it run by run from the fold pointer, `replay` is the scan reference. With `tauPer` the drift runs on the time since the
+  player last competed (`Player.lastMillis` = the run event time) and `read(state, player, func, nowMillis)` adds the drift up to
+  the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `Pairs` (`all` / `adjacent` /
+  `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
   `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
   entries sorted by player, and the contests of one event time are applied in context-key order. On the scan path

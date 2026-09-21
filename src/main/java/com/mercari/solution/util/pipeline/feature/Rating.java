@@ -16,8 +16,10 @@ import java.util.TreeMap;
  *
  * <p>Methods: {@code elo} (the pairwise logistic update, {@code kFactor} shared over the opponents) and the two
  * closed-form Bayesian approximations of Weng &amp; Lin (JMLR 2011) over a Gaussian strength {@code (mu, sigma)}:
- * {@code bradleyTerry} (full pairwise) and {@code plackettLuce} (the ranking likelihood). Before a contest every
- * participant's variance grows by {@code tau²} (strengths drift).
+ * {@code bradleyTerry} (pairwise — every opponent, the rank neighbours only, or the mean over the opponents:
+ * {@link Pairs}) and {@code plackettLuce} (the ranking likelihood). Before a contest every participant's variance
+ * grows by {@code tau²} (strengths drift) — per contest, or, with {@code tauPer}, in proportion to the time since the
+ * player's previous contest, so that an absence reopens the uncertainty and a busy stretch does not.
  *
  * <p>Unlike a {@link Summary} the state is <b>not mergeable</b>: an update reads the ratings the earlier contests
  * left, so the contests of a pool must be folded in time order by one replay — the op runs under the stage's one key
@@ -34,6 +36,24 @@ import java.util.TreeMap;
 public final class Rating implements Serializable {
 
     public enum Method { elo, bradleyTerry, plackettLuce }
+
+    /**
+     * The opponents a {@code bradleyTerry} player is paired with. {@code all}: every opponent, the sums growing with
+     * the field (the paper's full-pair update — in a field of sixteen one contest is fifteen games). {@code adjacent}:
+     * the rank neighbours only (the paper's partial-pair update) — the opponents sharing the player's outcome and those
+     * at the nearest better and the nearest worse outcome, a set the outcomes alone decide. {@code mean}: every
+     * opponent, the sums divided by their number — a contest weighs like one game whatever the field, the
+     * normalisation {@code elo} applies to {@code kFactor}.
+     *
+     * <p>{@code all} and {@code mean} pair every player with every opponent, so a pair is always read from both
+     * sides. {@code adjacent} is symmetric too, <b>except</b> where a player holds several rows in one contest: a
+     * neighbour is the nearest outcome among that row's opponents, and the player's own other rows are none of
+     * them, so a row may meet an opponent whose own neighbours the row is not one of. The pairing stays a function
+     * of the outcomes either way, which is what keeps a contest with ties order-free.
+     */
+    public enum Pairs { all, adjacent, mean }
+
+    public static final List<String> PAIRS = Arrays.stream(Pairs.values()).map(Pairs::name).toList();
 
     /** The method names as the DSL spells them, in declaration order (derived so it cannot drift from the enum). */
     public static final List<String> METHODS = Arrays.stream(Method.values()).map(Method::name).toList();
@@ -52,6 +72,8 @@ public final class Rating implements Serializable {
         public double sigma;
         public long count;
         public double delta;
+        /** The event time of the player's last contest (the clock of a time drift). */
+        public long lastMillis;
     }
 
     /** The ratings of one pool: player key → rating (players never seen read the prior). */
@@ -66,12 +88,17 @@ public final class Rating implements Serializable {
     /** Whether a smaller outcome is the better one (a rank / finishing position) rather than a larger one (a score). */
     private final boolean ascending;
     private final double mu, sigma, beta, tau, kFactor, scale;
+    /** The time {@code tau} is the drift of, or 0: {@code tau} is the drift of one contest. */
+    private final long tauPerMillis;
+    private final Pairs pairs;
     private final List<String> playerKeys, contestKeys;
     private final String field;
 
     private Rating(final Method method, final boolean ascending, final double mu, final double sigma, final double beta,
-                   final double tau, final double kFactor, final double scale,
+                   final double tau, final double kFactor, final double scale, final long tauPerMillis, final Pairs pairs,
                    final List<String> playerKeys, final List<String> contestKeys, final String field) {
+        this.tauPerMillis = tauPerMillis;
+        this.pairs = pairs;
         this.method = method;
         this.ascending = ascending;
         this.mu = mu;
@@ -110,10 +137,21 @@ public final class Rating implements Serializable {
     public static Rating of(final Method method, final boolean ascending, final Double mu, final Double sigma, final Double beta,
                             final Double tau, final Double kFactor, final Double scale,
                             final List<String> playerKeys, final List<String> contestKeys, final String field) {
+        return of(method, ascending, mu, sigma, beta, tau, kFactor, scale, null, null, playerKeys, contestKeys, field);
+    }
+
+    /**
+     * @param tauPerMillis the time {@code tau} is the drift of (null / 0: {@code tau} is the drift of one contest)
+     * @param pairs        bradleyTerry's pairing (null: all)
+     */
+    public static Rating of(final Method method, final boolean ascending, final Double mu, final Double sigma, final Double beta,
+                            final Double tau, final Double kFactor, final Double scale, final Long tauPerMillis, final Pairs pairs,
+                            final List<String> playerKeys, final List<String> contestKeys, final String field) {
         final double m = mu != null ? mu : defaultMu(method);
         final double s = sigma != null ? sigma : defaultSigma(m);
         return new Rating(method, ascending, m, s, beta != null ? beta : defaultBeta(s), tau != null ? tau : defaultTau(s),
-                kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE, playerKeys, contestKeys, field);
+                kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
+                tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, playerKeys, contestKeys, field);
     }
 
     /** The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). */
@@ -121,6 +159,8 @@ public final class Rating implements Serializable {
         return of(Method.valueOf(coordinates.get("method")), !"descending".equals(coordinates.get("order")),
                 number(coordinates, "mu"), number(coordinates, "sigma"), number(coordinates, "beta"), number(coordinates, "tau"),
                 number(coordinates, "kFactor"), number(coordinates, "scale"),
+                coordinates.get("tauPerMillis") == null ? null : Long.valueOf(coordinates.get("tauPerMillis")),
+                coordinates.get("pairs") == null ? null : Pairs.valueOf(coordinates.get("pairs")),
                 FeaturePlanCompiler.keyList(coordinates.get("playerKeys")), FeaturePlanCompiler.keyList(coordinates.get("contestKeys")),
                 coordinates.get("field"));
     }
@@ -143,14 +183,21 @@ public final class Rating implements Serializable {
      */
     public void fold(final State state, final List<SequenceEvaluator.Past> run) {
         final Map<String, List<Entry>> contests = new TreeMap<>();
+        // the run's event time dates every contest it holds (the clock of a drift in time): a run of mixed times
+        // would date them all by its first row, so the precondition is checked rather than trusted
+        final long millis = run.isEmpty() ? 0L : run.get(0).millis();
         for (final SequenceEvaluator.Past p : run) {
+            if (p.millis() != millis) {
+                throw new IllegalArgumentException("fold takes the rows of ONE event time: " + millis + " and " + p.millis()
+                        + " (the caller must slice the history by event time — SequenceEvaluator.advanceRating / Rating.replay)");
+            }
             final String contest = FeatureValues.key(p.values(), contestKeys);
             final String player = player(p.values());
             final Double outcome = SequenceEvaluator.finite(p.values().get(field));
             if (contest == null || player == null || outcome == null) continue;
             contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(player, outcome));
         }
-        for (final List<Entry> entries : contests.values()) update(state, entries);
+        for (final List<Entry> entries : contests.values()) update(state, entries, millis);
     }
 
     /**
@@ -172,8 +219,31 @@ public final class Rating implements Serializable {
         return state;
     }
 
-    /** Applies one contest. The entries' order does not matter (they are sorted by player, then outcome). */
+    /** Applies one contest of a rating whose drift is per contest (a drift in time needs the contest's time). */
     public void update(final State state, final List<Entry> contest) {
+        if (tauPerMillis > 0) throw new IllegalStateException("a rating with tauPer drifts in time: update(state, contest, millis)");
+        update(state, contest, 0L);
+    }
+
+    /**
+     * The variance a player enters a contest — or is read — with at {@code millis}: the rating's, grown by the drift.
+     * Per contest that is {@code tau²}, added when a contest is held (a read adds nothing: no contest has happened).
+     * In time it is {@code tau² · Δt / tauPer} over the time since the player's last contest, for a contest and a read
+     * alike — the read of a returning player shows the absence it comes back from — and nothing for a player never
+     * rated, whose prior is the whole uncertainty already.
+     */
+    private double drifted(final Player p, final long millis, final boolean contest) {
+        final double s = p == null ? sigma : p.sigma;
+        if (tauPerMillis <= 0) return s * s + (contest ? tau * tau : 0d);
+        if (p == null) return s * s;
+        // the absence, compared before it is subtracted: `millis - lastMillis` would wrap to a huge positive
+        // difference for an extreme millis, where Math.max of the wrapped value cannot clamp it back to none
+        final long absence = millis > p.lastMillis ? millis - p.lastMillis : 0L;
+        return s * s + tau * tau * absence / (double) tauPerMillis;
+    }
+
+    /** Applies one contest held at {@code millis}. The entries' order does not matter (they are sorted by player, then outcome). */
+    public void update(final State state, final List<Entry> contest, final long millis) {
         final List<Entry> entries = new ArrayList<>(contest);
         entries.sort(Comparator.comparing(Entry::player).thenComparingDouble(Entry::outcome));
         final int n = entries.size();
@@ -185,8 +255,7 @@ public final class Rating implements Serializable {
         for (int i = 0; i < n; i++) {
             final Player p = state.players.get(entries.get(i).player());
             m[i] = p == null ? mu : p.mu;
-            final double s = p == null ? sigma : p.sigma;
-            v[i] = s * s + tau * tau;
+            v[i] = drifted(p, millis, true);
         }
         final double[] dMu = new double[n], shrink = new double[n];
         Arrays.fill(shrink, 1d);
@@ -216,15 +285,21 @@ public final class Rating implements Serializable {
             if (method != Method.elo) p.sigma = Math.sqrt(v[i] * factor);
             p.delta = change;
             p.count++;
+            p.lastMillis = millis;
             i = j;
         }
     }
 
     /** 1 when entry i did better than entry j, 0.5 on equal outcomes, else 0. */
     private double score(final Entry i, final Entry j) {
+        return score(i.outcome(), j.outcome());
+    }
+
+    /** 1 when outcome a is better than outcome b, 0.5 when they are equal, else 0. */
+    private double score(final double a, final double b) {
         // numeric equality, not Double.compare: -0.0 and 0.0 are the same outcome (a tie), which compare denies
-        if (i.outcome() == j.outcome()) return 0.5;
-        return (Double.compare(i.outcome(), j.outcome()) < 0) == ascending ? 1d : 0d;
+        if (a == b) return 0.5;
+        return (Double.compare(a, b) < 0) == ascending ? 1d : 0d;
     }
 
     private void elo(final List<Entry> entries, final double[] m, final double[] dMu) {
@@ -249,14 +324,34 @@ public final class Rating implements Serializable {
         final int n = entries.size();
         for (int i = 0; i < n; i++) {
             final Entry self = entries.get(i);
+            // adjacent: the nearest better and the nearest worse outcome among the OPPONENTS (the player's own other
+            // rows are no opponents), which with the player's own outcome name its rank neighbours — a set the
+            // outcomes decide, not the order of the entries, so tied neighbours all count
+            double better = Double.NaN, worse = Double.NaN;
+            if (pairs == Pairs.adjacent) {
+                for (int q = 0; q < n; q++) {
+                    final Entry other = entries.get(q);
+                    if (other.player().equals(self.player())) continue;
+                    final double sc = score(other, self);
+                    if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
+                    if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
+                }
+            }
             double omega = 0, delta = 0;
+            int opponents = 0;
             for (int q = 0; q < n; q++) {
                 final Entry other = entries.get(q);
                 if (other.player().equals(self.player())) continue;
+                if (pairs == Pairs.adjacent && other.outcome() != self.outcome() && other.outcome() != better && other.outcome() != worse) continue;
                 final double c = Math.sqrt(v[i] + v[q] + 2 * beta * beta);
                 final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
                 omega += v[i] / c * (score(self, other) - p);
                 delta += Math.sqrt(v[i]) / c * (v[i] / (c * c)) * p * (1 - p);
+                opponents++;
+            }
+            if (pairs == Pairs.mean && opponents > 0) {
+                omega /= opponents;
+                delta /= opponents;
             }
             dMu[i] = omega;
             shrink[i] = Math.max(1 - delta, KAPPA);
@@ -303,17 +398,39 @@ public final class Rating implements Serializable {
     /**
      * A readout of a player's rating as the state holds it ({@code state} may be null: nothing folded yet). A player
      * never rated reads the prior {@code mu} / {@code sigma}, count 0 and a null {@code delta}.
+     *
+     * <p>Under a drift in time ({@code tauPer}) this reads the uncertainty of the player's <b>last contest</b>, not the
+     * one it carries now: every path that serves a row must pass the row's time
+     * ({@link #read(State, String, String, long)}), as {@code SequenceEvaluator} does on the fold-pointer and the scan
+     * path alike. This overload is the state's own view (tests, and a rating whose drift is per contest).
      */
     public Object read(final State state, final String player, final String func) {
+        return read(state, player, func, Long.MIN_VALUE);
+    }
+
+    /**
+     * A readout at {@code nowMillis}: under a drift in time {@code sigma} carries the drift since the player's last
+     * contest ({@link #drifted}) — what is known of the player now, not what was known when it last competed.
+     */
+    public Object read(final State state, final String player, final String func, final long nowMillis) {
         if (player == null) return null;
         final Player p = state == null ? null : state.players.get(player);
         return switch (func) {
             case "mu" -> p == null ? mu : p.mu;
-            case "sigma" -> p == null ? sigma : p.sigma;
+            case "sigma" -> p == null ? sigma : sigmaAt(p, nowMillis);
             case "count" -> p == null ? 0L : p.count;
             case "delta" -> p == null ? null : (Object) p.delta;
             default -> throw new IllegalArgumentException("unknown rating readout: " + func);
         };
+    }
+
+    /**
+     * The uncertainty a row at {@code nowMillis} reads: the state's, carrying the drift of the absence since the
+     * player's last contest. {@code Long.MIN_VALUE} (a read without a time) is the state's own value, bit for bit.
+     */
+    private double sigmaAt(final Player p, final long nowMillis) {
+        if (tauPerMillis <= 0 || nowMillis == Long.MIN_VALUE) return p.sigma;
+        return Math.sqrt(drifted(p, nowMillis, false));
     }
 
 }

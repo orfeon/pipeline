@@ -346,9 +346,17 @@ not alter values).
 - **`rating` in large fields** (more than about eight players per contest): `bradleyTerry` adds up every
   pair, so a player's first contest moves `mu` by several prior standard deviations and collapses `sigma`
   for good — the first result decides the rating, and the column screens as noise. A larger `beta` softens
-  the collapse without curing it. Use `plackettLuce` or `elo` there. `plackettLuce`'s `sigma` hardly shrinks
-  in a large field (about a percent per contest for the last players of a field of 16, next to nothing for
-  the leaders, whatever `beta`): it is a function of the contest count, so use `count` for "how well known".
+  the collapse without curing it. Use `pairs: mean` (or `adjacent`), `plackettLuce` or `elo` there.
+  `plackettLuce`'s `sigma` hardly shrinks in a large field (about a percent per contest for the last players
+  of a field of 16, next to nothing for the leaders, whatever `beta`): it is a function of the contest count,
+  so use `count` for "how well known".
+- **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
+  uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
+  previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is
+  then a feature. Declare `tau` with it (the default is sized for one contest), and keep `tauPer` well above the
+  outcome's availability lag (`settlementLag` + `ingestionLag` + the `predictAt` offset): the newest contest the
+  ratings may know is always that far back, so a `tauPer` near that lag inflates every row's `sigma` by a
+  constant rather than telling a real absence apart.
 - **`rating` warm-up**: every player starts from the prior, so the spread of `mu` grows over the first
   stretch of the input (a long one where contests are rare) — a drift in time if that stretch is in the
   training window. Drop the stretch, or use the rating relative to its contest through a **scale-free**
