@@ -2442,14 +2442,20 @@ public class FeatureTransformTest {
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             int count = 0;
+            final Set<Double> sums = new HashSet<>();
             for (final MElement row : rows) {
                 final Double first = row.getAsDouble("f_by_price"), second = row.getAsDouble("f_by_quantity");
                 Assertions.assertNotNull(first);
                 Assertions.assertNotNull(second);
-                Assertions.assertEquals(first + second, row.getAsDouble("f_additive"), 1e-9);
+                final Double sum = row.getAsDouble("f_additive");
+                Assertions.assertNotNull(sum);
+                Assertions.assertEquals(first + second, sum, 1e-9);
+                sums.add(sum);
                 count++;
             }
             Assertions.assertEquals(6, count);
+            // the curves vary with start_price / quantity: an all-zero (vacuously equal) sum would not catch a regression
+            Assertions.assertTrue(sums.size() > 1, sums::toString);
             return null;
         });
         pipeline.run();
@@ -2475,7 +2481,8 @@ public class FeatureTransformTest {
                       scope: row
                       expr: "price_q + q_bin"
                 """.replaceAll("(?m)^", "    ");
-        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks + "      output:\n"), 6, List.of(), List.of());
+        // "_Partial" pins that the parallel graph really did fan out: equal outputs prove nothing if it fell back to the chain
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks + "      output:\n"), 6, List.of("_Partial"), List.of());
     }
 
     /**

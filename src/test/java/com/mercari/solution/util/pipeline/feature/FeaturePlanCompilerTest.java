@@ -2233,6 +2233,38 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(fit.columnNames().containsAll(List.of("by_quantity", "additive")), same::describe);
     }
 
+    /**
+     * The same rule with a keyed stage instead of a second fit: a row column over a fitted column AND a sequence
+     * column of a later stage goes to that later stage — the fit stage precedes half of what it reads.
+     */
+    @Test
+    public void testRowColumnOverFitAndLaterKeyedStage() {
+        final String blocks = """
+                  - name: by_price
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                  - name: bycat
+                    scope: sequence
+                    entity: cat
+                    windows:
+                      - {maxEvents: 3}
+                    ops:
+                      - {type: aggregate, field: start_price, funcs: [mean]}
+                  - name: mix
+                    scope: row
+                    expr: "by_price + bycat_n3_start_price_mean"
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.columnNames().contains("by_price")).findFirst().orElseThrow();
+        final FeaturePlan.Stage keyed = plan.getStages().stream().filter(s -> s.columnNames().contains("bycat_n3_start_price_mean")).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.index() < keyed.index(), plan::describe);
+        Assertions.assertTrue(keyed.columnNames().contains("mix"), plan::describe);
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population

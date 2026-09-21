@@ -363,8 +363,10 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    same-key slot after its dependencies; inputs read *inside* the DoFn (row, history) may share the
    stage, inputs read *before* it (stage keys, fit stats, Vc fields) need an earlier stage
    (`strictInputs`); row columns are placed as late as possible (first consumer, or the last stage) —
-   except a row column over fitted columns, which is pulled into their fit stage (lambdas / artifact live
-   there), the LATEST one when it reads several (`placeRow`; the earliest precedes part of what it reads);
+   except a row column over fitted columns, which is pulled back to the earliest stage its own inputs allow
+   (`rowEarliest`): the fit stage when the fit is all it reads (lambdas / artifact live there), and the latest
+   of them when it reads several fit stages or a fitted plus a keyed column (`placeRow`; an earlier stage
+   precedes part of what it reads, which the scheduler's own consistency check rejects);
    a static-fit block = exactly one fit stage; sequence + population under one key fuse (reported
    as `population`). A column reading a later stage is a scheduler bug and throws.
 5. **Keyed evaluation is O(n) per key and history is trimmed per field.** New sequence /

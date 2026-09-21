@@ -4709,16 +4709,18 @@ public final class FeaturePlanCompiler {
             final Integer current = stageOf.get(name);
             if (current != null && current <= at) return;
             final OutputColumn r = columnsByCanonical.get(name);
-            // a row column over fitted statistics is evaluated in the block's fit stage (artifact / lambdas live there);
-            // over the fitted columns of several fit stages, in the latest of them: the earlier ones precede what it reads
-            int fitStage = -1;
+            // a row column over fitted statistics is evaluated as early as its own inputs allow (in the fit stage
+            // of a single fitted input: the artifact / lambdas live there), never earlier — with several fitted
+            // inputs, or a fitted one and a keyed one, the earlier stages precede part of what the column reads
+            boolean overFit = false;
             for (final String dep : r.inputs) {
                 final OutputColumn d = columnsByCanonical.get(dep);
                 if (d != null && FitMode.isLookupToken(d.coordinates.get("fit")) && fitStageOf.containsKey(d.block)) {
-                    fitStage = Math.max(fitStage, fitStageOf.get(d.block));
+                    overFit = true;
+                    break;
                 }
             }
-            final int target = fitStage < 0 ? at : Math.min(at, fitStage);
+            final int target = overFit ? Math.min(at, earliest) : at;
             if (target < earliest) {
                 throw new IllegalStateException("feature stage scheduling: " + name + " needs stage " + earliest + " but is required at stage " + target);
             }
