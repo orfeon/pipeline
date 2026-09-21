@@ -1615,7 +1615,9 @@ public final class FeaturePlanCompiler {
         }
         // the readouts: the rated player's (index 0, the names a rating of players has), then each member's under its
         // entity name, then the team's. Every column folds the same contests, so every one carries all the members' keys
-        // as past inputs; of the current row a column needs the keys of what it reads
+        // — as past inputs, and of the current row too: the columns of one op share ONE fold pointer (stateKey), so
+        // they must share one availability contract. A column whose self side were later than the others' would be
+        // classified apart (no window shift, or a runtime filter) and advance the shared state past their near edge
         record Readout(String segment, String func, int member) {}
         final List<Readout> readouts = new ArrayList<>();
         for (final String func : funcs) readouts.add(new Readout("", func, 0));
@@ -1639,10 +1641,10 @@ public final class FeaturePlanCompiler {
             addPastInput(c, field);
             for (final String key : entity.keys()) addPastInput(c, key);
             for (final String key : contest.keys()) addPastInput(c, key);
-            for (int j = 0; j < teamEntities.size(); j++) {
-                for (final String key : teamEntities.get(j).keys()) {
+            for (final EntityDef member : teamEntities) {
+                for (final String key : member.keys()) {
                     addPastInput(c, key);
-                    if (r.member() < 0 || r.member() == j + 1) addSelfInput(c, key);
+                    addSelfInput(c, key);
                 }
             }
             finishSequence(c, def, entity, window, null, reducedKey, op, List.of(), true);
@@ -1657,8 +1659,12 @@ public final class FeaturePlanCompiler {
         }
     }
 
-    /** The separators of the {@code teamMembers} coordinate ({@link Rating#encodeMembers}): no entity or key name may hold one. */
-    private static final Pattern TEAM_SEPARATORS = Pattern.compile("[|;,]");
+    /**
+     * The separators no entity or key name of a team may hold: those of the {@code teamMembers} coordinate
+     * ({@link Rating#encodeMembers}) and those of a state key ({@code U+0001} between a pool and its key,
+     * {@code U+0002} between the members of a team), which {@code Rating.withTeam} rejects by throwing.
+     */
+    private static final Pattern TEAM_SEPARATORS = Pattern.compile("[|;,\\u0001\\u0002]");
 
     /**
      * {@code with} / {@code team} of a rating op (code {@code sequence.rating.with}): the members are entities of the
@@ -1690,6 +1696,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final Set<String> seen = new HashSet<>();
+        // the rated player's pool is the block's entity name: checked once, not once per member
+        if (!validTeamName(entity.name(), loc)) valid = false;
         for (final FeatureSpec.TeamMember m : op.with) {
             final EntityDef member = m.entity == null ? null : entities.get(m.entity);
             if (member == null) {
@@ -1709,14 +1717,11 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("sequence.rating.with", loc, "an entity named 'team' cannot be a member: <as>_team_<func> are the columns of the whole team");
                 valid = false;
             }
-            for (final String name : concat(List.of(member.name(), entity.name()), member.keys())) {
-                if (TEAM_SEPARATORS.matcher(name).find()) {
-                    diagnostics.error("sequence.rating.with", loc, "a team's entity and key names cannot hold '|', ';' or ',': " + name);
-                    valid = false;
-                }
-            }
+            if (!validTeamName(member.name(), loc)) valid = false;
+            for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
             if (!m.unknown.isEmpty()) {
-                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name() + " (accepted: entity, mu, sigma, tau)");
+                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name()
+                        + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
                 valid = false;
             }
             if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
@@ -1734,10 +1739,12 @@ public final class FeaturePlanCompiler {
         return valid;
     }
 
-    private static List<String> concat(final List<String> a, final List<String> b) {
-        final List<String> all = new ArrayList<>(a);
-        all.addAll(b);
-        return all;
+    /** Whether a name of a team (an entity's, or one of its key fields') is free of the separators the state keys use. */
+    private boolean validTeamName(final String name, final String loc) {
+        if (!TEAM_SEPARATORS.matcher(name).find()) return true;
+        diagnostics.error("sequence.rating.with", loc, "a team's entity and key names cannot hold '|', ';', ','"
+                + " or the state key separators U+0001 / U+0002 (two members would meet on one state key): " + name);
+        return false;
     }
 
     /** The rating ops already expanded, by their {@code stateKey}: the coordinates behind one running state. */

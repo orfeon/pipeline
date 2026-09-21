@@ -170,6 +170,9 @@ public class FeatureSpec implements Serializable {
         public String withInvalid;
     }
 
+    /** The keys a {@link TeamMember} accepts; anything else is reported (see {@link TeamMember#unknown}). */
+    static final List<String> TEAM_MEMBER_KEYS = List.of("entity", "mu", "sigma", "tau");
+
     /** A member of a rating team: an {@code entities[].name} and its own prior / drift (null = the op's). */
     public static class TeamMember implements Serializable {
         public String entity;
@@ -1231,7 +1234,7 @@ public class FeatureSpec implements Serializable {
                     member.mu = doubleOf(mo, "mu", diagnostics, loc);
                     member.sigma = doubleOf(mo, "sigma", diagnostics, loc);
                     member.tau = doubleOf(mo, "tau", diagnostics, loc);
-                    for (final String key : mo.keySet()) if (!List.of("entity", "mu", "sigma", "tau").contains(key)) member.unknown.add(key);
+                    for (final String key : mo.keySet()) if (!TEAM_MEMBER_KEYS.contains(key)) member.unknown.add(key);
                 } else {
                     op.withInvalid = "with must list entity names or {entity, mu, sigma, tau} members: " + m;
                     continue;
@@ -1239,7 +1242,13 @@ public class FeatureSpec implements Serializable {
                 op.with.add(member);
             }
         }
-        op.team = Json.strings(o, "team");
+        if (o.has("team") && !o.get("team").isJsonNull()) {
+            // not Json.strings: a team that is not a list of readout names must be reported, not silently dropped
+            for (final JsonElement f : arrayOf(o.get("team"))) {
+                if (f.isJsonPrimitive()) op.team.add(f.getAsString());
+                else op.withInvalid = "team must list the readouts of the whole team (mu / sigma): " + f;
+            }
+        }
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");
