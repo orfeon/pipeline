@@ -243,7 +243,7 @@ public class AlignmentTest {
      */
     @Test
     public void testTooLittleInCommonIsCounted() {
-        final FeatureStages.SpectralSpec block = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 3, 64,
+        final FeatureStages.SpectralSpec block = new FeatureStages.SpectralSpec("block", "v", List.of("p"), List.of("v"), 3, 64,
                 null, false, List.of(), new int[0], null, 0L, 0L, Alignment.PROCRUSTES, null);
         final Spectral first = embedding(1, 3, "a", "b", "c", "d");
         final Spectral second = embedding(2, 3, "a", "x", "y", "z");
@@ -263,7 +263,7 @@ public class AlignmentTest {
         Assertions.assertEquals(2, grown.anchored);
         Assertions.assertEquals(0, block.unanchoredOf(embedding(4, 2, "a", "b", "c", "d"), grown));
         // fit.align none asked for no chain: nothing to count
-        final FeatureStages.SpectralSpec free = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 3, 64,
+        final FeatureStages.SpectralSpec free = new FeatureStages.SpectralSpec("block", "v", List.of("p"), List.of("v"), 3, 64,
                 null, false, List.of(), new int[0], null, 0L, 0L, Alignment.NONE, null);
         Assertions.assertEquals(0, free.unanchoredOf(first, free.alignTo(first, apart)));
     }

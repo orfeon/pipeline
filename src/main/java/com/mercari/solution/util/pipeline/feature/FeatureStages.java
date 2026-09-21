@@ -1905,13 +1905,14 @@ public final class FeatureStages {
     /**
      * One spectralEmbedding block of a fit stage (all its coordinate columns), rebuilt from the columns' coordinates:
      * a row contributes its value of {@code field} with the values of the lag {@code path} columns — the entity's
-     * previous steps, computed by an earlier keyed stage — and reads the coordinates of its {@code applied} value.
+     * previous steps, computed by an earlier keyed stage — and reads, per column, the coordinates of the value in
+     * {@code applied.get(i)}: the row's own value, its previous one, or ({@code of: [current, previous]}) both.
      *
      * <p>{@code vocabulary} is the {@code maxValues} cap as a side input ({@link #vocabularyView}, null until
      * {@link #prepare} builds it): unlike every other summary block the state here is quadratic in what it counts,
      * so the values are chosen before the pairs are accumulated rather than when the eigenproblem is solved.
      */
-    record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
+    record SpectralSpec(String block, String field, List<String> path, List<String> applied, int rank, int maxValues,
                         String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
                         Forward forward, long predictOffsetMillis, long minRows, String align,
                         PCollectionView<Map<String, Long>> vocabulary) implements ForwardFitBlock<String[], Spectral.PairCounts, Spectral> {
@@ -2039,15 +2040,22 @@ public final class FeatureStages {
         }
 
         /**
-         * {@code columns.get(i)} carries coordinate {@code components[i]} (resolved once in {@link #spectralSpecs}).
-         * The value's row is looked up once and its coordinates are read one by one: the model's arrays never leave it
-         * (one instance serves every thread of a worker) and no vector is copied per row.
+         * {@code columns.get(i)} carries coordinate {@code components[i]} of the value in the field {@code applied.get(i)}
+         * (resolved once in {@link #spectralSpecs}): the row's own value, its previous one, or — {@code of: [current,
+         * previous]} — a run of columns for each, read from the one model. A value's row is looked up once per run and its
+         * coordinates are read one by one: the model's arrays never leave it (one instance serves every thread of a
+         * worker) and no vector is copied per row.
          */
         @Override
         public void apply(final ForwardModel<Spectral> model, final Map<String, Object> values) {
             final Spectral spectral = modelFor(model, values);
-            final Integer row = spectral == null ? null : spectral.indexOf(valueOf(values.get(applied)));
+            String looked = null;
+            Integer row = null;
             for (int i = 0; i < components.length; i++) {
+                if (!applied.get(i).equals(looked)) {
+                    looked = applied.get(i);
+                    row = spectral == null ? null : spectral.indexOf(valueOf(values.get(looked)));
+                }
                 values.put(columns.get(i).getCanonicalName(), row == null ? null : spectral.coordinate(row, components[i]));
             }
         }
@@ -2062,8 +2070,12 @@ public final class FeatureStages {
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
             final int[] components = new int[e.getValue().size()];
-            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
-            specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), k.get("applied"),
+            final List<String> applied = new ArrayList<>(components.length);
+            for (int i = 0; i < components.length; i++) {
+                components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
+                applied.add(e.getValue().get(i).getCoordinates().get("applied"));
+            }
+            specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), applied,
                     Integer.parseInt(k.get("rank")), Integer.parseInt(k.get("maxValues")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
                     Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), k.get("align"), null));

@@ -371,8 +371,11 @@ public class FeatureSpec implements Serializable {
         /** spectralEmbedding: {@code cooccur.window} (steps back that count as co-occurring) / {@code cooccur.weighting}. */
         public Integer cooccurWindow;
         public String cooccurWeighting;
-        /** spectralEmbedding: which value of the row is embedded — {@code current} (default) | {@code previous}. */
-        public String embedOf;
+        /**
+         * spectralEmbedding: which value(s) of the row are embedded — {@code current} (default) | {@code previous}, or a
+         * list of both: one fit, the coordinates of the row's value and of the value it comes from. Empty = undeclared.
+         */
+        public List<String> embedOf = new ArrayList<>();
         /** spectralEmbedding: vocabulary cap (null = the default). */
         public Integer maxValues;
         /** transitionStats: how many previous values make the state (null = 1). */
@@ -1030,7 +1033,16 @@ public class FeatureSpec implements Serializable {
                 def.sequenceUnknown.add("cooccur " + o.get("cooccur"));
             }
         }
-        def.embedOf = Json.string(o, "of");
+        // of: current | previous | [current, previous] — an entry in another shape (of: [current, {…}]) or an empty
+        // list would otherwise be dropped without a word and the block would embed the row's own value in silence
+        if (o.has("of") && !o.get("of").isJsonNull()) {
+            final List<JsonElement> entries = arrayOf(o.get("of"));
+            for (final JsonElement e : entries) {
+                if (e.isJsonPrimitive()) def.embedOf.add(e.getAsString());
+                else def.sequenceUnknown.add("of " + e);
+            }
+            if (entries.isEmpty()) def.sequenceUnknown.add("of " + o.get("of"));
+        }
         def.maxValues = Json.integer(o, "maxValues");
         def.order = Json.integer(o, "order");
         if (o.has("emit") && !o.get("emit").isJsonNull()) {

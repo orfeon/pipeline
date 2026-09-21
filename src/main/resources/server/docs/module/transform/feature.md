@@ -913,7 +913,7 @@ outcome the usual window shift applies to the lag and to the counted transitions
     sequenceOf: {entity: seller, field: condition_grade}
     cooccur: {window: 2, weighting: ppmi}      # steps back that count as co-occurring (1..8, default 2); ppmi only
     rank: 8                                    # coordinates grade_embed_0 .. grade_embed_7 (default 8)
-    of: current                                # embed the row's own value (default) | previous: the value it comes from
+    of: current                                # embed the row's own value (default) | previous: the value it comes from | [current, previous]: both, from the one fit
     maxValues: 256                             # vocabulary cap, by co-occurrence mass (2..1024, default 256)
     fit: {artifact: {uri: "gs://bucket/features"}}   # static (default), forward, or inherited from a top-level forward fit
 ```
@@ -925,7 +925,10 @@ pointwise mutual information matrix `max(0, ln(C_ab · T / (r_a · r_b)))`, and 
 largest loading is positive — a re-fit reproduces the columns; under `fit.mode: forward` every fit is rotated into
 the coordinates of the one before it instead, see *Alignment of forward fits*). Values that follow and precede the same values land
 close together, which lets a model generalise across a high-cardinality state without a target: no label is read, so
-the columns are as available as the embedded value. `of: previous` embeds the state the entity comes from — the form
+the columns are as available as the embedded value. `of: [current, previous]` reads the one fit twice — the row's
+value as `<name>_<k>`, the value it comes from as `<name>_prev_<k>` — which is how to get both: two blocks that
+differ only in `of` count the same pairs and solve the same eigenproblem twice (and, under `forward`, are aligned
+as two separate chains). `of: previous` embeds the state the entity comes from — the form
 to use when the field itself is an outcome (the row's own value would be an `availability.violation`). A value that
 is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplus columns when there are fewer
 values than `rank`. A value the cap keeps but whose every co-occurrence partner it dropped reads null too: with no
