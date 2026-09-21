@@ -161,7 +161,19 @@ public final class Spectral implements Serializable, FitArtifact.Model {
      */
     private transient volatile Map<String, Integer> index;
 
+    /**
+     * How the coordinates were brought into those of the fit before them ({@link #alignTo}): null for a fit that
+     * stands alone. After {@code procrustes} a column is a mixture of components, so {@link #eigenvalues} are the
+     * spectrum of the fitted components rather than one value per column.
+     */
+    public final String alignment;
+
     Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped) {
+        this(vocabulary, embedding, eigenvalues, pairs, dropped, null);
+    }
+
+    Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped, final String alignment) {
+        this.alignment = alignment;
         this.vocabulary = vocabulary;
         this.embedding = embedding;
         this.eigenvalues = eigenvalues;
@@ -208,6 +220,29 @@ public final class Spectral implements Serializable, FitArtifact.Model {
     public double[] embed(final String value) {
         final Integer i = indexOf(value);
         return i == null ? null : embedding[i].clone();
+    }
+
+    /**
+     * This fit in the coordinates of {@code previous} ({@link Alignment}): the coordinates of the values both fits
+     * embed are paired, and every coordinate of this fit is rotated (or sign-flipped) towards them, so the columns of
+     * consecutive forward fits continue one another. Distances between values are unchanged. This fit is returned as
+     * it is when there is nothing to align to (no mode, an empty fit on either side, no value in common).
+     */
+    public Spectral alignTo(final Spectral previous, final String mode) {
+        if (previous == null || previous.isEmpty() || isEmpty()) return this;
+        final int k = rank();
+        final List<double[]> a = new ArrayList<>(), b = new ArrayList<>();
+        for (int i = 0; i < vocabulary.length; i++) {
+            final Integer at = previous.indexOf(vocabulary[i]);
+            if (at == null) continue;
+            a.add(embedding[i]);
+            b.add(previous.embedding[at]);
+        }
+        final double[][] map = Alignment.map(mode, Alignment.cross(a, b, k), a);
+        if (map == null) return this;
+        final double[][] rotated = new double[vocabulary.length][];
+        for (int i = 0; i < rotated.length; i++) rotated[i] = Alignment.apply(embedding[i], map);
+        return new Spectral(vocabulary, rotated, eigenvalues, pairs, dropped, mode);
     }
 
     /**
@@ -330,6 +365,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
         json.addProperty("pairs", pairs);
         json.addProperty("rank", rank());
         json.addProperty("dropped", dropped);
+        if (alignment != null) json.addProperty("alignment", alignment);
         final JsonArray values = new JsonArray();
         for (final double e : eigenvalues) values.add(e);
         json.add("eigenvalues", values);
@@ -370,7 +406,8 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             embedding[i] = new double[coordinates.size()];
             for (int r = 0; r < embedding[i].length; r++) embedding[i][r] = coordinates.get(r).getAsDouble();
         }
-        return new Spectral(vocabulary, embedding, eigenvalues, pairs.getAsLong(), dropped.getAsInt());
+        return new Spectral(vocabulary, embedding, eigenvalues, pairs.getAsLong(), dropped.getAsInt(),
+                json.has("alignment") ? json.get("alignment").getAsString() : null);
     }
 
     /** A required array member: a truncated artifact must say which member is missing, not throw a NullPointerException. */

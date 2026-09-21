@@ -264,6 +264,11 @@ The three forward knobs, all in the plan hash:
   even in a full block. A fit fewer rows contributed to is not solved and its rows read null. A `smooth` defaults to
   one more than its coefficients (`segments + degree + 1`), the others to no floor; `0` switches it off. The run log counts
   the change points it emptied. Set it when a backtest starts close to the beginning of the data.
+- `align: procrustes | sign | none` (svd / spectralEmbedding) — leave the default. Every forward fit is rotated into the
+  coordinates of the fit before it, so a score / coordinate column means the same thing in every block; without it
+  (`none`) the columns flip sign and mix whenever the largest loading changes hands or two eigenvalues cross, and a
+  model trained across blocks reads them as noise. `sign` only flips (each column stays the k-th eigenvector, close
+  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three.
 
 Reading the plan: `fit.mode.forward` (info) states per block what it reads, `windowBlocks` / `minBlocks` /
 `forwardLagMillis` are in the column coordinates — an **outcome** input delays the readable blocks by its settlement

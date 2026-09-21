@@ -708,7 +708,7 @@ whole-input moments and projected onto the leading `rank` right singular vectors
 ordered by explained variance (`<name>_0` carries the most). The fit needs only (n, Σx, Σxxᵀ), accumulated
 relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
 Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
-the vector length, tens to a few hundred). Components are oriented so the largest loading is positive (a
+the vector length, tens to a few hundred). Components of a static fit are oriented so the largest loading is positive (a
 re-fit reproduces the scores). A vector with a missing component (null / NaN) takes no part in the fit and
 reads null scores. An array input must have one length: vectors of another length are skipped (and read
 null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array
@@ -731,6 +731,35 @@ block) and the components are re-solved for every block window a row may read �
 vectors. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}` (geometry
 included), so the whole spec walks forward together; `fit: {mode: static}` on the block opts it out and says so
 (`svd.fit.mode.static` info). The artifact still holds the whole-input components, for a static serving run.
+
+**Alignment of forward fits (`fit.align: procrustes | sign | none`, svd and spectralEmbedding).** An eigendecomposition
+fixes its coordinates only up to what the matrix cannot see: the sign of every eigenvector, and any rotation inside a
+group of (nearly) equal eigenvalues. A static fit is solved once, so a fixed rule (the largest loading positive) makes
+it reproducible. A forward fit is solved again at every change point, and there that rule is *discontinuous*: the
+eigenvectors move smoothly with the data while the loading that happens to be the largest changes hands, and close
+eigenvalues swap order — so, left alone, a column flips and mixes from block to block although the fitted subspace
+hardly moved, and a model that splits on it across time reads noise. Under `forward` every fit is therefore brought
+into the coordinates of the fit before it:
+
+| `fit.align` | what happens to the fit of a change point | use |
+|---|---|---|
+| `procrustes` (default) | the orthogonal map `R` minimising `‖A R − B‖` — `A` this fit, `B` the previous (already aligned) one, paired over what they share: the loadings' dimensions for svd, the values both fits embed for an embedding | columns that continue across blocks: what a downstream model needs |
+| `sign` | every column is flipped to correlate positively with its own predecessor | when each column must stay *the k-th eigenvector*; close eigenvalues still mix and swap |
+| `none` | the static rule per fit | reproducing the columns of an earlier version |
+
+`procrustes` contains `sign` (for well-separated eigenvalues `R` is a diagonal of ±1) and also undoes what signs
+cannot: a rotation inside a near-degenerate eigenspace and a swap of order are orthogonal maps too. What a fit
+*explains* does not change — distances and inner products between coordinates, an svd's residual and total variance
+are those of the unrotated fit — but a column is then **a stable coordinate of the fitted subspace, not its k-th
+eigenvector**: an svd's `variances` are the data's variance along the rotated directions (unsorted), and an embedding's
+`eigenvalues` are the spectrum of the fitted components rather than one value per column (the artifact says
+`alignment: procrustes`). The chain runs **forward in time only** — a fit aligned to a later one would carry a trace
+of rows it may not read — and skips the change points that have no fit (`minRows`, an empty window). The whole-input
+model, which a static serving run loads in place of the forward fits a training run read, is aligned last, to the end
+of the chain, so serving continues the columns the consumer's model was trained on. A component the previous fit did
+not have (a vocabulary that was still smaller than `rank`) takes the direction left over, oriented by the static
+rule. Part of the plan hash when declared; a static fit ignores it (`<type>.fit.align` warning), as do the fits
+without such a freedom (curves, quantile knots, level statistics).
 
 **Residuals (`outputs: [scores, residual, residualNorm]`).** The scores say where a vector sits on the leading
 `rank` components; the residual is what those components do not explain — `x − mean − scale · Σ score_k ·
@@ -872,7 +901,8 @@ outcome the usual window shift applies to the lag and to the counted transitions
 at most `window` steps earlier in the same entity's sequence) is one co-occurrence, the counts become a positive
 pointwise mutual information matrix `max(0, ln(C_ab · T / (r_a · r_b)))`, and its eigenvectors of largest
 |eigenvalue|, scaled by `sqrt(|eigenvalue|)`, are the coordinates (the symmetric factorisation; oriented so the
-largest loading is positive — a re-fit reproduces the columns). Values that follow and precede the same values land
+largest loading is positive — a re-fit reproduces the columns; under `fit.mode: forward` every fit is rotated into
+the coordinates of the one before it instead, see *Alignment of forward fits*). Values that follow and precede the same values land
 close together, which lets a model generalise across a high-cardinality state without a target: no label is read, so
 the columns are as available as the embedded value. `of: previous` embeds the state the entity comes from — the form
 to use when the field itself is an outcome (the row's own value would be an `availability.violation`). A value that

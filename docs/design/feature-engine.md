@@ -1145,6 +1145,7 @@ merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` sta
 | `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
 | `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
 | `minRows` (lookup fits) | — | a state fewer rows contributed to is given the family's "nothing fitted" model — the fit of an empty state — by `ForwardFitBlock.fitAbove`, the one place both the whole-input fit and every change point go through; `rowsOf(state)` is the family's own count (`Moments.n`, `Values.size`, `PairCounts.rows`). A whole-input fit the floor empties writes no artifact — `artifactExists` would make the empty model permanent |
+| `align` (svd, spectralEmbedding) | — | after the change points are solved, `ForwardFitBlock.solve` chains them in time order through `alignTo(previous, current)`: each fitted model into the coordinates of the last fitted one before it (`Alignment`: orthogonal Procrustes over what the two fits share, or signs), never backwards — a fit aligned to a later one would read rows it may not — and the whole-input model last, to the end of the chain, because a static serving run loads it in place of the forward fits the training run read |
 | `fold` by time | every block but `[b − purgeBlocks, b + purgeBlocks + embargoBlocks]` around the row's block `b` | the total minus the range |
 
 Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family

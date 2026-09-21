@@ -7,7 +7,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Truncated SVD / PCA of a numeric vector feature (docs/design/feature-dsl.md §4.4, {@code type: svd}; the
@@ -39,9 +41,21 @@ public final class Svd implements Serializable, FitArtifact.Model {
     /** Trace of the fitted matrix: Σ variances over every dimension. */
     public final double totalVariance;
     public final long n;
+    /**
+     * How the components were brought into the coordinates of the fit before them ({@link #alignTo}): null for a fit
+     * that stands alone. After {@code procrustes} the components span the fitted subspace but are no longer its
+     * eigenvectors, and {@link #variances} are not sorted.
+     */
+    public final String alignment;
 
     Svd(final int dimension, final double[] mean, final double[] scale, final double[][] components,
         final double[] variances, final double totalVariance, final long n) {
+        this(dimension, mean, scale, components, variances, totalVariance, n, null);
+    }
+
+    Svd(final int dimension, final double[] mean, final double[] scale, final double[][] components,
+        final double[] variances, final double totalVariance, final long n, final String alignment) {
+        this.alignment = alignment;
         this.dimension = dimension;
         this.mean = mean;
         this.scale = scale;
@@ -317,6 +331,36 @@ public final class Svd implements Serializable, FitArtifact.Model {
         return out;
     }
 
+    /**
+     * This fit in the coordinates of {@code previous} ({@link Alignment}): the loadings are paired dimension by
+     * dimension and rotated (or sign-flipped) towards the previous fit's, so the score columns of consecutive forward
+     * fits continue one another. The fitted subspace, the residual and the total variance are unchanged; a component's
+     * variance is that of the data along its rotated direction, {@code Σ_i R_ij² λ_i}. This fit is returned as it is
+     * when there is nothing to align to (no mode, an empty fit on either side, another vector length).
+     */
+    public Svd alignTo(final Svd previous, final String mode) {
+        if (previous == null || previous.isEmpty() || isEmpty() || previous.dimension != dimension) return this;
+        final int k = rank();
+        final List<double[]> a = new ArrayList<>(dimension), b = new ArrayList<>(dimension);
+        for (int i = 0; i < dimension; i++) {
+            final double[] x = new double[k], y = new double[previous.rank()];
+            for (int r = 0; r < k; r++) x[r] = components[r][i];
+            for (int r = 0; r < y.length; r++) y[r] = previous.components[r][i];
+            a.add(x);
+            b.add(y);
+        }
+        final double[][] map = Alignment.map(mode, Alignment.cross(a, b, k), a);
+        if (map == null) return this;
+        final double[][] rotated = new double[k][dimension];
+        for (int i = 0; i < dimension; i++) {
+            final double[] row = Alignment.apply(a.get(i), map);
+            for (int r = 0; r < k; r++) rotated[r][i] = row[r];
+        }
+        final double[] along = new double[k];
+        for (int j = 0; j < k; j++) for (int i = 0; i < k; i++) along[j] += map[i][j] * map[i][j] * variances[i];
+        return new Svd(dimension, mean, scale, rotated, along, totalVariance, n, mode);
+    }
+
     /** The component scores of a vector, or null (missing component, wrong length, nothing fitted). */
     public double[] transform(final double[] x) {
         if (x == null || x.length != dimension || components.length == 0) return null;
@@ -383,6 +427,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
         json.add("components", rows);
         json.add("variances", array(variances));
         json.addProperty("totalVariance", totalVariance);
+        if (alignment != null) json.addProperty("alignment", alignment);
         return json;
     }
 
@@ -393,7 +438,8 @@ public final class Svd implements Serializable, FitArtifact.Model {
         final double[][] components = new double[rows.size()][];
         for (int r = 0; r < components.length; r++) components[r] = doubles(rows.get(r).getAsJsonArray());
         return new Svd(json.get("dimension").getAsInt(), doubles(json.getAsJsonArray("mean")), doubles(json.getAsJsonArray("scale")),
-                components, doubles(json.getAsJsonArray("variances")), json.get("totalVariance").getAsDouble(), n.getAsLong());
+                components, doubles(json.getAsJsonArray("variances")), json.get("totalVariance").getAsDouble(), n.getAsLong(),
+                json.has("alignment") ? json.get("alignment").getAsString() : null);
     }
 
 }

@@ -333,7 +333,12 @@ has no mass, null = nothing known yet; a first event reads the marginal. Interme
 (default 8), `of: current | previous` (which value of the row is embedded; `previous` for an outcome field),
 `maxValues` (vocabulary cap by co-occurrence mass, 2..1024, default 256), `fit` as for svd. Output float64
 `<name>_0 .. <name>_{rank−1}`: the value's coordinates from the PPMI matrix of the co-occurrence counts
-(eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive). No target is read. Null for
+(eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive; under `forward` each fit
+is rotated into the coordinates of the fit before it — `fit.align: procrustes` (default) `| sign | none`, also for
+`svd` — so a column continues across blocks: a stable coordinate of the fitted subspace rather than its k-th
+eigenvector, with distances unchanged. The chain runs forward in time only, and the whole-input model a static
+serving run loads ends it. `none` restores the per-fit orientation, under which columns flip and mix between
+blocks). No target is read. Null for
 a missing / unseen / capped value — including one the cap keeps but whose every partner it dropped (no co-occurrence
 row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. The
 cap is applied before the counts are accumulated (an extra pass ranks the values by co-occurrence mass; under

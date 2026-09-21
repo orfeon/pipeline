@@ -1751,7 +1751,7 @@ public class FeatureTransformTest {
             Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble("f_q_forward"), 1e-9);
             // and of testSvdForwardFit
             Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_pc_forward_0"));
-            final double[] d = svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2);
+            final double[] d = svdScoresChained(VEC_D1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}, new double[][]{VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2});
             Assertions.assertEquals(d[0], byKey.get("D/s1").getAsDouble("f_pc_forward_0"), 1e-9);
             Assertions.assertEquals(d[1], byKey.get("D/s1").getAsDouble("f_pc_forward_1"), 1e-9);
             // the smooth curve rode the svds' Combine: under a heavy penalty, the least-squares line of the bid on the price
@@ -2252,6 +2252,22 @@ public class FeatureTransformTest {
         return com.mercari.solution.util.pipeline.feature.Svd.fit(m, 2, true, false).transform(x);
     }
 
+    /**
+     * The scores of {@code x} under the LAST of a chain of forward fits (each given by the vectors it was fitted on, in
+     * time order): every fit is rotated into the coordinates of the one before it, which is what {@code fit.align:
+     * procrustes} — the default — makes a row read. A chain of one is {@link #svdScores}.
+     */
+    private static double[] svdScoresChained(final double[] x, final double[][]... fits) {
+        com.mercari.solution.util.pipeline.feature.Svd previous = null;
+        for (final double[][] vectors : fits) {
+            final com.mercari.solution.util.pipeline.feature.Svd.Moments m = new com.mercari.solution.util.pipeline.feature.Svd.Moments();
+            for (final double[] v : vectors) m.add(v);
+            final com.mercari.solution.util.pipeline.feature.Svd fitted = com.mercari.solution.util.pipeline.feature.Svd.fit(m, 2, true, false);
+            previous = previous == null ? fitted : fitted.alignTo(previous, "procrustes");
+        }
+        return previous.transform(x);
+    }
+
     private static String svdForwardConfig(final String dir, final String extra) {
         final String blocks = """
                     - name: pc
@@ -2292,10 +2308,11 @@ public class FeatureTransformTest {
             Assertions.assertEquals(6, byKey.size());
             assertScores(byKey.get("A/s1"), null);
             assertScores(byKey.get("A/s2"), null);
+            // the first fit has no predecessor; every later one is read in the coordinates of the fit before it
             assertScores(byKey.get("B/s1"), svdScores(VEC_B1, VEC_A1, VEC_A2));
-            assertScores(byKey.get("C/s1"), svdScores(VEC_C1, VEC_A1, VEC_A2, VEC_B1));
-            assertScores(byKey.get("C/s2"), svdScores(VEC_C2, VEC_A1, VEC_A2, VEC_B1));
-            assertScores(byKey.get("D/s1"), svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2));
+            assertScores(byKey.get("C/s1"), svdScoresChained(VEC_C1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}));
+            assertScores(byKey.get("C/s2"), svdScoresChained(VEC_C2, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}));
+            assertScores(byKey.get("D/s1"), svdScoresChained(VEC_D1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}, new double[][]{VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2}));
             return null;
         });
         pipeline.run();
@@ -2303,7 +2320,10 @@ public class FeatureTransformTest {
         Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
         final java.io.File artifact = new java.io.File(dirs[0], "pc.svd.json");
         Assertions.assertTrue(artifact.exists(), "the whole-input components are persisted for a static serving run");
-        Assertions.assertEquals(6, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject().get("n").getAsLong());
+        final com.google.gson.JsonObject whole = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(6, whole.get("n").getAsLong());
+        // what a static serving run loads ends the chain the training rows read, and says so
+        Assertions.assertEquals("procrustes", whole.get("alignment").getAsString());
 
         // window: P14D → two blocks
         final TestPipeline windowed = TestPipeline.create().enableAbandonedNodeEnforcement(false);
@@ -2313,7 +2333,8 @@ public class FeatureTransformTest {
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             assertScores(byKey.get("B/s1"), svdScores(VEC_B1, VEC_A1, VEC_A2));
             assertScores(byKey.get("C/s1"), null);                                   // (2869, 2871]: block 2870 alone has one vector
-            assertScores(byKey.get("D/s1"), svdScores(VEC_D1, VEC_C1, VEC_C2));    // (2871, 2873]: block 2872
+            // (2871, 2873]: block 2872 — aligned to the last FITTED window before it; the one-vector window in between has no fit
+            assertScores(byKey.get("D/s1"), svdScoresChained(VEC_D1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}, new double[][]{VEC_C1, VEC_C2}));
             return null;
         });
         windowed.run();
@@ -2325,10 +2346,22 @@ public class FeatureTransformTest {
             final Map<String, MElement> byKey = new HashMap<>();
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             assertScores(byKey.get("B/s1"), null);
-            assertScores(byKey.get("C/s1"), svdScores(VEC_C1, VEC_A1, VEC_A2, VEC_B1));
+            assertScores(byKey.get("C/s1"), svdScoresChained(VEC_C1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1}));
             return null;
         });
         min.run();
+
+        // align: none → every window oriented on its own, as a static fit of its vectors would be
+        final TestPipeline free = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> freeOut = MPipeline.apply(free, Config.load(SOURCE_CONFIG + svdForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", align: none")));
+        PAssert.that(freeOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            assertScores(byKey.get("C/s1"), svdScores(VEC_C1, VEC_A1, VEC_A2, VEC_B1));
+            assertScores(byKey.get("D/s1"), svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2));
+            return null;
+        });
+        free.run();
     }
 
     /** start_price and final_price of the six rows, in the order A/s1, A/s2, B/s1, C/s1, C/s2, D/s1. */

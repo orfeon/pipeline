@@ -1006,6 +1006,15 @@ public final class FeatureStages {
             return fit(state, loud);
         }
 
+        /**
+         * {@code current} in the coordinates of {@code previous}, the (already aligned) fit of the change point before
+         * it: the {@code fit.align} of a type whose solution has a gauge — the signs and rotations an eigendecomposition
+         * leaves open ({@link Alignment}; svd, spectralEmbedding). The other types have none and return the fit as is.
+         */
+        default M alignTo(final M previous, final M current) {
+            return current;
+        }
+
         /** The loaded model as this block will apply it (quantileTransform takes the config's clip, not the artifact's). */
         default M adopt(final M model) {
             return model;
@@ -1033,6 +1042,12 @@ public final class FeatureStages {
          * change point. The artifact is written once even under forward, which re-fits every run — but never for a
          * whole-input fit the {@code fit.minRows} floor emptied: an artifact is read back instead of fitting
          * ({@link #artifactExists}), so persisting the empty model would make "not enough rows yet" permanent.
+         *
+         * <p>The change points are solved independently and then chained by {@link #alignTo} in time order, each
+         * into the coordinates of the last fitted one before it — never the other way: a fit aligned to a later one
+         * would carry a trace of rows it may not read. The whole-input model, which a static serving run loads in
+         * place of the forward fits a training run read, is aligned last, to the end of that chain, so that serving
+         * continues the columns the consumer's model was trained on.
          */
         @Override
         default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
@@ -1040,7 +1055,7 @@ public final class FeatureStages {
             final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final S whole = all == null ? family().create() : all;
             final boolean floored = belowFloor(whole);
-            final M total = fitAbove(whole, true);
+            M total = fitAbove(whole, true);
             TreeMap<Long, M> byBlock = null;
             if (forward() != null) {
                 final int[] emptied = {0};
@@ -1049,6 +1064,13 @@ public final class FeatureStages {
                     if (rowsOf(state) > 0 && belowFloor(state)) emptied[0]++;
                     return fitAbove(state, false);
                 });
+                M previous = null;
+                for (final Map.Entry<Long, M> point : byBlock.entrySet()) {
+                    if (point.getValue().isEmpty()) continue;
+                    if (previous != null) point.setValue(alignTo(previous, point.getValue()));
+                    previous = point.getValue();
+                }
+                if (previous != null && !total.isEmpty()) total = alignTo(previous, total);
                 LOG.info("{} {}: forward fit over {} block(s), {} change point(s){}", artifact().name(), block(), parts.size(), byBlock.size(),
                         emptied[0] == 0 ? "" : ", " + emptied[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
             }
@@ -1540,7 +1562,7 @@ public final class FeatureStages {
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                   Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
+                   Forward forward, long predictOffsetMillis, long minRows, String align) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
         @Override
         public FitArtifact.Json<Svd> artifact() {
             return Svd.ARTIFACT;
@@ -1549,6 +1571,11 @@ public final class FeatureStages {
         @Override
         public long rowsOf(final Svd.Moments m) {
             return m.n;
+        }
+
+        @Override
+        public Svd alignTo(final Svd previous, final Svd current) {
+            return current.alignTo(previous, align);
         }
 
         /**
@@ -1706,7 +1733,7 @@ public final class FeatureStages {
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), k.get("align")));
         }
         return specs;
     }
@@ -1831,7 +1858,7 @@ public final class FeatureStages {
      */
     record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
                         String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                        Forward forward, long predictOffsetMillis, long minRows,
+                        Forward forward, long predictOffsetMillis, long minRows, String align,
                         PCollectionView<Map<String, Long>> vocabulary) implements ForwardFitBlock<String[], Spectral.PairCounts, Spectral> {
         @Override
         public FitArtifact.Json<Spectral> artifact() {
@@ -1890,7 +1917,7 @@ public final class FeatureStages {
         @Override
         public SpectralSpec prepare(final PCollection<MElement> fitInput, final String prefix) {
             return new SpectralSpec(block, field, path, applied, rank, maxValues, artifactUri, refit, columns, components,
-                    forward, predictOffsetMillis, minRows, vocabularyView(fitInput, this, prefix));
+                    forward, predictOffsetMillis, minRows, align, vocabularyView(fitInput, this, prefix));
         }
 
         @Override
@@ -1926,6 +1953,11 @@ public final class FeatureStages {
         @Override
         public long rowsOf(final Spectral.PairCounts counts) {
             return counts.rows;
+        }
+
+        @Override
+        public Spectral alignTo(final Spectral previous, final Spectral current) {
+            return current.alignTo(previous, align);
         }
 
         /** Factorises the pair counts of a time block's rows on one worker. */
@@ -1967,7 +1999,7 @@ public final class FeatureStages {
             specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), k.get("applied"),
                     Integer.parseInt(k.get("rank")), Integer.parseInt(k.get("maxValues")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), null));
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), k.get("align"), null));
         }
         return specs;
     }

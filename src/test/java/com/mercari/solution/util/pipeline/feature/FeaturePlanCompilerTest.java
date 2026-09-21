@@ -2338,6 +2338,64 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(keyed.columnNames().contains("mix"), plan::describe);
     }
 
+    /**
+     * {@code fit.align}: a forward svd / spectralEmbedding rotates every fit into the coordinates of the one before it
+     * unless told otherwise; a static fit is solved once and has nothing to align to, and the fits without a gauge
+     * (a curve, quantile knots, level statistics) say that they ignore it.
+     */
+    @Test
+    public void testFitAlign() {
+        final String blocks = """
+                  - name: pc
+                    scope: population
+                    type: svd
+                    inputs: [start_price, current_bid_t10]
+                    rank: 2
+                    fit: {mode: forward, blocks: {size: P7D}}
+                  - name: grade_embed
+                    scope: population
+                    type: spectralEmbedding
+                    sequenceOf: {entity: seller, field: condition_grade}
+                    rank: 2
+                    fit: {mode: forward, blocks: {size: P7D}, align: sign}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("procrustes", column(plan, "pc_0").getCoordinates().get("align"));
+        Assertions.assertEquals("sign", column(plan, "grade_embed_1").getCoordinates().get("align"));
+        Assertions.assertTrue(plan.describe().contains("fit.align procrustes, the default"), plan::describe);
+        Assertions.assertTrue(plan.describe().contains("fit.align sign"), plan::describe);
+        // declared, it is part of what is fitted
+        final FeaturePlan none = compile(SOURCES, withEncoding(blocks.replace("blocks: {size: P7D}}", "blocks: {size: P7D}, align: none}")));
+        Assertions.assertEquals("none", column(none, "pc_0").getCoordinates().get("align"));
+        Assertions.assertNotEquals(plan.getHash(), none.getHash());
+
+        final FeaturePlan unknown = compile(SOURCES, withEncoding(blocks.replace("align: sign", "align: rotate")));
+        Assertions.assertTrue(hasCode(unknown, "fit.align"), unknown::describe);
+        Assertions.assertTrue(unknown.getDiagnostics().hasErrors());
+
+        final String ignored = """
+                  - name: pc
+                    scope: population
+                    type: svd
+                    inputs: [start_price, current_bid_t10]
+                    rank: 2
+                    fit: {align: sign}
+                  - name: price_curve
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                    fit: {mode: forward, blocks: {size: P7D}, align: procrustes}
+            """;
+        final FeaturePlan statik = compile(SOURCES, withEncoding(ignored));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertNull(column(statik, "pc_0").getCoordinates().get("align"));
+        Assertions.assertTrue(hasCode(statik, "svd.fit.align"), statik::describe);
+        Assertions.assertTrue(hasCode(statik, "smooth.fit.align"), statik::describe);
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population
