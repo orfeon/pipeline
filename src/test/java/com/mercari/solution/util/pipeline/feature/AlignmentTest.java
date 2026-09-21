@@ -57,12 +57,12 @@ public class AlignmentTest {
         final double[][] q = orthogonal(k, 0.7);
         final List<double[]> b = new ArrayList<>();
         for (final double[] row : a) b.add(Alignment.apply(row, q));
-        final double[][] r = Alignment.map(Alignment.PROCRUSTES, Alignment.cross(a, b, k), a);
+        final double[][] r = Alignment.map(Alignment.PROCRUSTES, Alignment.cross(a, b, k), a).r();
         assertOrthogonal(r);
         for (int i = 0; i < k; i++) Assertions.assertArrayEquals(q[i], r[i], 1e-10);
         for (int row = 0; row < a.size(); row++) Assertions.assertArrayEquals(b.get(row), Alignment.apply(a.get(row), r), 1e-9);
         // signs alone cannot express the rotation: they only settle each column against its own predecessor
-        final double[][] s = Alignment.map(Alignment.SIGN, Alignment.cross(a, b, k), a);
+        final double[][] s = Alignment.map(Alignment.SIGN, Alignment.cross(a, b, k), a).r();
         for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) Assertions.assertEquals(i != j ? 0 : i == k - 1 ? -1 : 1, s[i][j], 0);
         Assertions.assertNull(Alignment.map(Alignment.NONE, Alignment.cross(a, b, k), a));
         Assertions.assertNull(Alignment.map(null, Alignment.cross(a, b, k), a));
@@ -95,7 +95,9 @@ public class AlignmentTest {
             final double[] full = Alignment.apply(row, q);
             previous.add(new double[]{full[0], full[1]});
         }
-        final double[][] r = Alignment.map(Alignment.PROCRUSTES, Alignment.cross(a, previous, k), a);
+        final Alignment.Map partial = Alignment.map(Alignment.PROCRUSTES, Alignment.cross(a, previous, k), a);
+        Assertions.assertEquals(2, partial.anchored(), "the previous fit had two components to anchor");
+        final double[][] r = partial.r();
         assertOrthogonal(r);
         final double[] free = new double[a.size()];
         for (int row = 0; row < a.size(); row++) {
@@ -225,6 +227,45 @@ public class AlignmentTest {
         double off = 0;
         for (int i = 0; i < scrambled.length; i++) off += Math.abs(signed.embedding[i][0] - first.embedding[i][0]);
         Assertions.assertTrue(off > 1e-3);
+    }
+
+    private static Spectral embedding(final long seed, final int rank, final String... vocabulary) {
+        final Random random = new Random(seed);
+        final double[][] coordinates = new double[vocabulary.length][rank];
+        for (final double[] row : coordinates) for (int j = 0; j < rank; j++) row[j] = random.nextGaussian();
+        return new Spectral(vocabulary, coordinates, new double[rank], 100, 0);
+    }
+
+    /**
+     * Two fits with less in common than they have columns: what they share anchors as many columns as it can (one
+     * shared value, one direction), the others are the fit's own and continue nothing — which the fit block counts, so
+     * that the run can say it. A component the previous fit did not have is a fit growing, and is not counted.
+     */
+    @Test
+    public void testTooLittleInCommonIsCounted() {
+        final FeatureStages.SpectralSpec block = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 3, 64,
+                null, false, List.of(), new int[0], null, 0L, 0L, Alignment.PROCRUSTES, null);
+        final Spectral first = embedding(1, 3, "a", "b", "c", "d");
+        final Spectral second = embedding(2, 3, "a", "x", "y", "z");
+        final Spectral aligned = block.alignTo(first, second);
+        Assertions.assertEquals(1, aligned.anchored);
+        Assertions.assertEquals(2, block.unanchoredOf(first, aligned));
+        // still an orthogonal map: the distances of the fit are its own
+        for (final String a : second.vocabulary) {
+            for (final String b : second.vocabulary) Assertions.assertEquals(distance(second, a, b), distance(aligned, a, b), 1e-10);
+        }
+        // nothing in common at all: the fit is left as it is, and none of its columns continues anything
+        final Spectral apart = embedding(3, 3, "p", "q", "r", "s");
+        Assertions.assertSame(apart, block.alignTo(first, apart));
+        Assertions.assertEquals(3, block.unanchoredOf(first, apart));
+        // a previous fit of two components anchors two of three: nothing is missing that could have been there
+        final Spectral grown = block.alignTo(embedding(4, 2, "a", "b", "c", "d"), embedding(5, 3, "a", "b", "c", "d"));
+        Assertions.assertEquals(2, grown.anchored);
+        Assertions.assertEquals(0, block.unanchoredOf(embedding(4, 2, "a", "b", "c", "d"), grown));
+        // fit.align none asked for no chain: nothing to count
+        final FeatureStages.SpectralSpec free = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 3, 64,
+                null, false, List.of(), new int[0], null, 0L, 0L, Alignment.NONE, null);
+        Assertions.assertEquals(0, free.unanchoredOf(first, free.alignTo(first, apart)));
     }
 
     private static FeatureStages.SvdSpec spec(final String align) {

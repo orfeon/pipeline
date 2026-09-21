@@ -268,7 +268,11 @@ The three forward knobs, all in the plan hash:
   coordinates of the fit before it, so a score / coordinate column means the same thing in every block; without it
   (`none`) the columns flip sign and mix whenever the largest loading changes hands or two eigenvalues cross, and a
   model trained across blocks reads them as noise. `sign` only flips (each column stays the k-th eigenvector, close
-  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three. What
+  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three.
+  Two run-log warnings belong to it: *shared too little with the fit before them to anchor every column* (consecutive
+  fits have fewer values in common than `rank` — lengthen `fit.window`, enlarge the blocks or lower `rank`) and
+  *the artifact … was written without an alignment and is kept* (an artifact from before `fit.align`: set
+  `fit.artifact.refit: true` once before serving from it). What
   `procrustes` costs: an svd's columns are no longer uncorrelated and `_0` no longer carries the most variance — set
   `none` only if a consumer depends on that (an unregularised linear fit on the scores), and expect the flipping back.
 

@@ -2325,6 +2325,23 @@ public class FeatureTransformTest {
         // what a static serving run loads ends the chain the training rows read, and says so
         Assertions.assertEquals("procrustes", whole.get("alignment").getAsString());
 
+        // a second run over the same artifact directory keeps the artifact (a forward fit re-fits, it does not rewrite)
+        // and reads it back to check that it belongs to this chain: same rows, same scores
+        final long written = artifact.lastModified();
+        final TestPipeline again = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> againOut = MPipeline.apply(again, Config.load(SOURCE_CONFIG + svdForwardConfig(dir, "")));
+        PAssert.that(againOut.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if ("D".equals(row.getAsString("session_id"))) {
+                    assertScores(row, svdScoresChained(VEC_D1, new double[][]{VEC_A1, VEC_A2}, new double[][]{VEC_A1, VEC_A2, VEC_B1},
+                            new double[][]{VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2}));
+                }
+            }
+            return null;
+        });
+        again.run();
+        Assertions.assertEquals(written, artifact.lastModified(), "the artifact of the first run is kept");
+
         // window: P14D → two blocks
         final TestPipeline windowed = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final Map<String, MCollection> windowedOut = MPipeline.apply(windowed, Config.load(SOURCE_CONFIG + svdForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", window: P14D")));

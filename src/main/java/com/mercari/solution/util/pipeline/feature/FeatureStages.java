@@ -1015,6 +1015,20 @@ public final class FeatureStages {
             return current;
         }
 
+        /** How a model was aligned ({@code fit.align}), null for one that stands alone — and always for a type without a gauge. */
+        default String alignmentOf(final M model) {
+            return null;
+        }
+
+        /**
+         * The columns of an aligned model that the fit before it HAD a predecessor for and that still found none: the
+         * two fits shared too little to anchor them ({@link Alignment.Map}). A component the previous fit did not have
+         * (a vocabulary still smaller than the rank) is not counted — that is a fit growing, not a chain breaking.
+         */
+        default int unanchoredOf(final M previous, final M aligned) {
+            return 0;
+        }
+
         /** The loaded model as this block will apply it (quantileTransform takes the config's clip, not the artifact's). */
         default M adopt(final M model) {
             return model;
@@ -1067,10 +1081,21 @@ public final class FeatureStages {
                     return fitAbove(state, false);
                 });
                 M previous = null;
+                int loose = 0;
                 for (final Map.Entry<Long, M> point : byBlock.entrySet()) {
                     if (point.getValue().isEmpty()) continue;
-                    if (previous != null) point.setValue(alignTo(previous, point.getValue()));
+                    if (previous != null) {
+                        point.setValue(alignTo(previous, point.getValue()));
+                        if (unanchoredOf(previous, point.getValue()) > 0) loose++;
+                    }
                     previous = point.getValue();
+                }
+                if (loose > 0) {
+                    // columns that continue nothing are what fit.align exists to prevent: the run says how often it happened
+                    LOG.warn("{} {}: {} change point(s) shared too little with the fit before them to anchor every column (fit.align): the columns without a"
+                                    + " predecessor there are that fit's own leading components and do not continue the earlier blocks — a longer fit.window,"
+                                    + " larger blocks or a smaller rank give consecutive fits more in common",
+                            artifact().name(), block(), loose);
                 }
                 if (previous != null && !total.isEmpty()) {
                     // alignTo returns the fit itself when it aligns nothing, so identity says whether the chain moved it
@@ -1087,11 +1112,16 @@ public final class FeatureStages {
                 LOG.warn("{} {}: the whole-input fit is below fit.minRows {}, so no artifact is written under {}; a run with enough rows writes it",
                         artifact().name(), block(), minRows(), artifactUri());
             } else if (artifactUri() != null && chained) {
-                // an artifact written before (by an earlier version, or by a run whose chain ended elsewhere) is kept
-                // as it is, so a serving run would read it in coordinates this run's rows never saw: say so once
-                LOG.warn("{} {}: an artifact already exists under {} and is kept, so it holds the coordinates of the run that wrote it while this run's forward fits"
-                                + " were aligned to one another (fit.align); set fit.artifact.refit before serving from it",
-                        artifact().name(), block(), artifactUri());
+                // an artifact is kept as it is. One this chain wrote earlier is a point of the same chain (the fits of
+                // the earlier blocks do not depend on what follows them), so a re-run has nothing to report. One written
+                // without this alignment — before fit.align existed — holds coordinates this run's rows never saw, and a
+                // serving run would load it: say so, once per run
+                final String kept = alignmentOf(artifact().read(artifactUri(), planHash, block()));
+                if (!java.util.Objects.equals(kept, alignmentOf(total))) {
+                    LOG.warn("{} {}: the artifact under {} was written {} and is kept, while this run's forward fits were aligned to one another (fit.align {}):"
+                                    + " a static serving run would load coordinates the training rows never saw; set fit.artifact.refit once to rewrite it",
+                            artifact().name(), block(), artifactUri(), kept == null ? "without an alignment" : "under fit.align " + kept, alignmentOf(total));
+                }
             }
             return new ForwardModel<>(total, byBlock, forward() == null ? null : series.observed());
         }
@@ -1591,6 +1621,18 @@ public final class FeatureStages {
             return current.alignTo(previous, align);
         }
 
+        @Override
+        public String alignmentOf(final Svd model) {
+            return model.alignment;
+        }
+
+        @Override
+        public int unanchoredOf(final Svd previous, final Svd aligned) {
+            if (align == null || Alignment.NONE.equals(align)) return 0;
+            // a fit the alignment left alone shared nothing at all with the one before it
+            return Math.min(aligned.rank(), previous.rank()) - (aligned.alignment == null ? 0 : aligned.anchored);
+        }
+
         /**
          * Solves the sufficient statistics (n, Σx, Σxxᵀ) — no vector leaves the workers. A per-change-point fit is
          * quiet: an empty / short window at a leave point is normal under forward.
@@ -1971,6 +2013,18 @@ public final class FeatureStages {
         @Override
         public Spectral alignTo(final Spectral previous, final Spectral current) {
             return current.alignTo(previous, align);
+        }
+
+        @Override
+        public String alignmentOf(final Spectral model) {
+            return model.alignment;
+        }
+
+        @Override
+        public int unanchoredOf(final Spectral previous, final Spectral aligned) {
+            if (align == null || Alignment.NONE.equals(align)) return 0;
+            // a fit the alignment left alone shared nothing at all with the one before it
+            return Math.min(aligned.rank(), previous.rank()) - (aligned.alignment == null ? 0 : aligned.anchored);
         }
 
         /** Factorises the pair counts of a time block's rows on one worker. */

@@ -31,6 +31,16 @@ final class Alignment {
     private Alignment() {
     }
 
+    /**
+     * What {@code A} is multiplied by, and how many of its columns the previous fit anchored: the rank of
+     * {@code AᵀB}. Fewer than {@code k} when the previous fit had fewer components, or when the two fits share too
+     * little (fewer paired rows than columns — two windows of an embedding with a value or two in common). The
+     * remaining columns have no predecessor: they are this fit's own leading components, orthogonalised against the
+     * anchored ones and oriented by the static rule — as determinate as a static fit, but they continue nothing.
+     */
+    record Map(double[][] r, int anchored) {
+    }
+
     /** {@code AᵀB} of two matrices with paired rows; {@code b}'s rows are read up to {@code k} columns (missing ones are zeros). */
     static double[][] cross(final List<double[]> a, final List<double[]> b, final int k) {
         final double[][] m = new double[k][k];
@@ -51,7 +61,7 @@ final class Alignment {
      * @param a the rows of {@code A}: a column the previous fit says nothing about keeps the orientation a static fit
      *          would give it (its largest entry positive)
      */
-    static double[][] map(final String mode, final double[][] cross, final List<double[]> a) {
+    static Map map(final String mode, final double[][] cross, final List<double[]> a) {
         if (mode == null || NONE.equals(mode)) return null;
         double norm = 0;
         for (final double[] row : cross) for (final double v : row) norm += v * v;
@@ -60,11 +70,15 @@ final class Alignment {
     }
 
     /** A diagonal of ±1: every column is flipped to correlate positively with its own predecessor (kept when uncorrelated). */
-    static double[][] signs(final double[][] cross) {
+    static Map signs(final double[][] cross) {
         final int k = cross.length;
         final double[][] r = new double[k][k];
-        for (int i = 0; i < k; i++) r[i][i] = cross[i][i] < 0 ? -1 : 1;
-        return r;
+        int anchored = 0;
+        for (int i = 0; i < k; i++) {
+            r[i][i] = cross[i][i] < 0 ? -1 : 1;
+            if (cross[i][i] != 0) anchored++;
+        }
+        return new Map(r, anchored);
     }
 
     /**
@@ -73,7 +87,7 @@ final class Alignment {
      * without a singular value — a component the previous fit did not have, or no overlap along it — is completed to
      * an orthonormal basis and oriented like a static fit.
      */
-    static double[][] rotation(final double[][] cross, final List<double[]> a) {
+    static Map rotation(final double[][] cross, final List<double[]> a) {
         final int k = cross.length;
         final double[][] gram = new double[k][k];
         for (int i = 0; i < k; i++) {
@@ -101,7 +115,8 @@ final class Alignment {
             u[i] = column;
             aligned++;
         }
-        // the directions nothing speaks for: the standard basis vectors, orthogonalised in order
+        // the directions nothing speaks for: the standard basis vectors — this fit's own components, in their order —
+        // orthogonalised against the anchored ones
         int next = 0;
         for (int i = aligned; i < k; i++) {
             double[] column = null;
@@ -129,7 +144,7 @@ final class Alignment {
             }
             for (int l = 0; l < k; l++) for (int j = 0; j < k; j++) r[l][j] += sign * u[i][l] * v[j];
         }
-        return r;
+        return new Map(r, aligned);
     }
 
     /** Modified Gram–Schmidt (twice) of {@code column} against {@code basis[0 .. count)}; false when nothing is left of it. */

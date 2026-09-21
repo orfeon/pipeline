@@ -52,15 +52,18 @@ public final class Svd implements Serializable, FitArtifact.Model {
      * eigenvectors, and {@link #variances} are not sorted.
      */
     public final String alignment;
+    /** The components {@link #alignTo} could anchor in the fit before ({@link Alignment.Map}); the rank for a fit that stands alone. Not persisted. */
+    public final int anchored;
 
     Svd(final int dimension, final double[] mean, final double[] scale, final double[][] components,
         final double[] variances, final double totalVariance, final long n) {
-        this(dimension, mean, scale, components, variances, totalVariance, n, null);
+        this(dimension, mean, scale, components, variances, totalVariance, n, null, components.length);
     }
 
     Svd(final int dimension, final double[] mean, final double[] scale, final double[][] components,
-        final double[] variances, final double totalVariance, final long n, final String alignment) {
+        final double[] variances, final double totalVariance, final long n, final String alignment, final int anchored) {
         this.alignment = alignment;
+        this.anchored = anchored;
         this.dimension = dimension;
         this.mean = mean;
         this.scale = scale;
@@ -354,8 +357,9 @@ public final class Svd implements Serializable, FitArtifact.Model {
             a.add(x);
             b.add(y);
         }
-        final double[][] map = Alignment.map(mode, Alignment.cross(a, b, k), a);
-        if (map == null) return this;
+        final Alignment.Map aligned = Alignment.map(mode, Alignment.cross(a, b, k), a);
+        if (aligned == null) return this;
+        final double[][] map = aligned.r();
         final double[][] rotated = new double[k][dimension];
         for (int i = 0; i < dimension; i++) {
             final double[] row = Alignment.apply(a.get(i), map);
@@ -363,7 +367,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
         }
         final double[] along = new double[k];
         for (int j = 0; j < k; j++) for (int i = 0; i < k; i++) along[j] += map[i][j] * map[i][j] * variances[i];
-        return new Svd(dimension, mean, scale, rotated, along, totalVariance, n, mode);
+        return new Svd(dimension, mean, scale, rotated, along, totalVariance, n, mode, aligned.anchored());
     }
 
     /** The component scores of a vector, or null (missing component, wrong length, nothing fitted). */
@@ -444,7 +448,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
         for (int r = 0; r < components.length; r++) components[r] = doubles(rows.get(r).getAsJsonArray());
         return new Svd(json.get("dimension").getAsInt(), doubles(json.getAsJsonArray("mean")), doubles(json.getAsJsonArray("scale")),
                 components, doubles(json.getAsJsonArray("variances")), json.get("totalVariance").getAsDouble(), n.getAsLong(),
-                json.has("alignment") ? json.get("alignment").getAsString() : null);
+                json.has("alignment") ? json.get("alignment").getAsString() : null, components.length);
     }
 
 }

@@ -167,13 +167,17 @@ public final class Spectral implements Serializable, FitArtifact.Model {
      * spectrum of the fitted components rather than one value per column.
      */
     public final String alignment;
+    /** The columns {@link #alignTo} could anchor in the fit before ({@link Alignment.Map}); the rank for a fit that stands alone. Not persisted. */
+    public final int anchored;
 
     Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped) {
-        this(vocabulary, embedding, eigenvalues, pairs, dropped, null);
+        this(vocabulary, embedding, eigenvalues, pairs, dropped, null, eigenvalues.length);
     }
 
-    Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped, final String alignment) {
+    Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped,
+             final String alignment, final int anchored) {
         this.alignment = alignment;
+        this.anchored = anchored;
         this.vocabulary = vocabulary;
         this.embedding = embedding;
         this.eigenvalues = eigenvalues;
@@ -238,11 +242,12 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             a.add(embedding[i]);
             b.add(previous.embedding[at]);
         }
-        final double[][] map = Alignment.map(mode, Alignment.cross(a, b, k), a);
-        if (map == null) return this;
+        // the rows are the model's own arrays, which every thread of a worker shares: Alignment only reads them
+        final Alignment.Map aligned = Alignment.map(mode, Alignment.cross(a, b, k), a);
+        if (aligned == null) return this;
         final double[][] rotated = new double[vocabulary.length][];
-        for (int i = 0; i < rotated.length; i++) rotated[i] = Alignment.apply(embedding[i], map);
-        return new Spectral(vocabulary, rotated, eigenvalues, pairs, dropped, mode);
+        for (int i = 0; i < rotated.length; i++) rotated[i] = Alignment.apply(embedding[i], aligned.r());
+        return new Spectral(vocabulary, rotated, eigenvalues, pairs, dropped, mode, aligned.anchored());
     }
 
     /**
@@ -407,7 +412,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             for (int r = 0; r < embedding[i].length; r++) embedding[i][r] = coordinates.get(r).getAsDouble();
         }
         return new Spectral(vocabulary, embedding, eigenvalues, pairs.getAsLong(), dropped.getAsInt(),
-                json.has("alignment") ? json.get("alignment").getAsString() : null);
+                json.has("alignment") ? json.get("alignment").getAsString() : null, eigenvalues.length);
     }
 
     /** A required array member: a truncated artifact must say which member is missing, not throw a NullPointerException. */

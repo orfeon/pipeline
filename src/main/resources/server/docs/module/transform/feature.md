@@ -767,9 +767,19 @@ linear fit on the scores, "the first component"); a tree model or a ridge reads 
 `fit: {align: none}` keeps the unaligned pair. The chain runs **forward in time only** — a fit aligned to a later one would carry a trace
 of rows it may not read — and skips the change points that have no fit (`minRows`, an empty window). The whole-input
 model, which a static serving run loads in place of the forward fits a training run read, is aligned last, to the end
-of the chain, so serving continues the columns the consumer's model was trained on. A component the previous fit did
+of the chain, so serving continues the columns the consumer's model was trained on. An artifact that already exists
+is kept, as always: one this chain wrote in an earlier run is a point of the same chain (the fits of the earlier
+blocks do not depend on what follows them), but one written **before `fit.align` existed** holds the old orientation
+— the run warns about exactly that case, and `fit.artifact.refit: true`, once, rewrites it.
+
+An alignment can anchor only as many columns as the two fits have in common. A component the previous fit did
 not have (a vocabulary that was still smaller than `rank`) takes the direction left over, oriented by the static
-rule. Part of the plan hash when declared; a static fit ignores it (`<type>.fit.align` warning), as do the fits
+rule — a fit growing. When two fits **share less than they have columns** — consecutive windows of an embedding
+with a value or two in common, the usual cause being a `fit.window` of few, small blocks over a field with many rare
+values — the shared part anchors what it can and the other columns are that fit's own leading components: as
+determinate as a static fit, but they continue nothing. The run counts the change points where that happened and
+warns (`… shared too little with the fit before them to anchor every column`); a longer `fit.window`, larger
+blocks or a smaller `rank` give consecutive fits more in common. Part of the plan hash when declared; a static fit ignores it (`<type>.fit.align` warning), as do the fits
 without such a freedom (curves, quantile knots, level statistics).
 
 **Residuals (`outputs: [scores, residual, residualNorm]`).** The scores say where a vector sits on the leading
