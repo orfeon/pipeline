@@ -2192,6 +2192,47 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))).getDiagnostics().hasErrors());
     }
 
+    /**
+     * A row column may read fitted columns of several fit stages — the sum of the curves of a chained additive fit is
+     * the prediction of that fit. It is evaluated in the LATEST of those fit stages (every fitted input exists there),
+     * not the earliest one, which precedes some of what it reads.
+     */
+    @Test
+    public void testRowColumnOverSeveralFitStages() {
+        final String blocks = """
+                  - name: by_price
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                    outputs: [curve, residual]
+                  - name: by_quantity
+                    scope: population
+                    type: smooth
+                    input: quantity
+                    target: by_price_resid
+                    range: [1, 10]
+                    segments: 4
+                  - name: additive
+                    scope: row
+                    expr: "by_price + by_quantity"
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final FeaturePlan.Stage first = plan.getStages().stream().filter(s -> s.columnNames().contains("by_price")).findFirst().orElseThrow();
+        final FeaturePlan.Stage second = plan.getStages().stream().filter(s -> s.columnNames().contains("by_quantity")).findFirst().orElseThrow();
+        final FeaturePlan.Stage sum = plan.getStages().stream().filter(s -> s.columnNames().contains("additive")).findFirst().orElseThrow();
+        Assertions.assertTrue(first.index() < second.index(), plan::describe);
+        Assertions.assertEquals(second.index(), sum.index(), plan::describe);
+        // two blocks of ONE fit stage were never the problem: the column stays in that stage
+        final String sameStage = blocks.replace("target: by_price_resid", "target: final_price").replace("        outputs: [curve, residual]\n", "");
+        final FeaturePlan same = compile(SOURCES, withEncoding(sameStage));
+        Assertions.assertFalse(same.getDiagnostics().hasErrors(), same::describe);
+        final FeaturePlan.Stage fit = same.getStages().stream().filter(s -> s.columnNames().contains("by_price")).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().containsAll(List.of("by_quantity", "additive")), same::describe);
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population

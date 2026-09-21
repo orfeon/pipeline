@@ -2409,6 +2409,75 @@ public class FeatureTransformTest {
         Assertions.assertEquals(2.0, json.get("edf").getAsDouble(), 1e-3);
     }
 
+    private static final String ADDITIVE_BLOCKS = """
+                    - name: by_price
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {lambda: 1000000000}
+                      outputs: [curve, residual]
+                    - name: by_quantity
+                      scope: population
+                      type: smooth
+                      input: quantity
+                      target: by_price_resid
+                      range: [1, 4]
+                      segments: 3
+                      penalty: {lambda: 1000000000}
+                    - name: additive
+                      scope: row
+                      expr: "by_price + by_quantity"
+                """.replaceAll("(?m)^", "    ");
+
+    /**
+     * An additive fit by hand: the second curve is fitted on what the first leaves, one fit stage later, and a row
+     * column sums the two — evaluated in the second fit stage, where both curves exist.
+     */
+    @Test
+    public void testRowColumnOverChainedFits() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", ADDITIVE_BLOCKS + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final Double first = row.getAsDouble("f_by_price"), second = row.getAsDouble("f_by_quantity");
+                Assertions.assertNotNull(first);
+                Assertions.assertNotNull(second);
+                Assertions.assertEquals(first + second, row.getAsDouble("f_additive"), 1e-9);
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * The same shape in both engine modes, over fits whose models do not depend on the order the rows were combined in
+     * (quantile knots and edges — the moments of a curve are sums, equal across runs only to the last bits).
+     */
+    @Test
+    public void testRowColumnOverChainedFitsParallelMatchesLinear() throws java.io.IOException {
+        final String blocks = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                    - name: q_bin
+                      scope: population
+                      type: discretize
+                      input: price_q
+                      bins: 3
+                    - name: q_both
+                      scope: row
+                      expr: "price_q + q_bin"
+                """.replaceAll("(?m)^", "    ");
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks + "      output:\n"), 6, List.of(), List.of());
+    }
+
     /**
      * The same curve under {@code fit.mode: forward} with a heavy FIRST-difference penalty — what is left is a
      * constant, the mean target of the readable rows. final_price is known PT30M + P6D after its event, so B (Jan 3)
