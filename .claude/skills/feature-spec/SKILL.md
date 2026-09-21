@@ -343,6 +343,20 @@ not alter values).
   expanding-only (a static / fold artifact keeps only n / Σy / Σy² per key), so a model that uses them
   must be served from the backfill path — the same history-based run as sequence features — not from a
   `fit.mode: static` config. Decide that before adopting them.
+- **`rating` in large fields** (more than about eight players per contest): `bradleyTerry` adds up every
+  pair, so a player's first contest moves `mu` by several prior standard deviations and collapses `sigma`
+  for good — the first result decides the rating, and the column screens as noise. Use `plackettLuce` or
+  `elo` there. `plackettLuce`'s `sigma` hardly shrinks in a large field (a fraction of a percent per
+  contest, whatever `beta`): it is a function of the contest count, so use `count` for "how well known".
+- **`rating` warm-up**: every player starts from the prior, so the spread of `mu` grows over the first
+  stretch of the input (years, for a slow sport) — a drift in time if that stretch is in the training
+  window. Drop the stretch, or use the rating relative to its contest (a context block: `zscore`,
+  `gapToBest`).
+- **`residualize` against something you left out on purpose**: residual + raw field (or its `zscore`)
+  lets the model rebuild the regressor's position in the group. If the market / baseline enters the model
+  as an offset or initial score and is deliberately not a feature, the residual brings it back, and the
+  gain you measure is the baseline's. Control: a run with the regressor itself as a feature — if it does as
+  well, the residual carried the baseline. Emit the residual without the raw field instead.
 - Very large generated configs must be JSON: the YAML loader keeps SnakeYAML's default code-point
   limit of about 3 MB per document.
 - Artifact / spill paths: `gs://...` or relative local paths (a Windows drive letter is read as a URI
