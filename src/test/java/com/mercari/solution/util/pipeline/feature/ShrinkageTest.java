@@ -61,6 +61,75 @@ public class ShrinkageTest {
     }
 
     /**
+     * Leave-node-out follows the back-off. A row whose declared leaf is empty (a key never seen, a null component of a
+     * {@code structure: sequence} path) starts from the deepest level that has rows, and that level's rows are what
+     * the levels above it contain: the row reads exactly what the lattice declared from that level reads. Subtracting
+     * the (empty) declared leaf instead would shrink the level toward ancestors that still hold its own rows.
+     */
+    @Test
+    public void testLeaveNodeOutSubtractsTheEffectiveLeaf() {
+        final Shrinkage shrinkage = Shrinkage.of(Shrinkage.Scale.identity, 2, true);
+        final Shrinkage.Level path3 = new Shrinkage.Level("k1_k2_k3", "p3_n", "p3_sum", null);
+        final Shrinkage.Level path2 = new Shrinkage.Level("k1_k2", "p2_n", "p2_sum", null);
+        final Shrinkage.Level path1 = new Shrinkage.Level("k1", "p1_n", "p1_sum", null);
+        final Shrinkage.Level global = new Shrinkage.Level(Shrinkage.GLOBAL, "g_n", "g_sum", null);
+        final List<Shrinkage.Level> full = List.of(path3, path2, path1, global);
+        final List<Shrinkage.Level> suffix = List.of(path2, path1, global);
+
+        // the oldest step is missing: no p3 statistics at all (the hidden columns of a null key read null)
+        final Map<String, Object> row = Map.of("p2_n", 2.0, "p2_sum", 2.0, "p1_n", 6.0, "p1_sum", 3.0, "g_n", 16.0, "g_sum", 4.0);
+        // by hand: root = (4 − 2) / (16 − 2) = 1/7; k1 = (3 − 2) / (6 − 2) = 1/4 with w = 4 / 6; leaf = 1 with w = 2 / 4
+        final double root = 1.0 / 7, k1 = root + 4.0 / 6 * (0.25 - root), expected = k1 + 0.5 * (1 - k1);
+        final Shrinkage.Composition c = shrinkage.compose(row, full, null);
+        Assertions.assertEquals(expected, c.value(), 1e-12);
+        final Shrinkage.Composition declared = shrinkage.compose(row, suffix, null);
+        Assertions.assertEquals(declared.value(), c.value(), 0d, "the same value as the lattice declared from the suffix");
+        Assertions.assertEquals(declared.effectiveN(), c.effectiveN(), 0d);
+        Assertions.assertArrayEquals(new Double[]{0d, declared.deviations()[0], declared.deviations()[1], declared.deviations()[2]}, c.deviations());
+        // a leaf seen with n = 0 is the same row
+        final Map<String, Object> unseen = new java.util.HashMap<>(row);
+        unseen.put("p3_n", 0.0);
+        unseen.put("p3_sum", 0.0);
+        Assertions.assertEquals(expected, shrinkage.compose(unseen, full, null).value(), 0d);
+        Assertions.assertEquals(1, Shrinkage.effectiveLeaf(row, full));
+
+        // a leaf with rows is untouched: its statistics leave every ancestor, the intermediate levels keep theirs
+        final Map<String, Object> seen = new java.util.HashMap<>(row);
+        seen.put("p3_n", 1.0);
+        seen.put("p3_sum", 0.0);
+        final double rootSeen = 4.0 / 15, k1Seen = rootSeen + 5.0 / 7 * (3.0 / 5 - rootSeen), k2Seen = k1Seen + 1.0 / 3 * (2.0 - k1Seen);
+        Assertions.assertEquals(k2Seen + 1.0 / 3 * (0 - k2Seen), shrinkage.compose(seen, full, null).value(), 1e-12);
+        Assertions.assertEquals(0, Shrinkage.effectiveLeaf(seen, full));
+
+        // only the root has rows: nothing to subtract, the row reads the global mean; an empty lattice reads null
+        Assertions.assertEquals(0.25, shrinkage.compose(Map.of("g_n", 16.0, "g_sum", 4.0), full, null).value(), 0d);
+        Assertions.assertNull(shrinkage.compose(Map.of(), full, null).value());
+        // leaveNodeOut: false subtracts nothing at any level
+        final double plainK1 = 0.25 + 6.0 / 8 * (0.5 - 0.25);
+        Assertions.assertEquals(plainK1 + 0.5 * (1 - plainK1), Shrinkage.of(Shrinkage.Scale.identity, 2, false).compose(row, full, null).value(), 1e-12);
+
+        // the search stops at an additive entry: the main-effect chains subtract the cell they generalise, and an empty
+        // cell has nothing to subtract — A keeps its rows against the root, as before
+        final List<Shrinkage.Level> additive = List.of(
+                new Shrinkage.Level("cell", "c_n", "c_sum", null),
+                new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, List.of(List.of(path1, global))),
+                global);
+        Assertions.assertEquals(0, Shrinkage.effectiveLeaf(row, additive));
+        Assertions.assertEquals(0.25 + 6.0 / 8 * (0.5 - 0.25), shrinkage.compose(row, additive, null).value(), 1e-12);
+
+        // distributions follow the same rule
+        final Shrinkage dm = Shrinkage.of(Shrinkage.Scale.identity, 2, true, Shrinkage.Family.dirichletMultinomial);
+        final Map<String, Object> dist = Map.of(
+                "p2_n", 2.0, "p2_sum", Map.of("x", 1.0),
+                "p1_n", 6.0, "p1_sum", Map.of("x", 0.5, "y", 0.5),
+                "g_n", 16.0, "g_sum", Map.of("x", 0.25, "y", 0.75));
+        final Map<String, Double> shrunk = dm.composeDistribution(dist, full, null).distribution();
+        Assertions.assertEquals(dm.composeDistribution(dist, suffix, null).distribution(), shrunk);
+        // root x = (4 − 2) / 14, k1 x = (3 − 2) / 4 with w = 4 / 6, leaf x = 1 with w = 2 / 4: the scalar chain above
+        Assertions.assertEquals(expected, shrunk.get("x"), 1e-12);
+    }
+
+    /**
      * A baseline offset on a logit scale: each level's own term is logit(observed) − logit(mean baseline) from the
      * hidden Σ(y − b) and Σb, the leaf shrinks toward the parent's term, and the composed value is the term itself
      * (not a probability). On the identity scale the extra sum changes nothing (Σ(y − b) / n as before).
