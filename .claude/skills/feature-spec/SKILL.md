@@ -264,6 +264,17 @@ The three forward knobs, all in the plan hash:
   even in a full block. A fit fewer rows contributed to is not solved and its rows read null. A `smooth` defaults to
   one more than its coefficients (`segments + degree + 1`), the others to no floor; `0` switches it off. The run log counts
   the change points it emptied. Set it when a backtest starts close to the beginning of the data.
+- `align: procrustes | sign | none` (svd / spectralEmbedding) — leave the default. Every forward fit is rotated into the
+  coordinates of the fit before it, so a score / coordinate column means the same thing in every block; without it
+  (`none`) the columns flip sign and mix whenever the largest loading changes hands or two eigenvalues cross, and a
+  model trained across blocks reads them as noise. `sign` only flips (each column stays the k-th eigenvector, close
+  eigenvalues still mix). Distances between embedded values and an svd's residual are the same under all three.
+  Two run-log warnings belong to it: *shared too little with the fit before them to anchor every column* (consecutive
+  fits have fewer values in common than `rank` — lengthen `fit.window`, enlarge the blocks or lower `rank`) and
+  *the artifact … was written without an alignment and is kept* (an artifact from before `fit.align`: set
+  `fit.artifact.refit: true` once before serving from it). What
+  `procrustes` costs: an svd's columns are no longer uncorrelated and `_0` no longer carries the most variance — set
+  `none` only if a consumer depends on that (an unregularised linear fit on the scores), and expect the flipping back.
 
 Reading the plan: `fit.mode.forward` (info) states per block what it reads, `windowBlocks` / `minBlocks` /
 `forwardLagMillis` are in the column coordinates — an **outcome** input delays the readable blocks by its settlement

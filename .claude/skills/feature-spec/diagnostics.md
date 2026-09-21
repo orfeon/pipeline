@@ -59,6 +59,8 @@ not expand because another block failed).
 | `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
 | `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential (one error per block) |
 | `fit.minRows` | error / info | error: must be ≥ 0 (0 = no floor). info (top level): it is the fewest rows a `smooth` / `svd` / `quantileTransform` / `spectralEmbedding` fit is solved from; encodings shrink a thin level instead and ignore it |
+| `fit.align` | error / info | error: must be `procrustes`, `sign` or `none`. info (top level): how the forward fits of an `svd` / `spectralEmbedding` block are brought into the coordinates of the fit before them; the other fits ignore it |
+| `<type>.fit.align` | warning | `fit.align` on a static `svd` / `spectralEmbedding` (solved once: nothing to align to) or on a type without that freedom (`smooth`, `quantileTransform`, `discretize`, `factorization`, `encoding`); it is ignored |
 | `<type>.fit.minRows` | warning | `encoding` / `discretize` / `factorization` do not take `fit.minRows`; it is ignored (an encoding shrinks a thin level instead) |
 | `fit.minHistory` | info | the minimum history of a `fit.mode: forward` block, rounded up to whole blocks (`minBlocks` wins); ignored by the other modes |
 | `engine.rowId` | error | every `rowId` field must be an input field |

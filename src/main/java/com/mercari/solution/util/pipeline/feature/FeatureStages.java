@@ -1006,6 +1006,29 @@ public final class FeatureStages {
             return fit(state, loud);
         }
 
+        /**
+         * {@code current} in the coordinates of {@code previous}, the (already aligned) fit of the change point before
+         * it: the {@code fit.align} of a type whose solution has a gauge — the signs and rotations an eigendecomposition
+         * leaves open ({@link Alignment}; svd, spectralEmbedding). The other types have none and return the fit as is.
+         */
+        default M alignTo(final M previous, final M current) {
+            return current;
+        }
+
+        /** How a model was aligned ({@code fit.align}), null for one that stands alone — and always for a type without a gauge. */
+        default String alignmentOf(final M model) {
+            return null;
+        }
+
+        /**
+         * The columns of an aligned model that the fit before it HAD a predecessor for and that still found none: the
+         * two fits shared too little to anchor them ({@link Alignment.Map}). A component the previous fit did not have
+         * (a vocabulary still smaller than the rank) is not counted — that is a fit growing, not a chain breaking.
+         */
+        default int unanchoredOf(final M previous, final M aligned) {
+            return 0;
+        }
+
         /** The loaded model as this block will apply it (quantileTransform takes the config's clip, not the artifact's). */
         default M adopt(final M model) {
             return model;
@@ -1033,6 +1056,13 @@ public final class FeatureStages {
          * change point. The artifact is written once even under forward, which re-fits every run — but never for a
          * whole-input fit the {@code fit.minRows} floor emptied: an artifact is read back instead of fitting
          * ({@link #artifactExists}), so persisting the empty model would make "not enough rows yet" permanent.
+         *
+         * <p>The change points are solved independently and then chained by {@link #alignTo} in time order, each
+         * into the coordinates of the last fitted one before it — never the other way: a fit aligned to a later one
+         * would carry a trace of rows it may not read. The whole-input model, which a static serving run loads in
+         * place of the forward fits a training run read, is aligned last, to the end of that chain, so that serving
+         * continues the columns the consumer's model was trained on — and when an artifact from an earlier run is
+         * kept instead of rewritten, the run warns that its coordinates are not this chain's.
          */
         @Override
         default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
@@ -1040,8 +1070,9 @@ public final class FeatureStages {
             final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final S whole = all == null ? family().create() : all;
             final boolean floored = belowFloor(whole);
-            final M total = fitAbove(whole, true);
+            M total = fitAbove(whole, true);
             TreeMap<Long, M> byBlock = null;
+            boolean chained = false;
             if (forward() != null) {
                 final int[] emptied = {0};
                 byBlock = series.models(forward().windowBlocks(), state -> {
@@ -1049,6 +1080,29 @@ public final class FeatureStages {
                     if (rowsOf(state) > 0 && belowFloor(state)) emptied[0]++;
                     return fitAbove(state, false);
                 });
+                M previous = null;
+                int loose = 0;
+                for (final Map.Entry<Long, M> point : byBlock.entrySet()) {
+                    if (point.getValue().isEmpty()) continue;
+                    if (previous != null) {
+                        point.setValue(alignTo(previous, point.getValue()));
+                        if (unanchoredOf(previous, point.getValue()) > 0) loose++;
+                    }
+                    previous = point.getValue();
+                }
+                if (loose > 0) {
+                    // columns that continue nothing are what fit.align exists to prevent: the run says how often it happened
+                    LOG.warn("{} {}: {} change point(s) shared too little with the fit before them to anchor every column (fit.align): the columns without a"
+                                    + " predecessor there are that fit's own leading components and do not continue the earlier blocks — a longer fit.window,"
+                                    + " larger blocks or a smaller rank give consecutive fits more in common",
+                            artifact().name(), block(), loose);
+                }
+                if (previous != null && !total.isEmpty()) {
+                    // alignTo returns the fit itself when it aligns nothing, so identity says whether the chain moved it
+                    final M end = alignTo(previous, total);
+                    chained = end != total;
+                    total = end;
+                }
                 LOG.info("{} {}: forward fit over {} block(s), {} change point(s){}", artifact().name(), block(), parts.size(), byBlock.size(),
                         emptied[0] == 0 ? "" : ", " + emptied[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
             }
@@ -1057,6 +1111,17 @@ public final class FeatureStages {
             } else if (artifactUri() != null && floored) {
                 LOG.warn("{} {}: the whole-input fit is below fit.minRows {}, so no artifact is written under {}; a run with enough rows writes it",
                         artifact().name(), block(), minRows(), artifactUri());
+            } else if (artifactUri() != null && chained) {
+                // an artifact is kept as it is. One this chain wrote earlier is a point of the same chain (the fits of
+                // the earlier blocks do not depend on what follows them), so a re-run has nothing to report. One written
+                // without this alignment — before fit.align existed — holds coordinates this run's rows never saw, and a
+                // serving run would load it: say so, once per run
+                final String kept = alignmentOf(artifact().read(artifactUri(), planHash, block()));
+                if (!java.util.Objects.equals(kept, alignmentOf(total))) {
+                    LOG.warn("{} {}: the artifact under {} was written {} and is kept, while this run's forward fits were aligned to one another (fit.align {}):"
+                                    + " a static serving run would load coordinates the training rows never saw; set fit.artifact.refit once to rewrite it",
+                            artifact().name(), block(), artifactUri(), kept == null ? "without an alignment" : "under fit.align " + kept, alignmentOf(total));
+                }
             }
             return new ForwardModel<>(total, byBlock, forward() == null ? null : series.observed());
         }
@@ -1540,7 +1605,7 @@ public final class FeatureStages {
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                   Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
+                   Forward forward, long predictOffsetMillis, long minRows, String align) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
         @Override
         public FitArtifact.Json<Svd> artifact() {
             return Svd.ARTIFACT;
@@ -1549,6 +1614,23 @@ public final class FeatureStages {
         @Override
         public long rowsOf(final Svd.Moments m) {
             return m.n;
+        }
+
+        @Override
+        public Svd alignTo(final Svd previous, final Svd current) {
+            return current.alignTo(previous, align);
+        }
+
+        @Override
+        public String alignmentOf(final Svd model) {
+            return model.alignment;
+        }
+
+        @Override
+        public int unanchoredOf(final Svd previous, final Svd aligned) {
+            if (align == null || Alignment.NONE.equals(align)) return 0;
+            // a fit the alignment left alone shared nothing at all with the one before it
+            return Math.min(aligned.rank(), previous.rank()) - (aligned.alignment == null ? 0 : aligned.anchored);
         }
 
         /**
@@ -1706,7 +1788,7 @@ public final class FeatureStages {
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), k.get("align")));
         }
         return specs;
     }
@@ -1831,7 +1913,7 @@ public final class FeatureStages {
      */
     record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
                         String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                        Forward forward, long predictOffsetMillis, long minRows,
+                        Forward forward, long predictOffsetMillis, long minRows, String align,
                         PCollectionView<Map<String, Long>> vocabulary) implements ForwardFitBlock<String[], Spectral.PairCounts, Spectral> {
         @Override
         public FitArtifact.Json<Spectral> artifact() {
@@ -1890,7 +1972,7 @@ public final class FeatureStages {
         @Override
         public SpectralSpec prepare(final PCollection<MElement> fitInput, final String prefix) {
             return new SpectralSpec(block, field, path, applied, rank, maxValues, artifactUri, refit, columns, components,
-                    forward, predictOffsetMillis, minRows, vocabularyView(fitInput, this, prefix));
+                    forward, predictOffsetMillis, minRows, align, vocabularyView(fitInput, this, prefix));
         }
 
         @Override
@@ -1926,6 +2008,23 @@ public final class FeatureStages {
         @Override
         public long rowsOf(final Spectral.PairCounts counts) {
             return counts.rows;
+        }
+
+        @Override
+        public Spectral alignTo(final Spectral previous, final Spectral current) {
+            return current.alignTo(previous, align);
+        }
+
+        @Override
+        public String alignmentOf(final Spectral model) {
+            return model.alignment;
+        }
+
+        @Override
+        public int unanchoredOf(final Spectral previous, final Spectral aligned) {
+            if (align == null || Alignment.NONE.equals(align)) return 0;
+            // a fit the alignment left alone shared nothing at all with the one before it
+            return Math.min(aligned.rank(), previous.rank()) - (aligned.alignment == null ? 0 : aligned.anchored);
         }
 
         /** Factorises the pair counts of a time block's rows on one worker. */
@@ -1967,7 +2066,7 @@ public final class FeatureStages {
             specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), k.get("applied"),
                     Integer.parseInt(k.get("rank")), Integer.parseInt(k.get("maxValues")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), null));
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), k.get("align"), null));
         }
         return specs;
     }

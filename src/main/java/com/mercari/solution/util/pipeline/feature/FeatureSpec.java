@@ -462,6 +462,11 @@ public class FeatureSpec implements Serializable {
          */
         public Integer minRows;
         /**
+         * fit.mode forward, svd / spectralEmbedding: how the fit of a change point is brought into the coordinates of
+         * the one before it ({@link Alignment}) — {@code procrustes} (the default), {@code sign} or {@code none}.
+         */
+        public String align;
+        /**
          * fit.mode forward: the range of blocks a row reads, {@code (usable − window, usable]}, rounded up to whole
          * blocks — the block-level default of a keySet {@code window.maxAge}, and the window of a static-fit block
          * (svd) that has no keySet. Null = every usable block.
@@ -538,6 +543,11 @@ public class FeatureSpec implements Serializable {
             if (minBlocks != null) {
                 if (minBlocks < 1) diagnostics.error("fit.minBlocks", loc, "fit.minBlocks must be >= 1: " + minBlocks);
                 else spec.minBlocks = minBlocks;
+            }
+            final String align = Json.string(fit, "align");
+            if (align != null) {
+                if (!Alignment.MODES.contains(align)) diagnostics.error("fit.align", loc, "fit.align must be one of " + Alignment.MODES + ": " + align);
+                else spec.align = align;
             }
             final Integer minRows = Json.integer(fit, "minRows");
             if (minRows != null) {
