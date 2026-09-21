@@ -4712,17 +4712,24 @@ public final class FeaturePlanCompiler {
             // a row column over fitted statistics is evaluated as early as its own inputs allow (in the fit stage
             // of a single fitted input: the artifact / lambdas live there), never earlier — with several fitted
             // inputs, or a fitted one and a keyed one, the earlier stages precede part of what the column reads
-            boolean overFit = false;
+            Integer fitStage = null;
             for (final String dep : r.inputs) {
                 final OutputColumn d = columnsByCanonical.get(dep);
                 if (d != null && FitMode.isLookupToken(d.coordinates.get("fit")) && fitStageOf.containsKey(d.block)) {
-                    overFit = true;
+                    fitStage = fitStageOf.get(d.block);
                     break;
                 }
             }
-            final int target = overFit ? Math.min(at, earliest) : at;
+            final int target = fitStage != null ? Math.min(at, earliest) : at;
             if (target < earliest) {
                 throw new IllegalStateException("feature stage scheduling: " + name + " needs stage " + earliest + " but is required at stage " + target);
+            }
+            // a reader of estimated pseudo-counts must stay in its levels' fit stage: the λ of a lookup fit lives there
+            // (merged with the artifact's), and any other stage would estimate its own over its input — another number,
+            // silently. A reader's inputs are its block's levels, so no spec reaches this; it keeps that true.
+            if (fitStage != null && target != fitStage && "varianceComponents".equals(r.coordinates.get("weights")) && r.coordinates.containsKey("levels")) {
+                throw new IllegalStateException("feature stage scheduling: " + name + " reads the estimated pseudo-counts of fit stage " + fitStage
+                        + " but is placed at stage " + target);
             }
             place(r, target, strictInputs(r));
         }

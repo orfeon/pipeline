@@ -2486,6 +2486,60 @@ public class FeatureTransformTest {
     }
 
     /**
+     * A row column over a fitted column AND a keyed column of a LATER stage (a seller's past mean of the fitted
+     * column itself, so the keyed stage cannot precede the fit): it is evaluated in that keyed stage, where the fitted
+     * value is an ordinary field of the row.
+     */
+    private static final String FIT_AND_KEYED_BLOCKS = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                    - name: qhist
+                      scope: sequence
+                      entity: seller
+                      windows:
+                        - {maxEvents: 3}
+                      ops:
+                        - {type: aggregate, field: price_q, funcs: [mean]}
+                    - name: q_mix
+                      scope: row
+                      expr: "price_q + qhist_n3_price_q_mean"
+                """.replaceAll("(?m)^", "    ");
+
+    @Test
+    public void testRowColumnOverFitAndLaterKeyedStage() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", FIT_AND_KEYED_BLOCKS + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Set<Double> sums = new HashSet<>();
+            int count = 0;
+            for (final MElement row : rows) {
+                final Double q = row.getAsDouble("f_price_q"), past = row.getAsDouble("f_qhist_n3_price_q_mean");
+                Assertions.assertNotNull(q);
+                if (past == null) {
+                    // a seller's first listing has no history: the sum has nothing to add
+                    Assertions.assertNull(row.getPrimitiveValue("f_q_mix"));
+                } else {
+                    Assertions.assertEquals(q + past, row.getAsDouble("f_q_mix"), 1e-12);
+                    sums.add(q + past);
+                }
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            // s1 has three listings with a history, s2 one
+            Assertions.assertTrue(sums.size() > 1, sums::toString);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testRowColumnOverFitAndLaterKeyedStageParallelMatchesLinear() throws java.io.IOException {
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", FIT_AND_KEYED_BLOCKS + "      output:\n"), 6, List.of("_Partial"), List.of());
+    }
+
+    /**
      * The same curve under {@code fit.mode: forward} with a heavy FIRST-difference penalty — what is left is a
      * constant, the mean target of the readable rows. final_price is known PT30M + P6D after its event, so B (Jan 3)
      * cannot read A's block yet, C (Jan 20) reads A and B, and D (Feb 1) reads everything before it; a REML-chosen
