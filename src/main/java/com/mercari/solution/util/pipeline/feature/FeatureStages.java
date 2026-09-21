@@ -1905,7 +1905,8 @@ public final class FeatureStages {
     /**
      * One spectralEmbedding block of a fit stage (all its coordinate columns), rebuilt from the columns' coordinates:
      * a row contributes its value of {@code field} with the values of the lag {@code path} columns — the entity's
-     * previous steps, computed by an earlier keyed stage — and reads the coordinates of its {@code applied} value.
+     * previous steps, computed by an earlier keyed stage — and reads, per column, the coordinates of the value in
+     * {@code applied.get(i)}: the row's own value, its previous one, or ({@code of: [current, previous]}) both.
      *
      * <p>{@code vocabulary} is the {@code maxValues} cap as a side input ({@link #vocabularyView}, null until
      * {@link #prepare} builds it): unlike every other summary block the state here is quadratic in what it counts,

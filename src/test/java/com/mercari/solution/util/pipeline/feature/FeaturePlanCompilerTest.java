@@ -2521,10 +2521,24 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(1, both.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).count(), both::describe);
         Assertions.assertEquals(1, FeatureStages.spectralSpecs(both.getColumns()).size(), "one fit for both embedded values");
         Assertions.assertNotEquals(plan.getHash(), both.getHash());
+        // the list is a set: written the other way round it is the same block — the same columns in the same order
+        final FeaturePlan reversed = compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("        rank: 3\n", "        rank: 3\n        of: [previous, current]\n")));
+        Assertions.assertEquals(both.getColumns().stream().map(OutputColumn::getCanonicalName).toList(),
+                reversed.getColumns().stream().map(OutputColumn::getCanonicalName).toList(), reversed::describe);
+        // under forward the two values are still one fit — one chain of aligned fits, not two
+        final FeaturePlan forwardBoth = compile(SOURCES, withEncoding(SPECTRAL_BLOCK
+                .replace("        rank: 3\n", "        rank: 3\n        of: [current, previous]\n")
+                .replace("fit: {artifact", "fit: {mode: forward, blocks: {size: P7D}, artifact")));
+        Assertions.assertFalse(forwardBoth.getDiagnostics().hasErrors(), forwardBoth::describe);
+        Assertions.assertEquals(1, forwardBoth.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).count(), forwardBoth::describe);
+        Assertions.assertEquals(1, FeatureStages.spectralSpecs(forwardBoth.getColumns()).size(), "one forward chain for both embedded values");
         // a single previous keeps the plain names; a repeated value and too many columns are refused
         Assertions.assertNull(previous.getColumn("grade_embed_prev_0"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: [current, current]"))), "spectralEmbedding.of"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: [current, previous]\n        maxFeatures: 4"))), "spectralEmbedding.maxFeatures"));
+        // an entry in another shape, or an empty list, is reported instead of silently embedding the row's own value
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: [current, {a: 1}]"))), "spectralEmbedding.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: []"))), "spectralEmbedding.parameters"));
         final FeaturePlan forward = compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("fit: {artifact", "fit: {mode: forward, blocks: {size: P7D}, artifact")));
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
         Assertions.assertEquals("forward", column(forward, "grade_embed_0").getCoordinates().get("fit"));

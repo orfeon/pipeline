@@ -2486,7 +2486,8 @@ public final class FeaturePlanCompiler {
         final String loc = def.location();
         if (!def.sequenceUnknown.isEmpty()) {
             diagnostics.error(def.type + ".parameters", loc, "not understood: " + def.sequenceUnknown
-                    + " (sequenceOf: {entity, field}; cooccur: {window, weighting}; emit: [distribution | {toValueProb: <value>}]; blend: {perEntity, priorWeight})");
+                    + " (sequenceOf: {entity, field}; cooccur: {window, weighting}; of: current | previous | [current, previous];"
+                    + " emit: [distribution | {toValueProb: <value>}]; blend: {perEntity, priorWeight})");
             return null;
         }
         if (def.sequenceEntity == null || def.sequenceField == null || !entities.containsKey(def.sequenceEntity)) {
@@ -2680,7 +2681,7 @@ public final class FeaturePlanCompiler {
         final int window = def.cooccurWindow == null ? Spectral.DEFAULT_WINDOW : def.cooccurWindow;
         final int rank = def.rank == null ? Spectral.DEFAULT_RANK : def.rank;
         final int maxValues = def.maxValues == null ? Spectral.DEFAULT_MAX_VALUES : def.maxValues;
-        final List<String> of = def.embedOf.isEmpty() ? List.of("current") : def.embedOf;
+        final List<String> declared = def.embedOf.isEmpty() ? List.of("current") : def.embedOf;
         boolean valid = true;
         if (window < 1 || window > 8) {
             diagnostics.error("spectralEmbedding.cooccur", loc, "cooccur.window must be within 1..8 steps: " + window);
@@ -2698,15 +2699,20 @@ public final class FeaturePlanCompiler {
             diagnostics.error("spectralEmbedding.maxValues", loc, "maxValues must be within 2.." + Spectral.MAX_VALUES + " (the eigenproblem is dense in the distinct values): " + maxValues);
             valid = false;
         }
-        if (!List.of("current", "previous").containsAll(of) || new HashSet<>(of).size() != of.size()) {
-            diagnostics.error("spectralEmbedding.of", loc, "of must be current | previous, or the list of both: " + of);
+        if (!List.of("current", "previous").containsAll(declared) || new HashSet<>(declared).size() != declared.size()) {
+            diagnostics.error("spectralEmbedding.of", loc, "of must be current | previous, or the list of both: " + declared);
             valid = false;
         }
-        if (def.maxFeatures != null && rank * of.size() > def.maxFeatures) {
-            diagnostics.error("spectralEmbedding.maxFeatures", loc, "rank " + rank + (of.size() > 1 ? " x " + of.size() + " embedded values" : "") + " exceeds maxFeatures " + def.maxFeatures);
+        final long produced = (long) rank * declared.size();
+        if (def.maxFeatures != null && produced > def.maxFeatures) {
+            diagnostics.error("spectralEmbedding.maxFeatures", loc, "rank " + rank + (declared.size() > 1 ? " for " + declared.size() + " embedded values" : "")
+                    + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
             valid = false;
         }
         if (!valid) return;
+        // `of` is a set: both values written either way round are the same block, so the columns come out in the
+        // same order (the row's value first) rather than in the order the list happened to be spelled in
+        final List<String> of = declared.size() < 2 ? declared : List.of("current", "previous");
         final List<String> path = sequencePath(def, window, computeAt);
         if (path == null) return;
         if (!rejectEncodingParameters(def, true)) return;
