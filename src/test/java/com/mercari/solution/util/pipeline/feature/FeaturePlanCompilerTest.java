@@ -1337,6 +1337,74 @@ public class FeaturePlanCompilerTest {
                 .anyMatch(m -> m.code().equals("encoding.keySet.sequence") && m.level() == Diagnostics.Level.warning), unshrunk::describe);
     }
 
+    /**
+     * {@code as} on a keySet and on a window names the segment the generated columns would otherwise derive: the keys
+     * joined by {@code _} (a path of lag columns is a name of a hundred characters) and the window token — which a
+     * filter does not have, so a filter-only window is {@code all} like the unconditional one and the two cannot stand
+     * in one block without a name. Only names change: the coordinates, the hidden level statistics (shared between the
+     * keySets of a block by their keys) and the stages are those of the unnamed declaration.
+     */
+    @Test
+    public void testKeySetAndWindowAs() {
+        final String path = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [condition_grade, category, seller_id]
+                        structure: sequence
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {priorWeight: 2, output: [composed, deviations, effectiveN]}
+            """;
+        final FeaturePlan plain = compile(SOURCES, withEncoding(path));
+        final FeaturePlan named = compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: sequence\n" + " ".repeat(12) + "as: gradePath")));
+        Assertions.assertFalse(named.getDiagnostics().hasErrors(), named::describe);
+        Assertions.assertNull(named.getColumn("enc__condition_grade_category_seller_id__e1__mean"), named::describe);
+        for (final String stat : List.of("mean", "dev0", "dev2", "mean__neff")) {
+            final OutputColumn a = column(plain, "enc__condition_grade_category_seller_id__e1__" + stat), b = column(named, "enc__gradePath__e1__" + stat);
+            Assertions.assertEquals(a.getCoordinates(), b.getCoordinates(), stat);
+            Assertions.assertEquals(a.getInputs(), b.getInputs(), stat);
+        }
+        Assertions.assertEquals("f_enc__gradePath__e1__mean", column(named, "enc__gradePath__e1__mean").getOutputName());
+        Assertions.assertEquals(plain.getStages().size(), named.getStages().size());
+
+        // the same keys twice — the raw path next to its shrunk chain — is a duplicate until one of them is named
+        // (runtime indentation of the text block: keySets entries at 10, their keys at 12, the block's keys at 8)
+        final String structure = " ".repeat(12) + "structure: sequence\n";
+        final String twice = path.replace(" ".repeat(8) + "shrinkage: {priorWeight: 2, output: [composed, deviations, effectiveN]}\n", "")
+                .replace(structure, structure + " ".repeat(12) + "shrinkage: {priorWeight: 2}\n" + " ".repeat(10) + "- keys: [condition_grade, category, seller_id]\n");
+        Assertions.assertNotEquals(path, twice);
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(twice)), "column.duplicate"));
+        final FeaturePlan both = compile(SOURCES, withEncoding(twice.replace(structure, structure + " ".repeat(12) + "as: gradePath\n")));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertEquals("compose", column(both, "enc__gradePath__e1__mean").getOperator());
+        Assertions.assertEquals("encoding", column(both, "enc__condition_grade_category_seller_id__e1__mean").getOperator());
+
+        // a window: the statistic over everything next to the one over the rows sharing the current row's grade
+        final String filter = "- {filter: \"condition_grade = $self.condition_grade\"}";
+        final FeaturePlan unnamed = compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {}\n      " + filter));
+        Assertions.assertTrue(hasCode(unnamed, "column.duplicate"), unnamed::describe);
+        final FeaturePlan windows = compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {}\n      " + filter.replace("}", ", as: sameGrade}")));
+        Assertions.assertFalse(windows.getDiagnostics().hasErrors(), windows::describe);
+        Assertions.assertNull(column(windows, "recent_all_sold_mean").getCoordinates().get("filter"));
+        final OutputColumn sameGrade = column(windows, "recent_sameGrade_sold_mean");
+        Assertions.assertEquals("sameGrade", sameGrade.getCoordinates().get("window"));
+        // the pre-event equality filter is reduced to a partition key as it is unnamed: the name changes nothing else
+        Assertions.assertEquals("seller_id,condition_grade", sameGrade.getCoordinates().get("stageKeys"));
+        Assertions.assertNull(column(windows, "recent_all_sold_mean").getCoordinates().get("stageKeys"), "the unconditional window stays under the entity key");
+        // a bounded window may be named too, and an encoding keySet's window takes the name into {window}
+        Assertions.assertNotNull(compile(SOURCES, SPEC.replace("- {maxAge: P365D}", "- {maxAge: P365D, as: lastYear}")).getColumn("recent_lastYear_sold_mean"));
+        final FeaturePlan encoding = compile(SOURCES, SPEC.replace("windows: [{maxAge: P365D}]", "windows: [{maxAge: P365D, as: lastYear}]"));
+        Assertions.assertFalse(encoding.getDiagnostics().hasErrors(), encoding::describe);
+        Assertions.assertNotNull(encoding.getColumn("enc__category__lastYear__e2__mean"), encoding::describe);
+
+        // a name is a segment of a column name
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: sequence\n" + " ".repeat(12) + "as: grade-path"))), "encoding.keySet.as"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: 5events}")), "window.as"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, as: _hidden}")), "window.as"));
+    }
+
     @Test
     public void testJointEstimatorCompilesToFitStageColumns() {
         final String joint = """

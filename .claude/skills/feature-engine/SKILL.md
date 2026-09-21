@@ -30,8 +30,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   features documents from inline, URI, path, `data:`; FreeMarker with the step args) →
   `FeaturePlanCompiler.compile(sources, parameters, inputSchema.getFields())` →
   errors = `plan.getDiagnostics().getErrorMessages()` + `FeatureStages.engineConstraints(plan, streaming)`
-  (both fail assembly with `IllegalModuleException`) → `LOG.info(plan.describe())`, printed to stdout
-  under `--dryRun=true` → `FeatureStages.createOutputSchema` → `Union.flatten` → `FeatureStages.apply`.
+  (both fail assembly with `IllegalModuleException`) → `LOG.info(plan.describe())` — or, under
+  `--dryRun=true`, printed to stdout *instead* (once: the log shares the console) → `FeatureStages.createOutputSchema` → `Union.flatten` → `FeatureStages.apply`.
 - `util/pipeline/feature/FeaturePlanService.java`: the one shared entry (`resolve` / `compile` /
   `validate(rawRequest)`). REST `POST /api/feature` (`server/api/FeatureService`), MCP
   `validate-feature` (`server/mcp/tool/ValidateFeatureTool`), agent `validateFeature`

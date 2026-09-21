@@ -3456,7 +3456,9 @@ public final class FeaturePlanCompiler {
                 final Window window = lookupWindow(declaredWindow, mode, def);
                 final Map<String, String> names = new HashMap<>(Map.of(
                         "block", def.name,
-                        "keys", String.join("_", ks.keys),
+                        // the visible columns only: the hidden level statistics are named by their keys (levelStats),
+                        // because every keySet of the block whose lattice contains the level shares them
+                        "keys", ks.as != null ? ks.as : String.join("_", ks.keys),
                         "window", window == null ? "" : window.token(),
                         "target", target.name));
                 for (final String stat : target.stats) {
@@ -3614,6 +3616,7 @@ public final class FeaturePlanCompiler {
         if (declared.maxAge == null && !declared.onCalendar()) return null;
         final Window window = new Window();
         window.maxAge = declared.maxAge;
+        window.as = declared.as;
         // a window on a calendar clock is counted in the blocks' ticks (forwardCoordinates)
         window.clock = declared.clock;
         window.maxAgeTicks = declared.maxAgeTicks;

@@ -3245,6 +3245,42 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * A named window: the rating over every seller next to the one per category pool, in one block. A filter has no
+     * token of its own — unnamed, both windows are {@code all} and the block is a duplicate — so {@code as} is what
+     * lets them stand side by side. The whole pool reads what it reads alone ({@link #testSequenceRating}); the
+     * sellers of this input never share a category, so a category pool holds no contest and its rating stays the prior.
+     */
+    @Test
+    public void testSequenceRatingNamedPoolWindow() throws java.io.IOException {
+        final String blocks = RATING_BLOCKS.replace("entity: seller\n",
+                "entity: seller\n" + " ".repeat(10) + "windows: [{}, {filter: \"category = $self.category\", as: byCategory}]\n");
+        Assertions.assertNotEquals(RATING_BLOCKS, blocks);
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + FEATURE_CONFIG.replace("      output:\n", blocks + "      output:\n"))).get("features");
+        Assertions.assertNotNull(output.getSchema().getField("f_skill_byCategory_pl_sigma"), output.getSchema()::toString);
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final double whole = switch (id) {
+                    case "A/s1", "A/s2", "B/s1" -> 1500.0;
+                    case "C/s1" -> 1516.0;
+                    case "C/s2" -> 1484.0;
+                    case "D/s1" -> 1516.0 + 32d * (1d - 1d / (1d + Math.pow(10d, -32d / 400d)));
+                    default -> throw new AssertionError("unexpected row " + id);
+                };
+                Assertions.assertEquals(whole, row.getAsDouble("f_skill_all_elo_mu"), 1e-9, id);
+                Assertions.assertEquals(1500.0, row.getAsDouble("f_skill_byCategory_elo_mu"), 0d, id);
+                Assertions.assertEquals(0L, ((Number) row.getPrimitiveValue("f_skill_byCategory_elo_count")).longValue(), id);
+                Assertions.assertEquals(25.0 / 3, row.getAsDouble("f_skill_byCategory_pl_sigma"), 0d, id);
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testSequenceRatingParallelMatchesLinear() throws java.io.IOException {
         // the rating replay (global key) is one more keyed branch of wave 1; the context block reading it follows

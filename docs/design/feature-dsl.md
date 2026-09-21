@@ -722,7 +722,12 @@ may be left unbounded:
   edge (`maxAge`), the count (`maxEvents`) and the condition (`filter`). A per-element near edge would
   allow declarations contradicting `ingestionLag`, so there is none.
 - **Naming tokens**: `maxAge: P365D → 365d`, `maxEvents: 20 → n20`, combined `365d_n20`. The naming
-  template has a `{window}` axis and the lineage keeps the window coordinates.
+  template has a `{window}` axis and the lineage keeps the window coordinates. A `filter` contributes no
+  token (a condition has no short canonical spelling), so a filter-only window is `all` like the
+  unconditional one; **`as:` on a window element names the segment** and is what lets both stand in one
+  block (the statistic over everything next to the one per `$self` pool). An encoding keySet takes `as:`
+  the same way for the `{keys}` axis. Both rename emitted columns only: the coordinates, and the hidden
+  level statistics the keySets of a block share by their keys, are those of the unnamed declaration.
 - **Execution plan**: several windows on one entity and order share one sort (several frames over
   one `PARTITION BY ... ORDER BY` in SQL; several range reads of one per-entity timestamped buffer
   in the engine). Nested windows (same filter, different far edge) are computed from differences of

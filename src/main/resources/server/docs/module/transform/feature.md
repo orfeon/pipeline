@@ -182,7 +182,7 @@ features:
     entity: seller
     windows:
       - {maxEvents: 5}
-      - {maxAge: P365D, filter: "category = $self.category"}
+      - {maxAge: P365D, filter: "category = $self.category"}   # as: <name> names the window segment (a filter has no token of its own)
     ops:
       - {type: lag, fields: [sold, start_price], k: 2}
       - {type: delta, field: start_price, k: 1}
@@ -336,7 +336,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   still inside the window shift — the replay only folds a contest once its outcome is available, so a long
   availability lag times the whole pool's row rate is what sizes the worker). When the contests fall
   into independent pools, split them with `windows: [{filter: "category = $self.category"}]` on a pre-event
-  field — it becomes the partition key and each pool is replayed on its own. Nothing else is a window here: an
+  field — it becomes the partition key and each pool is replayed on its own. To keep the rating over everything
+  next to the pooled one in the same block, name the pooled window: `windows: [{}, {filter: "category =
+  $self.category", as: byCategory}]` (unnamed, both are `all`). Nothing else is a window here: an
   update cannot be taken back, so `maxAge` / `maxEvents` / any other filter are rejected
   (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
   a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
@@ -756,6 +758,7 @@ values are chosen over the whole input while the counts stay per block. Artifact
         shrinkage: {priorWeight: 50}              # keySet-level override
       - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
         structure: sequence                       # a path, most recent first: (lag1, lag2) → (lag1) → global
+        as: gradePath                             # the {keys} segment of the emitted names (default: the keys joined by _)
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
@@ -884,6 +887,19 @@ event and weighs it by how similar it is to the current row instead:
   or removing an earlier one renames the columns: name an op `expr` with `as:` (`sequence.expr.anonymous` lists the
   unnamed ones). On an encoding target `as:` replaces the target name
   (`<block>__<keys>__<as>__<stat>`).
+- `as:` on a **window** names the window segment, which is otherwise derived from its bounds (`365d`, `n20`,
+  `365d_n20`, `20trading`, `all`). A `filter` has no token of its own, so a filter-only window is `all` — the
+  name of the unconditional window — and the two are a `column.duplicate` in one block until the filtered one
+  is named: `windows: [{}, {filter: "category = $self.category", as: byCategory}]` gives `<block>_all_…` next
+  to `<block>_byCategory_…` (the statistic over everything and the one per pool, whose gap is the usual
+  feature — for a `rating` too). On a keySet's window the name is the `{window}` segment.
+- `as:` on an encoding **keySet** replaces the `{keys}` segment (the keys joined by `_`):
+  `- {keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2], structure: sequence, as: gradePath}`
+  emits `<block>__gradePath__<target>__<stat>` instead of a name that repeats every lag column — and it lets
+  one block declare the same keys twice (a raw statistic next to its shrunk lattice). Only the emitted names
+  change; the hidden level statistics keep their key-derived names (the keySets of a block share them).
+- Both are names of letters, digits and `_` starting with a letter (`window.as`, `encoding.keySet.as`). They
+  are part of the spec, so renaming changes the plan hash like any other rename of an output.
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
   `values` when the output goes to a sink such as BigQuery or straight into a model. An encoding target's

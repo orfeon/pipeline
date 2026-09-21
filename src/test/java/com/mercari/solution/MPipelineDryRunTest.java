@@ -38,7 +38,7 @@ public class MPipelineDryRunTest {
                     - {session_id: "A", seller_id: "s1", quantity: 2, start_price: 100.0, session_time: "2024-01-01T00:00:00Z"}
                     - {session_id: "B", seller_id: "s1", quantity: 1, start_price: 200.0, session_time: "2024-01-02T00:00:00Z"}
             transforms:
-              - name: features
+              - name: dryrun_features
                 module: feature
                 inputs: [events]
                 parameters:
@@ -69,7 +69,7 @@ public class MPipelineDryRunTest {
             sinks:
               - name: out
                 module: storage
-                inputs: [features]
+                inputs: [dryrun_features]
                 parameters:
                   output: %sfeatures
                   format: json
@@ -82,19 +82,26 @@ public class MPipelineDryRunTest {
         try (var files = Files.list(dir)) {
             for (final Path p : files.toList()) Files.deleteIfExists(p);
         }
-        final PrintStream original = System.out;
-        final ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        final PrintStream original = System.out, originalErr = System.err;
+        final ByteArrayOutputStream captured = new ByteArrayOutputStream(), capturedErr = new ByteArrayOutputStream();
         try {
             System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
+            System.setErr(new PrintStream(capturedErr, true, StandardCharsets.UTF_8));
             MPipeline.main(new String[]{"--dryRun=true", "--config=" + CONFIG});
         } finally {
             System.setOut(original);
+            System.setErr(originalErr);
         }
         final String out = captured.toString(StandardCharsets.UTF_8);
         Assertions.assertTrue(out.contains("dry run: pipeline assembled successfully"), out);
-        Assertions.assertTrue(out.contains("output features:"), out);
+        Assertions.assertTrue(out.contains("output dryrun_features:"), out);
         // the feature plan report — including the hot-key audit SQL — is printed for the operator
-        Assertions.assertTrue(out.contains("feature plan for features:"), out);
+        Assertions.assertTrue(out.contains("feature plan for dryrun_features:"), out);
+        // ... once: the report is the dry run's deliverable on stdout, not also a log record on the same console. The
+        // streams are the JVM's and the tests run in parallel, so the step carries a name no other test logs a plan for
+        final String console = out + capturedErr.toString(StandardCharsets.UTF_8);
+        final int first = console.indexOf("feature plan for dryrun_features:");
+        Assertions.assertEquals(first, console.lastIndexOf("feature plan for dryrun_features:"), () -> console.substring(first, Math.min(console.length(), first + 2000)));
         Assertions.assertTrue(out.contains("-- audit"), out);
         Assertions.assertTrue(out.contains("GROUP BY seller_id"), out);
         try (var files = Files.list(dir)) {

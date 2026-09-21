@@ -136,10 +136,12 @@ array — the way to get "the composition of the others" as a per-row feature.
 ```
 
 Windows are strictly past (`t' < t`); the near edge is derived from `ingestionLag`, so `window` keys
-other than `maxEvents` / `maxAge` / `filter` / `clock` are rejected. `clock: <calendar>` (declared in the sources'
+other than `maxEvents` / `maxAge` / `filter` / `clock` / `as` are rejected. `clock: <calendar>` (declared in the sources'
 `clocks:`) counts `maxAge` in ticks (`{maxAge: 20, clock: business}` → token `20business`); `decayBy: <calendar>`
 and `fit.blocks: {size: <ticks>, clock: <calendar>}` count on it too; availability stays on wall time. Window token in names: `n5`, `365d`,
-`365d_n5`, `all`.
+`365d_n5`, `all` — or the window's `as:`. A `filter` has no token: a filter-only window is `all`, so next to
+the unconditional window it must be named (`windows: [{}, {filter: "category = $self.category", as: byCategory}]`
+→ `<block>_all_…` and `<block>_byCategory_…`; unnamed = `column.duplicate`).
 
 | op | keys | output name / type |
 |---|---|---|
@@ -216,6 +218,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
       parentRef: <field>
       hierarchy: [[coarser keys], additive, []]  # explicit lattice, fine → coarse
       shrinkage: {...}                           # per-keySet override
+      as: <name>                                 # replaces the {keys} segment of the emitted names (default: the keys joined by _) — short names for lag-column paths, and the same keys twice in one block
   targets:
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}
