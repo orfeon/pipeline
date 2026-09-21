@@ -3183,6 +3183,8 @@ public class FeatureTransformTest {
                   ops:
                     - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: pl, funcs: [mu, sigma, count]}
                     - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P10D, as: rest, funcs: [sigma]}
+                    - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 0, as: btm, funcs: [mu]}
                 - name: field
                   scope: context
                   context: session
@@ -3214,6 +3216,17 @@ public class FeatureTransformTest {
             final double plMuD = (Double) pl.read(state, "s1", "mu"), plSigmaD = (Double) pl.read(state, "s1", "sigma");
             // elo at D: 1516 beat 1484 with the expected score 1 / (1 + 10^(-32 / 400))
             final double eloDeltaD = 32d * (1d - 1d / (1d + Math.pow(10d, -32d / 400d)));
+            // tauPer: the variance drifts by tau² per 10 days since the seller's last known contest — also up to the row
+            // that reads it. C reads contest A 19 days later; D reads contest C (which entered 19 days after A) 12 days later
+            final long day = java.time.Duration.ofDays(1).toMillis(), timeA = java.time.Instant.parse("2025-01-01T10:00:00Z").toEpochMilli();
+            final Rating rest = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 2d, null, null, 10 * day, null, List.of(), List.of(), "y");
+            final Rating.State resting = new Rating.State();
+            rest.update(resting, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)), timeA);
+            final double restC = (Double) rest.read(resting, "s1", "sigma", timeA + 19 * day);
+            Assertions.assertEquals(Math.sqrt(8.065506316323548 * 8.065506316323548 + 4 * 1.9), restC, 1e-9);
+            rest.update(resting, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)), timeA + 19 * day);
+            final double restD = (Double) rest.read(resting, "s1", "sigma", timeA + 31 * day);
+            Assertions.assertTrue(restD > (Double) rest.read(resting, "s1", "sigma"), "the 12 days since contest C are in the read");
             int count = 0;
             for (final MElement row : rows) {
                 count++;
@@ -3228,6 +3241,14 @@ public class FeatureTransformTest {
                 };
                 final String[] columns = {"f_skill_all_pl_mu", "f_skill_all_pl_sigma", "f_skill_all_pl_count",
                         "f_skill_all_elo_mu", "f_skill_all_elo_count", "f_skill_all_elo_delta", "f_field_skill_all_elo_mu_gapToBest"};
+                final double restSigma = switch (id) {
+                    case "C/s1", "C/s2" -> restC;
+                    case "D/s1" -> restD;
+                    default -> 25.0 / 3;   // never rated: the prior, whatever time has passed
+                };
+                Assertions.assertEquals(restSigma, row.getAsDouble("f_skill_all_rest_sigma"), 1e-9, id);
+                // two sellers: the mean over the opponents is the one opponent — the plackettLuce value of a two-player contest
+                Assertions.assertEquals(((Number) expected[0]).doubleValue(), row.getAsDouble("f_skill_all_btm_mu"), 1e-9, id);
                 for (int i = 0; i < columns.length; i++) {
                     final Object actual = row.getPrimitiveValue(columns[i]);
                     if (expected[i] == null) {

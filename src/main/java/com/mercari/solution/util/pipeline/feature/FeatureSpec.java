@@ -132,6 +132,14 @@ public class FeatureSpec implements Serializable {
         public Double tau;
         public Double kFactor;
         public Double scale;
+        /**
+         * rating: the time {@code tau} is the drift of — a player's variance grows by {@code tau² · Δt / tauPer} over the
+         * time {@code Δt} since its previous contest instead of by {@code tau²} per contest (null), so a long absence
+         * reopens the uncertainty.
+         */
+        public Duration tauPer;
+        /** rating (bradleyTerry): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
+        public String pairs;
     }
 
     /**
@@ -1127,6 +1135,8 @@ public class FeatureSpec implements Serializable {
         op.tau = doubleOf(o, "tau", diagnostics, loc);
         op.kFactor = doubleOf(o, "kFactor", diagnostics, loc);
         op.scale = doubleOf(o, "scale", diagnostics, loc);
+        op.tauPer = Json.duration(o, "tauPer", null, diagnostics, loc);
+        op.pairs = Json.string(o, "pairs");
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");

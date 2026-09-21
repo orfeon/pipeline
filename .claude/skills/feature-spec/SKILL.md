@@ -345,9 +345,13 @@ not alter values).
   `fit.mode: static` config. Decide that before adopting them.
 - **`rating` in large fields** (more than about eight players per contest): `bradleyTerry` adds up every
   pair, so a player's first contest moves `mu` by several prior standard deviations and collapses `sigma`
-  for good — the first result decides the rating, and the column screens as noise. Use `plackettLuce` or
-  `elo` there. `plackettLuce`'s `sigma` hardly shrinks in a large field (a fraction of a percent per
+  for good — the first result decides the rating, and the column screens as noise. Use `pairs: mean` (or
+  `adjacent`), `plackettLuce` or `elo` there. `plackettLuce`'s `sigma` hardly shrinks in a large field (a fraction of a percent per
   contest, whatever `beta`): it is a function of the contest count, so use `count` for "how well known".
+- **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
+  uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
+  previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is
+  then a feature. Declare `tau` with it (the default is sized for one contest).
 - **`rating` warm-up**: every player starts from the prior, so the spread of `mu` grows over the first
   stretch of the input (years, for a slow sport) — a drift in time if that stretch is in the training
   window. Drop the stretch, or use the rating relative to its contest (a context block: `zscore`,
