@@ -218,6 +218,14 @@ public final class Svd implements Serializable, FitArtifact.Model {
      *             whole-input fit reports.
      */
     public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize, final boolean warn) {
+        return fit(m, rank, center, standardize, warn, null);
+    }
+
+    /**
+     * @param warm the fit of the change point before (forward), or null: its components start the iteration for the
+     *             leading ones ({@link SymmetricEigen}). It changes how fast the solve is, not what it converges to
+     */
+    public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize, final boolean warn, final Svd warm) {
         final int d = m.dimension;
         if (warn && m.mismatched > 0) {
             LOG.warn("svd: {} vector(s) of a length other than the fitted {} were skipped; the fitted length is whichever was seen first, so normalise the array length upstream", m.mismatched, d);
@@ -246,14 +254,14 @@ public final class Svd implements Serializable, FitArtifact.Model {
         }
         double trace = 0;
         for (int i = 0; i < d; i++) trace += c[i][i];
-        final double[][] eigen = jacobi(c);
         final int k = Math.min(rank, d);
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(c, k, false, warm == null || warm.dimension != d ? null : warm.components);
         if (warn && k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
         final double[][] components = new double[k][];
         final double[] variances = new double[k];
         for (int r = 0; r < k; r++) {
-            components[r] = eigen[r + 1].clone();
-            variances[r] = Math.max(0, eigen[0][r]);
+            components[r] = eigen.vectors()[r].clone();
+            variances[r] = Math.max(0, eigen.values()[r]);
             final double sign = sign(components[r]);
             if (sign < 0) for (int i = 0; i < d; i++) components[r][i] = -components[r][i];
         }

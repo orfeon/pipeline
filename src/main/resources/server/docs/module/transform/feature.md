@@ -931,7 +931,12 @@ is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplu
 values than `rank`. A value the cap keeps but whose every co-occurrence partner it dropped reads null too: with no
 co-occurrence row it has no position, rather than the origin of the fitted space. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
 under `fit.mode: forward`, where a row reads the complete blocks before it and the usual `window` / `minBlocks` apply)
-— and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. The cap is
+— and the eigenproblem is solved on one worker. Only the `rank` leading components are solved for: up to 128
+values by a full decomposition, beyond that by a block Krylov iteration that costs a few dozen products with the
+matrix (quadratic in the distinct values each) instead of a cubic sweep over every eigenpair — a 700-value matrix
+takes tenths of a second rather than several — and that starts, under `forward`, from the fit of the block before.
+It reproduces the full decomposition to about 1e-10 (accepted at a residual of 1e-12 of the matrix norm) and hands
+over to it if it does not settle. The matrix itself is dense in the distinct values, hence the cap. The cap is
 applied before the pairs are counted (one extra pass over the fit input ranks the values by co-occurrence mass), so
 the Combine state is bounded by `maxValues` rather than by the field's cardinality; under `fit.mode: forward` those
 values are chosen over the whole input while the counts stay per block — when the field has more values than

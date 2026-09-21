@@ -117,7 +117,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   estimator, see the class javadoc), `JointFit` (`estimator: joint`: cell table → ridge / BLUP by block
   Gauss–Seidel swept coarse → fine, fold / forward variants, `<id>.joint.avro`),
   `Discretization` (quantile edges + `<block>.bins.json`), `QuantileTransform` (CDF knots
-  + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → Jacobi eigendecomposition, `<block>.svd.json`), `Smooth` (`type: smooth`: a P-spline of a
+  + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → the leading eigenpairs, `<block>.svd.json`), `SymmetricEigen` (the leading `k` eigenpairs of a dense symmetric matrix, by magnitude or — PSD — by value: `Svd.jacobi` up to 128 rows, beyond that a restarted block Krylov iteration + Rayleigh–Ritz that takes a warm start and falls back to Jacobi if it has not settled; the "adds no direction" threshold of its Gram–Schmidt MUST stay at rounding level — near convergence the new Krylov directions are as small as the residuals, and dropping them stalls the iteration above its tolerance), `Smooth` (`type: smooth`: a P-spline of a
   target over a numeric key — uniform B-splines on a declared range, difference penalty, λ by REML — solved from the
   `Svd.Moments` of `[B(x), y]`, read through their centred form with the target centred; `<block>.smooth.json`; a
   *reused* family, engine doc §9.6.3), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag

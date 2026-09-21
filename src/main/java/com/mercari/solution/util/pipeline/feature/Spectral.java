@@ -255,6 +255,15 @@ public final class Spectral implements Serializable, FitArtifact.Model {
      *             point ({@link BlockSeries#models}), and an empty window at a leave point is normal
      */
     public static Spectral fit(final PairCounts state, final int rank, final int maxValues, final boolean warn) {
+        return fit(state, rank, maxValues, warn, null);
+    }
+
+    /**
+     * @param warm the fit of the change point before (forward), or null: its coordinates start the iteration for the
+     *             leading components ({@link SymmetricEigen}) — consecutive fits differ by one block of pairs, so the
+     *             subspace is nearly the answer already. It changes how fast the solve is, not what it converges to
+     */
+    public static Spectral fit(final PairCounts state, final int rank, final int maxValues, final boolean warn, final Spectral warm) {
         // the dense symmetric counts: a pair adds one to both (a, b) and (b, a) — two to the diagonal when a = b
         final TreeMap<String, Double> mass = new TreeMap<>();
         for (final Map.Entry<String, TreeMap<String, Long>> row : state.counts.entrySet()) {
@@ -343,14 +352,24 @@ public final class Spectral implements Serializable, FitArtifact.Model {
                     + " no embedding, every value maps to null", v, state.pairs);
             return new Spectral(new String[0], new double[0][], new double[0], state.pairs, ordered.size());
         }
-        // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix)
-        final double[][] eigen = Svd.jacobi(ppmi, true);
+        // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix):
+        // only those are solved for
         final int k = Math.min(rank, v);
+        double[][] start = null;
+        if (warm != null && !warm.isEmpty()) {
+            start = new double[warm.rank()][v];
+            for (int i = 0; i < v; i++) {
+                final Integer row = warm.indexOf(vocabulary[i]);
+                if (row == null) continue;
+                for (int r = 0; r < start.length; r++) start[r][i] = warm.embedding[row][r];
+            }
+        }
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(ppmi, k, true, start);
         final double[][] embedding = new double[v][k];
         final double[] eigenvalues = new double[k];
         for (int r = 0; r < k; r++) {
-            final double[] vector = eigen[r + 1];
-            eigenvalues[r] = eigen[0][r];
+            final double[] vector = eigen.vectors()[r];
+            eigenvalues[r] = eigen.values()[r];
             final double scale = Svd.sign(vector) * Math.sqrt(Math.abs(eigenvalues[r]));
             for (int i = 0; i < v; i++) embedding[i][r] = scale * vector[i];
         }

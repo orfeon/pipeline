@@ -270,4 +270,43 @@ public class SpectralTest {
         Assertions.assertTrue(Spectral.fromJson(com.google.gson.JsonParser.parseString(Spectral.fit(new Spectral.PairCounts(), 2, 256, false).toJson().toString()).getAsJsonObject()).isEmpty());
     }
 
+    /** Sequences over 200 values in ten communities: a value is followed by one of its own kind, now and then by any. */
+    private static Spectral.PairCounts communities(final int steps, final long seed) {
+        final Random random = new Random(seed);
+        final Spectral.PairCounts state = new Spectral.PairCounts();
+        int community = 0;
+        String before = "v000";
+        for (int i = 0; i < steps; i++) {
+            if (random.nextDouble() < 0.15) community = random.nextInt(10);
+            final String value = String.format("v%03d", community * 20 + random.nextInt(20));
+            state.add(value, before, 1);
+            before = value;
+        }
+        return state;
+    }
+
+    /**
+     * Beyond {@link SymmetricEigen#DENSE_LIMIT} values only the leading components are solved for, iteratively. The fit
+     * of the block before is the start a forward fit gives it — its coordinates, row by row of the new vocabulary,
+     * whose order has changed with the masses: it changes how long the solve takes, not the embedding.
+     */
+    @Test
+    public void testLargeVocabularyAndWarmStart() {
+        final Spectral.PairCounts earlier = communities(40_000, 1);
+        final Spectral.PairCounts later = communities(40_000, 1);
+        later.merge(communities(4_000, 2));
+        final Spectral before = Spectral.fit(earlier, 4, 256, false);
+        Assertions.assertTrue(before.vocabulary.length > SymmetricEigen.DENSE_LIMIT, before.vocabulary.length + " values");
+        final Spectral cold = Spectral.fit(later, 4, 256, false);
+        final Spectral warm = Spectral.fit(later, 4, 256, false, before);
+        Assertions.assertArrayEquals(cold.vocabulary, warm.vocabulary);
+        Assertions.assertArrayEquals(cold.eigenvalues, warm.eigenvalues, 1e-9);
+        for (final String value : cold.vocabulary) Assertions.assertArrayEquals(cold.embed(value), warm.embed(value), 1e-7, value);
+        // the communities are what the leading components see: a value sits closer to its own kind than to another
+        Assertions.assertTrue(cosine(cold.embed("v001"), cold.embed("v002")) > cosine(cold.embed("v001"), cold.embed("v101")));
+        // a start from an empty fit, or none, is the cold solve
+        final Spectral empty = Spectral.fit(new Spectral.PairCounts(), 4, 256, false);
+        for (final String value : cold.vocabulary) Assertions.assertArrayEquals(cold.embed(value), Spectral.fit(later, 4, 256, false, empty).embed(value), 0, value);
+    }
+
 }
