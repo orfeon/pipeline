@@ -456,6 +456,12 @@ public class FeatureSpec implements Serializable {
         /** fit.mode forward: rows with fewer usable preceding blocks (with data for the key) read null. */
         public Integer minBlocks;
         /**
+         * The fewest rows a lookup fit (smooth / svd / quantileTransform / spectralEmbedding) is solved from; a fit —
+         * the whole input's, or one time-block window's under forward — with fewer contributes null. Null = the type's
+         * default (smooth: one more than its coefficients; the others: no floor), 0 = no floor.
+         */
+        public Integer minRows;
+        /**
          * fit.mode forward: the range of blocks a row reads, {@code (usable − window, usable]}, rounded up to whole
          * blocks — the block-level default of a keySet {@code window.maxAge}, and the window of a static-fit block
          * (svd) that has no keySet. Null = every usable block.
@@ -532,6 +538,11 @@ public class FeatureSpec implements Serializable {
             if (minBlocks != null) {
                 if (minBlocks < 1) diagnostics.error("fit.minBlocks", loc, "fit.minBlocks must be >= 1: " + minBlocks);
                 else spec.minBlocks = minBlocks;
+            }
+            final Integer minRows = Json.integer(fit, "minRows");
+            if (minRows != null) {
+                if (minRows < 0) diagnostics.error("fit.minRows", loc, "fit.minRows must be >= 0 (0 = no floor): " + minRows);
+                else spec.minRows = minRows;
             }
             // the fit window (a duration on the time axis; ISO-8601 like blocks.size) and the minimum history
             if (fit.has("window") && !fit.get("window").isJsonNull()) {

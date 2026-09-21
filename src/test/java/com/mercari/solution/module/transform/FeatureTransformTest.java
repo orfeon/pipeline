@@ -1706,7 +1706,7 @@ public class FeatureTransformTest {
                     - {name: pc, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2}
                     - {name: pc_again, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {artifact: {uri: "%1$s"}}}
                     - {name: pc_forward, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {mode: forward, blocks: {size: P7D}}}
-                    - {name: bid_curve, scope: population, type: smooth, input: start_price, target: current_bid_t10, range: [0, 250], segments: 4, penalty: {lambda: 1000000000}}
+                    - {name: bid_curve, scope: population, type: smooth, input: start_price, target: current_bid_t10, range: [0, 250], segments: 4, penalty: {lambda: 1000000000}, fit: {minRows: 0}}
                 """.formatted(dir);
         // reserve_price: declared, never present in a row
         final String source = SOURCE_CONFIG.replace("        - {name: final_price, type: float64}\n",
@@ -2354,7 +2354,7 @@ public class FeatureTransformTest {
                       segments: 5
                       penalty: {lambda: 1000000000}
                       outputs: [curve, residual]
-                      fit: {artifact: "%s"}
+                      fit: {artifact: "%s", minRows: 0}
                     - name: resid_enc
                       scope: population
                       type: encoding
@@ -2409,6 +2409,47 @@ public class FeatureTransformTest {
         Assertions.assertEquals(2.0, json.get("edf").getAsDouble(), 1e-3);
     }
 
+    /**
+     * A whole-input fit the fit.minRows floor empties is NOT persisted: a later run adopts an existing artifact instead
+     * of fitting, so a stored empty model would turn "not enough rows yet" into "never". Six rows are fewer than the
+     * nine a curve of eight coefficients asks for by default: every row reads null and the artifact directory stays
+     * without a curve — while the same block with the floor switched off writes it ({@link #testSmooth}).
+     */
+    @Test
+    public void testFlooredFitWritesNoArtifact() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: price_curve
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      fit: {artifact: "%s"}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                Assertions.assertNull(row.getPrimitiveValue("f_price_curve"));
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+        final List<String> written = new ArrayList<>();
+        final java.io.File root = new java.io.File(dir);
+        if (root.exists()) {
+            try (java.util.stream.Stream<java.nio.file.Path> files = java.nio.file.Files.walk(root.toPath())) {
+                files.filter(p -> p.getFileName().toString().endsWith(".smooth.json")).forEach(p -> written.add(p.toString()));
+            }
+        }
+        Assertions.assertTrue(written.isEmpty(), written::toString);
+    }
+
     private static final String ADDITIVE_BLOCKS = """
                     - name: by_price
                       scope: population
@@ -2419,6 +2460,7 @@ public class FeatureTransformTest {
                       segments: 5
                       penalty: {lambda: 1000000000}
                       outputs: [curve, residual]
+                      fit: {minRows: 0}
                     - name: by_quantity
                       scope: population
                       type: smooth
@@ -2427,6 +2469,7 @@ public class FeatureTransformTest {
                       range: [1, 4]
                       segments: 3
                       penalty: {lambda: 1000000000}
+                      fit: {minRows: 0}
                     - name: additive
                       scope: row
                       expr: "by_price + by_quantity"
@@ -2556,8 +2599,25 @@ public class FeatureTransformTest {
                       range: [0, 250]
                       segments: 5
                       penalty: {order: 1, lambda: 1000000000}
-                      fit: {mode: forward, blocks: {size: P7D}}
+                      fit: {mode: forward, blocks: {size: P7D}, minRows: 0}
                     - name: price_reml
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      fit: {mode: forward, blocks: {size: P7D}, minRows: 0}
+                    - name: price_floor
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {order: 1, lambda: 1000000000}
+                      fit: {mode: forward, blocks: {size: P7D}, minRows: 4}
+                    - name: price_default
                       scope: population
                       type: smooth
                       input: start_price
@@ -2580,6 +2640,12 @@ public class FeatureTransformTest {
             Assertions.assertEquals(50.0, byKey.get("C/s1").getAsDouble("f_price_curve"), 1e-3);
             Assertions.assertEquals(50.0, byKey.get("C/s2").getAsDouble("f_price_curve"), 1e-3);
             Assertions.assertEquals(63.4, byKey.get("D/s1").getAsDouble("f_price_curve"), 1e-3);
+            // fit.minRows: three rows behind C are fewer than 4 — no curve — and the five behind D are enough; without a
+            // declared floor a curve needs one row more than it has coefficients (8 + 1), which no window of this input holds
+            Assertions.assertNull(byKey.get("C/s1").getPrimitiveValue("f_price_floor"));
+            Assertions.assertNull(byKey.get("C/s2").getPrimitiveValue("f_price_floor"));
+            Assertions.assertEquals(63.4, byKey.get("D/s1").getAsDouble("f_price_floor"), 1e-3);
+            for (final String key : SMOOTH_KEYS) Assertions.assertNull(byKey.get(key).getPrimitiveValue("f_price_default"), key);
             // three rows behind C, five behind D: a curve exists and stays within the targets it was fitted on
             for (final String key : List.of("C/s1", "C/s2", "D/s1")) {
                 final double v = byKey.get(key).getAsDouble("f_price_reml");

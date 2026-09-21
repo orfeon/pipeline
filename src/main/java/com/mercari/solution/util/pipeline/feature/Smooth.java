@@ -41,10 +41,17 @@ public final class Smooth implements Serializable, FitArtifact.Model {
     public static final int DEFAULT_PENALTY_ORDER = 2;
     /** Basis functions a block may span: the fit state is (m + 1)² doubles per time block. */
     public static final int MAX_BASIS = 64;
+    public static final String POLYNOMIAL = "polynomial", UNPENALISED = "unpenalised";
 
     /** REML search: decades around the scale tr(XᵀX) / tr(P), the grid step, and the refinement iterations. */
     private static final double SEARCH_DECADES = 8, SEARCH_STEP = 0.5;
     private static final int REFINE_ITERATIONS = 40;
+    /**
+     * How close (in the criterion, which is −2 log restricted likelihood up to a constant) the best searched strength
+     * must come to an END of the search for that end to be taken instead: a restricted-likelihood ratio of
+     * exp(0.005), far below anything the data can tell apart.
+     */
+    private static final double LIMIT_TOLERANCE = 1e-2;
 
     /**
      * Uniform B-splines of {@code degree} over {@code segments} equal intervals of {@code [lo, hi]}: {@code segments +
@@ -92,6 +99,15 @@ public final class Smooth implements Serializable, FitArtifact.Model {
     public final double lambda;
     /** Whether {@link #lambda} was chosen by REML (else declared). */
     public final boolean estimated;
+    /**
+     * Set when REML could not tell its best strength from an end of the searched range (the criterion there within
+     * {@code LIMIT_TOLERANCE} of the minimum): {@link #POLYNOMIAL} (λ → ∞, the curve is the penalty's polynomial)
+     * or {@link #UNPENALISED} (λ → 0). Towards such a limit the criterion flattens into a plateau, on which a
+     * minimiser returns whichever point rounding favours — two correct implementations then report strengths decades
+     * apart for the same curve. {@link #lambda} is that end of the search instead, a fixed number. Null for a
+     * minimum the data does locate, and for a declared strength.
+     */
+    public final String limit;
     /** One coefficient per basis function; empty when nothing could be fitted (every key maps to null). */
     public final double[] coefficients;
     /** Effective degrees of freedom {@code tr((XᵀX + λP)⁻¹XᵀX)}: {@code penaltyOrder} = a polynomial, {@code basis.size()} = unpenalised. */
@@ -100,12 +116,13 @@ public final class Smooth implements Serializable, FitArtifact.Model {
     public final double sigma2;
     public final long n;
 
-    Smooth(final Basis basis, final int penaltyOrder, final double lambda, final boolean estimated,
+    Smooth(final Basis basis, final int penaltyOrder, final double lambda, final boolean estimated, final String limit,
            final double[] coefficients, final double edf, final double sigma2, final long n) {
         this.basis = basis;
         this.penaltyOrder = penaltyOrder;
         this.lambda = lambda;
         this.estimated = estimated;
+        this.limit = limit;
         this.coefficients = coefficients;
         this.edf = edf;
         this.sigma2 = sigma2;
@@ -197,6 +214,7 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         }
         final Solver solver = new Solver(a, r, p, yy, n, penaltyOrder, traceA / m * 1e-10);
         final double chosen;
+        String limit = null;
         if (lambda != null) {
             chosen = lambda;
         } else {
@@ -208,19 +226,32 @@ public final class Smooth implements Serializable, FitArtifact.Model {
                         traceA, traceP, m, penaltyOrder);
                 return empty(basis, penaltyOrder, moments.n);
             }
-            double best = Double.NaN, bestValue = Double.POSITIVE_INFINITY;
-            for (double e = center - SEARCH_DECADES; e <= center + SEARCH_DECADES + 1e-9; e += SEARCH_STEP) {
+            final double first = center - SEARCH_DECADES;
+            double best = Double.NaN, bestValue = Double.POSITIVE_INFINITY, last = first, firstValue = Double.NaN, lastValue = Double.NaN;
+            boolean atFirst = true;
+            for (double e = first; e <= center + SEARCH_DECADES + 1e-9; e += SEARCH_STEP) {
                 final double value = solver.reml(Math.pow(10, e));
                 if (value < bestValue) {
                     bestValue = value;
                     best = e;
                 }
+                if (atFirst) {
+                    firstValue = value;
+                    atFirst = false;
+                }
+                last = e;
+                lastValue = value;
             }
             if (Double.isNaN(best)) {
                 if (warn) LOG.warn("smooth: the penalised system could not be solved at any strength (n = {}); no curve", moments.n);
                 return empty(basis, penaltyOrder, moments.n);
             }
-            chosen = Math.pow(10, refine(solver, best - SEARCH_STEP, best + SEARCH_STEP));
+            // a best strength the criterion cannot tell from an end of the search is that limit (see `limit`): the
+            // heavier end first — of two indistinguishable curves the polynomial is the simpler one
+            if (lastValue - bestValue <= LIMIT_TOLERANCE) limit = POLYNOMIAL;
+            else if (firstValue - bestValue <= LIMIT_TOLERANCE) limit = UNPENALISED;
+            chosen = Math.pow(10, POLYNOMIAL.equals(limit) ? last : UNPENALISED.equals(limit) ? first
+                    : refine(solver, best - SEARCH_STEP, best + SEARCH_STEP));
         }
         // one factorisation of (A + λP) serves the coefficients and the effective degrees of freedom
         final double[][] factor = solver.factor(chosen);
@@ -233,11 +264,11 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         final double rss = solver.rss(beta);
         final double sigma2 = n - edf > 0 ? rss / (n - edf) : Double.NaN;
         for (int i = 0; i < m; i++) beta[i] += mean[m];
-        return new Smooth(basis, penaltyOrder, chosen, lambda == null, beta, edf, sigma2, moments.n);
+        return new Smooth(basis, penaltyOrder, chosen, lambda == null, limit, beta, edf, sigma2, moments.n);
     }
 
     private static Smooth empty(final Basis basis, final int penaltyOrder, final long n) {
-        return new Smooth(basis, penaltyOrder, Double.NaN, false, new double[0], 0, Double.NaN, n);
+        return new Smooth(basis, penaltyOrder, Double.NaN, false, null, new double[0], 0, Double.NaN, n);
     }
 
     /** Golden-section minimisation of the REML criterion over log10 λ in {@code [lo, hi]} (a fixed iteration count: deterministic). */
@@ -383,6 +414,7 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         json.addProperty("penaltyOrder", penaltyOrder);
         json.addProperty("n", n);
         json.addProperty("estimated", estimated);
+        if (limit != null) json.addProperty("limit", limit);
         // JSON has no ±Infinity / NaN: an empty fit has no strength, and a saturated one no variance, so those go
         // through the shared writer that keeps a finite value a number and falls back to its string form otherwise
         json.add("lambda", FitArtifact.lambdaJson(lambda));
@@ -403,7 +435,7 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         final Basis basis = new Basis(json.get("lo").getAsDouble(), json.get("hi").getAsDouble(), json.get("segments").getAsInt(), json.get("degree").getAsInt());
         // getAsDouble accepts both forms lambdaJson writes (a number, or its string form when non-finite)
         return new Smooth(basis, json.get("penaltyOrder").getAsInt(), json.get("lambda").getAsDouble(),
-                json.get("estimated").getAsBoolean(), coefficients, json.get("edf").getAsDouble(),
+                json.get("estimated").getAsBoolean(), json.has("limit") ? json.get("limit").getAsString() : null, coefficients, json.get("edf").getAsDouble(),
                 json.get("sigma2").getAsDouble(), n.getAsLong());
     }
 
