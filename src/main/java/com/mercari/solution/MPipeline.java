@@ -113,7 +113,8 @@ public class MPipeline {
                 }
                 report.append("  output ").append(entry.getKey()).append(": ").append(entry.getValue().getSchema()).append('\n');
             }
-            LOG.info(report.toString());
+            // the deliverable of a dry run, printed once: the log goes to the same console, so logging it too
+            // shows every line of the report twice (the feature transform prints its plan the same way)
             System.out.println(report);
             return;
         }

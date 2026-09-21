@@ -268,6 +268,20 @@ public class RatingTest {
         Assertions.assertNull(pooledMu.getCoordinates().get("filter"));
         Assertions.assertEquals(List.of("category"), pooled.getStages().stream().filter(s -> s.columnNames().contains(pooledMu.getCanonicalName())).findFirst().orElseThrow().keys());
         Assertions.assertFalse(hasCode(pooled, "sequence.rating.globalKey"), pooled::describe);
+
+        // the rating over everything next to the one per pool, in one block (their gap is the usual feature): a filter
+        // has no token, so both windows are `all` until the pooled one is named — two states, two stages
+        final String windows = "    entity: seller\n    windows: [{}, {filter: \"category = $self.category\"%s}]\n    ops:";
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("    entity: seller\n    ops:", windows.formatted(""))), "column.duplicate"));
+        final FeaturePlan both = compile(SPEC.replace("    entity: seller\n    ops:", windows.formatted(", as: byCategory")));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        final OutputColumn whole = both.getColumn("skill_all_final_price_rating_mu"), perPool = both.getColumn("skill_byCategory_final_price_rating_mu");
+        Assertions.assertNotNull(perPool, both::describe);
+        Assertions.assertEquals("", whole.getCoordinates().get("stageKeys"));
+        Assertions.assertEquals("category", perPool.getCoordinates().get("stageKeys"));
+        Assertions.assertEquals("skill_byCategory_final_price_rating", perPool.getCoordinates().get("stateKey"));
+        Assertions.assertNotEquals(whole.getCoordinates().get("stateKey"), perPool.getCoordinates().get("stateKey"));
+        Assertions.assertNotNull(both.getColumn("skill_byCategory_elo_mu"), both::describe);
     }
 
     @Test
