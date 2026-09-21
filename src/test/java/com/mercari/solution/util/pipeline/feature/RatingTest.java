@@ -307,6 +307,295 @@ public class RatingTest {
         }
     }
 
+
+    /**
+     * A rating without a team is the arithmetic it was before teams existed, to the last bit: the hash of every
+     * (mu, sigma, delta, count) bit pattern after 400 seeded contests — ties, players holding several rows, drift per
+     * contest and in time, every method and pairing — recorded from the implementation that knew players only. A team
+     * of one member shares its change by v / v = 1, starts its sums from the member (not from 0) and clamps after the
+     * share, so nothing may move.
+     */
+    @Test
+    public void testPlayerArithmeticIsUnchangedByTeams() {
+        long hash = 17;
+        for (final Rating.Method method : Rating.Method.values()) {
+            for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
+                for (final Long tauPer : method == Rating.Method.elo ? new Long[]{null} : new Long[]{null, 3 * DAY}) {
+                    final Rating rating = Rating.of(method, true, null, null, null, method == Rating.Method.elo ? null : 1.5, null, null, tauPer, pairs,
+                            List.of("p"), List.of("c"), "y");
+                    final Rating.State state = new Rating.State();
+                    final Random random = new Random(20260921);
+                    long millis = 1_700_000_000_000L;
+                    for (int contest = 0; contest < 400; contest++) {
+                        millis += random.nextInt(10) * DAY / 2;
+                        final List<Rating.Entry> entries = new ArrayList<>();
+                        final int size = 2 + random.nextInt(9);
+                        for (int i = 0; i < size; i++) entries.add(entry("p" + random.nextInt(30), random.nextInt(6)));
+                        rating.update(state, entries, millis);
+                    }
+                    final List<String> names = new ArrayList<>(state.players.keySet());
+                    Collections.sort(names);
+                    for (final String name : names) {
+                        final Rating.Player player = state.players.get(name);
+                        for (final double value : new double[]{player.mu, player.sigma, player.delta}) hash = 31 * hash + Double.doubleToLongBits(value);
+                        hash = 31 * hash + player.count;
+                    }
+                }
+            }
+        }
+        Assertions.assertEquals(-8448840406834037034L, hash);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // teams: a row rated as the sum of its members
+    // ------------------------------------------------------------------------------------------
+
+    private static final double PRIOR_SIGMA = 25d / 3;
+
+    /** A rating of teams of two: the seller (pool "seller", the rating's own prior) and an agent with the prior given. */
+    private static Rating duo(final Rating.Method method, final Double tau, final Long tauPerMillis, final double agentMu, final double agentSigma) {
+        final Rating solo = Rating.of(method, true, null, null, null, tau, null, null, tauPerMillis, null, List.of("seller_id"), List.of("c"), "y");
+        return solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), agentMu, agentSigma, tau == null ? Rating.defaultTau(PRIOR_SIGMA) : tau)));
+    }
+
+    private static Rating.Entry team(final String seller, final String agent, final double outcome) {
+        return new Rating.Entry(List.of("seller\u0001" + seller, "agent\u0001" + agent), outcome);
+    }
+
+    private static Rating.Player player(final double mu, final double sigma, final long lastMillis) {
+        final Rating.Player player = new Rating.Player();
+        player.mu = mu;
+        player.sigma = sigma;
+        player.lastMillis = lastMillis;
+        return player;
+    }
+
+    /**
+     * The team form by hand (no drift, two teams — where both Bayesian rules agree). Two fresh members a side share
+     * the team's change in halves; next to a settled member (sigma 2) a fresh one holds 94.6% of the team's variance
+     * and takes that part of the update: the known member hardly moves.
+     */
+    @Test
+    public void testTeamUpdateIsSharedByVariance() {
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce)) {
+            final Rating rating = duo(method, 0d, null, 25d, PRIOR_SIGMA);
+            final Rating.State fresh = new Rating.State();
+            rating.update(fresh, List.of(team("s1", "a1", 1), team("s2", "a2", 2)));
+            for (final String winner : List.of("seller\u0001s1", "agent\u0001a1")) {
+                Assertions.assertEquals(26.964185503295965, fresh.players.get(winner).mu, 1e-9, method + " " + winner);
+                Assertions.assertEquals(8.17755635771097, fresh.players.get(winner).sigma, 1e-9, method + " " + winner);
+                Assertions.assertEquals(1L, fresh.players.get(winner).count);
+            }
+            Assertions.assertEquals(23.035814496704035, fresh.players.get("agent\u0001a2").mu, 1e-9, method.name());
+            // by hand: v = 2 · sigma², c² = 2v + 2β², Ω = v / c / 2, Δ = sqrt(v) / c · v / c² / 4, a half each
+            final double v = 2 * PRIOR_SIGMA * PRIOR_SIGMA, beta = PRIOR_SIGMA / 2, c = Math.sqrt(2 * v + 2 * beta * beta);
+            Assertions.assertEquals(25 + 0.5 * (v / c / 2), fresh.players.get("seller\u0001s1").mu, 1e-12);
+            Assertions.assertEquals(PRIOR_SIGMA * Math.sqrt(1 - 0.5 * (Math.sqrt(v) / c * v / (c * c) / 4)), fresh.players.get("seller\u0001s1").sigma, 1e-12);
+
+            // a settled seller with a fresh agent, on both sides
+            final Rating.State settled = new Rating.State();
+            for (final String seller : List.of("s1", "s2")) settled.players.put("seller\u0001" + seller, player(25, 2.0, 0));
+            rating.update(settled, List.of(team("s1", "a1", 1), team("s2", "a2", 2)));
+            Assertions.assertEquals(25.148408504215848, settled.players.get("seller\u0001s1").mu, 1e-9, method.name());
+            Assertions.assertEquals(1.9964953348276537, settled.players.get("seller\u0001s1").sigma, 1e-9, method.name());
+            Assertions.assertEquals(27.57653653152513, settled.players.get("agent\u0001a1").mu, 1e-9, method.name());
+            Assertions.assertEquals(8.07606386511803, settled.players.get("agent\u0001a1").sigma, 1e-9, method.name());
+            final double sellerMove = settled.players.get("seller\u0001s1").delta, agentMove = settled.players.get("agent\u0001a1").delta;
+            Assertions.assertEquals(4.0 / (4.0 + PRIOR_SIGMA * PRIOR_SIGMA), sellerMove / (sellerMove + agentMove), 1e-12, "the share is the part of the variance");
+
+            // the shares add up to the team's change: the team moves as ONE player of its summed strength moves
+            final Rating one = Rating.of(method, true, 50d, Math.sqrt(4.0 + PRIOR_SIGMA * PRIOR_SIGMA), beta, 0d, null, null, List.of("p"), List.of("c"), "y");
+            final Rating.State single = new Rating.State();
+            one.update(single, List.of(entry("t1", 1), entry("t2", 2)));
+            Assertions.assertEquals((Double) one.read(single, "t1", "delta"), sellerMove + agentMove, 1e-12, method.name());
+            Assertions.assertEquals((Double) one.read(single, "t1", "mu"), rating.readTeam(settled, List.of("seller\u0001s1", "agent\u0001a1"), "mu", Long.MIN_VALUE), 1e-12);
+        }
+    }
+
+    /**
+     * A member of several teams of one contest receives the sum of its shares, the rows of one team are not compared
+     * with each other, and nothing depends on the order the rows arrive in — with ties, a shared agent, a shared seller
+     * and a team holding two rows, under every method and pairing, to the last bit.
+     */
+    @Test
+    public void testTeamContestIsOrderFree() {
+        final List<Rating.Entry> contest = List.of(team("s1", "a1", 1), team("s2", "a1", 2), team("s3", "a2", 2), team("s1", "a2", 4),
+                team("s4", "a3", 5), team("s4", "a3", 3), team("s5", "a4", 6));
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce)) {
+            for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
+                final Rating rating = Rating.of(method, true, null, null, null, null, null, null, null, pairs, List.of("seller_id"), List.of("c"), "y")
+                        .withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 3d, 0.05)));
+                final Rating.State ordered = new Rating.State();
+                rating.update(ordered, contest);
+                for (int seed = 0; seed < 5; seed++) {
+                    final List<Rating.Entry> rows = new ArrayList<>(contest);
+                    Collections.shuffle(rows, new Random(seed));
+                    final Rating.State shuffled = new Rating.State();
+                    rating.update(shuffled, rows);
+                    Assertions.assertEquals(ordered.players.keySet(), shuffled.players.keySet());
+                    for (final String name : ordered.players.keySet()) {
+                        Assertions.assertEquals(ordered.players.get(name).mu, shuffled.players.get(name).mu, 0d, method + " " + pairs + " " + name);
+                        Assertions.assertEquals(ordered.players.get(name).sigma, shuffled.players.get(name).sigma, 0d, method + " " + pairs + " " + name);
+                    }
+                }
+                // one contest, one count — for the agent of two teams and the team of two rows alike
+                for (final Rating.Player player : ordered.players.values()) Assertions.assertEquals(1L, player.count);
+                Assertions.assertEquals(9, ordered.players.size(), "five sellers and four agents, in their own pools");
+                // an agent reads its own prior until it is rated, a seller the rating's
+                Assertions.assertEquals(0d, (Double) rating.read(ordered, 1, "agent\u0001never", "mu", Long.MIN_VALUE), 0d);
+                Assertions.assertEquals(3d, (Double) rating.read(ordered, 1, "agent\u0001never", "sigma", Long.MIN_VALUE), 0d);
+                Assertions.assertEquals(25d, (Double) rating.read(ordered, "seller\u0001never", "mu"), 0d);
+            }
+        }
+        // a contest of one team (its two rows) is no contest
+        final Rating rating = duo(Rating.Method.plackettLuce, 0d, null, 0d, 3d);
+        final Rating.State none = new Rating.State();
+        rating.update(none, List.of(team("s4", "a3", 5), team("s4", "a3", 3)));
+        Assertions.assertTrue(none.players.isEmpty());
+    }
+
+    /**
+     * Under a drift in time every member carries the absence of its own: the one that stayed away enters the contest
+     * wider, holds the larger part of the team's variance and takes the larger part of the update — and the team's
+     * sigma a row reads is that of its members as of the row.
+     */
+    @Test
+    public void testTeamMembersDriftOnTheirOwn() {
+        final Rating rating = duo(Rating.Method.plackettLuce, 2d, 30 * DAY, 25d, PRIOR_SIGMA);
+        final long now = 1_700_000_000_000L;
+        final Rating.State state = new Rating.State();
+        // both members of both teams settled at sigma 2; the sellers competed yesterday, agent a1 300 days ago
+        for (final String seller : List.of("s1", "s2")) state.players.put("seller\u0001" + seller, player(25, 2, now - DAY));
+        state.players.put("agent\u0001a1", player(25, 2, now - 300 * DAY));
+        state.players.put("agent\u0001a2", player(25, 2, now - DAY));
+        final List<String> rested = List.of("seller\u0001s1", "agent\u0001a1");
+        Assertions.assertEquals(Math.sqrt((4 + 4d / 30) + (4 + 4d * 10)), rating.readTeam(state, rested, "sigma", now), 1e-12);
+        Assertions.assertEquals(Math.sqrt(8d), rating.readTeam(state, rested, "sigma", Long.MIN_VALUE), 1e-12, "without a time: the state itself");
+        Assertions.assertEquals(50d, rating.readTeam(state, rested, "mu", now), 0d);
+        rating.update(state, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), now);
+        final double seller = state.players.get("seller\u0001s1").delta, agent = state.players.get("agent\u0001a1").delta;
+        Assertions.assertEquals((4 + 4d * 10) / (4 + 4d / 30), agent / seller, 1e-9, "the shares are the drifted variances");
+        Assertions.assertTrue(agent > 10 * seller);
+        Assertions.assertEquals(now, state.players.get("agent\u0001a1").lastMillis);
+        // in the other team nobody rested: equal shares
+        Assertions.assertEquals(state.players.get("seller\u0001s2").delta, state.players.get("agent\u0001a2").delta, 1e-12);
+    }
+
+    /** Rows to teams: the pools keep a seller and an agent of one id apart, and a row missing a member joins no contest. */
+    @Test
+    public void testTeamsFromRows() {
+        final Rating rating = duo(Rating.Method.bradleyTerry, 0d, null, 0d, 3d);
+        Assertions.assertEquals(2, rating.members().size());
+        final java.util.function.Function<String[], SequenceEvaluator.Past> row = f -> {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("c", f[0]);
+            values.put("seller_id", f[1]);
+            values.put("agent_id", f[2]);
+            values.put("y", Double.valueOf(f[3]));
+            return new SequenceEvaluator.Past(1_000L, values);
+        };
+        final Rating.State state = new Rating.State();
+        // the id "x" is a seller in one row and an agent in another; the last row has no agent
+        rating.fold(state, List.of(row.apply(new String[]{"c1", "x", "a1", "1"}), row.apply(new String[]{"c1", "s2", "x", "2"}),
+                row.apply(new String[]{"c1", "s3", null, "3"})));
+        final Map<String, Object> first = row.apply(new String[]{"c1", "x", "a1", "1"}).values(), second = row.apply(new String[]{"c1", "s2", "x", "2"}).values();
+        final String sellerX = rating.memberKey(first, 0), agentX = rating.memberKey(second, 1);
+        Assertions.assertTrue(sellerX.startsWith("seller\u0001") && agentX.startsWith("agent\u0001"), sellerX + " " + agentX);
+        Assertions.assertEquals(sellerX.substring("seller".length()), agentX.substring("agent".length()), "the same id, apart by the pool alone");
+        Assertions.assertEquals(java.util.Set.of(sellerX, rating.memberKey(first, 1), rating.memberKey(second, 0), agentX), state.players.keySet());
+        Assertions.assertTrue(state.players.get(sellerX).mu > 25 && state.players.get(agentX).mu < 0);
+        Assertions.assertEquals(List.of(sellerX, rating.memberKey(first, 1)), rating.teamOf(first));
+        final Map<String, Object> incomplete = row.apply(new String[]{"c2", "x", null, "1"}).values();
+        Assertions.assertNull(rating.teamOf(incomplete));
+        Assertions.assertNull(rating.readTeam(state, rating.teamOf(incomplete), "mu", 2_000L));
+        Assertions.assertEquals(sellerX, rating.player(incomplete), "the seller still reads its rating");
+        Assertions.assertTrue((Double) rating.read(state, rating.player(incomplete), "mu") > 25);
+        Assertions.assertNull(rating.memberKey(incomplete, 1));
+        Assertions.assertNull(rating.read(state, 1, rating.memberKey(incomplete, 1), "mu", 2_000L));
+        // a team of members never seen reads the priors: 25 + 0, sqrt(sigma² + 3²)
+        final Map<String, Object> unseen = row.apply(new String[]{"c2", "new", "new", "1"}).values();
+        Assertions.assertEquals(25d, rating.readTeam(state, rating.teamOf(unseen), "mu", 2_000L), 0d);
+        Assertions.assertEquals(Math.sqrt(PRIOR_SIGMA * PRIOR_SIGMA + 9), rating.readTeam(state, rating.teamOf(unseen), "sigma", 2_000L), 1e-12);
+        Assertions.assertEquals(25d, rating.readTeam(null, rating.teamOf(unseen), "mu", 2_000L), 0d, "nothing folded yet");
+
+        // what a team cannot be
+        final Rating solo = rating(Rating.Method.plackettLuce, true, 0d);
+        final List<Rating.Member> agent = List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 3d, 0d));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.elo, true, null).withTeam("seller", agent), "elo has no variance to share by");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("agent", agent), "one pool twice");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam(null, agent));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 0d, 0d))), "sigma 0");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.update(new Rating.State(), List.of(entry("a", 1), entry("b", 2))), "a player in a rating of teams");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), "count", 0L));
+    }
+
+    /**
+     * What the team form is for. Sellers (skill sd 4) work with agents (skill sd 2); an agent keeps a small stable of
+     * sellers and a seller leaves it for a random agent one time in four. The performance of a row is the sum of both
+     * skills and noise. Rated alone, an agent's rating is its skill PLUS the quality of its stable — the company it
+     * keeps; rated as a member of the team, the seller's part goes to the seller. The correlation of the agents' mu with
+     * their true skill tells the two apart.
+     */
+    @Test
+    public void testTeamRatingSeparatesAMemberFromItsCompany() {
+        for (int seed = 1; seed <= 10; seed++) separates(seed);
+    }
+
+    private static void separates(final int seed) {
+        final Random random = new Random(seed);
+        final int sellers = 200, agents = 20;
+        final double[] sellerSkill = new double[sellers], agentSkill = new double[agents];
+        final int[] stable = new int[sellers];
+        for (int i = 0; i < sellers; i++) {
+            sellerSkill[i] = 4 * random.nextGaussian();
+            stable[i] = random.nextInt(agents);
+        }
+        for (int j = 0; j < agents; j++) agentSkill[j] = 2 * random.nextGaussian();
+
+        final Rating teams = Rating.of(Rating.Method.plackettLuce, false, null, null, null, null, null, null, List.of("seller_id"), List.of("c"), "y")
+                .withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.04)));
+        final Rating alone = Rating.of(Rating.Method.plackettLuce, false, 0d, 4d, null, 0.04, null, null, List.of("agent_id"), List.of("c"), "y");
+        final Rating.State teamState = new Rating.State(), aloneState = new Rating.State();
+        for (int contest = 0; contest < 1500; contest++) {
+            final List<Rating.Entry> asTeams = new ArrayList<>(), asAgents = new ArrayList<>();
+            final java.util.Set<Integer> drawn = new java.util.HashSet<>();
+            while (drawn.size() < 8) drawn.add(random.nextInt(sellers));
+            for (final int seller : drawn) {
+                final int agent = random.nextInt(4) == 0 ? random.nextInt(agents) : stable[seller];
+                final double performance = sellerSkill[seller] + agentSkill[agent] + 4 * random.nextGaussian();
+                asTeams.add(team("s" + seller, "a" + agent, performance));
+                asAgents.add(entry("a" + agent, performance));
+            }
+            teams.update(teamState, asTeams);
+            alone.update(aloneState, asAgents);
+        }
+        final double[] inTeam = new double[agents], onItsOwn = new double[agents];
+        for (int j = 0; j < agents; j++) {
+            inTeam[j] = (Double) teams.read(teamState, 1, "agent\u0001a" + j, "mu", Long.MIN_VALUE);
+            onItsOwn[j] = (Double) alone.read(aloneState, "a" + j, "mu");
+        }
+        final double team = correlation(inTeam, agentSkill), solo = correlation(onItsOwn, agentSkill);
+        Assertions.assertTrue(team > TEAM_CORRELATION && team > solo + TEAM_MARGIN, "seed " + seed + ": team " + team + " vs alone " + solo);
+    }
+
+    private static double correlation(final double[] a, final double[] b) {
+        double ma = 0, mb = 0;
+        for (int i = 0; i < a.length; i++) {
+            ma += a[i] / a.length;
+            mb += b[i] / a.length;
+        }
+        double sab = 0, saa = 0, sbb = 0;
+        for (int i = 0; i < a.length; i++) {
+            sab += (a[i] - ma) * (b[i] - mb);
+            saa += (a[i] - ma) * (a[i] - ma);
+            sbb += (b[i] - mb) * (b[i] - mb);
+        }
+        return sab / Math.sqrt(saa * sbb);
+    }
+
+    /** Measured over the seeds 1..10: in the team 0.918 to 0.990, alone 0.683 to 0.919 (always lower, by 0.060 at least) - the bounds leave room. */
+    private static final double TEAM_CORRELATION = 0.9, TEAM_MARGIN = 0.04;
+
     @Test
     public void testContestProperties() {
         for (final Rating.Method method : Rating.Method.values()) {

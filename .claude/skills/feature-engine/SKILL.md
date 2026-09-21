@@ -140,7 +140,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   feeds it run by run from the fold pointer, `replay` is the scan reference. With `tauPer` the drift runs on the time since the
   player last competed (`Player.lastMillis` = the run event time) and `read(state, player, func, nowMillis)` adds the drift up to
   the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `Pairs` (`all` / `adjacent` /
-  `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Its columns are *pooled*
+  `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
+  (`withTeam`, pure layer only so far): an `Entry` holds the state keys of its members (`teamOf(row)`, pool-prefixed), the rules
+  run on the summed `(m, v)` unchanged and return `Ω` / raw `Δ`, and `update` shares them by `v_j / v` (clamp AFTER the share).
+  A rating without a team must stay bit-identical — `testPlayerArithmeticIsUnchangedByTeams` holds a hash of the pre-team
+  arithmetic; if it fails, the change moved a player's numbers (sum start, share, clamp position, accumulation order). Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
   `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
   entries sorted by player, and the contests of one event time are applied in context-key order. On the scan path
