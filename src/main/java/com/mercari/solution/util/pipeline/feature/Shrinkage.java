@@ -19,7 +19,8 @@ import java.util.Map;
  *   est(level) = est(parent) + w · (t(mean_level) − est(parent)),  w = n / (n + λ)
  * </pre>
  *
- * with leave-node-out (the leaf's own statistics are subtracted from every ancestor) and, for an
+ * with leave-node-out (the leaf's own statistics are subtracted from every ancestor — the leaf being the deepest
+ * level that has rows, {@link #effectiveLeaf}) and, for an
  * {@code additive} entry, the parent being {@code est(root) + Σ main-effect deviations} (sequential
  * estimator). {@code t} is the declared scale (identity / logit / log); the composed value is returned on
  * the original scale, deviations on the transform scale.
@@ -304,7 +305,11 @@ public final class Shrinkage implements Serializable {
 
     /**
      * Composes the leaf estimate for a lattice given leaf → root. Leave-node-out subtracts the leaf's own
-     * statistics from every ancestor (the leaf's contributions are contained in each of them).
+     * statistics from every ancestor (the leaf's contributions are contained in each of them). The leaf is the
+     * <b>effective</b> one ({@link #effectiveLeaf}): a row whose declared leaf has no rows (a key never seen, or a
+     * null component — the short history of a {@code structure: sequence} path) backs off to a coarser level, and
+     * that level's rows are what its ancestors contain — so the row reads what it would read had the lattice been
+     * declared from that level.
      */
     public Composition compose(final Map<String, Object> row, final List<Level> levels) {
         return compose(row, levels, null);
@@ -316,13 +321,35 @@ public final class Shrinkage implements Serializable {
      */
     public Composition compose(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
         final Double[] deviations = new Double[levels.size()];
-        final Level leaf = levels.get(0);
+        // without leave-node-out nothing is subtracted anywhere, so the effective leaf does not matter
+        final int leafIndex = leaveNodeOut ? effectiveLeaf(row, levels) : 0;
+        final Level leaf = levels.get(leafIndex);
         final double leafN = n(row, leaf.nColumn());
         final double leafSum = n(row, leaf.sumColumn());
         final double leafOff = leaf.offColumn() == null ? 0 : n(row, leaf.offColumn());
         final double[] effectiveN = new double[1];
-        final Double est = estimate(row, levels, 0, leafN, leafSum, leafOff, deviations, effectiveN, lambdas, false);
-        return new Composition(est == null ? null : output(scale, est, leaf.offColumn() != null), deviations, est == null ? null : effectiveN[0]);
+        final Double est = estimate(row, levels, 0, leafIndex, leafN, leafSum, leafOff, deviations, effectiveN, lambdas, false);
+        return new Composition(est == null ? null : output(scale, est, levels.get(0).offColumn() != null), deviations, est == null ? null : effectiveN[0]);
+    }
+
+    /**
+     * The level leave-node-out subtracts: the deepest level of the chain that has rows. The levels below it are empty
+     * (they defer to their parent with a zero deviation), so it is the level the back-off actually starts from.
+     *
+     * <p>A lattice that contains an {@code additive} entry keeps its <b>declared</b> leaf, whatever the chain above it
+     * holds: the main-effect chains behind that entry subtract the cell they generalise — every main level contains
+     * that cell, and an empty cell has nothing to subtract — while a coarser level of the chain (a coarse cross,
+     * §5.3.1) is contained in no main level, so subtracting it there would take a main level's {@code n} below zero
+     * and silently drop its main effect. Cross / additive lattices are therefore unchanged by the back-off.
+     */
+    static int effectiveLeaf(final Map<String, Object> row, final List<Level> levels) {
+        int leaf = -1;
+        for (int i = 0; i < levels.size(); i++) {
+            final Level level = levels.get(i);
+            if (level.isAdditive()) return 0;
+            if (leaf < 0 && n(row, level.nColumn()) > 0) leaf = i;
+        }
+        return leaf < 0 ? 0 : leaf;
     }
 
     /**
@@ -369,7 +396,11 @@ public final class Shrinkage implements Serializable {
         return l == null ? priorWeight : l;
     }
 
-    private Double estimate(final Map<String, Object> row, final List<Level> levels, final int index,
+    /**
+     * @param leafIndex the chain's effective leaf, whose statistics are {@code looN} / {@code looSum} / {@code looOff}:
+     *                  the levels above it contain them; the (empty) levels below it and the leaf itself do not
+     */
+    private Double estimate(final Map<String, Object> row, final List<Level> levels, final int index, final int leafIndex,
                             final double looN, final double looSum, final double looOff, final Double[] deviations, final double[] effectiveN,
                             final Map<String, Double> lambdas, final boolean subtractLeaf) {
         final Level level = levels.get(index);
@@ -377,13 +408,14 @@ public final class Shrinkage implements Serializable {
             // sequential estimator: parent of the cell is the additive prediction of the main effects.
             // every main-effect level also contains the cell's rows, so leave-node-out subtracts the leaf
             // statistics at every level of the main chains (subtractLeaf = true).
-            final Double root = estimate(row, levels, index + 1, looN, looSum, looOff, deviations, effectiveN, lambdas, false);
+            final Double root = estimate(row, levels, index + 1, leafIndex, looN, looSum, looOff, deviations, effectiveN, lambdas, false);
             if (root == null) return null;
             double sum = root;
             for (final List<Level> main : level.mainEffects()) {
                 final Double[] mainDev = new Double[main.size()];
                 final double[] ignored = new double[1];
-                final Double mainEst = estimate(row, main, 0, looN, looSum, looOff, mainDev, ignored, lambdas, true);
+                // a main chain is a list of its own: the leaf is none of its levels (-1), every one of them contains it
+                final Double mainEst = estimate(row, main, 0, -1, looN, looSum, looOff, mainDev, ignored, lambdas, true);
                 if (mainEst != null) sum += mainEst - root;
             }
             deviations[index] = sum - root;
@@ -393,7 +425,7 @@ public final class Shrinkage implements Serializable {
         double s = n(row, level.sumColumn());
         final boolean hasOffset = level.offColumn() != null;
         double off = hasOffset ? n(row, level.offColumn()) : 0;
-        if ((index > 0 || subtractLeaf) && leaveNodeOut) {
+        if ((index > leafIndex || subtractLeaf) && leaveNodeOut) {
             n -= looN;
             s -= looSum;
             off -= looOff;
@@ -403,7 +435,7 @@ public final class Shrinkage implements Serializable {
             effectiveN[0] = n;
             return own;
         }
-        final Double parent = estimate(row, levels, index + 1, looN, looSum, looOff, deviations, effectiveN, lambdas, subtractLeaf);
+        final Double parent = estimate(row, levels, index + 1, leafIndex, looN, looSum, looOff, deviations, effectiveN, lambdas, subtractLeaf);
         if (own == null) {
             deviations[index] = 0d;
             return parent;
@@ -437,11 +469,12 @@ public final class Shrinkage implements Serializable {
      * @param lambdas per-level pseudo-counts keyed by the level's {@code n} column, as in {@link #compose}
      */
     public Composition composeDistribution(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
-        final Level leaf = levels.get(0);
+        final int leafIndex = leaveNodeOut ? effectiveLeaf(row, levels) : 0;
+        final Level leaf = levels.get(leafIndex);
         final double leafN = n(row, leaf.nColumn());
         final Map<String, Double> leafCounts = counts(row, leaf, leafN);
         final double[] effectiveN = new double[1];
-        final Map<String, Double> p = estimateDistribution(row, levels, 0, leafN, leafCounts, effectiveN, lambdas);
+        final Map<String, Double> p = estimateDistribution(row, levels, 0, leafIndex, leafN, leafCounts, effectiveN, lambdas);
         return new Composition(null, null, p == null ? null : effectiveN[0], p);
     }
 
@@ -457,13 +490,13 @@ public final class Shrinkage implements Serializable {
         return counts;
     }
 
-    private Map<String, Double> estimateDistribution(final Map<String, Object> row, final List<Level> levels, final int index,
+    private Map<String, Double> estimateDistribution(final Map<String, Object> row, final List<Level> levels, final int index, final int leafIndex,
                                                      final double looN, final Map<String, Double> looCounts,
                                                      final double[] effectiveN, final Map<String, Double> lambdas) {
         final Level level = levels.get(index);
         double n = n(row, level.nColumn());
         final Map<String, Double> counts = counts(row, level, n);
-        if (index > 0 && leaveNodeOut) {
+        if (index > leafIndex && leaveNodeOut) {
             n -= looN;
             for (final Map.Entry<String, Double> e : looCounts.entrySet()) counts.merge(e.getKey(), -e.getValue(), Double::sum);
         }
@@ -478,7 +511,7 @@ public final class Shrinkage implements Serializable {
             effectiveN[0] = n;
             return own;
         }
-        final Map<String, Double> parent = estimateDistribution(row, levels, index + 1, looN, looCounts, effectiveN, lambdas);
+        final Map<String, Double> parent = estimateDistribution(row, levels, index + 1, leafIndex, looN, looCounts, effectiveN, lambdas);
         if (own == null) return parent;
         if (parent == null) {
             effectiveN[0] = n;

@@ -94,6 +94,7 @@ not expand because another block failed).
 | `ops.invalid` / `ops.type` | error | ops are strings or objects with `type` |
 | `window.invalid` / `window.both` | error | `window` is an object with `maxEvents` / `maxAge` / `filter`; do not use `window` and `windows` together |
 | `window.nearEdge` | error | a window key that would set the near edge; the near edge comes from `ingestionLag` |
+| `window.as` | error | a window's name for the generated columns: letters, digits and `_` starting with a letter — and two windows of a block named the same must select the same rows (`maxAge` / `maxEvents` / `clock` / `filter`), since the statistics behind the name are shared |
 | `filter.parse` / `predicate.parse` | error | the condition text does not parse (Filter grammar) |
 | `filter.quoted` / `predicate.quoted` | info | a column named like a reserved word was quoted automatically |
 | `validFor.alwaysExpired` | warning | the column's `validFor` expires before `predictAt` for every row — the value is always null |
@@ -211,6 +212,7 @@ not expand because another block failed).
 | `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence` |
 | `encoding.keySet.sequence` | error / warning / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain, the warning says the block declares no `shrinkage` so the chain is never composed (raw full-path statistic) |
 | `encoding.keySet.parentRef` / `encoding.keySet.cross` | error | `hierarchy` needs `parentRef`; `cross` needs ≥ 2 keys |
+| `encoding.keySet.as` | error | a keySet's name for the `{keys}` segment of the generated columns: letters, digits and `_` starting with a letter |
 | `encoding.hierarchy.entry` / `encoding.hierarchy.key` | error | entries are key lists, `additive` or `[]`; keys must exist |
 | `encoding.hierarchy.additive` | error | `additive` once, last before `[]`, and the single-key keySets (same windows) must exist in the block |
 | `encoding.hierarchy.scale` | error | a lattice with `additive` needs `shrinkage.scale` |
@@ -222,7 +224,7 @@ not expand because another block failed).
 | `encoding.offset` / `encoding.offset.computeAt` | error | offset must name a baseline; offset blocks compute at `predictAt` |
 | `encoding.offset.additive` | info | offset on a logit / log scale: the composed value is the additive term on that scale (`t(observed) − t(mean baseline)`, shrunk toward the parent's term) — a log-odds / log-rate ratio against the baseline, not a probability / rate |
 | `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |
-| `encoding.shrinkage.joint` | info | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker) |
+| `encoding.shrinkage.joint` | info / error | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker); as error: two keySets of the block (the same keys, one of them named with `as:`) resolve to that one solve with different lattices or shrinkage — declare them in separate blocks |
 | `encoding.shrinkage.weights` | error / info | `fixed \| varianceComponents` (`heldOut` not implemented); as info: variance components are estimated from the whole batch |
 | `encoding.shrinkage.priorWeight` / `.scale` / `.output` | error / warning | numeric ≥ 0 / identity-logit-log / composed-deviations-effectiveN; as warning: `deviations` are not defined for a shrunk `distribution` (none emitted) |
 | `encoding.shrinkage.family` | error | `gaussian \| betaBinomial \| gammaPoisson \| dirichletMultinomial` (default derived from the stat) |

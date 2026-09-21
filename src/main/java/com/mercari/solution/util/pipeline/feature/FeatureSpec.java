@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The "intent" side of the DSL (docs/design/feature-dsl.md §3–§5): the parsed {@code parameters} block of a
@@ -50,14 +51,32 @@ public class FeatureSpec implements Serializable {
         public String clock;
         /** {@code maxAge} on a calendar clock: a number of ticks. */
         public Long maxAgeTicks;
+        /**
+         * The window's name in generated column names, replacing the derived token. A filter has no token of its own, so
+         * a filter-only window is {@code all} — the name of the unconditional window: naming it is what lets the two
+         * stand side by side in one block (a statistic over everything next to the one per {@code $self} pool).
+         */
+        public String as;
 
         /** A window measured on a calendar clock. */
         public boolean onCalendar() {
             return maxAgeTicks != null;
         }
 
-        /** Short token for generated names (§4.3): 365d, n20, 365d_n20, 20trading, all. */
+        /**
+         * Whether two windows select the same rows: the far edge, the count, the clock and the condition. {@code as}
+         * is a display name, not part of the window — two windows are the same window whether or not they are named,
+         * and two windows that select different rows are different however they are named.
+         */
+        public boolean sameBounds(final Window other) {
+            return other != null && Objects.equals(maxAge, other.maxAge) && Objects.equals(maxEvents, other.maxEvents)
+                    && Objects.equals(maxAgeTicks, other.maxAgeTicks) && Objects.equals(clock, other.clock)
+                    && Objects.equals(filter, other.filter);
+        }
+
+        /** Short token for generated names (§4.3): 365d, n20, 365d_n20, 20trading, all — or the declared {@code as}. */
         public String token() {
+            if (as != null) return as;
             final List<String> parts = new ArrayList<>();
             if (maxAge != null) parts.add(Durations.shortName(maxAge));
             if (maxAgeTicks != null) parts.add(maxAgeTicks + clock);
@@ -190,6 +209,12 @@ public class FeatureSpec implements Serializable {
         public String shrinkageJson;
         public String parentRef;
         public Integer maxDepth;
+        /**
+         * The keySet's name in generated column names, replacing the {@code {keys}} segment (the keys joined by
+         * {@code _}) — a path of lag columns is otherwise a name of a hundred characters. The hidden level statistics
+         * keep their key-derived names: they are shared by every keySet of the block whose lattice contains the level.
+         */
+        public String as;
     }
 
     /** One factorization output: {@code pair: [a, b]}, {@code embedding: field (dims)} or {@code sum: true}. */
@@ -883,8 +908,10 @@ public class FeatureSpec implements Serializable {
             keySet.shrinkageJson = ks.has("shrinkage") && ks.get("shrinkage").isJsonObject() ? ks.get("shrinkage").toString() : null;
             keySet.parentRef = Json.string(ks, "parentRef");
             keySet.maxDepth = Json.integer(ks, "maxDepth");
+            keySet.as = nameSegment(ks, "encoding.keySet.as", "keySet", diagnostics, loc + ".keySets");
             def.keySets.add(keySet);
         }
+        checkWindowNames(def, diagnostics, loc);
         for (final JsonObject t : objects(o, "targets")) {
             final Target target = new Target();
             if (t.has("field") && t.get("field").isJsonObject()) {
@@ -1026,6 +1053,42 @@ public class FeatureSpec implements Serializable {
         return def;
     }
 
+    /**
+     * An {@code as} that names a segment of generated column names: letters, digits and {@code _}, starting with a
+     * letter (a leading {@code _} marks an intermediate column), so the column stays a legal field name in every sink
+     * — the rule a clock's name follows for the same reason ({@link Clock#NAME}).
+     */
+    private static String nameSegment(final JsonObject o, final String code, final String what, final Diagnostics diagnostics, final String loc) {
+        final String as = Json.string(o, "as");
+        if (as == null) return null;
+        if (!Clock.NAME.matcher(as).matches()) {
+            diagnostics.error(code, loc, what + " as must be a name of letters, digits and '_' starting with a letter (it becomes a segment of the column names): " + as);
+            return null;
+        }
+        return as;
+    }
+
+    /**
+     * A window name is the block's: every window of the block (its own and its keySets') writes it into the same
+     * {@code {window}} segment, and the hidden level statistics of an encoding are shared by that name. Two windows
+     * of one block that select different rows must therefore not carry the same name — unnamed they could not
+     * (the token is derived from the bounds), and sharing one would silently make one window read the other's
+     * statistics wherever the emitted names happen not to collide.
+     */
+    private static void checkWindowNames(final FeatureDef def, final Diagnostics diagnostics, final String loc) {
+        final Map<String, Window> named = new LinkedHashMap<>();
+        final List<Window> windows = new ArrayList<>(def.windows);
+        for (final KeySet ks : def.keySets) windows.addAll(ks.windows);
+        for (final Window w : windows) {
+            if (w.as == null) continue;
+            final Window previous = named.putIfAbsent(w.as, w);
+            if (previous != null && !previous.sameBounds(w)) {
+                diagnostics.error("window.as", loc, "two windows of this block are named '" + w.as + "' but select different rows"
+                        + " (maxAge / maxEvents / clock / filter): one name is one window — the statistics behind it are shared, so name them apart");
+            }
+        }
+    }
+
     private static List<Window> parseWindows(final JsonObject o, final Diagnostics diagnostics, final String loc) {
         final List<Window> windows = new ArrayList<>();
         final List<JsonElement> elements = new ArrayList<>();
@@ -1060,8 +1123,9 @@ public class FeatureSpec implements Serializable {
                 window.maxAge = Json.duration(w, "maxAge", null, diagnostics, loc);
             }
             window.filter = Json.string(w, "filter");
+            window.as = nameSegment(w, "window.as", "window", diagnostics, loc);
             for (final String key : w.keySet()) {
-                if (!List.of("maxEvents", "maxAge", "filter", "clock").contains(key)) {
+                if (!List.of("maxEvents", "maxAge", "filter", "clock", "as").contains(key)) {
                     diagnostics.error("window.nearEdge", loc,
                             "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (§4.3)");
                 }

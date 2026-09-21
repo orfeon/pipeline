@@ -1611,6 +1611,9 @@ public final class FeaturePlanCompiler {
     /** The rating ops already expanded, by their {@code stateKey}: the coordinates behind one running state. */
     private final Map<String, String> ratingStates = new HashMap<>();
 
+    /** The joint fits already expanded, by their id: the lattice and shrinkage behind one solve. */
+    private final Map<String, String> jointFits = new HashMap<>();
+
     /**
      * Upper bound on the component columns one general-form block emits: {@code lti} windows × halflifes × channels ×
      * components, {@code bilinear} windows × the Lyndon words of the channels up to the depth.
@@ -3484,7 +3487,9 @@ public final class FeaturePlanCompiler {
                 final Window window = lookupWindow(declaredWindow, mode, def);
                 final Map<String, String> names = new HashMap<>(Map.of(
                         "block", def.name,
-                        "keys", String.join("_", ks.keys),
+                        // the visible columns only: the hidden level statistics are named by their keys (levelStats),
+                        // because every keySet of the block whose lattice contains the level shares them
+                        "keys", ks.as != null ? ks.as : String.join("_", ks.keys),
                         "window", window == null ? "" : window.token(),
                         "target", target.name));
                 for (final String stat : target.stats) {
@@ -3642,6 +3647,7 @@ public final class FeaturePlanCompiler {
         if (declared.maxAge == null && !declared.onCalendar()) return null;
         final Window window = new Window();
         window.maxAge = declared.maxAge;
+        window.as = declared.as;
         // a window on a calendar clock is counted in the blocks' ticks (forwardCoordinates)
         window.clock = declared.clock;
         window.maxAgeTicks = declared.maxAgeTicks;
@@ -3652,10 +3658,11 @@ public final class FeaturePlanCompiler {
         return ks.windows.isEmpty() ? Collections.singletonList(null) : ks.windows;
     }
 
+    /** The windows of two keySets select the same rows — their names ({@code as}) are not part of the comparison. */
     private static boolean sameWindows(final List<Window> a, final List<Window> b) {
         if (a.size() != b.size()) return false;
         for (int i = 0; i < a.size(); i++) {
-            if (!Objects.equals(a.get(i).token(), b.get(i).token()) || !Objects.equals(a.get(i).filter, b.get(i).filter)) return false;
+            if (!a.get(i).sameBounds(b.get(i))) return false;
         }
         return true;
     }
@@ -3827,6 +3834,18 @@ public final class FeaturePlanCompiler {
         if (levels.isEmpty() || !levels.get(levels.size() - 1).keys().isEmpty()) levels.add(new JointFit.Level(Shrinkage.GLOBAL, List.of()));
         final String id = render("{block}__{keys}__{window}__{target}", Map.of(
                 "block", def.name, "keys", String.join("_", ks.keys), "window", window == null ? "" : window.token(), "target", targetName));
+        // the id is key-derived (a keySet's `as` renames its columns, not the fit it reads), so a block declaring the
+        // same keys twice resolves to one solve: the engine groups the columns by it and reads the parameters of the
+        // first. Sharing is right when the lattice and the shrinkage are the same and wrong when they are not.
+        final String signature = JointFit.encodeLevels(levels) + "|" + shrinkage.scale + "|" + shrinkage.weights + "|" + shrinkage.priorWeight;
+        final String previousSignature = jointFits.putIfAbsent(id, signature);
+        if (previousSignature != null && !previousSignature.equals(signature)) {
+            diagnostics.error("encoding.shrinkage.joint", loc, "two keySets of block '" + def.name + "' resolve to the same joint fit '" + id
+                    + "' with different lattices or shrinkage (" + previousSignature + " vs " + signature + "): the joint fit is identified by the keys,"
+                    + " the window and the target — a keySet's as: renames its columns but not the fit they read, so the second would be filled from"
+                    + " the first's solve; declare them in separate blocks");
+            return 0;
+        }
         if (hintedBlocks.add(def.name + "#joint#" + id)) {
             final List<String> tokens = new ArrayList<>();
             for (final JointFit.Level l : levels) tokens.add(l.token());

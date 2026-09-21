@@ -52,10 +52,12 @@ public class FeatureTransform extends Transform {
             LOG.error("feature plan for {} failed:\n{}", getName(), plan.describe());
             throw new IllegalModuleException(getName(), "feature", errors);
         }
-        LOG.info("feature plan for {}:\n{}", getName(), plan.describe());
         if (inputs.getPipeline().getOptions().as(MPipeline.MPipelineOptions.class).getDryRun()) {
-            // --dryRun: the plan report (stages, columns, hot-key audit SQL, diagnostics) is the deliverable
+            // --dryRun: the plan report (stages, columns, hot-key audit SQL, diagnostics) is the deliverable, printed
+            // once — the log goes to the same console, so logging it too shows every line of the report twice
             System.out.println("feature plan for " + getName() + ":\n" + plan.describe());
+        } else {
+            LOG.info("feature plan for {}:\n{}", getName(), plan.describe());
         }
 
         final DataType outputType = Optional.ofNullable(getOutputType()).orElse(DataType.AVRO);

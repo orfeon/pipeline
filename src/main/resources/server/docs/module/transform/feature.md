@@ -182,7 +182,7 @@ features:
     entity: seller
     windows:
       - {maxEvents: 5}
-      - {maxAge: P365D, filter: "category = $self.category"}
+      - {maxAge: P365D, filter: "category = $self.category"}   # as: <name> names the window segment (a filter has no token of its own)
     ops:
       - {type: lag, fields: [sold, start_price], k: 2}
       - {type: delta, field: start_price, k: 1}
@@ -353,44 +353,51 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   still inside the window shift — the replay only folds a contest once its outcome is available, so a long
   availability lag times the whole pool's row rate is what sizes the worker). When the contests fall
   into independent pools, split them with `windows: [{filter: "category = $self.category"}]` on a pre-event
-  field — it becomes the partition key and each pool is replayed on its own. Nothing else is a window here: an
+  field — it becomes the partition key and each pool is replayed on its own. To keep the rating over everything
+  next to the pooled one in the same block, name the pooled window: `windows: [{}, {filter: "category =
+  $self.category", as: byCategory}]` (unnamed, both are `all`). Nothing else is a window here: an
   update cannot be taken back, so `maxAge` / `maxEvents` / any other filter are rejected
   (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
   a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
   applied in the order of their context key.
 - **Field size decides what the uncertainty is worth.** The default parameters are the customary ones of these
   models, which come from games of a handful of players; in a large field both Bayesian updates still follow
-  the paper to the letter, but behave differently. With fresh players and the default parameters, the winner of one contest of `k` players moves, and
-  every player's `sigma` (8.33 before) becomes:
+  the paper to the letter, but behave differently. What one contest of `k` fresh players does to the winner's
+  `mu` and to `sigma` (8.33 before) — `bradleyTerry` moves every player's `sigma` alike, `plackettLuce` by the
+  place, so there the winner's and the last player's are given:
 
-  | `k` | `bradleyTerry` winner / `sigma` | `plackettLuce` winner / `sigma` |
+  | `k` | `bradleyTerry` winner / `sigma` | `plackettLuce` winner / `sigma` (winner – last) |
   |---|---|---|
   | 2 | +2.6 / 8.07 | +2.6 / 8.07 |
-  | 4 | +7.9 / 7.50 | +2.8 / 8.08 – 8.26 |
-  | 8 | +18.4 / 6.22 | +2.3 / 8.18 – 8.32 |
-  | 16 | +39.5 / 1.89 | +1.7 / 8.25 – 8.33 |
+  | 4 | +7.9 / 7.50 | +2.8 / 8.26 – 8.08 |
+  | 8 | +18.4 / 6.22 | +2.3 / 8.32 – 8.18 |
+  | 16 | +39.5 / 1.89 | +1.7 / 8.33 – 8.25 |
 
-  `bradleyTerry` adds up all `k − 1` pairs, so in a large field one contest moves `mu` by several prior standard
-  deviations and collapses `sigma`; with the small default `tau` it never reopens, and **the first contest
-  decides the rating** for good. A larger `beta` softens the collapse (`beta: 2 · sigma` → `sigma` 7.8 at
-  `k = 16`) but not the size of the move. Above some eight players choose the pairing instead: **`pairs:
-  mean`** divides the sums by the number of opponents — a contest weighs like one game whatever the field (at
-  `k = 16`: winner +2.6, every `sigma` 8.07, the two-player values), the normalisation `elo` applies to
-  `kFactor` — and **`pairs: adjacent`** is the paper's partial-pair update: a player meets its rank neighbours
-  only (the opponents sharing its outcome and those at the nearest better and the nearest worse one), so fresh
-  equals in the middle of the field do not move in their first contest (ends ±2.6 / 8.07, middle 0 / 7.79) and
-  the ratings separate over the following ones. Both keep `sigma` a usable "how well do we know this player":
-  it narrows by a few percent per contest instead of collapsing in one. `plackettLuce` has the opposite
-  property: its normaliser `c² = Σ(σ² + β²)` grows with the field, so a contest shrinks `sigma` by a fraction of
-  a percent whatever `beta` is — `mu` is a sound rating, its step never decays with experience, and **`sigma`
-  is little more than a function of the contest count**: read `count` for "how well do we know this player",
-  and treat `sigma` as a feature in small contests only.
+  `bradleyTerry` adds up the `k − 1` pairs of every player, so in a large field one contest moves `mu` by
+  several prior standard deviations and collapses `sigma`; with the small default `tau` it never reopens, and
+  **the first contest decides the rating** for good. A larger `beta` softens both without curing either
+  (`beta: 2 · sigma` at `k = 16`: `sigma` 7.8 and a move of +19.8, still 2.4 prior standard deviations).
+  Above some eight players choose the pairing instead: **`pairs: mean`** divides the sums by the number of
+  opponents — a contest weighs like one game whatever the field (at `k = 16`: winner +2.6, every `sigma` 8.07,
+  the two-player values), the normalisation `elo` applies to `kFactor` — and **`pairs: adjacent`** is the
+  paper's partial-pair update: a player meets its rank neighbours only (the opponents sharing its outcome and
+  those at the nearest better and the nearest worse one), so fresh equals in the middle of the field do not
+  move in their first contest (ends ±2.6 / 8.07, middle 0 / 7.79) and the ratings separate over the following
+  ones. Both keep `sigma` a usable "how well do we know this player": it narrows by a few percent per contest
+  instead of collapsing in one. `plackettLuce` and `elo` are the other way out of a large field — `elo`'s
+  `kFactor` is shared over the opponents and does not grow with it either. `plackettLuce` has the opposite
+  property: its normaliser `c² = Σ(σ² + β²)` grows with the field, so a contest barely shrinks `sigma` — at
+  `k = 16` by 1.0% for the last player and 0.03% for the winner, and no `beta` takes the last player past 1.5%
+  (the smaller the `beta` the more it shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays
+  only as slowly as `sigma` does, but **`sigma` is little more than a function of the contest count**: read
+  `count` for "how well do we know this player", and treat `sigma` as a feature in small contests only.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
-  stretch out of the training window, or use the rating relative to its contest (a context block over it:
-  `zscore`, `gapToBest`, `rank`), which is comparable from the first contest on. `count` tells how warm a
-  player is; a pool split by a `$self` filter warms up per pool.
+  stretch out of the training window, or read the rating relative to its contest with a **scale-free** context
+  op over it (`zscore`, `rank`): a `gapToBest` is in `mu` units, so it drifts with the spread exactly like `mu`
+  itself, and a contest whose players are all still at the prior has no spread at all (`zscore` reads null
+  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
 - Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
@@ -807,6 +814,7 @@ values are chosen over the whole input while the counts stay per block. Artifact
         shrinkage: {priorWeight: 50}              # keySet-level override
       - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
         structure: sequence                       # a path, most recent first: (lag1, lag2) → (lag1) → global
+        as: gradePath                             # the {keys} segment of the emitted names (default: the keys joined by _)
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
@@ -815,7 +823,7 @@ values are chosen over the whole input while the counts stay per block. Artifact
       priorWeight: 20                             # fixed pseudo-count, and the fallback when a level has too few keys
       family: gaussian                            # gaussian | betaBinomial | gammaPoisson | dirichletMultinomial; default derived from the stat
       scale: logit                                # identity | logit | log; required when a lattice uses additive
-      leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor
+      leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor (in a chain, the leaf = the deepest level that has rows)
       output: [composed, deviations, effectiveN]  # composed (default) | deviations (dev0, dev1, ...) | effectiveN (<stat>__neff)
 ```
 
@@ -823,7 +831,13 @@ values are chosen over the whole input while the counts stay per block. Artifact
 shrinkage toward the global mean. Every lattice level is evaluated as its own keyed stage over the same
 window and target, and the composition is a per-row formula: `est(level) = est(parent) + w · (t(mean) −
 est(parent))` from the global level down to the key, on the declared scale. `share` is
-`n_key / n_global` over strictly-past rows.
+`n_key / n_global` over strictly-past rows. With `leaveNodeOut` the rows of the leaf are taken out of every
+ancestor before it is shrunk toward them (an ancestor contains them, so it would otherwise pull the leaf toward
+itself). In a chain lattice the leaf is the **deepest level that has rows**: a row whose declared leaf is
+empty — a key never seen, or a null key component — backs off to a coarser level, and it is that level's rows
+that leave the ancestors, so the row reads exactly what the lattice declared from that level reads. A lattice
+with `additive` (`structure: cross`) keeps the declared cell instead: the main-effect chains take out the cell
+they generalise, and an empty cell has nothing to take out.
 
 **Paths (`structure: sequence`).** The keys are the steps of a path **declared most recent first** —
 typically the `lag` columns of a categorical field (`- {type: lag, field: condition_grade, k: 2}` →
@@ -831,7 +845,8 @@ typically the `lag` columns of a categorical field (`- {type: lag, field: condit
 path's suffixes: `(k1, k2, k3) → (k1, k2) → (k1) → global`, i.e. the explicit `hierarchy: [[k1, k2], [k1],
 []]`. The statistic of a long path is shrunk toward what the shorter, better-observed path says, and a row
 whose older steps are null (an entity with a short history) or whose path was never seen reads its **longest
-known suffix** — so young entities are not dropped the way a cross of lag columns drops them. At least two
+known suffix** — the value a path declared with only those steps reads, leave-node-out included — so young
+entities are not dropped the way a cross of lag columns drops them. At least two
 keys (`encoding.keySet.sequence`); the info of the same code lists the derived levels, and the same code
 warns when the block declares no `shrinkage` at all — the chain is only composed for a shrunk statistic, so
 without it the column is the raw full-path value and an unseen path reads null. A chain composes top-down
@@ -935,6 +950,24 @@ event and weighs it by how similar it is to the current row instead:
   or removing an earlier one renames the columns: name an op `expr` with `as:` (`sequence.expr.anonymous` lists the
   unnamed ones). On an encoding target `as:` replaces the target name
   (`<block>__<keys>__<as>__<stat>`).
+- `as:` on a **window** names the window segment, which is otherwise derived from its bounds (`365d`, `n20`,
+  `365d_n20`, `20trading`, `all`). A `filter` has no token of its own, so a filter-only window is `all` — the
+  name of the unconditional window — and the two are a `column.duplicate` in one block until the filtered one
+  is named: `windows: [{}, {filter: "category = $self.category", as: byCategory}]` gives `<block>_all_…` next
+  to `<block>_byCategory_…` (the statistic over everything and the one per pool, whose gap is the usual
+  feature — for a `rating` too). On a keySet's window the name is the `{window}` segment.
+- `as:` on an encoding **keySet** replaces the `{keys}` segment (the keys joined by `_`):
+  `- {keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2], structure: sequence, as: gradePath}`
+  emits `<block>__gradePath__<target>__<stat>` instead of a name that repeats every lag column — and it lets
+  one block declare the same keys twice (a raw statistic next to its shrunk lattice). Only the emitted names
+  change; the hidden level statistics keep their key-derived names (the keySets of a block share them) — and so
+  does the `estimator: joint` fit, so the same keys twice under `joint` read one solve: with the same lattice
+  and shrinkage that is the point, and when they differ it is an error (`encoding.shrinkage.joint`; declare
+  them in separate blocks).
+- Both are names of letters, digits and `_` starting with a letter (`window.as`, `encoding.keySet.as`). They
+  are part of the spec, so renaming changes the plan hash like any other rename of an output. One window name
+  is one window: two windows of a block named the same must select the same rows (same `maxAge` / `maxEvents` /
+  `clock` / `filter`), since the statistics behind the name are shared (`window.as`).
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
   `values` when the output goes to a sink such as BigQuery or straight into a model. An encoding target's
@@ -1020,14 +1053,16 @@ Two context ops fit a small model over the rows of the group and hand each row i
   purpose**: a market or baseline that enters the model as an offset / initial score (the setup the `softmax`
   op and `output.roles.baseline` serve) comes back in through the residual, and the gain it shows is the
   baseline's, not the score's. There, check the residual against a control that holds `against` itself: if
-  the control does as well, the residual carries the baseline. Emitting the residual **without** the raw field
-  (`output.exclude`) leaves the model nothing to rebuild `against` from.
-- **Choosing `discount`.** Plain Harville hands the later places to the favourites too readily — the stronger
-  a row, the more its probability of finishing within the first three is overstated. `[0.81, 0.65]` (the
-  example above) is a measured starting point for fields of eight to eighteen: on one such dataset it had the
-  best log loss of the within-first-three probabilities among the variants tried, where plain Harville put
-  the favourites' probability ten points above their realised rate. The best exponents depend on the sport and
-  the field size: fit the two numbers outside the pipeline against realised placings when they matter.
+  the control does as well, the residual carries the baseline. Emit the residual **without** the raw field and
+  the model has nothing to rebuild `against` from: `output.exclude` when the field is a column this transform
+  computes, `output.passThrough` (`keys` / `none`) when it is an input field — `exclude` matches emitted
+  columns only and never drops a pass-through input (it reports `output.exclude.unmatched` instead).
+- **Choosing `discount`.** The stronger a row, the more plain Harville overstates its probability of finishing
+  within the first three. `[0.81, 0.65]` (the example above) is a measured starting point for fields of eight
+  to eighteen: on one such dataset it had the best log loss of the within-first-three probabilities among the
+  variants tried, where plain Harville put the strongest rows ten points above their realised rate. The best
+  exponents depend on the field size and on the domain: fit the two numbers outside the pipeline against
+  realised placings when they matter.
 - **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
   without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
   in one `top` are one pass, not one per place. `maxGroupSize` (default 64) is read by `harville` only: a group

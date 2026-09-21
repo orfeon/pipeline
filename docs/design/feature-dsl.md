@@ -722,7 +722,16 @@ may be left unbounded:
   edge (`maxAge`), the count (`maxEvents`) and the condition (`filter`). A per-element near edge would
   allow declarations contradicting `ingestionLag`, so there is none.
 - **Naming tokens**: `maxAge: P365D → 365d`, `maxEvents: 20 → n20`, combined `365d_n20`. The naming
-  template has a `{window}` axis and the lineage keeps the window coordinates.
+  template has a `{window}` axis and the lineage keeps the window coordinates. A `filter` contributes no
+  token (a condition has no short canonical spelling), so a filter-only window is `all` like the
+  unconditional one; **`as:` on a window element names the segment** and is what lets both stand in one
+  block (the statistic over everything next to the one per `$self` pool). An encoding keySet takes `as:`
+  the same way for the `{keys}` axis. A name changes what a column is called, not what it reads: the bounds
+  the window selects by, and the hidden level statistics the keySets of a block share by their keys, are
+  those of the unnamed declaration (a window's `{window}` coordinate and the state keys derived from the
+  token do carry the name, like the column names themselves). A name is the block's, so two windows of one
+  block that select different rows may not share it, and a keySet's name does not rename the joint fit its
+  columns read (the same keys twice under `estimator: joint` are one solve).
 - **Execution plan**: several windows on one entity and order share one sort (several frames over
   one `PARTITION BY ... ORDER BY` in SQL; several range reads of one per-entity timestamped buffer
   in the engine). Nested windows (same filter, different far edge) are computed from differences of
@@ -1135,7 +1144,15 @@ weight of each step follows the §5.5 weights rule (default `varianceComponents`
 closed form `w = n/(n+λ)`). Parent self-contamination is avoided by `shrinkage.leaveNodeOut`
 (default true) uniformly for every lattice kind — subtracting the child's sufficient statistics from the
 parent's, which keeps the combiner structure and the single pass (for well-observed keySets the
-difference to "full" is negligible). Availability propagation (§6.1) is unchanged: each level's
+difference to "full" is negligible). The child is the **effective leaf** of the row — the deepest level of
+the chain that has rows: a row whose declared leaf is empty (an unseen key, a null key component, the
+missing older steps of a `structure: sequence` path) backs off to a coarser level, and that level's
+statistics are the ones its ancestors contain. Subtracting the (empty) declared leaf instead would shrink the
+level toward ancestors that still hold its own rows, and the row would not read what the lattice declared
+from that level reads. A lattice containing an `additive` entry keeps its **declared** leaf: the main-effect
+chains behind that entry subtract the cell they generalise (an empty cell has nothing to subtract), and a
+coarser level of the chain — a coarse cross — is contained in no main-effect level, so subtracting it there
+would drop a main effect. Availability propagation (§6.1) is unchanged: each level's
 aggregate is the max of its contributing rows' availability and the interpolation is a per-row
 composition.
 

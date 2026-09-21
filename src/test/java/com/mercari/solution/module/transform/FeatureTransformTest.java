@@ -379,6 +379,14 @@ public class FeatureTransformTest {
                   targets:
                     - {field: sold, stats: [mean]}
                   shrinkage: {priorWeight: 1}
+                - name: last
+                  scope: population
+                  type: encoding
+                  keySets:
+                    - keys: [grade_all_condition_grade_lag1]
+                  targets:
+                    - {field: sold, stats: [mean]}
+                  shrinkage: {priorWeight: 1}
             """.replaceAll("(?m)^", "    ");
 
     /**
@@ -410,12 +418,20 @@ public class FeatureTransformTest {
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             // Jan 3: no outcome has reached the system yet
             Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue(column));
-            // Jan 20, s1 (good, good): the path is new; after "good" came B/s1 (not sold): 1/3 + 1/2 · (0 − 1/3) = 1/6
-            Assertions.assertEquals(1.0 / 6.0, byKey.get("C/s1").getAsDouble(column), 1e-9);
+            // a new path backs off to its suffix, and leave-node-out follows it: the suffix level is the effective leaf,
+            // so its rows leave the global rate — the value a one-key encoding on the last grade reads.
+            // Jan 20, s1 (good, good): the path is new; after "good" came B/s1 (not sold), the global rate without it
+            // is 1/2: 1/2 + 1/2 · (0 − 1/2) = 1/4
+            Assertions.assertEquals(0.25, byKey.get("C/s1").getAsDouble(column), 1e-9);
             // Jan 20, s2 (fair, –): no second step and nothing seen after "fair" yet: the global rate 1/3
             Assertions.assertEquals(1.0 / 3.0, byKey.get("C/s2").getAsDouble(column), 1e-9);
-            // Feb 1, s1 (fair, good): new path; after "fair" came C/s2 (sold): 3/5 + 1/2 · (1 − 3/5) = 0.8
-            Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble(column), 1e-9);
+            // Feb 1, s1 (fair, good): new path; after "fair" came C/s2 (sold), the global rate without it is 2/4:
+            // 1/2 + 1/2 · (1 − 1/2) = 0.75
+            Assertions.assertEquals(0.75, byKey.get("D/s1").getAsDouble(column), 1e-9);
+            // no row has seen its two-step path, so every row reads what the encoding declared on the last grade alone reads
+            for (final MElement row : byKey.values()) {
+                Assertions.assertEquals(row.getPrimitiveValue("f_last__grade_all_condition_grade_lag1__sold__mean"), row.getPrimitiveValue(column), row::toString);
+            }
             return null;
         });
         pipeline.run();
@@ -2497,11 +2513,12 @@ public class FeatureTransformTest {
             Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_grade_next_to_good"));
             Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
             Assertions.assertEquals(2.0 / 3, byKey.get("D/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
-            // per entity: D's own (s1, fair) cell is empty, so it reads the pooled fair level — which now shrinks toward
-            // the whole marginal (good 3 of 5), since leave-node-out subtracts the LEAF's rows and the leaf has none:
-            // (1 + 2 · 0.6) / (1 + 2). s2's first transition (C/s2, previous = fair) finds the pooled cell empty too —
-            // C/s1 shares its timestamp — and reads the marginal of the three rows before it (good, fair, good)
-            Assertions.assertEquals(11.0 / 15, byKey.get("D/s1").getAsDouble("f_grade_own_to_good"), 1e-9);
+            // per entity: D's own (s1, fair) cell is empty, so it backs off to the pooled fair level — the effective
+            // leaf, whose one row leaves the marginal as it does under the pooled declaration: the same 2/3, not
+            // (1 + 2 · 0.6) / (1 + 2) against a marginal that still holds that row. s2's first transition (C/s2,
+            // previous = fair) finds the pooled cell empty too — C/s1 shares its timestamp — and reads the marginal of
+            // the three rows before it (good, fair, good)
+            Assertions.assertEquals(2.0 / 3, byKey.get("D/s1").getAsDouble("f_grade_own_to_good"), 1e-9);
             Assertions.assertEquals(2.0 / 3, byKey.get("C/s2").getAsDouble("f_grade_next_to_good"), 1e-9);
             Assertions.assertEquals(2.0 / 3, byKey.get("C/s2").getAsDouble("f_grade_own_to_good"), 1e-9);
             return null;
@@ -3259,6 +3276,42 @@ public class FeatureTransformTest {
                         Assertions.assertEquals(expected[i], ((Number) actual).longValue(), id + " " + columns[i]);
                     }
                 }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * A named window: the rating over every seller next to the one per category pool, in one block. A filter has no
+     * token of its own — unnamed, both windows are {@code all} and the block is a duplicate — so {@code as} is what
+     * lets them stand side by side. The whole pool reads what it reads alone ({@link #testSequenceRating}); the
+     * sellers of this input never share a category, so a category pool holds no contest and its rating stays the prior.
+     */
+    @Test
+    public void testSequenceRatingNamedPoolWindow() throws java.io.IOException {
+        final String blocks = RATING_BLOCKS.replace("entity: seller\n",
+                "entity: seller\n" + " ".repeat(10) + "windows: [{}, {filter: \"category = $self.category\", as: byCategory}]\n");
+        Assertions.assertNotEquals(RATING_BLOCKS, blocks);
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + FEATURE_CONFIG.replace("      output:\n", blocks + "      output:\n"))).get("features");
+        Assertions.assertNotNull(output.getSchema().getField("f_skill_byCategory_pl_sigma"), output.getSchema()::toString);
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final double whole = switch (id) {
+                    case "A/s1", "A/s2", "B/s1" -> 1500.0;
+                    case "C/s1" -> 1516.0;
+                    case "C/s2" -> 1484.0;
+                    case "D/s1" -> 1516.0 + 32d * (1d - 1d / (1d + Math.pow(10d, -32d / 400d)));
+                    default -> throw new AssertionError("unexpected row " + id);
+                };
+                Assertions.assertEquals(whole, row.getAsDouble("f_skill_all_elo_mu"), 1e-9, id);
+                Assertions.assertEquals(1500.0, row.getAsDouble("f_skill_byCategory_elo_mu"), 0d, id);
+                Assertions.assertEquals(0L, ((Number) row.getPrimitiveValue("f_skill_byCategory_elo_count")).longValue(), id);
+                Assertions.assertEquals(25.0 / 3, row.getAsDouble("f_skill_byCategory_pl_sigma"), 0d, id);
             }
             Assertions.assertEquals(6, count);
             return null;
