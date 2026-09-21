@@ -108,14 +108,32 @@ public class ShrinkageTest {
         final double plainK1 = 0.25 + 6.0 / 8 * (0.5 - 0.25);
         Assertions.assertEquals(plainK1 + 0.5 * (1 - plainK1), Shrinkage.of(Shrinkage.Scale.identity, 2, false).compose(row, full, null).value(), 1e-12);
 
-        // the search stops at an additive entry: the main-effect chains subtract the cell they generalise, and an empty
-        // cell has nothing to subtract — A keeps its rows against the root, as before
+        // an additive entry keeps the declared leaf: the main-effect chains subtract the cell they generalise, and an
+        // empty cell has nothing to subtract — A keeps its rows against the root, as before
         final List<Shrinkage.Level> additive = List.of(
                 new Shrinkage.Level("cell", "c_n", "c_sum", null),
                 new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, List.of(List.of(path1, global))),
                 global);
         Assertions.assertEquals(0, Shrinkage.effectiveLeaf(row, additive));
         Assertions.assertEquals(0.25 + 6.0 / 8 * (0.5 - 0.25), shrinkage.compose(row, additive, null).value(), 1e-12);
+
+        // ... and it keeps it even when a coarser level of the chain has rows (§5.3.1: an empty cell over a coarse
+        // cross). That level is contained in no main-effect level, so subtracting it there would take the main level's
+        // n below zero and drop the main effect: the cell — empty, nothing to subtract — stays the leave-node-out node
+        final Shrinkage.Level mainEffect = new Shrinkage.Level("k2", "m_n", "m_sum", null);
+        final List<Shrinkage.Level> coarseAdditive = List.of(
+                new Shrinkage.Level("k1_k2", "c_n", "c_sum", null),
+                path1,
+                new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, List.of(List.of(mainEffect, global))),
+                global);
+        final Map<String, Object> coarse = new java.util.HashMap<>(row);
+        coarse.put("m_n", 4.0);
+        coarse.put("m_sum", 3.0);
+        Assertions.assertEquals(0, Shrinkage.effectiveLeaf(coarse, coarseAdditive));
+        // marginal 4/16, main effect 3/4 with w = 4/6, the coarse cross 3/6 with w = 6/8 — all against full ancestors
+        final double marginal = 0.25, additivePrediction = marginal + 4.0 / 6 * (0.75 - marginal);
+        Assertions.assertEquals(additivePrediction + 6.0 / 8 * (0.5 - additivePrediction),
+                shrinkage.compose(coarse, coarseAdditive, null).value(), 1e-12);
 
         // distributions follow the same rule
         final Shrinkage dm = Shrinkage.of(Shrinkage.Scale.identity, 2, true, Shrinkage.Family.dirichletMultinomial);

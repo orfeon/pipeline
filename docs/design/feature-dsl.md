@@ -1140,8 +1140,10 @@ the chain that has rows: a row whose declared leaf is empty (an unseen key, a nu
 missing older steps of a `structure: sequence` path) backs off to a coarser level, and that level's
 statistics are the ones its ancestors contain. Subtracting the (empty) declared leaf instead would shrink the
 level toward ancestors that still hold its own rows, and the row would not read what the lattice declared
-from that level reads. The search stops at an `additive` entry: the main-effect chains behind it subtract
-the cell they generalise. Availability propagation (§6.1) is unchanged: each level's
+from that level reads. A lattice containing an `additive` entry keeps its **declared** leaf: the main-effect
+chains behind that entry subtract the cell they generalise (an empty cell has nothing to subtract), and a
+coarser level of the chain — a coarse cross — is contained in no main-effect level, so subtracting it there
+would drop a main effect. Availability propagation (§6.1) is unchanged: each level's
 aggregate is the max of its contributing rows' availability and the interpolation is a per-row
 composition.
 

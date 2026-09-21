@@ -321,7 +321,8 @@ public final class Shrinkage implements Serializable {
      */
     public Composition compose(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
         final Double[] deviations = new Double[levels.size()];
-        final int leafIndex = effectiveLeaf(row, levels);
+        // without leave-node-out nothing is subtracted anywhere, so the effective leaf does not matter
+        final int leafIndex = leaveNodeOut ? effectiveLeaf(row, levels) : 0;
         final Level leaf = levels.get(leafIndex);
         final double leafN = n(row, leaf.nColumn());
         final double leafSum = n(row, leaf.sumColumn());
@@ -333,17 +334,22 @@ public final class Shrinkage implements Serializable {
 
     /**
      * The level leave-node-out subtracts: the deepest level of the chain that has rows. The levels below it are empty
-     * (they defer to their parent with a zero deviation), so it is the level the back-off actually starts from. The
-     * search stops at an {@code additive} entry — what lies behind it are the main-effect chains, which subtract the
-     * cell they generalise, not a level of their own — and an empty chain keeps the declared leaf (nothing to subtract).
+     * (they defer to their parent with a zero deviation), so it is the level the back-off actually starts from.
+     *
+     * <p>A lattice that contains an {@code additive} entry keeps its <b>declared</b> leaf, whatever the chain above it
+     * holds: the main-effect chains behind that entry subtract the cell they generalise — every main level contains
+     * that cell, and an empty cell has nothing to subtract — while a coarser level of the chain (a coarse cross,
+     * §5.3.1) is contained in no main level, so subtracting it there would take a main level's {@code n} below zero
+     * and silently drop its main effect. Cross / additive lattices are therefore unchanged by the back-off.
      */
     static int effectiveLeaf(final Map<String, Object> row, final List<Level> levels) {
+        int leaf = -1;
         for (int i = 0; i < levels.size(); i++) {
             final Level level = levels.get(i);
-            if (level.isAdditive()) break;
-            if (n(row, level.nColumn()) > 0) return i;
+            if (level.isAdditive()) return 0;
+            if (leaf < 0 && n(row, level.nColumn()) > 0) leaf = i;
         }
-        return 0;
+        return leaf < 0 ? 0 : leaf;
     }
 
     /**
@@ -408,7 +414,8 @@ public final class Shrinkage implements Serializable {
             for (final List<Level> main : level.mainEffects()) {
                 final Double[] mainDev = new Double[main.size()];
                 final double[] ignored = new double[1];
-                final Double mainEst = estimate(row, main, 0, leafIndex, looN, looSum, looOff, mainDev, ignored, lambdas, true);
+                // a main chain is a list of its own: the leaf is none of its levels (-1), every one of them contains it
+                final Double mainEst = estimate(row, main, 0, -1, looN, looSum, looOff, mainDev, ignored, lambdas, true);
                 if (mainEst != null) sum += mainEst - root;
             }
             deviations[index] = sum - root;
@@ -462,7 +469,7 @@ public final class Shrinkage implements Serializable {
      * @param lambdas per-level pseudo-counts keyed by the level's {@code n} column, as in {@link #compose}
      */
     public Composition composeDistribution(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
-        final int leafIndex = effectiveLeaf(row, levels);
+        final int leafIndex = leaveNodeOut ? effectiveLeaf(row, levels) : 0;
         final Level leaf = levels.get(leafIndex);
         final double leafN = n(row, leaf.nColumn());
         final Map<String, Double> leafCounts = counts(row, leaf, leafN);

@@ -365,7 +365,8 @@ keyed stage (keySet K):
   / `__sum` / `__sumsq`) of the level's keyed stage; the visible columns are row operators (`compose` /
   `deviation` / `effectiveN` / `share` / `fitStat`) that compose top-down (back-off, leave-node-out =
   parent − child with the child being the row's effective leaf, `Shrinkage.effectiveLeaf` = the deepest level
-  that has rows, scale transforms) inside the row. The Beam counterpart of spec §5.3.1 "per-level
+  of the chain that has rows — the declared cell in a lattice with `additive` —, scale transforms) inside the
+  row. The Beam counterpart of spec §5.3.1 "per-level
   aggregation + one top-down pass". The global level of a lattice is **one key holding every row**;
   §9.3 and §9.5 are about that key.
 - `weights: fixed` (`w = n/(n+λ)`) is row-local. `weights: varianceComponents` (τ² across siblings) is

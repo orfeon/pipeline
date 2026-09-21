@@ -764,7 +764,7 @@ values are chosen over the whole input while the counts stay per block. Artifact
       priorWeight: 20                             # fixed pseudo-count, and the fallback when a level has too few keys
       family: gaussian                            # gaussian | betaBinomial | gammaPoisson | dirichletMultinomial; default derived from the stat
       scale: logit                                # identity | logit | log; required when a lattice uses additive
-      leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor (the leaf = the deepest level that has rows)
+      leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor (in a chain, the leaf = the deepest level that has rows)
       output: [composed, deviations, effectiveN]  # composed (default) | deviations (dev0, dev1, ...) | effectiveN (<stat>__neff)
 ```
 
@@ -774,9 +774,11 @@ window and target, and the composition is a per-row formula: `est(level) = est(p
 est(parent))` from the global level down to the key, on the declared scale. `share` is
 `n_key / n_global` over strictly-past rows. With `leaveNodeOut` the rows of the leaf are taken out of every
 ancestor before it is shrunk toward them (an ancestor contains them, so it would otherwise pull the leaf toward
-itself). The leaf is the **deepest level that has rows**: a row whose declared leaf is empty — a key never
-seen, or a null key component — backs off to a coarser level, and it is that level's rows that leave the
-ancestors, so the row reads exactly what the lattice declared from that level reads.
+itself). In a chain lattice the leaf is the **deepest level that has rows**: a row whose declared leaf is
+empty — a key never seen, or a null key component — backs off to a coarser level, and it is that level's rows
+that leave the ancestors, so the row reads exactly what the lattice declared from that level reads. A lattice
+with `additive` (`structure: cross`) keeps the declared cell instead: the main-effect chains take out the cell
+they generalise, and an empty cell has nothing to take out.
 
 **Paths (`structure: sequence`).** The keys are the steps of a path **declared most recent first** —
 typically the `lag` columns of a categorical field (`- {type: lag, field: condition_grade, k: 2}` →
