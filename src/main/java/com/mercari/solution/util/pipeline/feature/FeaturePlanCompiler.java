@@ -2743,7 +2743,7 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)"
                     + (outcome ? "; '" + def.sequenceField + "' is outcome-like, so each training row's own outcome is one of the pairs behind"
-                            + " the coordinates it reads — 'of: previous' changes which value is looked up, not what the fit counts (fit.mode forward does)" : ""));
+                            + " the coordinates it reads — 'of' changes which value(s) are looked up, not what the fit counts (fit.mode forward does)" : ""));
         }
         final List<String> references = new ArrayList<>(path);
         references.add(def.sequenceField);
@@ -4237,7 +4237,8 @@ public final class FeaturePlanCompiler {
             final AvailableAt at = ref.availableAt();
             if (at == null || at.isPreEvent()) continue;
             if (!at.isStatic()) {
-                diagnostics.error("fit.mode.forward.dynamic", loc, "fit.mode forward needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
+                // once per block and reference: this runs per column, and a block has rank (x embedded values) of them
+                if (hintedBlocks.add("fit.mode.forward.dynamic:" + def.name + ":" + reference)) diagnostics.error("fit.mode.forward.dynamic", loc, "fit.mode forward needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
                 continue;
             }
             lag = Math.max(lag, at.getOffset().toMillis());
