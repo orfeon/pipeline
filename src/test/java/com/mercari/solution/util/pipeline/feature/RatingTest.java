@@ -796,9 +796,47 @@ public class RatingTest {
     }
 
     private static FeaturePlan compileTeamSpec(final String spec) {
+        return compileTeamSpec(spec, "{name: agent_id, type: string}");
+    }
+
+    /** @param agentField the sources declaration of the agent's key field */
+    private static FeaturePlan compileTeamSpec(final String spec, final String agentField) {
         final JsonObject sources = Config.convertConfigJson(SOURCES.replace("      - {name: seller_id, type: string}\n",
-                "      - {name: seller_id, type: string}\n      - {name: agent_id, type: string}\n"), Config.Format.yaml);
+                "      - {name: seller_id, type: string}\n      - " + agentField + "\n"), Config.Format.yaml);
         return FeaturePlanCompiler.compile(sources, Config.convertConfigJson(spec, Config.Format.yaml), null);
+    }
+
+    /**
+     * The columns of one rating op share ONE fold pointer, so they share one availability contract: every readout
+     * takes every member's keys from its own row, whichever member it reads. Here the agent is only known after the
+     * event. Were that the agent's columns' business alone, they would be classified apart — a violation carries no
+     * window shift — and, kept as intermediates by a consumer, advance the shared state to the row's own time: the
+     * seller's columns, correctly shifted, would then read contests whose outcome they must not know yet. With one
+     * contract the op stands or falls as a whole, and the evaluator refuses a state whose columns disagree on the shift.
+     */
+    @Test
+    public void testTeamColumnsShareOneAvailabilityContract() {
+        final FeaturePlan late = compileTeamSpec(teamSpec(DUO), "{name: agent_id, type: string, availableAt: after(event)}");
+        final List<OutputColumn> columns = late.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        Assertions.assertEquals(8, columns.size(), late::describe);
+        for (final OutputColumn c : columns) {
+            Assertions.assertEquals(OutputColumn.Status.violation, c.getStatus(), c.getCanonicalName() + "\n" + late.describe());
+            Assertions.assertNull(c.getWindowShift(), c.getCanonicalName());
+        }
+        // known before the event, the same columns all carry the one shift
+        final List<OutputColumn> shifted = compileTeam(DUO).getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        Assertions.assertEquals(1, shifted.stream().map(OutputColumn::getWindowShift).distinct().count());
+        Assertions.assertEquals(Duration.parse("P2DT40M"), shifted.get(0).getWindowShift());
+        new SequenceEvaluator(shifted).setup();
+
+        // the invariant where the state is shared: one column of the op without its shift is refused, not replayed
+        shifted.get(3).windowShift = null;
+        final IllegalStateException refused = Assertions.assertThrows(IllegalStateException.class, () -> new SequenceEvaluator(shifted).setup());
+        Assertions.assertTrue(refused.getMessage().contains("skill_all_duo") && refused.getMessage().contains("window shift"), refused.getMessage());
+        // ... and so is a column that reads a member the team does not have
+        final List<OutputColumn> columnsOfTwo = compileTeam(DUO).getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        columnsOfTwo.get(4).coordinates.put("memberIndex", "2");
+        Assertions.assertThrows(IllegalStateException.class, () -> new SequenceEvaluator(columnsOfTwo).setup());
     }
 
     private static final String DUO = "      - {type: rating, field: final_price, context: session, order: descending, as: duo, tau: 0.5,"
@@ -869,11 +907,16 @@ public class RatingTest {
         cases.put(DUO.replace("sigma: 4", "sigma: 0"), "a member's sigma");
         cases.put(DUO.replace("sigma: 4", "sigma: 4, beta: 2"), "beta is the team's, not a member's");
         cases.put(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [3]"), "neither a name nor a member");
+        cases.put(DUO.replace("team: [mu, sigma]", "team: [{mu: true}]"), "a team readout is a name: reported, not dropped");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan plan = compileTeam(e.getKey());
             Assertions.assertTrue(plan.getDiagnostics().hasErrors() && hasCode(plan, "sequence.rating.with"), () -> e.getValue() + "\n" + plan.describe());
             Assertions.assertTrue(plan.getColumns().stream().noneMatch(c -> "rating".equals(c.getOperator())), e.getValue());
         }
+        // an entity name holding a separator of the state keys is a diagnostic, not a worker failing in Rating.withTeam
+        final FeaturePlan separator = compileTeamSpec(teamSpec(DUO).replace("{name: agent,", "{name: \"ag\\u0001ent\",").replace("entity: agent", "entity: \"ag\\u0001ent\""));
+        Assertions.assertTrue(separator.getDiagnostics().hasErrors() && hasCode(separator, "sequence.rating.with"), separator::describe);
+        Assertions.assertEquals(1, separator.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.with")).count(), "reported once");
         // two ops of one name with different teams would share one state
         Assertions.assertTrue(hasCode(compileTeam(DUO + "\n" + DUO.replace("sigma: 4", "sigma: 2").replace(", team: [mu, sigma]", "").replace("funcs: [mu, sigma, count]", "funcs: [delta]")),
                 "sequence.rating.as"));

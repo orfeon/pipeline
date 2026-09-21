@@ -418,6 +418,28 @@ public class SequenceEvaluator implements Serializable {
             checkWindowContract(c, plan);
             plans.put(c.canonicalName, plan);
         }
+        checkSharedStates();
+    }
+
+    /**
+     * Columns that share one running state (the readouts of a rating op, the components of a dynamics channel) share
+     * its fold pointer: the first one read advances it to ITS near edge. They must therefore agree on the window shift
+     * — a column with a shorter one (a self side classified apart: a violation kept as an intermediate has none) would
+     * fold contests / events the others must not see yet, and hand them over without a word. The compiler gives the
+     * columns of one state one availability contract; this is that invariant, checked where the state is shared.
+     */
+    private void checkSharedStates() {
+        final Map<String, OutputColumn> first = new HashMap<>();
+        for (final OutputColumn c : columns) {
+            final ColumnPlan plan = plans.get(c.canonicalName);
+            if (plan.stateKey == null) continue;
+            final OutputColumn other = first.putIfAbsent(plan.stateKey, c);
+            if (other != null && plans.get(other.canonicalName).shiftMillis != plan.shiftMillis) {
+                throw new IllegalStateException("columns " + other.canonicalName + " and " + c.canonicalName + " share the running state '" + plan.stateKey
+                        + "' but not its window shift (" + plans.get(other.canonicalName).shiftMillis + " ms vs " + plan.shiftMillis + " ms): the shorter one"
+                        + " would advance the state past the other's near edge — the columns of one state need one availability contract (the same self and past inputs)");
+            }
+        }
     }
 
     /**
@@ -432,6 +454,9 @@ public class SequenceEvaluator implements Serializable {
      */
     private static void checkWindowContract(final OutputColumn c, final ColumnPlan plan) {
         if (plan.rating == null) return;
+        if (plan.ratingMember < 0 || plan.ratingMember >= plan.rating.members().size()) {
+            throw new IllegalStateException("rating column " + c.canonicalName + " reads member " + plan.ratingMember + " of a team of " + plan.rating.members().size());
+        }
         if (plan.maxEvents != null || plan.filterText != null || hasMaxAge(plan)) {
             throw new IllegalStateException("rating column " + c.canonicalName + " carries a window this evaluator cannot honour"
                     + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window — admitting one means"
