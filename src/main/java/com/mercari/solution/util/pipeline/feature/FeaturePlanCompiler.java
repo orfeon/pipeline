@@ -1461,6 +1461,9 @@ public final class FeaturePlanCompiler {
         if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
 
+    /** The largest {@code tauPer} the {@code tauPerMillis} coordinate can carry (a millisecond count). */
+    private static final Duration MAX_TAU_PER = Duration.ofMillis(Long.MAX_VALUE);
+
     /**
      * The sequence {@code rating} op: the block's entity is the rated player, {@code field} the outcome of a contest
      * and {@code context} the contest (the rows of one group at one event time). One running state per op × window,
@@ -1519,8 +1522,13 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.rating.parameter", loc, "unknown pairs: " + op.pairs + " (available: " + String.join(" | ", Rating.PAIRS) + ")");
             valid = false;
         }
-        if (op.tauPer != null && (op.tauPer.isZero() || op.tauPer.isNegative())) {
-            diagnostics.error("sequence.rating.parameter", loc, "tauPer must be a positive duration (the time tau is the drift of): " + op.tauPer);
+        // the coordinate is a millisecond count, so the DURATION being non-zero is not enough: one that rounds to 0 ms
+        // (or does not fit in millis at all, where toMillis() would throw instead of reporting) would silently fall
+        // back to the per-contest drift — with a tau this very check makes the spec size for a whole period
+        final long tauPerMillis = op.tauPer == null || op.tauPer.compareTo(MAX_TAU_PER) > 0 ? 0L : op.tauPer.toMillis();
+        if (op.tauPer != null && tauPerMillis <= 0) {
+            diagnostics.error("sequence.rating.parameter", loc, "tauPer must be a positive duration of at least one millisecond,"
+                    + " and no longer than a millisecond count holds (the time tau is the drift of): " + op.tauPer);
             valid = false;
         } else if (op.tauPer != null && !elo && op.tau == null) {
             // the default tau (sigma / 100) is the drift of ONE CONTEST: spread over a period it would age nothing
@@ -1564,7 +1572,7 @@ public final class FeaturePlanCompiler {
             shared.put("sigma", Double.toString(sigma));
             shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
-            if (op.tauPer != null) shared.put("tauPerMillis", Long.toString(op.tauPer.toMillis()));
+            if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (method == Rating.Method.bradleyTerry && op.pairs != null) shared.put("pairs", op.pairs);
         }
         shared.put("context", contest.name());

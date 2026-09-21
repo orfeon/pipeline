@@ -335,7 +335,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   wide before the contest that will narrow it again; `mu` does not move. `tau` must then be declared (the
   default is sized for one contest): choose it from how far a strength wanders — with the default prior
   (`sigma` 8.33), `tau: 2, tauPer: P30D` takes a settled player (`sigma` 3) to 7 after ten months away.
-  `bradleyTerry` / `plackettLuce` only; the period is wall time.
+  Size `tauPer` well above the outcome's availability lag (`settlementLag` + `ingestionLag` + the `predictAt`
+  offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
+  that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
+  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` only; the period is wall time.
 - **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
   (the rating's change in its last contest, null before the first). An entity never rated reads the prior
   (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,

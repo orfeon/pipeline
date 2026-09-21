@@ -44,6 +44,12 @@ public final class Rating implements Serializable {
      * at the nearest better and the nearest worse outcome, a set the outcomes alone decide. {@code mean}: every
      * opponent, the sums divided by their number — a contest weighs like one game whatever the field, the
      * normalisation {@code elo} applies to {@code kFactor}.
+     *
+     * <p>{@code all} and {@code mean} pair every player with every opponent, so a pair is always read from both
+     * sides. {@code adjacent} is symmetric too, <b>except</b> where a player holds several rows in one contest: a
+     * neighbour is the nearest outcome among that row's opponents, and the player's own other rows are none of
+     * them, so a row may meet an opponent whose own neighbours the row is not one of. The pairing stays a function
+     * of the outcomes either way, which is what keeps a contest with ties order-free.
      */
     public enum Pairs { all, adjacent, mean }
 
@@ -177,14 +183,20 @@ public final class Rating implements Serializable {
      */
     public void fold(final State state, final List<SequenceEvaluator.Past> run) {
         final Map<String, List<Entry>> contests = new TreeMap<>();
+        // the run's event time dates every contest it holds (the clock of a drift in time): a run of mixed times
+        // would date them all by its first row, so the precondition is checked rather than trusted
+        final long millis = run.isEmpty() ? 0L : run.get(0).millis();
         for (final SequenceEvaluator.Past p : run) {
+            if (p.millis() != millis) {
+                throw new IllegalArgumentException("fold takes the rows of ONE event time: " + millis + " and " + p.millis()
+                        + " (the caller must slice the history by event time — SequenceEvaluator.advanceRating / Rating.replay)");
+            }
             final String contest = FeatureValues.key(p.values(), contestKeys);
             final String player = player(p.values());
             final Double outcome = SequenceEvaluator.finite(p.values().get(field));
             if (contest == null || player == null || outcome == null) continue;
             contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(player, outcome));
         }
-        final long millis = run.isEmpty() ? 0L : run.get(0).millis();
         for (final List<Entry> entries : contests.values()) update(state, entries, millis);
     }
 
@@ -224,7 +236,10 @@ public final class Rating implements Serializable {
         final double s = p == null ? sigma : p.sigma;
         if (tauPerMillis <= 0) return s * s + (contest ? tau * tau : 0d);
         if (p == null) return s * s;
-        return s * s + tau * tau * Math.max(0L, millis - p.lastMillis) / (double) tauPerMillis;
+        // the absence, compared before it is subtracted: `millis - lastMillis` would wrap to a huge positive
+        // difference for an extreme millis, where Math.max of the wrapped value cannot clamp it back to none
+        final long absence = millis > p.lastMillis ? millis - p.lastMillis : 0L;
+        return s * s + tau * tau * absence / (double) tauPerMillis;
     }
 
     /** Applies one contest held at {@code millis}. The entries' order does not matter (they are sorted by player, then outcome). */
@@ -383,6 +398,11 @@ public final class Rating implements Serializable {
     /**
      * A readout of a player's rating as the state holds it ({@code state} may be null: nothing folded yet). A player
      * never rated reads the prior {@code mu} / {@code sigma}, count 0 and a null {@code delta}.
+     *
+     * <p>Under a drift in time ({@code tauPer}) this reads the uncertainty of the player's <b>last contest</b>, not the
+     * one it carries now: every path that serves a row must pass the row's time
+     * ({@link #read(State, String, String, long)}), as {@code SequenceEvaluator} does on the fold-pointer and the scan
+     * path alike. This overload is the state's own view (tests, and a rating whose drift is per contest).
      */
     public Object read(final State state, final String player, final String func) {
         return read(state, player, func, Long.MIN_VALUE);
@@ -397,11 +417,20 @@ public final class Rating implements Serializable {
         final Player p = state == null ? null : state.players.get(player);
         return switch (func) {
             case "mu" -> p == null ? mu : p.mu;
-            case "sigma" -> p == null ? sigma : tauPerMillis > 0 && nowMillis != Long.MIN_VALUE ? Math.sqrt(drifted(p, nowMillis, false)) : p.sigma;
+            case "sigma" -> p == null ? sigma : sigmaAt(p, nowMillis);
             case "count" -> p == null ? 0L : p.count;
             case "delta" -> p == null ? null : (Object) p.delta;
             default -> throw new IllegalArgumentException("unknown rating readout: " + func);
         };
+    }
+
+    /**
+     * The uncertainty a row at {@code nowMillis} reads: the state's, carrying the drift of the absence since the
+     * player's last contest. {@code Long.MIN_VALUE} (a read without a time) is the state's own value, bit for bit.
+     */
+    private double sigmaAt(final Player p, final long nowMillis) {
+        if (tauPerMillis <= 0 || nowMillis == Long.MIN_VALUE) return p.sigma;
+        return Math.sqrt(drifted(p, nowMillis, false));
     }
 
 }
