@@ -81,9 +81,6 @@ public final class BlockSeries<S extends Serializable> implements Serializable {
      * co-occurrence counts of {@link Spectral}, the gathered values of {@link QuantileTransform}) — the same
      * prefix-scan {@link VarianceComponents#forwardSeries} does per key. {@code fit} therefore reads the state it is
      * given and keeps nothing: every family's fit copies what it needs into its model.
-     *
-     * <p>{@code fit} is called once per change point, in increasing order: a caller may carry the model of the point
-     * before into the next call (the warm start of an iterative solve).
      */
     public <M> TreeMap<Long, M> models(final int windowBlocks, final Function<S, M> fit) {
         final TreeMap<Long, M> models = new TreeMap<>();

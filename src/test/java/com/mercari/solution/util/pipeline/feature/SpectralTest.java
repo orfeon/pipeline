@@ -286,27 +286,29 @@ public class SpectralTest {
     }
 
     /**
-     * Beyond {@link SymmetricEigen#DENSE_LIMIT} values only the leading components are solved for, iteratively. The fit
-     * of the block before is the start a forward fit gives it — its coordinates, row by row of the new vocabulary,
-     * whose order has changed with the masses: it changes how long the solve takes, not the embedding.
+     * Beyond {@link SymmetricEigen#DENSE_LIMIT} values the eigenproblem is solved by the library decomposition rather
+     * than the Jacobi sweep: the same embedding to rounding — the sweep is run on the same PPMI matrix here as the
+     * reference — and the same bits from one call to the next.
      */
     @Test
-    public void testLargeVocabularyAndWarmStart() {
-        final Spectral.PairCounts earlier = communities(40_000, 1);
-        final Spectral.PairCounts later = communities(40_000, 1);
-        later.merge(communities(4_000, 2));
-        final Spectral before = Spectral.fit(earlier, 4, 256, false);
-        Assertions.assertTrue(before.vocabulary.length > SymmetricEigen.DENSE_LIMIT, before.vocabulary.length + " values");
-        final Spectral cold = Spectral.fit(later, 4, 256, false);
-        final Spectral warm = Spectral.fit(later, 4, 256, false, before);
-        Assertions.assertArrayEquals(cold.vocabulary, warm.vocabulary);
-        Assertions.assertArrayEquals(cold.eigenvalues, warm.eigenvalues, 1e-9);
-        for (final String value : cold.vocabulary) Assertions.assertArrayEquals(cold.embed(value), warm.embed(value), 1e-7, value);
+    public void testLargeVocabulary() {
+        final Spectral.PairCounts state = communities(40_000, 1);
+        final Spectral spectral = Spectral.fit(state, 4, 256, false);
+        Assertions.assertTrue(spectral.vocabulary.length > SymmetricEigen.DENSE_LIMIT, spectral.vocabulary.length + " values");
         // the communities are what the leading components see: a value sits closer to its own kind than to another
-        Assertions.assertTrue(cosine(cold.embed("v001"), cold.embed("v002")) > cosine(cold.embed("v001"), cold.embed("v101")));
-        // a start from an empty fit, or none, is the cold solve
-        final Spectral empty = Spectral.fit(new Spectral.PairCounts(), 4, 256, false);
-        for (final String value : cold.vocabulary) Assertions.assertArrayEquals(cold.embed(value), Spectral.fit(later, 4, 256, false, empty).embed(value), 0, value);
+        Assertions.assertTrue(cosine(spectral.embed("v001"), spectral.embed("v002")) > cosine(spectral.embed("v001"), spectral.embed("v101")));
+        final Spectral again = Spectral.fit(state, 4, 256, false);
+        for (final String value : spectral.vocabulary) Assertions.assertArrayEquals(spectral.embed(value), again.embed(value), 0, value);
+        // the sweep, on the matrix the fit built: the same eigenvalues, and the same coordinates up to each column's sign
+        final double[][] ppmi = Spectral.ppmiOf(state, spectral.vocabulary);
+        final double[][] sweep = Svd.jacobi(ppmi, true);
+        for (int r = 0; r < 4; r++) {
+            Assertions.assertEquals(sweep[0][r], spectral.eigenvalues[r], 1e-9, "eigenvalue " + r);
+            final double scale = Math.sqrt(Math.abs(sweep[0][r]));
+            double dot = 0;
+            for (int i = 0; i < spectral.vocabulary.length; i++) dot += sweep[r + 1][i] * scale * spectral.embedding[i][r];
+            Assertions.assertEquals(Math.abs(sweep[0][r]), Math.abs(dot), 1e-8, "component " + r);
+        }
     }
 
 }

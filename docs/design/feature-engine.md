@@ -441,8 +441,10 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   relative to the first accepted vector so a large offset does not cancel the covariance away; merging
   re-anchors exactly — one `Combine`, no row leaves the workers) and solves the d × d matrix on the
   driver for its `rank` leading components (`SymmetricEigen`: up to 128 dimensions the cyclic Jacobi sweep, convergence
-  judged relative to the Frobenius norm; beyond, a restarted block Krylov iteration with a Rayleigh–Ritz step, which
-  falls back to the sweep if it does not settle).
+  judged relative to the Frobenius norm; beyond, ojalgo's symmetric decomposition — Householder tridiagonalisation
+  and QR, the same O(d³) with a real implementation's constant: 0.15 s at 700 rows against the sweep's 7–15 s. A
+  restarted block Krylov iteration for the leading pairs alone was measured against it and lost on slowly decaying
+  spectra, the usual ones for co-occurrence data, so there is no iterative path and no warm start).
 - **Joint estimator** (`JointSpec` → `JointFit`, spec §5.5 rule 1): one model per keySet × window × target of
   an encoding block with `estimator: joint`. The extract emits `(cell, y)` with the cell = the cross of every
   level's key fields (`FeatureValues.key`, decodable by `keyComponents`), `Combine.perKey` aggregates
@@ -1250,10 +1252,9 @@ chain `(entity, path) → (path) → suffixes → global` (Dirichlet-Multinomial
 pins "sugar == the explicit lag + encoding blocks" value for value. `spectralEmbedding` adds one model (`Spectral`)
 and one summary family of its own (`Spectral.SUMMARY`, family name `PairCounts`: nested sorted maps of unordered pair
 counts, a monoid — sorted so the sums and the vocabulary order never depend on the arrival order), contributed as
-`String[]{value, lag values…}` by `SpectralSpec`; the PPMI matrix and its leading eigenpairs (`SymmetricEigen.leading`,
-by magnitude: the matrix is indefinite, and a Krylov space finds both ends of a spectrum) run in `solve`, per change
-point under forward — each started from the model of the change point before (`ForwardFitBlock.fit(state, loud, warm)`,
-which may change how fast a model is found and never which). The matrix is dense in the distinct values, hence `maxValues`
+`String[]{value, lag values…}` by `SpectralSpec`; the PPMI matrix (`Spectral.ppmiOf`) and its leading eigenpairs
+(`SymmetricEigen.leading`, by magnitude: the matrix is indefinite) run in `solve`, per change point under forward.
+The matrix is dense in the distinct values, hence `maxValues`
 (default 256, at most 1024) by co-occurrence mass. With these two, every population type the catalog registers is
 implemented; `population.unsupported` remains for types registered ahead of their implementation.
 

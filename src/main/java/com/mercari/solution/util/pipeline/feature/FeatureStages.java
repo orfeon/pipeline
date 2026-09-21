@@ -979,15 +979,6 @@ public final class FeatureStages {
          */
         M fit(S state, boolean loud);
 
-        /**
-         * {@link #fit} with the model of the change point before at hand ({@code warm}, the last one that fitted
-         * anything, or null): a type whose solve is iterative starts from it — consecutive forward fits differ by one
-         * block of rows. It must change how fast the model is found, never which model: the others ignore it.
-         */
-        default M fit(final S state, final boolean loud, final M warm) {
-            return fit(state, loud);
-        }
-
         /** {@code fit.minRows}: a state fewer rows contributed to is not fitted — its rows read null (0 = no floor). */
         long minRows();
 
@@ -1005,11 +996,6 @@ public final class FeatureStages {
          * input starts mid-block, so the first window may hold a handful of rows.
          */
         default M fitAbove(final S state, final boolean loud) {
-            return fitAbove(state, loud, null);
-        }
-
-        /** {@link #fitAbove(Serializable, boolean)} with a warm start ({@link #fit(Serializable, boolean, Serializable)}). */
-        default M fitAbove(final S state, final boolean loud, final M warm) {
             if (belowFloor(state)) {
                 if (loud) {
                     LOG.warn("{} {}: {} row(s) are fewer than fit.minRows {}; nothing is fitted, every row reads null",
@@ -1017,7 +1003,7 @@ public final class FeatureStages {
                 }
                 return fit(family().create(), false);
             }
-            return fit(state, loud, warm);
+            return fit(state, loud);
         }
 
         /**
@@ -1084,23 +1070,16 @@ public final class FeatureStages {
             final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final S whole = all == null ? family().create() : all;
             final boolean floored = belowFloor(whole);
-            M total;
+            M total = fitAbove(whole, true);
             TreeMap<Long, M> byBlock = null;
             boolean chained = false;
-            if (forward() == null) {
-                total = fitAbove(whole, true);
-            } else {
+            if (forward() != null) {
                 final int[] emptied = {0};
-                // the change points are solved in time order, each started from the last one that fitted anything
-                final java.util.concurrent.atomic.AtomicReference<M> warm = new java.util.concurrent.atomic.AtomicReference<>();
                 byBlock = series.models(forward().windowBlocks(), state -> {
                     // an empty window at a leave point is normal and not counted: only a window that held rows
                     if (rowsOf(state) > 0 && belowFloor(state)) emptied[0]++;
-                    final M fitted = fitAbove(state, false, warm.get());
-                    if (!fitted.isEmpty()) warm.set(fitted);
-                    return fitted;
+                    return fitAbove(state, false);
                 });
-                total = fitAbove(whole, true, warm.get());
                 M previous = null;
                 int loose = 0;
                 for (final Map.Entry<Long, M> point : byBlock.entrySet()) {
@@ -1660,12 +1639,7 @@ public final class FeatureStages {
          */
         @Override
         public Svd fit(final Svd.Moments m, final boolean loud) {
-            return fit(m, loud, null);
-        }
-
-        @Override
-        public Svd fit(final Svd.Moments m, final boolean loud, final Svd warm) {
-            final Svd fitted = Svd.fit(m, rank, center, standardize, loud, warm);
+            final Svd fitted = Svd.fit(m, rank, center, standardize, loud);
             if (loud) {
                 LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
                         block, fitted.rank(), rank, m.n, m.dimension, m.skipped, m.mismatched);
@@ -2056,12 +2030,7 @@ public final class FeatureStages {
         /** Factorises the pair counts of a time block's rows on one worker. */
         @Override
         public Spectral fit(final Spectral.PairCounts counts, final boolean loud) {
-            return fit(counts, loud, null);
-        }
-
-        @Override
-        public Spectral fit(final Spectral.PairCounts counts, final boolean loud, final Spectral warm) {
-            final Spectral fitted = Spectral.fit(counts, rank, maxValues, loud, warm);
+            final Spectral fitted = Spectral.fit(counts, rank, maxValues, loud);
             if (loud) {
                 LOG.info("spectralEmbedding {}: {} value(s) embedded in {} of {} requested coordinate(s) from {} pairs ({} counted value(s) left out: no co-occurrence row)",
                         block, fitted.vocabulary.length, fitted.rank(), rank, fitted.pairs, fitted.dropped);

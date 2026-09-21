@@ -6,9 +6,9 @@ import org.junit.jupiter.api.Test;
 import java.util.Random;
 
 /**
- * The leading eigenpairs by the restarted block Krylov iteration: they are those of the full Jacobi decomposition — for the indefinite
- * matrix of an embedding (ordered by magnitude, with pairs of equal magnitude) and for a covariance — a warm start
- * changes the number of restarts and not the answer, and what the iteration cannot settle falls back to the full solve.
+ * The leading eigenpairs of a large symmetric matrix are those of the Jacobi sweep — for the indefinite matrix of an
+ * embedding (ordered by magnitude, with pairs of equal magnitude) and for a covariance — bit-for-bit reproducible,
+ * and a small matrix still takes the sweep itself.
  */
 public class SymmetricEigenTest {
 
@@ -48,11 +48,7 @@ public class SymmetricEigenTest {
     }
 
     private static void assertSamePairs(final double[][] a, final SymmetricEigen.Result result, final int k, final boolean byMagnitude) {
-        assertSamePairs(a, result, k, Svd.jacobi(a, byMagnitude));
-    }
-
-    /** The reference decomposition of a few hundred rows is the slow path this class exists to avoid: pass it in when it is already at hand. */
-    private static void assertSamePairs(final double[][] a, final SymmetricEigen.Result result, final int k, final double[][] full) {
+        final double[][] full = Svd.jacobi(a, byMagnitude);
         Assertions.assertEquals(k, result.values().length);
         for (int i = 0; i < k; i++) {
             Assertions.assertEquals(full[0][i], result.values()[i], 1e-9, "eigenvalue " + i);
@@ -69,11 +65,14 @@ public class SymmetricEigenTest {
     @Test
     public void testLeadingPairsOfAnIndefiniteMatrix() {
         final double[][] a = withSpectrum(indefinite(300), 1);
-        final SymmetricEigen.Result result = SymmetricEigen.leading(a, 6, true, null);
-        Assertions.assertTrue(result.restarts() > 0, "300 rows are beyond the dense limit");
+        final SymmetricEigen.Result result = SymmetricEigen.leading(a, 6, true);
         assertSamePairs(a, result, 6, true);
         // by magnitude: the second eigenvalue is the negative one
         Assertions.assertTrue(result.values()[1] < 0, "values " + java.util.Arrays.toString(result.values()));
+        // the same matrix again: the same bits
+        final SymmetricEigen.Result again = SymmetricEigen.leading(a, 6, true);
+        Assertions.assertArrayEquals(result.values(), again.values(), 0);
+        for (int i = 0; i < 6; i++) Assertions.assertArrayEquals(result.vectors()[i], again.vectors()[i], 0);
     }
 
     @Test
@@ -81,12 +80,10 @@ public class SymmetricEigenTest {
         final double[] spectrum = new double[200];
         for (int i = 0; i < spectrum.length; i++) spectrum[i] = 5 * Math.pow(0.9, i);
         final double[][] a = withSpectrum(spectrum, 2);
-        final SymmetricEigen.Result result = SymmetricEigen.leading(a, 4, false, null);
-        Assertions.assertTrue(result.restarts() > 0);
-        assertSamePairs(a, result, 4, false);
+        assertSamePairs(a, SymmetricEigen.leading(a, 4, false), 4, false);
     }
 
-    /** λ and −λ have the same magnitude: the iteration cannot tell them apart, the Ritz step does. */
+    /** λ and −λ have the same magnitude: both are leading, and each is an eigenpair. */
     @Test
     public void testPairsOfEqualMagnitude() {
         final double[] spectrum = indefinite(260);
@@ -96,9 +93,7 @@ public class SymmetricEigenTest {
         spectrum[2] = 7;
         spectrum[3] = -7;
         final double[][] a = withSpectrum(spectrum, 3);
-        final SymmetricEigen.Result result = SymmetricEigen.leading(a, 4, true, null);
-        Assertions.assertTrue(result.restarts() > 0);
-        // within a pair the order is Jacobi's too (a stable sort of |λ|), but only the set is a property of the matrix
+        final SymmetricEigen.Result result = SymmetricEigen.leading(a, 4, true);
         final double[] sorted = result.values().clone();
         java.util.Arrays.sort(sorted);
         Assertions.assertArrayEquals(new double[]{-12, -7, 7, 12}, sorted, 1e-9);
@@ -114,68 +109,27 @@ public class SymmetricEigenTest {
         }
     }
 
-    /** The answer of a neighbouring problem as the start: the same pairs, in fewer steps. */
     @Test
-    public void testWarmStart() {
-        // a spectrum that decays slowly — one Krylov space is not enough from a random start
-        final int d = 400;
-        final double[] spectrum = new double[d];
-        for (int i = 0; i < d; i++) spectrum[i] = (i % 3 == 1 ? -1 : 1) * 10 * Math.pow(0.985, i);
-        final double[][] a = withSpectrum(spectrum, 4);
-        final SymmetricEigen.Result cold = SymmetricEigen.leading(a, 6, true, null);
-        // the matrix one block of data later: a small symmetric perturbation
-        final Random random = new Random(9);
-        final double[][] next = new double[d][d];
-        for (int i = 0; i < d; i++) {
-            for (int j = i; j < d; j++) {
-                final double moved = a[i][j] + 1e-7 * random.nextGaussian();
-                next[i][j] = moved;
-                next[j][i] = moved;
-            }
-        }
-        final SymmetricEigen.Result fresh = SymmetricEigen.leading(next, 6, true, null);
-        final SymmetricEigen.Result warm = SymmetricEigen.leading(next, 6, true, cold.vectors());
-        final double[][] full = Svd.jacobi(next, true);
-        assertSamePairs(next, warm, 6, full);
-        Assertions.assertTrue(warm.restarts() < fresh.restarts(), warm.restarts() + " warm vs " + fresh.restarts() + " cold");
-        // a start that is no help — vectors of another length, a repeated vector — is ignored or replaced, not trusted
-        assertSamePairs(next, SymmetricEigen.leading(next, 6, true, new double[][]{new double[7], cold.vectors()[0], cold.vectors()[0]}), 6, full);
-    }
-
-    @Test
-    public void testSmallLowRankAndUnsettledMatrices() {
-        // small: the full decomposition answers
+    public void testSmallAndLowRankMatrices() {
+        // small: the sweep itself answers, so an earlier artifact is reproduced bit for bit
         final double[][] small = withSpectrum(new double[]{4, -3, 2, 1, 0.5}, 5);
-        final SymmetricEigen.Result dense = SymmetricEigen.leading(small, 2, true, null);
-        Assertions.assertEquals(0, dense.restarts());
-        assertSamePairs(small, dense, 2, true);
+        final SymmetricEigen.Result dense = SymmetricEigen.leading(small, 2, true);
+        final double[][] sweep = Svd.jacobi(small, true);
+        Assertions.assertArrayEquals(new double[]{sweep[0][0], sweep[0][1]}, dense.values(), 0);
+        Assertions.assertArrayEquals(sweep[1], dense.vectors()[0], 0);
         // more pairs asked for than the matrix has rows
-        Assertions.assertEquals(5, SymmetricEigen.leading(small, 9, true, null).values().length);
+        Assertions.assertEquals(5, SymmetricEigen.leading(small, 9, true).values().length);
+        Assertions.assertEquals(200, SymmetricEigen.leading(withSpectrum(new double[200], 6), 300, true).values().length);
 
-        // rank 3 in 200 rows: the block is kept of full rank by fresh directions, the pairs beyond the rank are zeros
+        // rank 3 in 200 rows: the pairs beyond the rank are zeros
         final double[] spectrum = new double[200];
         spectrum[0] = 3;
         spectrum[1] = -2;
         spectrum[2] = 1;
-        final SymmetricEigen.Result low = SymmetricEigen.leading(withSpectrum(spectrum, 6), 5, true, null);
+        final SymmetricEigen.Result low = SymmetricEigen.leading(withSpectrum(spectrum, 6), 5, true);
         Assertions.assertArrayEquals(new double[]{3, -2, 1}, java.util.Arrays.copyOf(low.values(), 3), 1e-9);
         Assertions.assertEquals(0, low.values()[3], 1e-9);
         Assertions.assertEquals(0, low.values()[4], 1e-9);
-
-        // every magnitude equal (A² = I): [X, AX] is already invariant, so one restart is exact
-        final double[] signs = new double[180];
-        for (int i = 0; i < signs.length; i++) signs[i] = i % 2 == 0 ? 1 : -1;
-        final SymmetricEigen.Result involution = SymmetricEigen.leading(withSpectrum(signs, 7), 3, true, null);
-        Assertions.assertEquals(1, involution.restarts());
-        for (final double value : involution.values()) Assertions.assertEquals(1, Math.abs(value), 1e-9);
-
-        // an iteration that is not given the restarts it needs hands over to the full decomposition: same pairs
-        final double[] slow = new double[300];
-        for (int i = 0; i < slow.length; i++) slow[i] = (i % 2 == 0 ? 1 : -1) * Math.pow(0.999, i);
-        final double[][] hard = withSpectrum(slow, 8);
-        final SymmetricEigen.Result handed = SymmetricEigen.leading(hard, 3, true, null, true, 1);
-        Assertions.assertEquals(0, handed.restarts());
-        assertSamePairs(hard, handed, 3, true);
     }
 
 }

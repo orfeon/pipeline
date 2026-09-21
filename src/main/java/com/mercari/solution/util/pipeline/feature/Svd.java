@@ -17,8 +17,8 @@ import java.util.List;
  * projected onto the leading {@code rank} right singular vectors, giving {@code rank} decorrelated scores ordered
  * by explained variance. Fitted from sufficient statistics only — (n, Σx, Σxxᵀ) is one {@code Combine} over the
  * rows, so no row leaves the workers — and the d × d covariance is solved on the driver for its {@code rank}
- * leading components only ({@link SymmetricEigen}: the cyclic Jacobi sweep of {@link #jacobi} up to a few hundred
- * dimensions, a restarted block Krylov iteration beyond; d is the vector length, tens to a few hundred). The
+ * leading components ({@link SymmetricEigen}: the cyclic Jacobi sweep of {@link #jacobi} up to 128 dimensions, the
+ * library's symmetric decomposition beyond; d is the vector length, tens to a few hundred). The
  * components' sign is fixed (largest-magnitude loading positive) so a re-fit on the same data reproduces the same
  * scores.
  *
@@ -220,14 +220,6 @@ public final class Svd implements Serializable, FitArtifact.Model {
      *             whole-input fit reports.
      */
     public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize, final boolean warn) {
-        return fit(m, rank, center, standardize, warn, null);
-    }
-
-    /**
-     * @param warm the fit of the change point before (forward), or null: its components start the iteration for the
-     *             leading ones ({@link SymmetricEigen}). It changes how fast the solve is, not what it converges to
-     */
-    public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize, final boolean warn, final Svd warm) {
         final int d = m.dimension;
         if (warn && m.mismatched > 0) {
             LOG.warn("svd: {} vector(s) of a length other than the fitted {} were skipped; the fitted length is whichever was seen first, so normalise the array length upstream", m.mismatched, d);
@@ -257,7 +249,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
         double trace = 0;
         for (int i = 0; i < d; i++) trace += c[i][i];
         final int k = Math.min(rank, d);
-        final SymmetricEigen.Result eigen = SymmetricEigen.leading(c, k, false, warm == null || warm.dimension != d ? null : warm.components, warn);
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(c, k, false);
         if (warn && k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
         final double[][] components = new double[k][];
         final double[] variances = new double[k];
