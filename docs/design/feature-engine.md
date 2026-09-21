@@ -318,8 +318,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `sigma_j² = v_j · max(1 − share · Δ, κ)`, the clamp after the share — walking the sorted entries so that a member of
   several teams (like a player of several rows) sums its shares in an order the contest decides. A team of one has
   the share `v / v = 1` and sums that start from the member rather than from 0: the arithmetic of a player to the
-  last bit, which `RatingTest.testPlayerArithmeticIsUnchangedByTeams` pins with a hash recorded from the
-  implementation that knew players only. `elo` has no variance to share by and takes no team. The members' levels
+  last bit, which `RatingTest.testPlayerArithmeticIsUnchangedByTeams` pins against a frozen copy of the update as it
+  stood before teams (`PlayersOnly`), run side by side in one JVM — not against recorded numbers: `Math.exp` / `Math.pow`
+  are specified to an ulp, not to a bit, so a constant would pin a platform's libm rather than the property. The rated
+  player's prior, drift and key fields live in `members.get(0)` and nowhere else. `elo` has no variance to share by and takes no team. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no

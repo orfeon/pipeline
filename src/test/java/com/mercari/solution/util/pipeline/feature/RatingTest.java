@@ -309,21 +309,27 @@ public class RatingTest {
 
 
     /**
-     * A rating without a team is the arithmetic it was before teams existed, to the last bit: the hash of every
-     * (mu, sigma, delta, count) bit pattern after 400 seeded contests — ties, players holding several rows, drift per
-     * contest and in time, every method and pairing — recorded from the implementation that knew players only. A team
-     * of one member shares its change by v / v = 1, starts its sums from the member (not from 0) and clamps after the
-     * share, so nothing may move.
+     * A rating without a team is the arithmetic it was before teams existed, to the last bit: 400 seeded contests —
+     * ties, players holding several rows, drift per contest and in time, every method and pairing — folded by the
+     * rating and by {@link PlayersOnly}, the update as it stood before a row could be a team, frozen here. A team of one
+     * shares its change by v / v = 1, starts its sums from the member (not from 0) and clamps after the share, so
+     * nothing may move — not by an ulp.
+     *
+     * <p>The two run side by side in one JVM on purpose. {@code Math.exp} / {@code Math.pow} are specified to within
+     * an ulp, not to a bit, so a constant recorded on one machine (as this test first did: the hash of every bit
+     * pattern, taken from the implementation that knew players only, and met by the team-aware one) would hold a
+     * platform's libm rather than the property. An oracle reads the same {@code Math} as the code it judges.
      */
     @Test
     public void testPlayerArithmeticIsUnchangedByTeams() {
-        long hash = 17;
+        int compared = 0;
         for (final Rating.Method method : Rating.Method.values()) {
             for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
                 for (final Long tauPer : method == Rating.Method.elo ? new Long[]{null} : new Long[]{null, 3 * DAY}) {
-                    final Rating rating = Rating.of(method, true, null, null, null, method == Rating.Method.elo ? null : 1.5, null, null, tauPer, pairs,
-                            List.of("p"), List.of("c"), "y");
-                    final Rating.State state = new Rating.State();
+                    final Double tau = method == Rating.Method.elo ? null : 1.5;
+                    final Rating rating = Rating.of(method, true, null, null, null, tau, null, null, tauPer, pairs, List.of("p"), List.of("c"), "y");
+                    final PlayersOnly before = new PlayersOnly(method, tau == null ? 0 : tau, tauPer == null ? 0L : tauPer, pairs == null ? Rating.Pairs.all : pairs);
+                    final Rating.State state = new Rating.State(), expected = new Rating.State();
                     final Random random = new Random(20260921);
                     long millis = 1_700_000_000_000L;
                     for (int contest = 0; contest < 400; contest++) {
@@ -332,18 +338,188 @@ public class RatingTest {
                         final int size = 2 + random.nextInt(9);
                         for (int i = 0; i < size; i++) entries.add(entry("p" + random.nextInt(30), random.nextInt(6)));
                         rating.update(state, entries, millis);
+                        before.update(expected, entries, millis);
                     }
-                    final List<String> names = new ArrayList<>(state.players.keySet());
-                    Collections.sort(names);
-                    for (final String name : names) {
-                        final Rating.Player player = state.players.get(name);
-                        for (final double value : new double[]{player.mu, player.sigma, player.delta}) hash = 31 * hash + Double.doubleToLongBits(value);
-                        hash = 31 * hash + player.count;
+                    Assertions.assertEquals(expected.players.keySet(), state.players.keySet());
+                    for (final String name : expected.players.keySet()) {
+                        final Rating.Player was = expected.players.get(name), is = state.players.get(name);
+                        final String where = method + " " + pairs + " tauPer " + tauPer + " " + name;
+                        Assertions.assertEquals(Double.doubleToLongBits(was.mu), Double.doubleToLongBits(is.mu), where + " mu " + was.mu + " / " + is.mu);
+                        Assertions.assertEquals(Double.doubleToLongBits(was.sigma), Double.doubleToLongBits(is.sigma), where + " sigma " + was.sigma + " / " + is.sigma);
+                        Assertions.assertEquals(Double.doubleToLongBits(was.delta), Double.doubleToLongBits(is.delta), where + " delta");
+                        Assertions.assertEquals(was.count, is.count, where);
+                        Assertions.assertEquals(was.lastMillis, is.lastMillis, where);
+                        compared++;
                     }
                 }
             }
         }
-        Assertions.assertEquals(-8448840406834037034L, hash);
+        Assertions.assertTrue(compared >= 8 * 25, "every configuration rated its players: " + compared);
+    }
+
+    /**
+     * The rating update as it stood before a row could be a team (players only, default prior and beta): the oracle of
+     * {@link #testPlayerArithmeticIsUnchangedByTeams}. FROZEN — it is not kept in step with {@link Rating}; a deliberate
+     * change of a player's arithmetic changes this copy in the same commit, and says so.
+     */
+    private static final class PlayersOnly {
+        private static final double KAPPA = 1e-4, MU = 25d, SIGMA = MU / 3, BETA = SIGMA / 2, K_FACTOR = 32d, SCALE = 400d, ELO_MU = 1500d;
+        private final Rating.Method method;
+        private final double tau;
+        private final long tauPerMillis;
+        private final Rating.Pairs pairs;
+
+        PlayersOnly(final Rating.Method method, final double tau, final long tauPerMillis, final Rating.Pairs pairs) {
+            this.method = method;
+            this.tau = tau;
+            this.tauPerMillis = tauPerMillis;
+            this.pairs = pairs;
+        }
+
+        private double mu() {
+            return method == Rating.Method.elo ? ELO_MU : MU;
+        }
+
+        private double sigma() {
+            return method == Rating.Method.elo ? ELO_MU / 3 : SIGMA;
+        }
+
+        private double drifted(final Rating.Player p, final long millis) {
+            final double s = p == null ? sigma() : p.sigma;
+            if (tauPerMillis <= 0) return s * s + tau * tau;
+            if (p == null) return s * s;
+            final long absence = millis > p.lastMillis ? millis - p.lastMillis : 0L;
+            return s * s + tau * tau * absence / (double) tauPerMillis;
+        }
+
+        void update(final Rating.State state, final List<Rating.Entry> contest, final long millis) {
+            final List<Rating.Entry> entries = new ArrayList<>(contest);
+            entries.sort(java.util.Comparator.comparing(Rating.Entry::player).thenComparingDouble(Rating.Entry::outcome));
+            final int n = entries.size();
+            if (n < 2 || entries.get(0).player().equals(entries.get(n - 1).player())) return;
+            final double[] m = new double[n], v = new double[n];
+            for (int i = 0; i < n; i++) {
+                final Rating.Player p = state.players.get(entries.get(i).player());
+                m[i] = p == null ? mu() : p.mu;
+                v[i] = drifted(p, millis);
+            }
+            final double[] dMu = new double[n], shrink = new double[n];
+            java.util.Arrays.fill(shrink, 1d);
+            switch (method) {
+                case elo -> elo(entries, m, dMu);
+                case bradleyTerry -> bradleyTerry(entries, m, v, dMu, shrink);
+                case plackettLuce -> plackettLuce(entries, m, v, dMu, shrink);
+            }
+            int i = 0;
+            while (i < n) {
+                final String name = entries.get(i).player();
+                double change = 0, factor = 1;
+                int j = i;
+                for (; j < n && entries.get(j).player().equals(name); j++) {
+                    change += dMu[j];
+                    factor *= shrink[j];
+                }
+                final Rating.Player p = state.players.computeIfAbsent(name, key -> {
+                    final Rating.Player created = new Rating.Player();
+                    created.mu = mu();
+                    created.sigma = sigma();
+                    return created;
+                });
+                p.mu = m[i] + change;
+                if (method != Rating.Method.elo) p.sigma = Math.sqrt(v[i] * factor);
+                p.delta = change;
+                p.count++;
+                p.lastMillis = millis;
+                i = j;
+            }
+        }
+
+        private static double score(final double a, final double b) {
+            if (a == b) return 0.5;
+            return Double.compare(a, b) < 0 ? 1d : 0d;   // ascending: the smaller outcome is the better one
+        }
+
+        private void elo(final List<Rating.Entry> entries, final double[] m, final double[] dMu) {
+            final int n = entries.size();
+            for (int i = 0; i < n; i++) {
+                double sum = 0;
+                int opponents = 0;
+                for (int j = 0; j < n; j++) {
+                    if (entries.get(j).player().equals(entries.get(i).player())) continue;
+                    final double expected = 1d / (1d + Math.pow(10d, (m[j] - m[i]) / SCALE));
+                    sum += score(entries.get(i).outcome(), entries.get(j).outcome()) - expected;
+                    opponents++;
+                }
+                if (opponents > 0) dMu[i] = K_FACTOR * sum / opponents;
+            }
+        }
+
+        private void bradleyTerry(final List<Rating.Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] shrink) {
+            final int n = entries.size();
+            for (int i = 0; i < n; i++) {
+                final Rating.Entry self = entries.get(i);
+                double better = Double.NaN, worse = Double.NaN;
+                if (pairs == Rating.Pairs.adjacent) {
+                    for (int q = 0; q < n; q++) {
+                        final Rating.Entry other = entries.get(q);
+                        if (other.player().equals(self.player())) continue;
+                        final double sc = score(other.outcome(), self.outcome());
+                        if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
+                        if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
+                    }
+                }
+                double omega = 0, delta = 0;
+                int opponents = 0;
+                for (int q = 0; q < n; q++) {
+                    final Rating.Entry other = entries.get(q);
+                    if (other.player().equals(self.player())) continue;
+                    if (pairs == Rating.Pairs.adjacent && other.outcome() != self.outcome() && other.outcome() != better && other.outcome() != worse) continue;
+                    final double c = Math.sqrt(v[i] + v[q] + 2 * BETA * BETA);
+                    final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
+                    omega += v[i] / c * (score(self.outcome(), other.outcome()) - p);
+                    delta += Math.sqrt(v[i]) / c * (v[i] / (c * c)) * p * (1 - p);
+                    opponents++;
+                }
+                if (pairs == Rating.Pairs.mean && opponents > 0) {
+                    omega /= opponents;
+                    delta /= opponents;
+                }
+                dMu[i] = omega;
+                shrink[i] = Math.max(1 - delta, KAPPA);
+            }
+        }
+
+        private void plackettLuce(final List<Rating.Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] shrink) {
+            final int n = entries.size();
+            double c2 = 0, top = Double.NEGATIVE_INFINITY;
+            for (int i = 0; i < n; i++) {
+                c2 += v[i] + BETA * BETA;
+                top = Math.max(top, m[i]);
+            }
+            final double c = Math.sqrt(c2);
+            final double[] e = new double[n];
+            for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - top) / c);
+            final double[] remaining = new double[n];
+            final int[] ties = new int[n];
+            for (int q = 0; q < n; q++) {
+                for (int t = 0; t < n; t++) {
+                    final double sc = score(entries.get(t).outcome(), entries.get(q).outcome());
+                    if (sc <= 0.5) remaining[q] += e[t];
+                    if (sc == 0.5) ties[q]++;
+                }
+            }
+            for (int i = 0; i < n; i++) {
+                double omega = 0, delta = 0;
+                for (int q = 0; q < n; q++) {
+                    if (q != i && score(entries.get(q).outcome(), entries.get(i).outcome()) < 0.5) continue;
+                    final double quotient = e[i] / remaining[q];
+                    omega += (q == i ? 1 - quotient : -quotient) / ties[q];
+                    delta += quotient * (1 - quotient) / ties[q];
+                }
+                dMu[i] = v[i] / c * omega;
+                shrink[i] = Math.max(1 - Math.sqrt(v[i]) / c * (v[i] / c2) * delta, KAPPA);
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------------------

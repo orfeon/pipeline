@@ -131,37 +131,28 @@ public final class Rating implements Serializable {
     private final Method method;
     /** Whether a smaller outcome is the better one (a rank / finishing position) rather than a larger one (a score). */
     private final boolean ascending;
-    private final double mu, sigma, beta, tau, kFactor, scale;
+    private final double beta, kFactor, scale;
     /** The time {@code tau} is the drift of, or 0: {@code tau} is the drift of one contest. */
     private final long tauPerMillis;
     private final Pairs pairs;
-    private final List<String> playerKeys, contestKeys;
+    private final List<String> contestKeys;
     private final String field;
-    /** The team a row is rated as, the rated player first; one member = a player. */
+    /**
+     * The team a row is rated as, the rated player first; one member = a player. The rated player's prior, drift and
+     * key fields live here and nowhere else (the rating's {@code mu} / {@code sigma} / {@code tau} are its first member's).
+     */
     private final List<Member> members;
 
-    private Rating(final Method method, final boolean ascending, final double mu, final double sigma, final double beta,
-                   final double tau, final double kFactor, final double scale, final long tauPerMillis, final Pairs pairs,
-                   final List<String> playerKeys, final List<String> contestKeys, final String field) {
-        this(method, ascending, mu, sigma, beta, tau, kFactor, scale, tauPerMillis, pairs, playerKeys, contestKeys, field,
-                List.of(new Member(null, playerKeys, mu, sigma, tau)));
-    }
-
-    private Rating(final Method method, final boolean ascending, final double mu, final double sigma, final double beta,
-                   final double tau, final double kFactor, final double scale, final long tauPerMillis, final Pairs pairs,
-                   final List<String> playerKeys, final List<String> contestKeys, final String field, final List<Member> members) {
+    private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
+                   final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members) {
         this.members = members;
         this.tauPerMillis = tauPerMillis;
         this.pairs = pairs;
         this.method = method;
         this.ascending = ascending;
-        this.mu = mu;
-        this.sigma = sigma;
         this.beta = beta;
-        this.tau = tau;
         this.kFactor = kFactor;
         this.scale = scale;
-        this.playerKeys = playerKeys;
         this.contestKeys = contestKeys;
         this.field = field;
     }
@@ -203,9 +194,11 @@ public final class Rating implements Serializable {
                             final List<String> playerKeys, final List<String> contestKeys, final String field) {
         final double m = mu != null ? mu : defaultMu(method);
         final double s = sigma != null ? sigma : defaultSigma(m);
-        return new Rating(method, ascending, m, s, beta != null ? beta : defaultBeta(s), tau != null ? tau : defaultTau(s),
+        // a rating without a team: one member under no pool, its state keyed by the bare keys as it always was
+        return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
-                tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, playerKeys, contestKeys, field);
+                tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))));
     }
 
     /** The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). */
@@ -241,8 +234,9 @@ public final class Rating implements Serializable {
         if (with == null || with.isEmpty()) {
             throw new IllegalArgumentException("a team needs at least one member besides the rated player");
         }
+        final Member player = members.get(0);
         final List<Member> team = new ArrayList<>();
-        team.add(new Member(pool, playerKeys, mu, sigma, tau));
+        team.add(new Member(pool, player.keys(), player.mu(), player.sigma(), player.tau()));
         team.addAll(with);
         final Set<String> pools = new HashSet<>();
         for (final Member member : team) {
@@ -260,7 +254,7 @@ public final class Rating implements Serializable {
                 throw new IllegalArgumentException("a member needs a finite mu, sigma > 0 and tau >= 0: " + member);
             }
         }
-        return new Rating(method, ascending, mu, sigma, beta, tau, kFactor, scale, tauPerMillis, pairs, playerKeys, contestKeys, field, List.copyOf(team));
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team));
     }
 
     /** The members of the team a row is rated as (one: a player). */

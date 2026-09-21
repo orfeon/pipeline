@@ -143,8 +143,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`, pure layer only so far): an `Entry` holds the state keys of its members (`teamOf(row)`, pool-prefixed), the rules
   run on the summed `(m, v)` unchanged and return `Ω` / raw `Δ`, and `update` shares them by `v_j / v` (clamp AFTER the share).
-  A rating without a team must stay bit-identical — `testPlayerArithmeticIsUnchangedByTeams` holds a hash of the pre-team
-  arithmetic; if it fails, the change moved a player's numbers (sum start, share, clamp position, accumulation order). Its columns are *pooled*
+  A rating without a team must stay bit-identical — `testPlayerArithmeticIsUnchangedByTeams` compares it bit for bit with
+  `PlayersOnly`, a FROZEN copy of the pre-team update inside `RatingTest` (an oracle in the same JVM, not recorded numbers:
+  `Math.exp` is 1-ulp-specified, a constant would be platform-bound); if it fails, the change moved a player's numbers (sum
+  start, share, clamp position, accumulation order). `withTeam` declares the whole team at once and rejects what would
+  mis-key the state (no key fields, an empty / repeated call, a separator inside a pool); state keys are
+  `FeatureValues.key` texts (`<len>:<value>\u0001` per component) — never build one by hand, use `memberKey` / `teamOf`. Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
   `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
   entries sorted by player, and the contests of one event time are applied in context-key order. On the scan path
