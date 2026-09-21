@@ -2797,10 +2797,18 @@ public class FeatureTransformTest {
                       cooccur: {window: 1}
                       rank: 2
                       fit: {mode: forward, blocks: {size: P7D}}
+                    - name: grade_both
+                      scope: population
+                      type: spectralEmbedding
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      cooccur: {window: 1}
+                      rank: 2
+                      of: [current, previous]
                 """.formatted(dir);
         final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
         Assertions.assertNull(outputs.get("features").getSchema().getField("f_grade_embed_2"));
+        Assertions.assertNotNull(outputs.get("features").getSchema().getField("f_grade_both_prev_1"));
         final double m = Math.sqrt(Math.log(1.6) / 2), walk = Math.sqrt(Math.log(1.5) / 2);
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             int good = 0;
@@ -2815,6 +2823,23 @@ public class FeatureTransformTest {
                     Assertions.assertEquals(0, e0 + e1, 1e-9, row::toString);
                 }
                 final String key = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                // of: [current, previous] reads the ONE fit twice: the row's value as grade_embed does, and the value the
+                // seller comes from — good for B and C of s1, fair for D/s1 and C/s2, nothing for a first listing
+                Assertions.assertEquals(e0, row.getAsDouble("f_grade_both_0"), 0, row::toString);
+                Assertions.assertEquals(e1, row.getAsDouble("f_grade_both_1"), 0, row::toString);
+                if (key.startsWith("A/")) {
+                    Assertions.assertNull(row.getPrimitiveValue("f_grade_both_prev_0"), row::toString);
+                    Assertions.assertNull(row.getPrimitiveValue("f_grade_both_prev_1"), row::toString);
+                } else {
+                    final double p0 = row.getAsDouble("f_grade_both_prev_0"), p1 = row.getAsDouble("f_grade_both_prev_1");
+                    if ("B/s1".equals(key) || "C/s1".equals(key)) {
+                        Assertions.assertEquals(m, p0, 1e-9, row::toString);
+                        Assertions.assertEquals(m, p1, 1e-9, row::toString);
+                    } else {
+                        Assertions.assertEquals(m, Math.abs(p0), 1e-9, row::toString);
+                        Assertions.assertEquals(0, p0 + p1, 1e-9, row::toString);
+                    }
+                }
                 if ("D/s1".equals(key)) {
                     Assertions.assertEquals(walk, row.getAsDouble("f_grade_walk_0"), 1e-9);
                     Assertions.assertEquals(walk, row.getAsDouble("f_grade_walk_1"), 1e-9);

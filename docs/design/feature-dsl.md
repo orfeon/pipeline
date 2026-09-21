@@ -860,7 +860,7 @@ under its own name (intermediate columns, most recent first) and then:
 - `spectralEmbedding` is a fitted block like `svd`: a row contributes its value with its lag values to a pair-count
   summary (unordered pairs within `cooccur.window` steps), the counts become a PPMI matrix, and the eigenvectors of
   largest |eigenvalue| scaled by `sqrt(|eigenvalue|)` are the coordinates (`rank` columns; the vocabulary is capped
-  by co-occurrence mass). `of: current | previous` chooses the embedded value — `previous` when the field is an
+  by co-occurrence mass). `of: current | previous | [current, previous]` chooses the embedded value(s) (the list reads the one fit for both: `<name>_<k>` and `<name>_prev_<k>`) — `previous` when the field is an
   outcome. `fit.mode: static | forward`.
 
 ```yaml

@@ -334,7 +334,9 @@ has no mass, null = nothing known yet; a first event reads the marginal. Interme
 ### `type: spectralEmbedding` (static, or forward per time block)
 
 `sequenceOf: {entity, field}`, `cooccur: {window: 2, weighting: ppmi}` (steps back that co-occur, 1..8), `rank`
-(default 8), `of: current | previous` (which value of the row is embedded; `previous` for an outcome field),
+(default 8), `of: current | previous | [current, previous]` (which value of the row is embedded; `previous` for an
+outcome field; the list reads ONE fit twice — `<name>_<k>` for the row's value, `<name>_prev_<k>` for the value it
+comes from — instead of two blocks that would each count the pairs and solve the eigenproblem),
 `maxValues` (vocabulary cap by co-occurrence mass, 2..1024, default 256), `fit` as for svd. Output float64
 `<name>_0 .. <name>_{rank−1}`: the value's coordinates from the PPMI matrix of the co-occurrence counts
 (eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive; under `forward` each fit

@@ -175,7 +175,7 @@ public class SpectralTest {
         for (final KV<String, Long> e : ranked.subList(0, 3)) vocabulary.put(e.getKey(), e.getValue());
         Assertions.assertEquals(Set.of("b", "a", "c"), vocabulary.keySet());
         // the block restricts each row's pairs to the vocabulary, exactly as the extraction does
-        final FeatureStages.SpectralSpec spec = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 2, 3,
+        final FeatureStages.SpectralSpec spec = new FeatureStages.SpectralSpec("block", "v", List.of("p"), List.of("v"), 2, 3,
                 null, false, List.of(), new int[]{0}, null, 0L, 0L, null, null);
         final Spectral.PairCounts filtered = Spectral.SUMMARY.create();
         for (final String[] values : rows) {

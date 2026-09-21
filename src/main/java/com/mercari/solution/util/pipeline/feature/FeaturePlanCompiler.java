@@ -2543,7 +2543,7 @@ public final class FeaturePlanCompiler {
             if (def.blendPerEntity != null || def.blendPriorWeight != null) foreign.add("blend");
         } else {
             if (def.cooccurWindow != null || def.cooccurWeighting != null) foreign.add("cooccur");
-            if (def.embedOf != null) foreign.add("of");
+            if (!def.embedOf.isEmpty()) foreign.add("of");
             if (def.maxValues != null) foreign.add("maxValues");
             if (def.rank != null) foreign.add("rank");
         }
@@ -2670,7 +2670,9 @@ public final class FeaturePlanCompiler {
      * at most {@code cooccur.window} steps earlier in the entity's sequence) are counted, turned into a PPMI matrix
      * and factorised ({@link Spectral}). The pairs come from the lag path of {@link #sequencePath}, so the fit is a
      * summary block like svd (static, or per time block under forward); the row's own value — or, with
-     * {@code of: previous}, its previous one — is looked up. {@code rank} FLOAT64 columns {@code <name>_<k>}.
+     * {@code of: previous}, its previous one — is looked up. {@code rank} FLOAT64 columns {@code <name>_<k>}; with
+     * {@code of: [current, previous]} the ONE fit is read twice and the previous value's coordinates are
+     * {@code <name>_prev_<k>} (two blocks would count the same pairs and solve the same eigenproblem twice).
      */
     private void expandSpectralEmbedding(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
@@ -2678,7 +2680,7 @@ public final class FeaturePlanCompiler {
         final int window = def.cooccurWindow == null ? Spectral.DEFAULT_WINDOW : def.cooccurWindow;
         final int rank = def.rank == null ? Spectral.DEFAULT_RANK : def.rank;
         final int maxValues = def.maxValues == null ? Spectral.DEFAULT_MAX_VALUES : def.maxValues;
-        final String of = def.embedOf == null ? "current" : def.embedOf;
+        final List<String> of = def.embedOf.isEmpty() ? List.of("current") : def.embedOf;
         boolean valid = true;
         if (window < 1 || window > 8) {
             diagnostics.error("spectralEmbedding.cooccur", loc, "cooccur.window must be within 1..8 steps: " + window);
@@ -2696,12 +2698,12 @@ public final class FeaturePlanCompiler {
             diagnostics.error("spectralEmbedding.maxValues", loc, "maxValues must be within 2.." + Spectral.MAX_VALUES + " (the eigenproblem is dense in the distinct values): " + maxValues);
             valid = false;
         }
-        if (!List.of("current", "previous").contains(of)) {
-            diagnostics.error("spectralEmbedding.of", loc, "of must be current | previous: " + of);
+        if (!List.of("current", "previous").containsAll(of) || new HashSet<>(of).size() != of.size()) {
+            diagnostics.error("spectralEmbedding.of", loc, "of must be current | previous, or the list of both: " + of);
             valid = false;
         }
-        if (def.maxFeatures != null && rank > def.maxFeatures) {
-            diagnostics.error("spectralEmbedding.maxFeatures", loc, "rank " + rank + " exceeds maxFeatures " + def.maxFeatures);
+        if (def.maxFeatures != null && rank * of.size() > def.maxFeatures) {
+            diagnostics.error("spectralEmbedding.maxFeatures", loc, "rank " + rank + (of.size() > 1 ? " x " + of.size() + " embedded values" : "") + " exceeds maxFeatures " + def.maxFeatures);
             valid = false;
         }
         if (!valid) return;
@@ -2713,9 +2715,9 @@ public final class FeaturePlanCompiler {
         final String minRowsPhrase = minRowsPhrase(minRows, null);
         final String align = alignOf(def, fitSpec, "spectralEmbedding");
         final boolean forward = fitSpec.mode == FitMode.forward;
-        final String applied = "previous".equals(of) ? path.get(0) : def.sequenceField;
         final String what = "spectralEmbedding counts the pairs of " + def.sequenceField + " within " + window + " step(s) of entity " + def.sequenceEntity
-                + " and factorises their PPMI matrix into " + rank + " coordinate(s) (at most " + maxValues + " values)";
+                + " and factorises their PPMI matrix into " + rank + " coordinate(s) (at most " + maxValues + " values)"
+                + (of.size() > 1 ? ", read for the row's value (" + def.name + "_<k>) and for its previous one (" + def.name + "_prev_<k>) from the one fit" : "");
         if (forward) {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + "), re-solved for every row over the complete blocks"
@@ -2739,29 +2741,34 @@ public final class FeaturePlanCompiler {
         }
         final List<String> references = new ArrayList<>(path);
         references.add(def.sequenceField);
-        for (int k = 0; k < rank; k++) {
-            final OutputColumn c = newColumn(def.name, Scope.population, "spectralEmbedding", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
-            c.fitted = true;
-            c.coordinates.put("fit", forward ? "forward" : "static");
-            if (forward) {
-                forwardCoordinates(c, null, references, def, fitSpec);
-                c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+        // one embedded value keeps the plain names whichever it is; of the two, the previous one is marked
+        for (final String embedded : of) {
+            final String applied = "previous".equals(embedded) ? path.get(0) : def.sequenceField;
+            final String prefix = def.name + (of.size() > 1 && "previous".equals(embedded) ? "_prev_" : "_");
+            for (int k = 0; k < rank; k++) {
+                final OutputColumn c = newColumn(def.name, Scope.population, "spectralEmbedding", prefix + k, Schema.FieldType.FLOAT64, computeAt);
+                c.fitted = true;
+                c.coordinates.put("fit", forward ? "forward" : "static");
+                if (forward) {
+                    forwardCoordinates(c, null, references, def, fitSpec);
+                    c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+                }
+                c.coordinates.put("field", canonicalOf(def.sequenceField));
+                c.coordinates.put("path", String.join(",", path));
+                c.coordinates.put("applied", canonicalOf(applied));
+                c.coordinates.put("rank", Integer.toString(rank));
+                c.coordinates.put("component", Integer.toString(k));
+                c.coordinates.put("maxValues", Integer.toString(maxValues));
+                if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+                if (fitSpec.refit) c.coordinates.put("refit", "true");
+                if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
+                if (align != null) c.coordinates.put("align", align);
+                // only the embedded value is read from the row itself; the pairs are read through the fit
+                addSelfInput(c, applied);
+                for (final String reference : references) addPastInput(c, reference);
+                finishStaticFitted(c, def);
+                register(c);
             }
-            c.coordinates.put("field", canonicalOf(def.sequenceField));
-            c.coordinates.put("path", String.join(",", path));
-            c.coordinates.put("applied", canonicalOf(applied));
-            c.coordinates.put("rank", Integer.toString(rank));
-            c.coordinates.put("component", Integer.toString(k));
-            c.coordinates.put("maxValues", Integer.toString(maxValues));
-            if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
-            if (fitSpec.refit) c.coordinates.put("refit", "true");
-            if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
-            if (align != null) c.coordinates.put("align", align);
-            // only the embedded value is read from the row itself; the pairs are read through the fit
-            addSelfInput(c, applied);
-            for (final String reference : references) addPastInput(c, reference);
-            finishStaticFitted(c, def);
-            register(c);
         }
     }
 
