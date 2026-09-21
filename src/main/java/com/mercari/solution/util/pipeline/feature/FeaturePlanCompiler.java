@@ -3386,6 +3386,11 @@ public final class FeaturePlanCompiler {
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        // an encoding has no row floor: a level too thin to stand on its own is shrunk towards its parent instead
+        if (defFit != null && defFit.has("minRows") && hintedBlocks.add("encoding.fit.minRows:" + def.name)) {
+            diagnostics.warning("encoding.fit.minRows", loc, "fit.minRows is not implemented for encoding and ignored"
+                    + " (a thin level is shrunk towards its parent instead; smooth / svd / quantileTransform / spectralEmbedding take it)");
+        }
         resolveBlockClock(fitSpec, loc);
         // fold: {by, purge, embargo} (negative durations are rejected by parseFold); a time fold has no hash folds to count
         fitSpec.foldBy = spec.fit.foldBy;

@@ -48,8 +48,8 @@ public final class Smooth implements Serializable, FitArtifact.Model {
     private static final int REFINE_ITERATIONS = 40;
     /**
      * How close (in the criterion, which is −2 log restricted likelihood up to a constant) the best searched strength
-     * must come to an END of the search for that end to be taken instead: a likelihood ratio of exp(−0.005), far
-     * below anything the data can tell apart.
+     * must come to an END of the search for that end to be taken instead: a restricted-likelihood ratio of
+     * exp(0.005), far below anything the data can tell apart.
      */
     private static final double LIMIT_TOLERANCE = 1e-2;
 
@@ -228,13 +228,17 @@ public final class Smooth implements Serializable, FitArtifact.Model {
             }
             final double first = center - SEARCH_DECADES;
             double best = Double.NaN, bestValue = Double.POSITIVE_INFINITY, last = first, firstValue = Double.NaN, lastValue = Double.NaN;
+            boolean atFirst = true;
             for (double e = first; e <= center + SEARCH_DECADES + 1e-9; e += SEARCH_STEP) {
                 final double value = solver.reml(Math.pow(10, e));
                 if (value < bestValue) {
                     bestValue = value;
                     best = e;
                 }
-                if (e == first) firstValue = value;
+                if (atFirst) {
+                    firstValue = value;
+                    atFirst = false;
+                }
                 last = e;
                 lastValue = value;
             }

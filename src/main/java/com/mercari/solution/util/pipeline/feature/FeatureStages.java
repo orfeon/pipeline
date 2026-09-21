@@ -985,13 +985,18 @@ public final class FeatureStages {
         /** The rows that contributed to a state (what {@link #minRows} counts). */
         long rowsOf(S state);
 
+        /** Whether the {@code fit.minRows} floor empties this state: the one predicate {@link #fitAbove} and the run log share. */
+        default boolean belowFloor(final S state) {
+            return minRows() > 0 && rowsOf(state) < minRows();
+        }
+
         /**
          * {@link #fit} behind the {@code fit.minRows} floor: a state below it gets the family's "nothing fitted" model
          * (the fit of an empty state), whose rows read null. The first blocks of a forward fit are where it bites — the
          * input starts mid-block, so the first window may hold a handful of rows.
          */
         default M fitAbove(final S state, final boolean loud) {
-            if (minRows() > 0 && rowsOf(state) < minRows()) {
+            if (belowFloor(state)) {
                 if (loud) {
                     LOG.warn("{} {}: {} row(s) are fewer than fit.minRows {}; nothing is fitted, every row reads null",
                             artifact().name(), block(), rowsOf(state), minRows());
@@ -1025,25 +1030,33 @@ public final class FeatureStages {
         /**
          * Solves the per-time-block states on one worker: the whole-input model (a static fit is a single block, whose
          * state is fitted as it stands — a fit reads the state and keeps nothing) and, under forward, one model per
-         * change point. The artifact is written once even under forward, which re-fits every run.
+         * change point. The artifact is written once even under forward, which re-fits every run — but never for a
+         * whole-input fit the {@code fit.minRows} floor emptied: an artifact is read back instead of fitting
+         * ({@link #artifactExists}), so persisting the empty model would make "not enough rows yet" permanent.
          */
         @Override
         default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
             final BlockSeries<S> series = new BlockSeries<>(family(), parts);
             final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
-            final M total = fitAbove(all == null ? family().create() : all, true);
+            final S whole = all == null ? family().create() : all;
+            final boolean floored = belowFloor(whole);
+            final M total = fitAbove(whole, true);
             TreeMap<Long, M> byBlock = null;
             if (forward() != null) {
-                final int[] belowFloor = {0};
+                final int[] emptied = {0};
                 byBlock = series.models(forward().windowBlocks(), state -> {
-                    if (minRows() > 0 && rowsOf(state) > 0 && rowsOf(state) < minRows()) belowFloor[0]++;
+                    // an empty window at a leave point is normal and not counted: only a window that held rows
+                    if (rowsOf(state) > 0 && belowFloor(state)) emptied[0]++;
                     return fitAbove(state, false);
                 });
                 LOG.info("{} {}: forward fit over {} block(s), {} change point(s){}", artifact().name(), block(), parts.size(), byBlock.size(),
-                        belowFloor[0] == 0 ? "" : ", " + belowFloor[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
+                        emptied[0] == 0 ? "" : ", " + emptied[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
             }
-            if (artifactUri() != null && (refit() || !artifact().exists(artifactUri(), planHash, block()))) {
+            if (artifactUri() != null && !floored && (refit() || !artifact().exists(artifactUri(), planHash, block()))) {
                 artifact().write(artifactUri(), planHash, block(), total);
+            } else if (artifactUri() != null && floored) {
+                LOG.warn("{} {}: the whole-input fit is below fit.minRows {}, so no artifact is written under {}; a run with enough rows writes it",
+                        artifact().name(), block(), minRows(), artifactUri());
             }
             return new ForwardModel<>(total, byBlock, forward() == null ? null : series.observed());
         }

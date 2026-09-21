@@ -520,7 +520,9 @@ non-null value for a quantile transform, a value with at least one previous valu
 `smooth` needs as many rows as it has coefficients (`segments + degree` — with fewer, the penalty alone decides the
 curve); the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
 emptied (`forward fit over … change point(s), n of them with fewer than fit.minRows …`). Encodings ignore it: a thin
-level is shrunk towards its parent instead (`fit.minRows` info). Part of the plan hash when declared.
+level is shrunk towards its parent instead (`encoding.fit.minRows` warning on a block that declares one). Part of the
+plan hash when declared. A fit the floor empties writes no artifact, so a later run with enough rows still fits.
+
 A `type: svd`, `type: quantileTransform`, `type: smooth` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
 *Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
 unaffected.
