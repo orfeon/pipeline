@@ -331,7 +331,7 @@ public final class Rating implements Serializable {
         for (final SequenceEvaluator.Past p : run) {
             if (p.millis() != millis) {
                 throw new IllegalArgumentException("fold takes the rows of ONE event time: " + millis + " and " + p.millis()
-                        + " (the caller must slice the history by event time — SequenceEvaluator.advanceRating / Rating.replay)");
+                        + " (the caller must slice the history by event time - SequenceEvaluator.advanceRating / Rating.replay)");
             }
             final String contest = FeatureValues.key(p.values(), contestKeys);
             final List<String> team = teamOf(p.values());

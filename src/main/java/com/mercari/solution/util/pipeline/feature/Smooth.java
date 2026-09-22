@@ -222,7 +222,7 @@ public final class Smooth implements Serializable, FitArtifact.Model {
             // a non-finite centre (an empty design, or a penalty with nothing to penalise: basis size ≤ the order)
             // would make the grid below step from ±∞ by a finite amount and never terminate
             if (!Double.isFinite(center)) {
-                if (warn) LOG.warn("smooth: no strength scale to search (tr(XᵀX) = {}, tr(P) = {}, {} basis function(s) at penalty order {}); no curve",
+                if (warn) LOG.warn("smooth: no strength scale to search (tr(X^TX) = {}, tr(P) = {}, {} basis function(s) at penalty order {}); no curve",
                         traceA, traceP, m, penaltyOrder);
                 return empty(basis, penaltyOrder, moments.n);
             }
@@ -256,7 +256,7 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         // one factorisation of (A + λP) serves the coefficients and the effective degrees of freedom
         final double[][] factor = solver.factor(chosen);
         if (factor == null) {
-            if (warn) LOG.warn("smooth: the penalised system is singular at λ = {} (n = {}); no curve", chosen, moments.n);
+            if (warn) LOG.warn("smooth: the penalised system is singular at lambda = {} (n = {}); no curve", chosen, moments.n);
             return empty(basis, penaltyOrder, moments.n);
         }
         final double[] beta = solver.solve(factor);

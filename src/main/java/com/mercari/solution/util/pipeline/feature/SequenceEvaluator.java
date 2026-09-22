@@ -437,7 +437,7 @@ public class SequenceEvaluator implements Serializable {
             if (other != null && plans.get(other.canonicalName).shiftMillis != plan.shiftMillis) {
                 throw new IllegalStateException("columns " + other.canonicalName + " and " + c.canonicalName + " share the running state '" + plan.stateKey
                         + "' but not its window shift (" + plans.get(other.canonicalName).shiftMillis + " ms vs " + plan.shiftMillis + " ms): the shorter one"
-                        + " would advance the state past the other's near edge — the columns of one state need one availability contract (the same self and past inputs)");
+                        + " would advance the state past the other's near edge - the columns of one state need one availability contract (the same self and past inputs)");
             }
         }
     }
@@ -459,7 +459,7 @@ public class SequenceEvaluator implements Serializable {
         }
         if (plan.maxEvents != null || plan.filterText != null || hasMaxAge(plan)) {
             throw new IllegalStateException("rating column " + c.canonicalName + " carries a window this evaluator cannot honour"
-                    + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window — admitting one means"
+                    + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window - admitting one means"
                     + " implementing the eviction the running state lacks (advanceRating) and keeping the contests of a truncated"
                     + " window whole (select / Rating.replay)");
         }
@@ -643,7 +643,7 @@ public class SequenceEvaluator implements Serializable {
      * counts, nulls included); a field contributes its numeric value when it is {@link #finite}.
      */
     Object contribution(final ColumnPlan plan, final Past p) {
-        // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
+        // a path event, or none when the row has no value for the channel (a field-less channel is the constant 1)
         if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
         // a point of a multi-channel path (none when a channel is missing)
         if (plan.summary.family() instanceof Signature signature) return signature.event(p);

@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row \| time, purge, embargo}` (time: every block is a fold, a row reads all blocks but its own, the purge on both sides and the embargo after the purge — purge defaults to the target label's horizon; more than half the blocks left out → run-time warning + counter `timeFold_<level>_excludedOverHalf`), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd) + `minRows` (lookup fits: the fewest rows a fit is solved from) + `align: procrustes \| sign \| none` (forward `svd` / `spectralEmbedding`: how each fit is brought into the coordinates of the one before it), `artifact: {uri, refit, id}` or the URI string |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row \| time, purge, embargo, until}` (time: every block is a fold, a row reads all blocks but its own, the purge on both sides and the embargo after the purge — purge defaults to the target label's horizon; more than half the blocks left out → run-time warning + counter `timeFold_<level>_excludedOverHalf`; `until: <instant \| date>` ends the training period: the cross-fit stays within the blocks up to it and later rows read forward — one batch for out-of-fold training values and walk-forward evaluation values), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd) + `minRows` (lookup fits: the fewest rows a fit is solved from) + `align: procrustes \| sign \| none` (forward `svd` / `spectralEmbedding`: how each fit is brought into the coordinates of the one before it), `artifact: {uri, refit, id}` or the URI string |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -179,9 +179,14 @@ of a block may share an `as:` only if they select the same rows (`window.as`).
 
 `decayBy` = the clock (`events` default: newest past event = age 0; `time`: days — to the current row for
 fourier / legendre, to the newest past event for exponential, whose higher components would otherwise grow with
-the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are strings or `{expr, as}`; name them
+the gap; add `sinceEvent` `unit: [days]` for the gap). An event of a channel is a row **with a value**: a missing
+value neither counts on the `events` clock nor moves the `time` read position (the newest past event is the newest
+valued one) and, under `legendre`, does not set the span's origin. The log-signature's `events` time channel counts
+complete points, `trend` the present values among its
+last `k` rows. `lift.exprs` entries are strings or `{expr, as}`; name them
 (`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
-channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
+channel `time` (components 1.. only), shifted like the latest of the block's channels; being the constant 1 it has a
+value on every row, so it counts every row of the window where a value channel counts only its valued ones. Every measure keeps no history
 without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
 (windows × halflifes × channels × components). Channels must be numeric / bool.
 
@@ -224,7 +229,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}
     - {expr: "<numeric expr>", stats: [mean]}
-  offset: <baselines[].name>                     # target minus baseline; on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
+  offset: <baselines[].name>                     # target minus baseline, read from the past rows like the target (a baseline over an outcome shifts the window, not a violation); on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
   combine: product | zip
   naming: "{block}__{keys}__{window}__{target}__{stat}"   # default; empty segments collapse
   shrinkage:

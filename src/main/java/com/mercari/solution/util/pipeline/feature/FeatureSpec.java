@@ -432,16 +432,34 @@ public class FeatureSpec implements Serializable {
         public Duration purge;
         /** {@code fit.fold.embargo}: the extra span left out after the purge that follows the row's block (default none). */
         public Duration embargo;
+        /**
+         * {@code fit.fold.until}: the end of the training period as an instant (UTC millis). The cross-fit runs within
+         * the blocks up to it; a row of a later block reads the blocks before its own instead (forward), so one batch
+         * yields the out-of-fold training values and the walk-forward evaluation values. Null = every block is a fold.
+         */
+        public Long untilMillis;
 
         public boolean isTimeFold() {
             return "time".equals(foldBy);
         }
 
-        /** Parses {@code fold: {by: row | time, purge, embargo}} of a fit block (top level or per feature). */
+        /** An ISO-8601 instant ({@code 2025-01-25T00:00:00Z}), a zone-less date-time ({@code 2025-01-25T00:00:00}, UTC) or a date ({@code 2025-01-25}, UTC midnight) as epoch millis. */
+        static long parseInstant(final String text) {
+            final String t = text.trim();
+            if (!t.contains("T")) return java.time.LocalDate.parse(t).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+            try {
+                return java.time.Instant.parse(t).toEpochMilli();
+            } catch (final java.time.format.DateTimeParseException e) {
+                // a date-time without a zone: UTC, like the date form
+                return java.time.LocalDateTime.parse(t).toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+            }
+        }
+
+        /** Parses {@code fold: {by: row | time, purge, embargo, until}} of a fit block (top level or per feature). */
         static void parseFold(final JsonObject fit, final FitSpec spec, final Diagnostics diagnostics, final String loc) {
             if (fit == null || !fit.has("fold") || fit.get("fold").isJsonNull()) return;
             if (!fit.get("fold").isJsonObject()) {
-                diagnostics.error("fit.fold", loc, "fit.fold must be an object: {by: row | time, purge: <ISO-8601 duration>, embargo: <ISO-8601 duration>}");
+                diagnostics.error("fit.fold", loc, "fit.fold must be an object: {by: row | time, purge: <ISO-8601 duration>, embargo: <ISO-8601 duration>, until: <instant | date>}");
                 return;
             }
             final JsonObject fold = fit.getAsJsonObject("fold");
@@ -458,9 +476,17 @@ public class FeatureSpec implements Serializable {
             }
             if (purge != null && !purge.isNegative()) spec.purge = purge;
             if (embargo != null && !embargo.isNegative()) spec.embargo = embargo;
+            final String until = Json.string(fold, "until");
+            if (until != null) {
+                try {
+                    spec.untilMillis = parseInstant(until);
+                } catch (final RuntimeException e) {
+                    diagnostics.error("fit.fold.until", loc, "fit.fold.until must be an ISO-8601 instant, date-time or date, UTC (2025-01-25T00:00:00Z / 2025-01-25T00:00:00 / 2025-01-25): " + until);
+                }
+            }
             for (final String key : fold.keySet()) {
-                if (!List.of("by", "purge", "embargo").contains(key)) {
-                    diagnostics.error("fit.fold", loc, "unknown fit.fold key '" + key + "' (accepted: by, purge, embargo)");
+                if (!List.of("by", "purge", "embargo", "until").contains(key)) {
+                    diagnostics.error("fit.fold", loc, "unknown fit.fold key '" + key + "' (accepted: by, purge, embargo, until)");
                 }
             }
         }
@@ -666,6 +692,12 @@ public class FeatureSpec implements Serializable {
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
     public AvailableAt predictAt;
+    /**
+     * The predictAt a missing / unparsable declaration falls back to, so the rest of the report is still produced
+     * (the error is already recorded). It is {@code event_time}, never {@code atEventTime}: that one is the far-past
+     * sentinel, and a window shift measured against it ({@code past - predictAt}) overflows a millisecond count.
+     */
+    private static final AvailableAt PREDICT_AT_FALLBACK = AvailableAt.eventRelative(Duration.ZERO);
     public List<EntityDef> entities = new ArrayList<>();
     public List<ContextDef> contexts = new ArrayList<>();
     public List<BaselineDef> baselines = new ArrayList<>();
@@ -689,7 +721,7 @@ public class FeatureSpec implements Serializable {
                 spec.lineage.add(new LineageEntry(fields, from, Json.string(o, "eventTime")));
             }
         } else {
-            diagnostics.error("lineage.missing", "lineage", "lineage is required (fields → source mapping)");
+            diagnostics.error("lineage.missing", "lineage", "lineage is required (fields -> source mapping)");
         }
 
         if (parameters.has("time") && parameters.get("time").isJsonObject()) {
@@ -704,16 +736,16 @@ public class FeatureSpec implements Serializable {
         spec.predictAtExpression = Json.string(parameters, "predictAt");
         if (spec.predictAtExpression == null) {
             diagnostics.error("predictAt.missing", "predictAt", "predictAt is required");
-            spec.predictAt = AvailableAt.atEventTime();
+            spec.predictAt = PREDICT_AT_FALLBACK;
         } else {
             try {
                 spec.predictAt = AvailableAt.parseTimeExpression(spec.predictAtExpression);
                 if (!spec.predictAt.isStatic()) {
-                    diagnostics.error("predictAt.invalid", "predictAt", "predictAt must be event_time ± duration");
+                    diagnostics.error("predictAt.invalid", "predictAt", "predictAt must be event_time +/- duration");
                 }
             } catch (final IllegalArgumentException e) {
                 diagnostics.error("predictAt.invalid", "predictAt", e.getMessage());
-                spec.predictAt = AvailableAt.atEventTime();
+                spec.predictAt = PREDICT_AT_FALLBACK;
             }
         }
 
@@ -1207,7 +1239,7 @@ public class FeatureSpec implements Serializable {
             final Window previous = named.putIfAbsent(w.as, w);
             if (previous != null && !previous.sameBounds(w)) {
                 diagnostics.error("window.as", loc, "two windows of this block are named '" + w.as + "' but select different rows"
-                        + " (maxAge / maxEvents / clock / filter): one name is one window — the statistics behind it are shared, so name them apart");
+                        + " (maxAge / maxEvents / clock / filter): one name is one window - the statistics behind it are shared, so name them apart");
             }
         }
     }
@@ -1250,7 +1282,7 @@ public class FeatureSpec implements Serializable {
             for (final String key : w.keySet()) {
                 if (!List.of("maxEvents", "maxAge", "filter", "clock", "as").contains(key)) {
                     diagnostics.error("window.nearEdge", loc,
-                            "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (§4.3)");
+                            "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (section 4.3)");
                 }
             }
             windows.add(window);

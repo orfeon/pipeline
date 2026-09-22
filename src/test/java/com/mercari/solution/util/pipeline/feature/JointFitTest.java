@@ -25,12 +25,13 @@ public class JointFitTest {
     }
 
     /**
-     * Under an offset a cell whose mean baseline is outside the scale (Σb = 0 on log) has no term and is left out of
-     * the solve like an empty cell — its rows do not count and the clamp constant never enters the ridge; on the
-     * identity scale the same cell stays (the residual is defined).
+     * Under an offset term a cell without information (Σb = 0 on log: a cold-start baseline) has no term and is left
+     * out of the solve like an empty cell — its rows do not count; the cells with information are fitted as their
+     * score-type terms S / V weighted by V, the ridge being the pseudo-count in rows times the fit's information per
+     * row. On the identity scale the same cell stays (the residual is defined).
      */
     @Test
-    public void testOffsetCellWithUndefinedBaselineIsSkipped() {
+    public void testOffsetCellWithoutInformationIsSkipped() {
         final List<JointFit.Cell> cells = List.of(
                 new JointFit.Cell(FeatureValues.keyOf(List.of("a1", "b1")), 10, 2, 4, 5),
                 new JointFit.Cell(FeatureValues.keyOf(List.of("a2", "b1")), 10, -1, 3, 6),
@@ -38,7 +39,18 @@ public class JointFitTest {
         final JointFit.Solution log = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.log, true, "fixed", 1);
         Assertions.assertEquals(20, log.rows, 0d, "the Σb = 0 cell's rows are not fitted");
         Assertions.assertNull(log.effects.get(0).get(FeatureValues.keyOf(List.of("a1", "b2"))));
+        Assertions.assertEquals(11.0 / 20, log.infoPerRow, 1e-12, "the information per fitted row");
+        // the intercept alone (a huge ridge) is the information-weighted mean of the cells' terms: (2 + (−1)) / (5 + 6)
+        final JointFit.Solution pooled = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.log, true, "fixed", 1e12);
+        Assertions.assertEquals(1.0 / 11, pooled.mu, 1e-9);
         Assertions.assertTrue(Math.abs(log.mu) < 5, "no clamp constant (−27.6) in the intercept: " + log.mu);
+        // a logit cell reads its information from Σ b(1 − b)
+        final List<JointFit.Cell> logitCells = List.of(
+                new JointFit.Cell(FeatureValues.keyOf(List.of("a1", "b1")), 10, 2, 4, 5, 2.5),
+                new JointFit.Cell(FeatureValues.keyOf(List.of("a2", "b1")), 10, -1, 3, 6, 0));
+        final JointFit.Solution logit = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), logitCells, Shrinkage.Scale.logit, true, "fixed", 1e12);
+        Assertions.assertEquals(10, logit.rows, 0d);
+        Assertions.assertEquals(2 / 2.5, logit.mu, 1e-9);
         final JointFit.Solution identity = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, true, "fixed", 1);
         Assertions.assertEquals(25, identity.rows, 0d);
     }

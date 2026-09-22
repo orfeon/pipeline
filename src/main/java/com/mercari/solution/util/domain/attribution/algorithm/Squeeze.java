@@ -365,7 +365,7 @@ public class Squeeze implements AttributionAlgorithm {
         final StringBuilder sb = new StringBuilder();
         for(final int d : cuboid) {
             if(!sb.isEmpty()) {
-                sb.append(' ');
+                sb.append('\u0000');
             }
             sb.append(row[d]);
         }

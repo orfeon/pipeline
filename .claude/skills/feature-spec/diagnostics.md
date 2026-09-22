@@ -54,9 +54,10 @@ not expand because another block failed).
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
-| `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo}` |
+| `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo, until}` |
 | `fit.fold.negative` | error | `fold.purge` / `fold.embargo` must be non-negative durations |
-| `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` without `by: time` — ignored |
+| `fit.fold.until` | error | `fold.until` must be an ISO-8601 instant, date-time or date, UTC (`2025-06-30T00:00:00Z` / `2025-06-30T00:00:00` / `2025-06-30`) |
+| `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` / `until` without `by: time` — ignored |
 | `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
 | `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential (one error per block) |
 | `fit.minRows` | error / info | error: must be ≥ 0 (0 = no floor). info (top level): it is the fewest rows a `smooth` / `svd` / `quantileTransform` / `spectralEmbedding` fit is solved from; encodings shrink a thin level instead and ignore it |
@@ -180,6 +181,7 @@ not expand because another block failed).
 | `clock.fit` | error | a keySet window on a calendar under `fit.mode: forward` needs `fit.blocks` on the same clock (`{size: <ticks>, clock: <name>}`) |
 | `clock.direction` | error | a `direction: future` window measures its horizon on wall time (an ISO-8601 `maxAge`) |
 | `window.clock` / `fit.blocks.clock` | error | on a calendar, `maxAge` / `blocks.size` are whole numbers of ticks (`clock: events` is spelled `maxEvents`; blocks on a clock take no `bucket`) |
+| `window.clock.hidden` | warning | a window on a calendar clock whose wall-time shift (an outcome's settlement + ingestion lag) covers all its ticks on average: the window holds no row. Widen `maxAge` beyond the shift in ticks (the `availability.windowShift` info states it), or read a wall-time window |
 | `sources.clocks` / `.name` / `.type` / `.dates` / `.uri` | error | `clocks:` entries are `{name, type: calendar, dates: [yyyy-MM-dd, ...] \| uri}`; the name is not `time` / `events` |
 | `sequence.form` | error | a block has both `ops` and `lift` / `summarize`: split it into two blocks |
 | `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |
@@ -233,7 +235,7 @@ not expand because another block failed).
 | `encoding.target.values` | error | `targets[].values` lists the categories of a `distribution` to emit as flat FLOAT64 columns (`<column>_<value>`, like `countByValue`); the target declares no `distribution` stat |
 | `encoding.nested` | error | nested targets (`field.ref`) not implemented |
 | `encoding.offset` / `encoding.offset.computeAt` | error | offset must name a baseline; offset blocks compute at `predictAt` |
-| `encoding.offset.additive` | info | offset on a logit / log scale: the composed value is the additive term on that scale (`t(observed) − t(mean baseline)`, shrunk toward the parent's term) — a log-odds / log-rate ratio against the baseline, not a probability / rate |
+| `encoding.offset.additive` | info | offset on a logit / log scale: the composed value is the additive term on that scale (the key's score-type estimate `Σ(y − b) / information`, one scoring step from the baseline, shrunk toward the parent's term by information) — a log-odds / log-rate ratio against the baseline, not a probability / rate; finite for a key with no success |
 | `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |
 | `encoding.shrinkage.joint` | info / error | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker); as error: two keySets of the block (the same keys, one of them named with `as:`) resolve to that one solve with different lattices or shrinkage — declare them in separate blocks |
 | `encoding.shrinkage.weights` | error / info | `fixed \| varianceComponents` (`heldOut` not implemented); as info: variance components are estimated from the whole batch |

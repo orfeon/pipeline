@@ -92,7 +92,7 @@ public final class AvailableAt implements Serializable {
             return dynamic("event_date T" + abs.group(1));
         }
         throw new IllegalArgumentException("Unsupported time expression: " + expression
-                + " (expected atEventTime | event_time ± <ISO8601 duration> | after(event) | atRowCreation | event_date THH:MM)");
+                + " (expected atEventTime | event_time +/- <ISO8601 duration> | after(event) | atRowCreation | event_date THH:MM)");
     }
 
     public boolean isStatic() {

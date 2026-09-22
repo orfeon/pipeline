@@ -761,6 +761,30 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("session_time", column(noTie, "enc__seller_id__e2__n").getCoordinates().get("foldKeys"));
     }
 
+    /**
+     * A diagnostic raised once per keySet / window / column with the same text is reported once: the
+     * varianceComponents info is parsed per keySet (two here) and the advice does not change with the keySet, while
+     * messages that name their column stay one per column.
+     */
+    @Test
+    public void testIdenticalDiagnosticsAreReportedOnce() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {weights: varianceComponents}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> "encoding.shrinkage.weights".equals(m.code())).count(), plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().filter(m -> "availability.windowShift".equals(m.code())).count() > 1, plan::describe);
+        final Diagnostics diagnostics = new Diagnostics();
+        diagnostics.info("a.b", "x", "same");
+        diagnostics.info("a.b", "x", "same");
+        diagnostics.info("a.b", "y", "same");
+        diagnostics.warning("a.b", "x", "same");
+        Assertions.assertEquals(3, diagnostics.getMessages().size());
+        // errors are never merged: each is a thing to fix, whether or not its text names the item
+        diagnostics.error("a.c", "x", "malformed");
+        diagnostics.error("a.c", "x", "malformed");
+        Assertions.assertEquals(5, diagnostics.getMessages().size());
+        Assertions.assertEquals(2, diagnostics.getErrorMessages().size());
+    }
+
     @Test
     public void testOffsetRequiresPredictAtComputeAt() {
         final String spec = SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    computeAt: \"event_time - PT1H\"");
@@ -774,9 +798,11 @@ public class FeaturePlanCompilerTest {
 
     /**
      * An offset on a logit / log shrinkage scale is accepted: the block's levels keep a hidden Σ baseline
-     * ({@code __sumoff}) next to Σ(y − b), the composed column reads it through its {@code levels} coordinate, and
-     * an info diagnostic says the value is the additive term on the scale. On identity nothing changes (no extra
-     * column), and the joint estimator accepts the same declaration.
+     * ({@code __sumoff}) next to Σ(y − b) — and on logit the information Σ b(1 − b) ({@code __suminfo}) the score-type
+     * term divides by; on log that information is Σ baseline itself — the composed column reads them through its
+     * {@code levels} coordinate, the hidden columns carry the score scale for the engine, and an info diagnostic says
+     * the value is the additive term on the scale. On identity nothing changes (no extra column), and the joint
+     * estimator accepts the same declaration.
      */
     @Test
     public void testOffsetOnLogitScaleKeepsBaselineSum() {
@@ -791,25 +817,123 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(off.getCoordinates().get("field"), column(plan, "enc__seller_id__e2__sum").getCoordinates().get("field"));
         Assertions.assertNotNull(plan.getColumn("enc__global__e2__sumoff"));
         Assertions.assertNotNull(plan.getColumn("enc__category__365d__e2__sumoff"));
+        final OutputColumn info = column(plan, "enc__seller_id__e2__suminfo");
+        Assertions.assertTrue(info.isIntermediate());
+        Assertions.assertEquals("suminfo", info.getCoordinates().get("stat"));
+        Assertions.assertEquals("logit", info.getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("logit", column(plan, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
         Assertions.assertEquals("compose", composed.getOperator());
         Assertions.assertEquals("logit", composed.getCoordinates().get("scale"));
-        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff"), composed.getCoordinates().get("levels"));
+        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff,enc__seller_id__e2__suminfo"), composed.getCoordinates().get("levels"));
         Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__sumoff"));
+        Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__suminfo"));
+        final Shrinkage.Level leaf = Shrinkage.parseLevels(composed.getCoordinates().get("levels")).get(0);
+        Assertions.assertEquals("enc__seller_id__e2__suminfo", leaf.infoColumn());
         // the target-less count / share levels have no baseline sum
         Assertions.assertNull(plan.getColumn("enc__seller_id__sumoff"));
+        Assertions.assertNull(plan.getColumn("enc__seller_id__suminfo"));
+        // log: the information is Σ baseline — no extra column, the level reads sumoff for it
+        final FeaturePlan log = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log}"));
+        Assertions.assertFalse(log.getDiagnostics().hasErrors(), log::describe);
+        Assertions.assertNull(log.getColumn("enc__seller_id__e2__suminfo"));
+        Assertions.assertEquals("log", column(log, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("enc__seller_id__e2__sumoff", Shrinkage.parseLevels(column(log, "enc__seller_id__e2__mean").getCoordinates().get("levels")).get(0).infoColumn());
 
         final FeaturePlan identity = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
         Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
         Assertions.assertFalse(hasCode(identity, "encoding.offset.additive"));
         Assertions.assertNull(identity.getColumn("enc__seller_id__e2__sumoff"));
+        Assertions.assertNull(column(identity, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         Assertions.assertFalse(column(identity, "enc__seller_id__e2__mean").getCoordinates().get("levels").contains("sumoff"));
+
+        // the plan hash of an offset term names the estimator: an artifact of the transformed-mean estimator, addressed by the
+        // same spec, is not found (a keySet-level scale counts too; identity and no offset are unsalted)
+        final JsonObject logitJson = Config.convertConfigJson(logit, Config.Format.yaml);
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(logitJson));
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market")
+                .replace("      - keys: [category]\n", "      - keys: [category]\n        shrinkage: {scale: log}\n"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2, scale: logit}"), Config.Format.yaml)));
+        Assertions.assertEquals(FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(Config.convertConfigJson(SOURCES, Config.Format.yaml)) + "\u0000"
+                + FeaturePlanCompiler.canonical(FeaturePlanCompiler.withoutArtifact(logitJson)) + "\u0000" + FeaturePlanCompiler.OFFSET_ESTIMATOR), plan.getHash());
 
         final FeaturePlan joint = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log, estimator: joint}\n    fit: {mode: static}"));
         Assertions.assertFalse(joint.getDiagnostics().hasErrors(), joint::describe);
         Assertions.assertTrue(hasCode(joint, "encoding.offset.additive"), joint::describe);
         Assertions.assertEquals("joint", column(joint, "enc__seller_id__e2__mean").getOperator());
         Assertions.assertEquals("market", column(joint, "enc__seller_id__e2__mean").getCoordinates().get("offset"));
+    }
+
+    /**
+     * A baseline over an outcome field is a valid offset (spec §3 rule 3): the baseline is read from the past rows next
+     * to their outcome, never from the current row, so its availability joins the target's on the past side. The
+     * expanding block's levels shift their window by the outcome's lag exactly as an outcome target does (the composed
+     * value, read from the shifted statistics, stays staticSafe), a forward fit delays the blocks it may read by the same
+     * lag, a static fit is unchanged — and emitting that baseline as a column of the row is still a violation.
+     */
+    @Test
+    public void testOffsetOverOutcomeBaselineShiftsTheWindow() {
+        final String marketLine = "  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        Assertions.assertTrue(SPEC.contains(marketLine));
+        final String settled = SPEC.replace(marketLine, marketLine + "\n  - {name: settled, context: session, expr: \"share(1 / final_price)\"}");
+        final Duration outcomeLag = Duration.ofDays(6).plusMinutes(38);   // settlement + ingestion + the predictAt offset
+
+        // a pre-event target too, so the shift its level takes is the baseline's alone (sold has the same lag itself)
+        final String withPrice = settled.replace("      - {expr: \"sold >= 1\", stats: [mean]}\n", "      - {expr: \"sold >= 1\", stats: [mean]}\n      - {field: start_price, stats: [mean]}\n");
+        Assertions.assertNotEquals(settled, withPrice);
+        final FeaturePlan plan = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    shrinkage: {priorWeight: 2, scale: logit}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "availability.violation"), plan::describe);
+        // the target-less count reads no baseline (it counts every row): no shift from the offset
+        final OutputColumn count = column(plan, "enc__seller_id__count");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, count.getStatus(), plan::describe);
+        Assertions.assertFalse(count.getPastInputs().contains("__baseline_settled"), count::describe);
+        // a target's level reads the baseline next to the target: the pre-event target's level shifts by the baseline's lag
+        final OutputColumn priceN = column(plan, "enc__seller_id__start_price__n");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, priceN.getStatus(), plan::describe);
+        Assertions.assertEquals(outcomeLag, priceN.getWindowShift());
+        Assertions.assertTrue(priceN.getPastInputs().contains("__baseline_settled"), priceN::describe);
+        final OutputColumn n = column(plan, "enc__seller_id__e2__n");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, n.getStatus());
+        Assertions.assertEquals(outcomeLag, n.getWindowShift());
+        final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, composed.getStatus(), plan::describe);
+        Assertions.assertFalse(composed.getInputs().contains("__baseline_settled"), "the composed value never reads the row's own baseline");
+        Assertions.assertTrue(composed.getDerivedFrom().contains("outcome"), composed::describe);
+        // a pre-event baseline shifts nothing, and without an offset the pre-event target's level shifts nothing
+        final FeaturePlan market = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(market, "enc__seller_id__count").getStatus(), market::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(market, "enc__seller_id__start_price__n").getStatus(), market::describe);
+        final FeaturePlan plain = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2}"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plain, "enc__seller_id__start_price__n").getStatus(), plain::describe);
+
+        // the row cannot see its own settled baseline: emitting it is the violation it always was — unless it is the
+        // evaluation baseline (output.roles.baseline), post-event by declaration like a label: status label, never a feature
+        final String emitting = settled.replace("expr: \"share(1 / final_price)\"}", "expr: \"share(1 / final_price)\", emit: settledProb}")
+                .replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled");
+        final FeaturePlan emitted = compile(SOURCES, emitting);
+        Assertions.assertTrue(hasCode(emitted, "availability.violation"), emitted::describe);
+        final FeaturePlan role = compile(SOURCES, emitting.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  roles: {baseline: settled}"));
+        Assertions.assertFalse(role.getDiagnostics().hasErrors(), role::describe);
+        Assertions.assertEquals(OutputColumn.Status.label, column(role, "settledProb").getStatus(), role::describe);
+        Assertions.assertEquals("f_settledProb", role.getRoleColumns().get("baseline"), role::describe);
+        // (a screen excludes a status-label column from its candidates: FeatureLineage.labels collects every one)
+
+        // lookup fits: static is unchanged, forward delays the readable blocks by the baseline's lag
+        final FeaturePlan statik = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: static}"));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(statik, "enc__seller_id__e2__mean").getStatus(), statik::describe);
+        final FeaturePlan forward = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        // (under a lookup fit the visible statistics read the hidden levels, which carry the geometry): the row-count level
+        // takes no lag from the baseline it never reads, a target's level takes the baseline's
+        Assertions.assertEquals("0", column(forward, "enc__seller_id__n").getCoordinates().get("forwardLagMillis"), forward::describe);
+        Assertions.assertTrue(Long.parseLong(column(forward, "enc__seller_id__e2__n").getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, forward::describe);
+        final FeaturePlan forwardPrice = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertTrue(Long.parseLong(column(forwardPrice, "enc__seller_id__start_price__n").getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, forwardPrice::describe);
+        final FeaturePlan forwardMarket = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertEquals("0", column(forwardMarket, "enc__seller_id__start_price__n").getCoordinates().get("forwardLagMillis"), forwardMarket::describe);
     }
 
     /**
@@ -3103,6 +3227,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(Duration.ofDays(730), Durations.parse("P2Y"));
         Assertions.assertEquals("365d", Durations.shortName(Durations.parse("P365D")));
         Assertions.assertEquals("10m", Durations.shortName(Durations.parse("PT10M")));
+        // a malformed duration is an IllegalArgumentException: every caller reports it as a diagnostic by catching
+        // that one, so a DateTimeParseException would escape the compile as an unhandled exception instead
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Durations.parse("P1X"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> AvailableAt.parseTimeExpression("event_time - P1X"));
+        final FeaturePlan malformed = compile(SOURCES, SPEC.replace("predictAt: \"event_time - PT8M\"", "predictAt: \"event_time - P1X\""));
+        Assertions.assertTrue(hasCode(malformed, "predictAt.invalid"), malformed::describe);
+        // and the fallback predictAt is event_time, not the pre-event sentinel: a window shift measured against that
+        // one overflows a millisecond count instead of reporting the missing declaration
+        final FeaturePlan missing = compile(SOURCES, SPEC.replace("predictAt: \"event_time - PT8M\"\n", ""));
+        Assertions.assertTrue(hasCode(missing, "predictAt.missing"), missing::describe);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -3845,7 +3979,7 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
         // the purge is two-sided and the embargo extends it (the info spells out the width left out)
         Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code())
-                && m.message().contains("on both sides") && m.message().contains("2·purge + embargo + 1")), plan::describe);
+                && m.message().contains("on both sides") && m.message().contains("2*purge + embargo + 1")), plan::describe);
 
         // a declared purge wins over the label's horizon and is inherited by the blocks (10 days of 7-day blocks → 2)
         final FeaturePlan declared = compile(SOURCES, spec.replace("fold: {by: time, embargo: P40D}", "fold: {by: time, purge: P10D, embargo: P40D}"));
@@ -3872,6 +4006,30 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(negative.getDiagnostics().getMessages().stream().noneMatch(m -> "fit.fold.purge".equals(m.code()) && m.level() == Diagnostics.Level.error), negative::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, purge: P1D}")), "fit.fold.ignored"));
+
+        // fit.fold.until: the cross-fit is confined to the blocks up to the until block, later rows read forward — the
+        // coordinates carry the block and the lag of the level's target / offset (an outcome: settlement + ingestion)
+        final FeaturePlan until = compile(SOURCES, spec.replace(fold, "fold: {by: time, embargo: P40D, until: \"2025-06-30\"}"));
+        Assertions.assertFalse(until.getDiagnostics().hasErrors(), until::describe);
+        final OutputColumn untilMean = until.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit") && c.getCanonicalName().endsWith("e2__n")).findFirst().orElseThrow();
+        Assertions.assertEquals(Long.toString(2025 * 12L + 5), untilMean.getCoordinates().get("untilBlock"), "month blocks: June 2025");
+        Assertions.assertTrue(Long.parseLong(untilMean.getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, untilMean.getCoordinates()::toString);
+        final OutputColumn untilCount = until.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit") && c.getCanonicalName().endsWith("seller_id__n")).findFirst().orElseThrow();
+        Assertions.assertEquals("0", untilCount.getCoordinates().get("forwardLagMillis"), "a row count has no lag");
+        Assertions.assertNull(mean.getCoordinates().get("untilBlock"), "no until: every block is a fold");
+        Assertions.assertTrue(until.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code()) && m.message().contains("fit.fold.until")), until::describe);
+        // an instant is accepted too, a malformed value is its own error, and until without by: time is ignored with a warning
+        Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00Z\"}"))
+                .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"));
+        Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00\"}"))
+                .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"), "a zone-less date-time is UTC");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"June 2025\"}")), "fit.fold.until"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T25:00:00\"}")), "fit.fold.until"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, until: \"2025-06-30\"}")), "fit.fold.ignored"));
+        // the training period is in the plan hash
+        Assertions.assertNotEquals(until.getHash(), compile(SOURCES, spec.replace(fold, "fold: {by: time, embargo: P40D, until: \"2025-07-31\"}")).getHash());
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: static, blocks: {bucket: month}")), "fit.fold.ignored"));
         // joint under a time fold: one error for the block, not one per keySet (enc has two)
         final FeaturePlan joint = compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
@@ -3893,6 +4051,7 @@ public class FeaturePlanCompilerTest {
                     windows: [{maxAge: 3, clock: business}]
                     ops:
                       - {type: aggregate, field: start_price, funcs: [mean]}
+                      - {type: aggregate, field: sold, funcs: [count]}
                       - {type: ewma, field: start_price, halflife: [2], decayBy: business}
                   - name: enc_days
                     scope: population
@@ -3917,6 +4076,23 @@ public class FeaturePlanCompilerTest {
         final OutputColumn ewma = column(plan, "days_3business_start_price_ewma2");
         Assertions.assertEquals("business", ewma.getCoordinates().get("decayBy"));
         Assertions.assertNotNull(ewma.getClocks().get("business"));
+        // an outcome under a calendar window: the near edge shifts on wall time (6 days 38 minutes), which the info
+        // states in ticks of the clock (consecutive days: one tick a day) against the window's 3 ticks
+        final OutputColumn shifted = column(plan, "days_3business_sold_count");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, shifted.getStatus());
+        final Diagnostics.Message shift = plan.getDiagnostics().getMessages().stream()
+                .filter(m -> "availability.windowShift".equals(m.code()) && m.message().startsWith("days_3business_sold_count:")).findFirst().orElseThrow();
+        Assertions.assertTrue(shift.message().contains("~6.0 of the window's 3 tick(s)"), shift::message);
+        // ... and a shift covering every tick of the window is a warning of its own (the window holds no row)
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "window.clock.hidden".equals(m.code())
+                && m.level() == Diagnostics.Level.warning && m.message().startsWith("days_3business_sold_count:")), plan::describe);
+        final FeaturePlan wide = compile(sources, spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 30, clock: business}]"));
+        Assertions.assertFalse(hasCode(wide, "window.clock.hidden"), wide::describe);
+        Assertions.assertTrue(wide.getDiagnostics().getMessages().stream().anyMatch(m -> "availability.windowShift".equals(m.code())
+                && m.message().contains("~6.0 of the window's 30 tick(s)") && m.message().contains("the newest ticks are never visible")), wide::describe);
+        Assertions.assertTrue(shift.message().contains("business"), shift::message);
+        Assertions.assertFalse(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "availability.windowShift".equals(m.code())
+                && m.message().startsWith("recent_n5_sold_count:") && m.message().contains("tick")), "a wall-time window says nothing about ticks");
         // forward blocks of 5 ticks; the keySet window of 7 ticks reads 2 blocks
         final OutputColumn level = plan.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
                 && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
@@ -3949,7 +4125,7 @@ public class FeaturePlanCompilerTest {
         rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {bucket: month, clock: business}"), "fit.blocks.clock");
         rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: P3D, clock: business}]"), "window.clock");
         rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: events}]"), "window.clock");
-        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
+        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: aggregate, field: sold, funcs: [count]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
                 "    entity: seller\n    direction: future\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}"), "clock.direction");
         for (final Map.Entry<String, String> e : rejected.entrySet()) {
             Assertions.assertNotEquals(spec, e.getKey(), e.getValue());
