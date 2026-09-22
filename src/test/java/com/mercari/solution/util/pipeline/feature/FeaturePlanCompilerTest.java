@@ -3929,7 +3929,10 @@ public class FeaturePlanCompilerTest {
         // an instant is accepted too, a malformed value is its own error, and until without by: time is ignored with a warning
         Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00Z\"}"))
                 .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"));
+        Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00\"}"))
+                .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"), "a zone-less date-time is UTC");
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"June 2025\"}")), "fit.fold.until"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T25:00:00\"}")), "fit.fold.until"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, until: \"2025-06-30\"}")), "fit.fold.ignored"));
         // the training period is in the plan hash
         Assertions.assertNotEquals(until.getHash(), compile(SOURCES, spec.replace(fold, "fold: {by: time, embargo: P40D, until: \"2025-07-31\"}")).getHash());

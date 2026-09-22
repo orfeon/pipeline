@@ -426,11 +426,16 @@ public class FeatureSpec implements Serializable {
             return "time".equals(foldBy);
         }
 
-        /** An ISO-8601 instant ({@code 2025-01-25T00:00:00Z}) or date ({@code 2025-01-25}, UTC midnight) as epoch millis. */
+        /** An ISO-8601 instant ({@code 2025-01-25T00:00:00Z}), a zone-less date-time ({@code 2025-01-25T00:00:00}, UTC) or a date ({@code 2025-01-25}, UTC midnight) as epoch millis. */
         static long parseInstant(final String text) {
             final String t = text.trim();
-            if (t.length() == 10) return java.time.LocalDate.parse(t).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
-            return java.time.Instant.parse(t).toEpochMilli();
+            if (!t.contains("T")) return java.time.LocalDate.parse(t).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+            try {
+                return java.time.Instant.parse(t).toEpochMilli();
+            } catch (final java.time.format.DateTimeParseException e) {
+                // a date-time without a zone: UTC, like the date form
+                return java.time.LocalDateTime.parse(t).toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+            }
         }
 
         /** Parses {@code fold: {by: row | time, purge, embargo, until}} of a fit block (top level or per feature). */
@@ -459,7 +464,7 @@ public class FeatureSpec implements Serializable {
                 try {
                     spec.untilMillis = parseInstant(until);
                 } catch (final RuntimeException e) {
-                    diagnostics.error("fit.fold.until", loc, "fit.fold.until must be an ISO-8601 instant or date (2025-01-25T00:00:00Z / 2025-01-25): " + until);
+                    diagnostics.error("fit.fold.until", loc, "fit.fold.until must be an ISO-8601 instant, date-time or date, UTC (2025-01-25T00:00:00Z / 2025-01-25T00:00:00 / 2025-01-25): " + until);
                 }
             }
             for (final String key : fold.keySet()) {

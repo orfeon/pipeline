@@ -935,8 +935,8 @@ public final class FeatureStages {
         return seriesTotals(series, levelIds, Map.of(), label);
     }
 
-    /** @param untilBlocks per level, the last block the totals cover (a training period); a level absent reads its whole series */
-    private static PCollection<KV<String, VarianceComponents.KeyStats>> seriesTotals(final PCollection<KV<String, ForwardBlocks.Series>> series,
+    /** @param untilBlocks per level, the last block the totals cover (a training period, that block included); a level absent reads its whole series */
+    static PCollection<KV<String, VarianceComponents.KeyStats>> seriesTotals(final PCollection<KV<String, ForwardBlocks.Series>> series,
                                                                                     final Set<String> levelIds, final Map<String, Long> untilBlocks, final String label) {
         final Map<String, Long> until = new HashMap<>(untilBlocks); // a serializable copy for the DoFn
         return series

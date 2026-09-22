@@ -56,7 +56,7 @@ not expand because another block failed).
 | `fit.folds` | error | at least 2 |
 | `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo, until}` |
 | `fit.fold.negative` | error | `fold.purge` / `fold.embargo` must be non-negative durations |
-| `fit.fold.until` | error | `fold.until` must be an ISO-8601 instant or date, UTC (`2025-06-30T00:00:00Z` / `2025-06-30`) |
+| `fit.fold.until` | error | `fold.until` must be an ISO-8601 instant, date-time or date, UTC (`2025-06-30T00:00:00Z` / `2025-06-30T00:00:00` / `2025-06-30`) |
 | `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` / `until` without `by: time` — ignored |
 | `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
 | `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential (one error per block) |

@@ -606,7 +606,7 @@ is a fold:
   out-of-fold statistics read a minority of the data: the engine logs a warning and counts the rows in the counter
   `feature/timeFold_<level>_excludedOverHalf` (the input's block span is only known at run time) — use smaller blocks
   or a shorter purge / embargo.
-- **`until: <instant | date>`** (`2025-06-30`, `2025-06-30T00:00:00Z`; UTC) ends the training period: the cross-fit
+- **`until: <instant | date>`** (`2025-06-30`, `2025-06-30T00:00:00Z`, or a zone-less `2025-06-30T00:00:00`; all UTC) ends the training period: the cross-fit
   runs within the blocks up to the block of `until` (a training row reads the other training blocks minus its purge /
   embargo range, never a later block), and a row of a later block reads **forward** — the blocks before its own whose
   targets were known at predictAt (the block that ends before `event + predictAt offset − the target's lag`, as
