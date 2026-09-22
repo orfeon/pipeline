@@ -17,6 +17,47 @@ import java.util.TreeMap;
  */
 public class VarianceComponentsTest {
 
+    /**
+     * An offset term: the per-key Combine accumulates Σb and Σ b(1 − b) from the extracted (y − b, b) pairs, the level
+     * moments keep the score statistics of both transformed scales next to the identity ones, and the level's score
+     * scale picks which λ is derived — 1 / τ² by {@link Shrinkage#lambdaFromScore} on logit (V = Σ b(1 − b)) or log
+     * (V = Σb), the identity moments otherwise.
+     */
+    @Test
+    public void testScoreMomentsFollowTheLevelScale() {
+        final VarianceComponents.KeyStatsFn keyFn = new VarianceComponents.KeyStatsFn();
+        final double[][] rows = {{1 - 0.2, 0.2}, {0 - 0.3, 0.3}, {1 - 0.5, 0.5}};   // (y − b, b)
+        VarianceComponents.KeyStats a = keyFn.createAccumulator();
+        for (final double[] r : rows) a = keyFn.addInput(a, org.apache.beam.sdk.values.KV.of(r[0], r[1]));
+        Assertions.assertEquals(3, a.n, 0d);
+        Assertions.assertEquals(1.0, a.sumOff, 1e-12);
+        Assertions.assertEquals(0.2 * 0.8 + 0.3 * 0.7 + 0.5 * 0.5, a.sumInfo, 1e-12);
+        VarianceComponents.KeyStats b = keyFn.createAccumulator();
+        b = keyFn.addInput(b, org.apache.beam.sdk.values.KV.of(0 - 0.4, 0.4));
+        b = keyFn.addInput(b, org.apache.beam.sdk.values.KV.of(0 - 0.1, 0.1));
+        final VarianceComponents.KeyStats merged = keyFn.mergeAccumulators(List.of(a, b));
+        Assertions.assertEquals(a.sumInfo + b.sumInfo, merged.sumInfo, 1e-12);
+        Assertions.assertEquals(a.sumInfo - b.sumInfo, VarianceComponents.subtract(a, b).sumInfo, 1e-12);
+
+        final VarianceComponents.MomentsFn fn = new VarianceComponents.MomentsFn();
+        final VarianceComponents.Moments m = fn.mergeAccumulators(List.of(fn.addInput(fn.createAccumulator(), a), fn.addInput(fn.createAccumulator(), b)));
+        Assertions.assertEquals(2, m.keysLogit);
+        Assertions.assertEquals(a.sumInfo + b.sumInfo, m.sumVLogit, 1e-12);
+        Assertions.assertEquals(a.sum + b.sum, m.sumSLogit, 1e-12);
+        Assertions.assertEquals(a.sum * a.sum / a.sumInfo + b.sum * b.sum / b.sumInfo, m.sumS2OverVLogit, 1e-12);
+        Assertions.assertEquals(a.sumOff + b.sumOff, m.sumVLog, 1e-12);
+        final Double logit = VarianceComponents.lambdaOf(m, "logit");
+        Assertions.assertEquals(Shrinkage.lambdaFromScore(2, m.sumVLogit, m.sumV2Logit, m.sumSLogit, m.sumS2OverVLogit), logit);
+        Assertions.assertEquals(Shrinkage.lambdaFromScore(2, m.sumVLog, m.sumV2Log, m.sumSLog, m.sumS2OverVLog), VarianceComponents.lambdaOf(m, "log"));
+        Assertions.assertEquals(Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq), VarianceComponents.lambdaOf(m, null));
+        // the in-memory derivation keys the scale by level id
+        final Map<String, VarianceComponents.KeyStats> stats = new HashMap<>();
+        stats.put(FitArtifact.entryKey("lvl__n", "a"), a);
+        stats.put(FitArtifact.entryKey("lvl__n", "b"), b);
+        Assertions.assertEquals(logit, VarianceComponents.lambdasInMemory(stats, Map.of("lvl__n", "logit")).get("lvl__n"));
+        Assertions.assertEquals(VarianceComponents.lambdaOf(m, null), VarianceComponents.lambdasInMemory(stats).get("lvl__n"));
+    }
+
     /** A cumulative series over random sparse blocks (n ≥ 1 per block). */
     private static ForwardBlocks.Series series(final Random random, final int blocks) {
         final long[] block = new long[blocks];
@@ -55,6 +96,89 @@ public class VarianceComponentsTest {
         Assertions.assertEquals(expected.keySet(), actual.keySet(), message);
         for (final Map.Entry<Long, Double> e : expected.entrySet()) {
             Assertions.assertEquals(e.getValue(), actual.get(e.getKey()), Math.abs(e.getValue()) * 1e-9, message + " block " + e.getKey());
+        }
+    }
+
+    /** A cumulative series of an offset level: residuals y - b of a 0/1 target against a baseline b in (0.05, 0.95). */
+    private static ForwardBlocks.Series offsetSeries(final Random random, final int blocks) {
+        final long[] block = new long[blocks];
+        final double[] n = new double[blocks], sum = new double[blocks], sumSq = new double[blocks], sumOff = new double[blocks], sumInfo = new double[blocks];
+        long b = random.nextInt(5);
+        double cn = 0, cs = 0, cq = 0, co = 0, ci = 0;
+        for (int i = 0; i < blocks; i++) {
+            b += 1 + random.nextInt(4);
+            final int rows = 1 + random.nextInt(3);
+            for (int r = 0; r < rows; r++) {
+                final double baseline = 0.05 + 0.9 * random.nextDouble();
+                final double y = (random.nextDouble() < baseline ? 1 : 0) - baseline;
+                cn += 1;
+                cs += y;
+                cq += y * y;
+                co += baseline;
+                ci += Shrinkage.information(Shrinkage.Scale.logit, baseline);
+            }
+            block[i] = b;
+            n[i] = cn;
+            sum[i] = cs;
+            sumSq[i] = cq;
+            sumOff[i] = co;
+            sumInfo[i] = ci;
+        }
+        return new ForwardBlocks.Series(block, n, sum, sumSq, sumOff, sumInfo);
+    }
+
+    private static Map<Long, Double> lambdas(final VarianceComponents.BlockMoments acc, final String scoreScale) {
+        final Map<Long, Double> out = new TreeMap<>();
+        for (final Map.Entry<Long, VarianceComponents.Moments> e : acc.byBlock.entrySet()) {
+            final Double lambda = VarianceComponents.lambdaOf(e.getValue(), scoreScale);
+            if (lambda != null) out.put(e.getKey(), lambda);
+        }
+        return out;
+    }
+
+    /**
+     * fit.mode forward under an offset term: the per-block λ of a score level (1 / τ² on the logit or log scale,
+     * {@link Shrinkage#lambdaFromScore}) computed by the pipeline's Combine — one accumulator, and partial accumulators
+     * merged out of order — equals the in-memory reference for that scale, and differs from the identity moments' λ.
+     */
+    @Test
+    public void testScoreLambdaByBlockMatchesReference() {
+        final Random random = new Random(11);
+        for (final String scale : new String[]{"logit", "log"}) {
+            for (int trial = 0; trial < 10; trial++) {
+                final int keys = 2 + random.nextInt(12);
+                final Map<String, ForwardBlocks.Series> byEntry = new HashMap<>();
+                final List<ForwardBlocks.Series> all = new ArrayList<>();
+                for (int k = 0; k < keys; k++) {
+                    final ForwardBlocks.Series s = offsetSeries(random, 1 + random.nextInt(6));
+                    byEntry.put(FitArtifact.entryKey("lvl__n", "k" + k), s);
+                    all.add(s);
+                }
+                final TreeMap<Long, Double> expected = VarianceComponents.lambdasByBlock(byEntry, Map.of("lvl__n", scale)).get("lvl__n");
+                final VarianceComponents.BlockMomentsFn fn = new VarianceComponents.BlockMomentsFn();
+                VarianceComponents.BlockMoments single = fn.createAccumulator();
+                for (final ForwardBlocks.Series s : all) single = fn.addInput(single, s);
+                assertLambdas(expected, lambdas(fn.extractOutput(single), scale), scale + " trial " + trial);
+                final List<VarianceComponents.BlockMoments> partials = new ArrayList<>();
+                VarianceComponents.BlockMoments part = fn.createAccumulator();
+                for (int i = all.size() - 1; i >= 0; i--) {
+                    part = fn.addInput(part, all.get(i));
+                    if (random.nextBoolean()) {
+                        partials.add(part);
+                        part = fn.createAccumulator();
+                    }
+                }
+                partials.add(part);
+                assertLambdas(expected, lambdas(fn.mergeAccumulators(partials), scale), scale + " merged trial " + trial);
+                // a score scale is not the identity moments: the reference of the raw scale is another number
+                final TreeMap<Long, Double> identity = VarianceComponents.lambdasByBlock(byEntry, Map.of()).get("lvl__n");
+                if (!expected.isEmpty() && !identity.isEmpty()) {
+                    final long last = expected.lastKey();
+                    if (identity.containsKey(last) && Double.isFinite(expected.get(last)) && Double.isFinite(identity.get(last))) {
+                        Assertions.assertNotEquals(identity.get(last), expected.get(last), 1e-9, scale + " trial " + trial);
+                    }
+                }
+            }
         }
     }
 

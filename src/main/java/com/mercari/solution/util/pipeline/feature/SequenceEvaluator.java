@@ -643,7 +643,7 @@ public class SequenceEvaluator implements Serializable {
      * counts, nulls included); a field contributes its numeric value when it is {@link #finite}.
      */
     Object contribution(final ColumnPlan plan, final Past p) {
-        // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
+        // a path event, or none when the row has no value for the channel (a field-less channel is the constant 1)
         if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
         // a point of a multi-channel path (none when a channel is missing)
         if (plan.summary.family() instanceof Signature signature) return signature.event(p);

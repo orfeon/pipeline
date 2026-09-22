@@ -43,10 +43,31 @@ public final class VarianceComponents {
      * additionally tags every contribution with the row's fold so out-of-fold statistics can be derived by
      * subtraction ({@code fit.mode: fold}).
      */
-    public record LevelSpec(String id, List<String> keys, String field, String offsetColumn, List<String> foldKeys, int folds) implements Serializable {
+    public record LevelSpec(String id, List<String> keys, String field, String offsetColumn, List<String> foldKeys, int folds,
+                            String scoreScale) implements Serializable {
         public LevelSpec(final String id, final List<String> keys, final String field, final String offsetColumn) {
-            this(id, keys, field, offsetColumn, null, 0);
+            this(id, keys, field, offsetColumn, null, 0, null);
         }
+    }
+
+    /**
+     * The levels composed on the score scale (an offset term on logit / log — the {@code scoreScale} coordinate of their
+     * hidden columns): level id → scale name. Their λ is {@link Shrinkage#lambdaFromScore} instead of the identity moments.
+     */
+    public static Map<String, String> scoreScalesOf(final List<LevelSpec> specs) {
+        final Map<String, String> scales = new HashMap<>();
+        for (final LevelSpec spec : specs) if (spec.scoreScale() != null) scales.put(spec.id(), spec.scoreScale());
+        return scales;
+    }
+
+    /** The λ of one level from its moments: on the score scale for a score level, the identity moments otherwise. */
+    static Double lambdaOf(final Moments m, final String scoreScale) {
+        if (scoreScale == null) return Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+        return switch (scoreScale) {
+            case "logit" -> Shrinkage.lambdaFromScore(m.keysLogit, m.sumVLogit, m.sumV2Logit, m.sumSLogit, m.sumS2OverVLogit);
+            case "log" -> Shrinkage.lambdaFromScore(m.keysLog, m.sumVLog, m.sumV2Log, m.sumSLog, m.sumS2OverVLog);
+            default -> Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+        };
     }
 
     /** Prefix of the per-fold entries in the per-key statistics map: {@code #<fold>} + separator + level entry. */
@@ -87,21 +108,24 @@ public final class VarianceComponents {
                         for (final KV<Long, KeyStats> e : c.element().getValue()) entries.add(e);
                         entries.sort(Comparator.comparingLong(KV::getKey));
                         final long[] blocks = new long[entries.size()];
-                        final double[] n = new double[entries.size()], sum = new double[entries.size()], sumSq = new double[entries.size()], sumOff = new double[entries.size()];
-                        double cn = 0, cs = 0, cq = 0, co = 0;
+                        final double[] n = new double[entries.size()], sum = new double[entries.size()], sumSq = new double[entries.size()],
+                                sumOff = new double[entries.size()], sumInfo = new double[entries.size()];
+                        double cn = 0, cs = 0, cq = 0, co = 0, ci = 0;
                         for (int i = 0; i < entries.size(); i++) {
                             final KeyStats s = entries.get(i).getValue();
                             cn += s.n;
                             cs += s.sum;
                             cq += s.sumSq;
                             co += s.sumOff;
+                            ci += s.sumInfo;
                             blocks[i] = entries.get(i).getKey();
                             n[i] = cn;
                             sum[i] = cs;
                             sumSq[i] = cq;
                             sumOff[i] = co;
+                            sumInfo[i] = ci;
                         }
-                        c.output(KV.of(c.element().getKey(), new ForwardBlocks.Series(blocks, n, sum, sumSq, sumOff)));
+                        c.output(KV.of(c.element().getKey(), new ForwardBlocks.Series(blocks, n, sum, sumSq, sumOff, sumInfo)));
                     }
                 }))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(ForwardBlocks.Series.class)));
@@ -122,6 +146,11 @@ public final class VarianceComponents {
      * (what a row reading that block shrinks with). Levels with too few keys at a block have no entry there.
      */
     public static Map<String, TreeMap<Long, Double>> lambdasByBlock(final Map<String, ForwardBlocks.Series> series) {
+        return lambdasByBlock(series, Map.of());
+    }
+
+    /** @param scoreScales the score levels ({@link #scoreScalesOf}): their λ is estimated on the score scale */
+    public static Map<String, TreeMap<Long, Double>> lambdasByBlock(final Map<String, ForwardBlocks.Series> series, final Map<String, String> scoreScales) {
         final Map<String, List<ForwardBlocks.Series>> byLevel = new HashMap<>();
         final Map<String, TreeSet<Long>> blocksByLevel = new HashMap<>();
         for (final Map.Entry<String, ForwardBlocks.Series> e : series.entrySet()) {
@@ -140,7 +169,7 @@ public final class VarianceComponents {
                     final KeyStats stats = s.statsBetween(-1, s.floor(block));
                     if (stats != null) m = fn.addInput(m, stats);
                 }
-                final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+                final Double lambda = lambdaOf(m, scoreScales.get(e.getKey()));
                 if (lambda != null) perBlock.put(block, lambda);
             }
             lambdas.put(e.getKey(), perBlock);
@@ -172,7 +201,9 @@ public final class VarianceComponents {
      * step function over the keys' blocks) — gathered into one small side input (levels × blocks). No DoFn scans
      * the series to derive λ (a scan of a map side input is one state fetch per entry on a portable runner).
      */
-    public static PCollectionView<List<LevelLambdas>> lambdasByBlockView(final PCollection<KV<String, ForwardBlocks.Series>> series, final String label) {
+    public static PCollectionView<List<LevelLambdas>> lambdasByBlockView(final PCollection<KV<String, ForwardBlocks.Series>> series,
+                                                                         final Map<String, String> scoreScales, final String label) {
+        final Map<String, String> scales = new HashMap<>(scoreScales); // a serializable copy for the DoFn
         return series
                 .apply(label + "_PerLevel", ParDo.of(new DoFn<KV<String, ForwardBlocks.Series>, KV<String, ForwardBlocks.Series>>() {
                     @ProcessElement
@@ -188,8 +219,7 @@ public final class VarianceComponents {
                     public void processElement(final ProcessContext c) {
                         final TreeMap<Long, Double> perBlock = new TreeMap<>();
                         for (final Map.Entry<Long, Moments> e : c.element().getValue().byBlock.entrySet()) {
-                            final Moments m = e.getValue();
-                            final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+                            final Double lambda = lambdaOf(e.getValue(), scales.get(c.element().getKey()));
                             if (lambda != null) perBlock.put(e.getKey(), lambda);
                         }
                         LOG.info("varianceComponents {} (forward): lambda estimated at {} of {} blocks",
@@ -310,6 +340,7 @@ public final class VarianceComponents {
         out.sum = total.sum - part.sum;
         out.sumSq = total.sumSq - part.sumSq;
         out.sumOff = total.sumOff - part.sumOff;
+        out.sumInfo = total.sumInfo - part.sumInfo;
         return out.n <= 0 ? null : out;
     }
 
@@ -334,12 +365,12 @@ public final class VarianceComponents {
             final String field = hidden.getCoordinates().get("field");
             if (field == null) continue;
             final String offset = hidden.getCoordinates().containsKey("offset") ? "__baseline_" + hidden.getCoordinates().get("offset") : null;
-            specs.put(level.nColumn(), new LevelSpec(level.nColumn(), List.of(keys.split(",")), field, offset));
+            specs.put(level.nColumn(), new LevelSpec(level.nColumn(), List.of(keys.split(",")), field, offset, null, 0, hidden.getCoordinates().get("scoreScale")));
         }
     }
 
     public static PCollectionView<Map<String, Double>> estimate(final PCollection<MElement> input, final List<LevelSpec> specs, final String label) {
-        return lambdasFromKeyStats(perKeyStats(input, specs, label), label);
+        return lambdasFromKeyStats(perKeyStats(input, specs, label), scoreScalesOf(specs), label);
     }
 
     /** Per-key sufficient statistics of every level: {@code KV<levelId + (char)1 + key, stats>}. */
@@ -353,6 +384,11 @@ public final class VarianceComponents {
 
     /** In-memory counterpart of {@link #lambdasFromKeyStats} for statistics loaded from an artifact. */
     public static Map<String, Double> lambdasInMemory(final Map<String, KeyStats> stats) {
+        return lambdasInMemory(stats, Map.of());
+    }
+
+    /** @param scoreScales the score levels ({@link #scoreScalesOf}): their λ is estimated on the score scale */
+    public static Map<String, Double> lambdasInMemory(final Map<String, KeyStats> stats, final Map<String, String> scoreScales) {
         final Map<String, Moments> moments = new HashMap<>();
         final MomentsFn fn = new MomentsFn();
         for (final Map.Entry<String, KeyStats> e : stats.entrySet()) {
@@ -361,14 +397,16 @@ public final class VarianceComponents {
         }
         final Map<String, Double> lambdas = new HashMap<>();
         for (final Map.Entry<String, Moments> e : moments.entrySet()) {
-            final Moments m = e.getValue();
-            final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+            final Double lambda = lambdaOf(e.getValue(), scoreScales.get(e.getKey()));
             if (lambda != null) lambdas.put(e.getKey(), lambda);
         }
         return lambdas;
     }
 
-    public static PCollectionView<Map<String, Double>> lambdasFromKeyStats(final PCollection<KV<String, KeyStats>> perKey, final String label) {
+    /** @param scoreScales the score levels ({@link #scoreScalesOf}): their λ is estimated on the score scale (1 / τ²) */
+    public static PCollectionView<Map<String, Double>> lambdasFromKeyStats(final PCollection<KV<String, KeyStats>> perKey,
+                                                                           final Map<String, String> scoreScales, final String label) {
+        final Map<String, String> scales = new HashMap<>(scoreScales); // a serializable copy for the DoFn
         return perKey
                 .apply(label + "_PerLevel", ParDo.of(new DoFn<KV<String, KeyStats>, KV<String, KeyStats>>() {
                     @ProcessElement
@@ -384,7 +422,7 @@ public final class VarianceComponents {
                     @ProcessElement
                     public void processElement(final ProcessContext c) {
                         final Moments m = c.element().getValue();
-                        final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+                        final Double lambda = lambdaOf(m, scales.get(c.element().getKey()));
                         if (lambda == null) {
                             LOG.info("varianceComponents {}: too few keys/rows (K={}, N={}); using priorWeight", c.element().getKey(), m.keys, m.n);
                             return;
@@ -431,9 +469,12 @@ public final class VarianceComponents {
         }
     }
 
-    /** Per-key sufficient statistics (n, Σy, Σy²) plus, under a baseline offset, Σb of the same rows ({@code sumOff}, else 0). */
+    /**
+     * Per-key sufficient statistics (n, Σy, Σy²) plus, under a baseline offset, Σb ({@code sumOff}) and Σ b(1 − b)
+     * ({@code sumInfo}, the logit-scale information; on log the information is Σb) of the same rows, else 0.
+     */
     public static class KeyStats implements Serializable {
-        double n, sum, sumSq, sumOff;
+        double n, sum, sumSq, sumOff, sumInfo;
     }
 
     /** Coder of the extracted values: {@code KV<y (offset), b or null>}. */
@@ -451,7 +492,11 @@ public final class VarianceComponents {
             acc.n += 1;
             acc.sum += y;
             acc.sumSq += y * y;
-            if (value.getValue() != null) acc.sumOff += value.getValue();
+            if (value.getValue() != null) {
+                final double b = value.getValue();
+                acc.sumOff += b;
+                acc.sumInfo += Shrinkage.information(Shrinkage.Scale.logit, b);
+            }
             return acc;
         }
 
@@ -463,6 +508,7 @@ public final class VarianceComponents {
                 out.sum += a.sum;
                 out.sumSq += a.sumSq;
                 out.sumOff += a.sumOff;
+                out.sumInfo += a.sumInfo;
             }
             return out;
         }
@@ -476,10 +522,18 @@ public final class VarianceComponents {
         }
     }
 
-    /** Level-wide moments over keys (inputs of {@link Shrinkage#lambdaFromMoments}). */
+    /**
+     * Level-wide moments over keys: the identity ones (inputs of {@link Shrinkage#lambdaFromMoments}) and, for an offset
+     * term, the score ones on either transformed scale (inputs of {@link Shrinkage#lambdaFromScore}: keys with
+     * information, Σ V_k, Σ V_k², Σ S_k, Σ S_k² / V_k — V = Σ b(1 − b) on logit, Σb on log). Both scales are kept
+     * because the Combine does not know the level's scale; {@link #lambdaOf} reads the one the level composes on.
+     */
     public static class Moments implements Serializable {
         long keys;
         double n, sum, sumSq, sumSqOverN, sumNSq;
+        long keysLogit, keysLog;
+        double sumVLogit, sumV2Logit, sumSLogit, sumS2OverVLogit;
+        double sumVLog, sumV2Log, sumSLog, sumS2OverVLog;
     }
 
     static class MomentsFn extends Combine.CombineFn<KeyStats, Moments, Moments> {
@@ -495,6 +549,20 @@ public final class VarianceComponents {
             acc.sumSq += k.sumSq;
             acc.sumSqOverN += k.sum * k.sum / k.n;
             acc.sumNSq += k.n * k.n;
+            if (k.sumInfo > 0) {
+                acc.keysLogit += 1;
+                acc.sumVLogit += k.sumInfo;
+                acc.sumV2Logit += k.sumInfo * k.sumInfo;
+                acc.sumSLogit += k.sum;
+                acc.sumS2OverVLogit += k.sum * k.sum / k.sumInfo;
+            }
+            if (k.sumOff > 0) {
+                acc.keysLog += 1;
+                acc.sumVLog += k.sumOff;
+                acc.sumV2Log += k.sumOff * k.sumOff;
+                acc.sumSLog += k.sum;
+                acc.sumS2OverVLog += k.sum * k.sum / k.sumOff;
+            }
             return acc;
         }
 
@@ -508,6 +576,16 @@ public final class VarianceComponents {
                 out.sumSq += a.sumSq;
                 out.sumSqOverN += a.sumSqOverN;
                 out.sumNSq += a.sumNSq;
+                out.keysLogit += a.keysLogit;
+                out.sumVLogit += a.sumVLogit;
+                out.sumV2Logit += a.sumV2Logit;
+                out.sumSLogit += a.sumSLogit;
+                out.sumS2OverVLogit += a.sumS2OverVLogit;
+                out.keysLog += a.keysLog;
+                out.sumVLog += a.sumVLog;
+                out.sumV2Log += a.sumV2Log;
+                out.sumSLog += a.sumSLog;
+                out.sumS2OverVLog += a.sumS2OverVLog;
             }
             return out;
         }

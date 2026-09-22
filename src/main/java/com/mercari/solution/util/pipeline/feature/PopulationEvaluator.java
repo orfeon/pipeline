@@ -33,6 +33,12 @@ public class PopulationEvaluator extends SequenceEvaluator {
 
     /** Hidden statistic of an offset block on a logit / log scale: Σ baseline over the rows counted by the level's {@code sum}. */
     public static final String SUM_OFFSET = "sumoff";
+    /**
+     * Hidden statistic of an offset block on the logit scale: Σ b(1 − b), the Fisher information of the rows counted by the
+     * level's {@code sum} at their baseline — the denominator of the score-type term ({@link Shrinkage#ownScore}; on log
+     * the information is Σ baseline itself, so the level reads {@code sumoff} for it).
+     */
+    public static final String SUM_INFO = "suminfo";
 
     /**
      * Stats the expanding (per-key replay) engine can serve: every statistic with a summary family
@@ -43,13 +49,18 @@ public class PopulationEvaluator extends SequenceEvaluator {
         return summary(stat) != null;
     }
 
-    /** Σ baseline accumulates like any other sum: the hidden statistic reads the sum of a moments summary. */
+    /** Σ baseline and Σ b(1 − b) accumulate like any other sum: the hidden statistics read the sum of a moments summary. */
     private static final Summary.Spec SUM_OFFSET_SUMMARY =
             new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of("sum"));
 
-    /** The summary family of an encoding stat: the catalog's, plus the hidden Σ baseline of an offset block. */
+    /** Whether a stat is one of the hidden offset sums ({@code sumoff} / {@code suminfo}). */
+    static boolean isOffsetSum(final String stat) {
+        return SUM_OFFSET.equals(stat) || SUM_INFO.equals(stat);
+    }
+
+    /** The summary family of an encoding stat: the catalog's, plus the hidden offset sums of an offset block. */
     private static Summary.Spec summary(final String stat) {
-        return SUM_OFFSET.equals(stat) ? SUM_OFFSET_SUMMARY : OperatorCatalog.summary(stat);
+        return isOffsetSum(stat) ? SUM_OFFSET_SUMMARY : OperatorCatalog.summary(stat);
     }
 
     @Override
@@ -71,8 +82,10 @@ public class PopulationEvaluator extends SequenceEvaluator {
         if ("distribution".equals(plan.stat)) return p.values().get(plan.field);
         final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
         if (t == null) return null;
-        // Σ baseline runs over the same rows the level's sum counts (the pair is null unless target and baseline are present)
-        return SUM_OFFSET.equals(plan.stat) ? baseline(t) : t.getKey();
+        // Σ baseline / Σ b(1 − b) run over the same rows the level's sum counts (the pair is null unless target and baseline are present)
+        if (SUM_OFFSET.equals(plan.stat)) return baseline(t);
+        if (SUM_INFO.equals(plan.stat)) return information(t);
+        return t.getKey();
     }
 
     /**
@@ -90,11 +103,16 @@ public class PopulationEvaluator extends SequenceEvaluator {
         return target.getValue() == null ? 0d : target.getValue();
     }
 
-    /** The hidden {@code sum} / {@code sumoff} of a level reads 0 (not null) when nothing contributed: the composition adds sums. */
+    /** The row's information at its baseline on the logit scale, {@code b(1 − b)} (the only scale with a column of its own). */
+    private static double information(final KV<Double, Double> target) {
+        return Shrinkage.information(Shrinkage.Scale.logit, baseline(target));
+    }
+
+    /** The hidden {@code sum} / {@code sumoff} / {@code suminfo} of a level reads 0 (not null) when nothing contributed: the composition adds sums. */
     @Override
     Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state, final long nowMillis) {
         final Object value = plan.summary.<Serializable>typed().read(state, plan.summary.readout());
-        return value == null && ("sum".equals(plan.stat) || SUM_OFFSET.equals(plan.stat)) ? 0d : value;
+        return value == null && ("sum".equals(plan.stat) || isOffsetSum(plan.stat)) ? 0d : value;
     }
 
     /** Scan fallback (equivalence testing and any non-incremental configuration). */
@@ -132,14 +150,15 @@ public class PopulationEvaluator extends SequenceEvaluator {
             java.util.Arrays.sort(values, 0, n);
             return OrderStatistics.quantile(quantile, values, n);
         }
-        final boolean offsetSum = SUM_OFFSET.equals(stat);
-        double n = 0, sum = 0, sumSq = 0, sumOff = 0;
+        final boolean offsetSum = isOffsetSum(stat);
+        double n = 0, sum = 0, sumSq = 0, sumOff = 0, sumInfo = 0;
         for (final Past p : window) {
             final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
             if (t == null) continue;
             n++;
             if (offsetSum) {
                 sumOff += baseline(t);
+                sumInfo += information(t);
                 continue;
             }
             final double v = t.getKey();
@@ -149,6 +168,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
         return switch (stat) {
             case "sum" -> sum;
             case SUM_OFFSET -> sumOff;
+            case SUM_INFO -> sumInfo;
             case "mean", "rate" -> n == 0 ? null : sum / n;
             case "std" -> {
                 if (n < 2) yield null;

@@ -171,7 +171,7 @@ parameters:
 | the entity's **strength from the contests it took part in**, adjusted for the strength of its opponents (and its uncertainty) | `sequence` op `rating` (`context` = the contest, `field` = the outcome; `plackettLuce` / `bradleyTerry` / `elo`) | one replay under the global key (hint `sequence.rating.globalKey`, expected); no `maxAge` / `maxEvents`; follow it with a context block (`zscore`, `gapToBest`) for the strength relative to the field |
 | a **target mean / rate per key**, shrunk toward coarser keys, optionally windowed | `population`, `type: encoding` | never `sequence.aggregate mean` over an outcome (no shrinkage; the validator hints `sequence.aggregate.encoding`) |
 | per-key counts / shares (frequency encoding), std, quantiles of a value | `population`, `type: encoding` with `stats: [count, share]` / `std` / `quantile`, `q25` | quantiles / distribution are expanding-only |
-| out-of-fold encodings for time series (no neighbouring labels in the fit) | `fit: {mode: fold, blocks: {...}, fold: {by: time, purge, embargo}}` | purge (both sides of the block) defaults to the target label's horizon; a cross-fit (later blocks are read) |
+| out-of-fold encodings for time series (no neighbouring labels in the fit) | `fit: {mode: fold, blocks: {...}, fold: {by: time, purge, embargo, until}}` | purge (both sides of the block) defaults to the target label's horizon; a cross-fit (later blocks are read) — `until: <date>` confines it to the training period and lets the rows after it read forward (a backtest in one batch) |
 | a training weight for overlapping labels (uniqueness) | `1 / (1 + past count + future count)` over the horizon, declared `output.roles.weight` | post-event like the labels (status `label`), never a feature |
 | forward-looking **labels** (the value / return / first barrier touched over the next horizon) | `sequence` with `direction: future` and a `maxAge` | label columns (status `label`), never features — a feature reading one is `availability.violation`; declare a derived label in `output.roles.label` |
 | a key's category distribution as flat columns (for BigQuery / a model) | `population`, `type: encoding` with `stats: [distribution], values: [a, b, c]` on the target | one FLOAT64 share column per listed category (`<column>_<value>`) replaces the map column; unlisted categories are dropped |
@@ -213,9 +213,17 @@ sequence ops never see the current row.
   in the plan and keep `maxFeatures` tight.
 - **Residual against a baseline**: `offset: <baselines[].name>` on the block subtracts the baseline from
   the target. With `scale: logit` / `log` the composed column is the key's **log-odds / log-rate ratio
-  against its mean baseline** (shrunk toward the parent's), i.e. the effect *orthogonal to the baseline*
-  — the right target when a feature is judged by its excess information over a market baseline; the
-  plan reports it as info `encoding.offset.additive`. On identity it is the mean residual.
+  against its baseline** — the score-type one-step estimate `Σ(y − b) / information`, finite for a key
+  with no success, shrunk toward the parent's by information — i.e. the effect *orthogonal to the
+  baseline*, the right target when a feature is judged by its excess information over a market baseline;
+  the plan reports it as info `encoding.offset.additive`. On identity it is the mean residual. The baseline is
+  read from the past rows next to their outcome, never from the current row, so a baseline over an
+  outcome field (a settled price) is a valid offset: it shifts the window like an outcome target does
+  (`windowShift`) instead of being a violation. The row's own value of such a baseline is still
+  post-event, so `baselines[].emit` of it is an `availability.violation` — except as the evaluation
+  baseline (`output.roles.baseline: <name>` with `emit`), which is post-event by declaration like a
+  label: status `label`, never a feature. A baseline's `context` must be one event (its rows share the
+  event time), or a past row's baseline reads outcomes settled after that row's lag.
 - A lattice (`hierarchy` / `structure`) shrinks sparse keys toward coarser contexts. `additive` /
   `structure: cross` need the single-key keySets in the same block and an explicit `shrinkage.scale`.
 - The **global level** (`[]`, or any `share` denominator) is one key holding every row — a single
@@ -257,6 +265,12 @@ The three forward knobs, all in the plan hash:
   stability. A row never reads its own block, so **the first block of the data reads null**, and with yearly blocks
   that is the first year. Pick the largest block whose within-block drift you can ignore; `month` / `P90D` are the
   usual answers for daily data.
+- `fold: {by: time, purge, embargo, until}` under `mode: fold` — the purge and the embargo round **up to whole
+  blocks**, so a 7-day purge on month blocks leaves whole months out on each side (a third of a year with the
+  embargo): make the blocks about as long as the purge. `until` ends the training period — the cross-fit stays
+  within the blocks up to it, and a row after it reads forward — so a training set with out-of-fold values and an
+  evaluation set with walk-forward values come out of one batch; without `until` every row, evaluation rows
+  included, reads later blocks (a leak for a backtest).
 - `window: P2Y` — the fit forgets: only the blocks within the window are read (rounded up to whole blocks). Use it
   when old regimes should stop shaping today's ranks / components; leave it out to use all history. For an encoding
   it is the default of keySets without their own `maxAge`.

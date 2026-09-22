@@ -618,13 +618,16 @@ public final class FeatureStages {
 
     /**
      * One fitted lattice level of a static block: hidden columns it fills ({@code n}, {@code sum}, {@code sumsq} and,
-     * for an offset block on a logit / log scale, {@code sumoff} = Σ baseline) and how its statistics are keyed.
+     * for an offset block on a logit / log scale, {@code sumoff} = Σ baseline — plus {@code suminfo} = Σ b(1 − b) on
+     * logit), how its statistics are keyed, and the score scale it is composed on ({@code scoreScale}: logit / log for
+     * an offset term, null otherwise — the λ estimate and the artifact manifest read it).
      */
-    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, String offSumColumn, List<String> keys, String field,
+    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, String offSumColumn, String infoSumColumn, String scoreScale,
+                    List<String> keys, String field,
                     String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds,
                     Forward forward, TimeFold timeFold) implements Serializable {
         VarianceComponents.LevelSpec spec() {
-            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds);
+            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds, scoreScale);
         }
         /** fit.mode fold: out-of-fold statistics, always fitted in-pipeline (an artifact only holds the totals). */
         boolean isFold() {
@@ -666,16 +669,27 @@ public final class FeatureStages {
      * The per-block geometry of a time fold ({@code fit.mode fold} with {@code fit.fold.by: time}; from the column
      * coordinates, see FeaturePlanCompiler.timeFoldCoordinates): a row reads every block but its own, the
      * {@code purgeBlocks} on both sides of it and the {@code embargoBlocks} beyond the purge after it. It shares the
-     * per-(key, block) series with forward levels but none of their row-relative geometry (usable block, lag, window).
+     * per-(key, block) series with forward levels, and without {@code fit.fold.until} none of their row-relative
+     * geometry. Under {@code fit.fold.until} it also carries the last block of the training period
+     * ({@code untilBlock}, null without) and the availability lag a later row's forward read applies
+     * ({@code lagMillis}).
      */
-    record TimeFold(ForwardBlocks blocks, String blockField, String blockFieldType, int purgeBlocks, int embargoBlocks) implements Serializable {
+    record TimeFold(ForwardBlocks blocks, String blockField, String blockFieldType, int purgeBlocks, int embargoBlocks,
+                    Long untilBlock, long lagMillis) implements Serializable {
         static TimeFold of(final OutputColumn column) {
             final Map<String, String> coordinates = column.getCoordinates();
             if (!"fold".equals(coordinates.get("fit")) || !"time".equals(coordinates.get("foldBy"))) return null;
+            final String until = coordinates.get("untilBlock");
             return new TimeFold(ForwardBlocks.fromCoordinates(coordinates, column.getClocks()),
                     coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"),
                     Integer.parseInt(coordinates.getOrDefault("purgeBlocks", "0")),
-                    Integer.parseInt(coordinates.getOrDefault("embargoBlocks", "0")));
+                    Integer.parseInt(coordinates.getOrDefault("embargoBlocks", "0")),
+                    until == null ? null : Long.valueOf(until),
+                    Long.parseLong(coordinates.getOrDefault("forwardLagMillis", "0")));
+        }
+        /** Whether a row of {@code block} lies after the training period (reads forward instead of the cross-fit). */
+        boolean isEvaluation(final long block) {
+            return untilBlock != null && block > untilBlock;
         }
         /** The first block a row of {@code block} leaves out: {@code block − purge}. */
         long from(final long block) {
@@ -705,6 +719,8 @@ public final class FeatureStages {
                     names.contains(base + "__sum") ? base + "__sum" : null,
                     names.contains(base + "__sumsq") ? base + "__sumsq" : null,
                     names.contains(base + "__" + PopulationEvaluator.SUM_OFFSET) ? base + "__" + PopulationEvaluator.SUM_OFFSET : null,
+                    names.contains(base + "__" + PopulationEvaluator.SUM_INFO) ? base + "__" + PopulationEvaluator.SUM_INFO : null,
+                    c.getCoordinates().get("scoreScale"),
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
@@ -713,6 +729,13 @@ public final class FeatureStages {
                     Forward.of(c), TimeFold.of(c)));
         }
         return new ArrayList<>(levels.values());
+    }
+
+    /** The score levels among fitted levels ({@link VarianceComponents#scoreScalesOf}): level id → scale name. */
+    static Map<String, String> scoreScalesOf(final List<FitLevel> levels) {
+        final Map<String, String> scales = new HashMap<>();
+        for (final FitLevel level : levels) if (level.scoreScale() != null) scales.put(level.id(), level.scoreScale());
+        return scales;
     }
 
     /**
@@ -772,7 +795,7 @@ public final class FeatureStages {
             statsView = perKey.apply(label + "_StatsView", View.asMap());
             sideInputs.add(statsView);
             if (needsLambdas) {
-                lambdasView = VarianceComponents.lambdasFromKeyStats(perKey, label + "_Vc");
+                lambdasView = VarianceComponents.lambdasFromKeyStats(perKey, scoreScalesOf(fitted), label + "_Vc");
                 sideInputs.add(lambdasView);
             }
             if (!writeBlocks.isEmpty()) writeArtifacts(perKey, writeBlocks, fitted, planHash, null, label + "_WriteStatic");
@@ -794,9 +817,16 @@ public final class FeatureStages {
             seriesView = allSeries.apply(label + "_ForwardView", View.asList());
             sideInputs.add(seriesView);
             if (!timeFolds.isEmpty() && (needsLambdas || !writeTimeFoldBlocks.isEmpty())) {
-                final PCollection<KV<String, VarianceComponents.KeyStats>> totals = seriesTotals(allSeries, levelIds(timeFolds), label + "_TimeFoldTotals");
+                // fit.fold.until: λ over the training period only (the artifact keeps the whole-input totals), so the
+                // whole-input pass runs only when an artifact needs it or no level clips its series
+                final Map<String, Long> untilBlocks = untilBlocks(timeFolds);
+                final PCollection<KV<String, VarianceComponents.KeyStats>> totals =
+                        !writeTimeFoldBlocks.isEmpty() || untilBlocks.isEmpty()
+                                ? seriesTotals(allSeries, levelIds(timeFolds), label + "_TimeFoldTotals") : null;
                 if (needsLambdas) {
-                    timeFoldLambdasView = VarianceComponents.lambdasFromKeyStats(totals, label + "_TimeFoldVc");
+                    final PCollection<KV<String, VarianceComponents.KeyStats>> training = untilBlocks.isEmpty() ? totals
+                            : seriesTotals(allSeries, levelIds(timeFolds), untilBlocks, label + "_TimeFoldTrainingTotals");
+                    timeFoldLambdasView = VarianceComponents.lambdasFromKeyStats(training, scoreScalesOf(timeFolds), label + "_TimeFoldVc");
                     sideInputs.add(timeFoldLambdasView);
                 }
                 if (!writeTimeFoldBlocks.isEmpty()) writeArtifacts(totals, writeTimeFoldBlocks, timeFolds, planHash, null, label + "_WriteTimeFold");
@@ -806,7 +836,7 @@ public final class FeatureStages {
                     // only the forward levels enter the per-block λ Combine (built only when something reads it)
                     final PCollection<KV<String, ForwardBlocks.Series>> series = timeFolds.isEmpty()
                             ? allSeries : seriesOf(allSeries, levelIds(forward), label + "_ForwardOnly");
-                    forwardLambdasView = VarianceComponents.lambdasByBlockView(series, label + "_ForwardVc");
+                    forwardLambdasView = VarianceComponents.lambdasByBlockView(series, scoreScalesOf(forward), label + "_ForwardVc");
                 }
                 if (needsLambdas) sideInputs.add(forwardLambdasView);
                 if (!writeForwardBlocks.isEmpty()) {
@@ -892,15 +922,32 @@ public final class FeatureStages {
                 .setCoder(series.getCoder());
     }
 
+    /** The last training block of every time-fold level under {@code fit.fold.until} (level id → block); empty without. */
+    private static Map<String, Long> untilBlocks(final List<FitLevel> timeFolds) {
+        final Map<String, Long> until = new HashMap<>();
+        for (final FitLevel level : timeFolds) if (level.timeFold().untilBlock() != null) until.put(level.id(), level.timeFold().untilBlock());
+        return until;
+    }
+
     /** The totals of the given levels' series: what an artifact holds, and what a whole-input λ is estimated from. */
     private static PCollection<KV<String, VarianceComponents.KeyStats>> seriesTotals(final PCollection<KV<String, ForwardBlocks.Series>> series,
                                                                                     final Set<String> levelIds, final String label) {
+        return seriesTotals(series, levelIds, Map.of(), label);
+    }
+
+    /** @param untilBlocks per level, the last block the totals cover (a training period, that block included); a level absent reads its whole series */
+    static PCollection<KV<String, VarianceComponents.KeyStats>> seriesTotals(final PCollection<KV<String, ForwardBlocks.Series>> series,
+                                                                                    final Set<String> levelIds, final Map<String, Long> untilBlocks, final String label) {
+        final Map<String, Long> until = new HashMap<>(untilBlocks); // a serializable copy for the DoFn
         return series
                 .apply(label, ParDo.of(new DoFn<KV<String, ForwardBlocks.Series>, KV<String, VarianceComponents.KeyStats>>() {
                     @ProcessElement
                     public void processElement(final ProcessContext c) {
-                        if (!levelIds.contains(FitArtifact.levelOf(c.element().getKey()))) return;
-                        final VarianceComponents.KeyStats t = c.element().getValue().totals();
+                        final String level = FitArtifact.levelOf(c.element().getKey());
+                        if (!levelIds.contains(level)) return;
+                        final ForwardBlocks.Series s = c.element().getValue();
+                        final Long last = until.get(level);
+                        final VarianceComponents.KeyStats t = last == null ? s.totals() : s.statsBetween(-1, s.floor(last));
                         if (t != null) c.output(KV.of(c.element().getKey(), t));
                     }
                 }))
@@ -2256,7 +2303,7 @@ public final class FeatureStages {
                         @ProcessElement
                         public void processElement(final ProcessContext c) {
                             final VarianceComponents.KeyStats s = c.element().getValue();
-                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq, s.sumOff));
+                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq, s.sumOff, s.sumInfo));
                         }
                     }))
                     .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(JointFit.Cell.class))
@@ -2519,7 +2566,7 @@ public final class FeatureStages {
                 .apply(label + "_Flatten", Flatten.pCollections())
                 .apply(label + "_Group", GroupByKey.create())
                 .apply(label, ParDo
-                        .of(new WriteArtifactDoFn(uris, levelsOfBlock, planHash, lambdasView))
+                        .of(new WriteArtifactDoFn(uris, levelsOfBlock, planHash, lambdasView, scoreScalesOf(levels)))
                         .withSideInputs(lambdasView == null ? List.of() : List.of(lambdasView)));
     }
 
@@ -2530,13 +2577,16 @@ public final class FeatureStages {
         private final String planHash;
         /** fit.mode forward: the manifest records λ per block of the block's levels */
         private final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView;
+        /** the score levels (level id → scale): their manifest λ is estimated on the score scale */
+        private final Map<String, String> scoreScales;
 
         WriteArtifactDoFn(final Map<String, String> uris, final Map<String, List<String>> levels, final String planHash,
-                          final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView) {
+                          final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView, final Map<String, String> scoreScales) {
             this.uris = uris;
             this.levels = levels;
             this.planHash = planHash;
             this.lambdasView = lambdasView;
+            this.scoreScales = new HashMap<>(scoreScales);
         }
 
         @ProcessElement
@@ -2559,7 +2609,7 @@ public final class FeatureStages {
                 }
                 extra.add("lambdasByBlock", byBlock);
             }
-            FitArtifact.write(uris.get(block), planHash, block, blockStats, blockLevels, extra);
+            FitArtifact.write(uris.get(block), planHash, block, blockStats, blockLevels, extra, scoreScales);
         }
     }
 
@@ -2639,11 +2689,14 @@ public final class FeatureStages {
         public void setup() {
             super.setup();
             loaded = new HashMap<>();
+            // a block with a logit offset term reads Σ b(1 − b): an artifact from before that statistic is refused
+            final Set<String> infoBlocks = new HashSet<>();
+            for (final FitLevel level : levels) if (level.infoSumColumn() != null) infoBlocks.add(level.block());
             for (final Map.Entry<String, String> e : loadBlocks.entrySet()) {
                 final String path = FitArtifact.statsPath(e.getValue(), planHash, e.getKey());
-                loaded.putAll(ARTIFACT_CACHE.computeIfAbsent(path, p -> FitArtifact.read(e.getValue(), planHash, e.getKey())));
+                loaded.putAll(ARTIFACT_CACHE.computeIfAbsent(path, p -> FitArtifact.read(e.getValue(), planHash, e.getKey(), infoBlocks.contains(e.getKey()))));
             }
-            loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded);
+            loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded, scoreScalesOf(levels));
             counters = new HashMap<>();
             warnedLevels = new HashSet<>();
             loadedModels = new HashMap<>();
@@ -2708,17 +2761,25 @@ public final class FeatureStages {
          * A time fold: the totals minus the blocks {@code [b − purge, b + purge + embargo]} around the row's block
          * {@code b} — one prefix difference of the series. The purge is two-sided (label windows overlap in both
          * directions), the embargo an extra buffer after it. λ is the whole input's, set with the other levels' in
-         * {@link #prepare} (as for a hash fold).
+         * {@link #prepare} (as for a hash fold). Under {@code fit.fold.until} the totals and the range are those of the
+         * blocks up to the until block, and a row of a later block reads forward: the blocks before its usable one
+         * (the block that ends before {@code event + predictOffset − lag}), as a {@code fit.mode forward} level
+         * without a window or a floor does — its evaluation values are walk-forward, never cross-fit.
          */
         private VarianceComponents.KeyStats timeFoldStats(final FitLevel level, final ForwardBlocks.Series s, final long eventMillis) {
             if (s == null) return null;
             final TimeFold f = level.timeFold();
             final long block = f.blocks().indexOf(eventMillis);
+            if (f.isEvaluation(block)) {
+                final int position = s.floor(f.blocks().usableBlock(eventMillis, predictOffsetMillis, f.lagMillis()));
+                return position < 0 ? null : s.statsBetween(-1, position);
+            }
             final long from = f.from(block);
-            final long to = f.to(block);
+            final long to = f.untilBlock() == null ? f.to(block) : Math.min(f.to(block), f.untilBlock());
             auditTimeFold(level, from, to);
             final VarianceComponents.KeyStats excluded = s.statsBetween(s.floor(from - 1), s.floor(to));
-            return VarianceComponents.subtract(s.totals(), excluded);
+            final VarianceComponents.KeyStats totals = f.untilBlock() == null ? s.totals() : s.statsBetween(-1, s.floor(f.untilBlock()));
+            return VarianceComponents.subtract(totals, excluded);
         }
 
         /**
@@ -2729,15 +2790,19 @@ public final class FeatureStages {
         private void auditTimeFold(final FitLevel level, final long from, final long to) {
             final long[] span = timeFoldSpans == null ? null : timeFoldSpans.get(level.id());
             if (span == null) return;
-            final long total = span[1] - span[0] + 1;
-            final long excluded = Math.min(to, span[1]) - Math.max(from, span[0]) + 1;
+            // under fit.fold.until the training period ends at the until block
+            final Long until = level.timeFold().untilBlock();
+            final long last = until == null ? span[1] : Math.min(span[1], until);
+            if (last < span[0]) return;
+            final long total = last - span[0] + 1;
+            final long excluded = Math.min(to, last) - Math.max(from, span[0]) + 1;
             if (2 * excluded <= total) return;
             counters.computeIfAbsent(level.id(), id -> Metrics.counter("feature", "timeFold_" + id + "_excludedOverHalf")).inc();
             if (warnedLevels.add(level.id())) {
                 final TimeFold f = level.timeFold();
-                LOG.warn("feature fit: time fold of level {} leaves out {} of the input's {} blocks around a row (purge {} on both sides, embargo {}): "
-                        + "its out-of-fold statistics read less than half of the input; use smaller blocks or a shorter purge / embargo",
-                        level.id(), 2L * f.purgeBlocks() + f.embargoBlocks() + 1, total, f.purgeBlocks(), f.embargoBlocks());
+                LOG.warn("feature fit: time fold of level {} leaves out {} of the {} blocks of the {} around a row (purge {} on both sides, embargo {}): "
+                        + "its out-of-fold statistics read less than half of them; use smaller blocks or a shorter purge / embargo",
+                        level.id(), excluded, total, until == null ? "input" : "training period (fit.fold.until)", f.purgeBlocks(), f.embargoBlocks());
             }
         }
 
@@ -2807,6 +2872,7 @@ public final class FeatureStages {
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
                     if (level.offSumColumn() != null) values.put(level.offSumColumn(), stats == null ? 0d : stats.sumOff);
+                    if (level.infoSumColumn() != null) values.put(level.infoSumColumn(), stats == null ? 0d : stats.sumInfo);
                 }
                 if (rowLambdas != null) evaluator.setLambdas(rowLambdas); // the λ of the row's usable block, per forward level
                 for (final StaticFitBlock<?> block : blocks) apply(block, model(c, block), values);

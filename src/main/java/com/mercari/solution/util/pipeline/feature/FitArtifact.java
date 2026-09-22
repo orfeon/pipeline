@@ -49,7 +49,8 @@ public final class FitArtifact {
                {"name": "n", "type": "double"},
                {"name": "sum", "type": "double"},
                {"name": "sumSq", "type": "double"},
-               {"name": "sumOff", "type": "double", "default": 0.0}
+               {"name": "sumOff", "type": "double", "default": 0.0},
+               {"name": "sumInfo", "type": "double", "default": 0.0}
              ]}
             """);
 
@@ -153,12 +154,17 @@ public final class FitArtifact {
 
     public static void write(final String artifactUri, final String planHash, final String block,
                              final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels) {
-        write(artifactUri, planHash, block, stats, levels, null);
+        write(artifactUri, planHash, block, stats, levels, null, Map.of());
     }
 
-    /** @param extra additional manifest members (fit.mode forward: the per-block λ), or null */
+    /**
+     * @param extra       additional manifest members (fit.mode forward: the per-block λ), or null
+     * @param scoreScales the levels composed on the score scale ({@link VarianceComponents#scoreScalesOf}): the manifest's
+     *                    λ of such a level is 1 / τ² on that scale
+     */
     public static void write(final String artifactUri, final String planHash, final String block,
-                             final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels, final JsonObject extra) {
+                             final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels, final JsonObject extra,
+                             final Map<String, String> scoreScales) {
         final String path = statsPath(artifactUri, planHash, block);
         try {
             final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -176,6 +182,7 @@ public final class FitArtifact {
                     record.put("sum", s.sum);
                     record.put("sumSq", s.sumSq);
                     record.put("sumOff", s.sumOff);
+                    record.put("sumInfo", s.sumInfo);
                     writer.append(record);
                 }
             }
@@ -188,7 +195,7 @@ public final class FitArtifact {
             // the variance-components pseudo-counts derived from these statistics (per level), for auditing
             // what a run shrank with; absent for a level with too few keys
             final JsonObject lambdas = new JsonObject();
-            for (final Map.Entry<String, Double> e : VarianceComponents.lambdasInMemory(stats).entrySet()) {
+            for (final Map.Entry<String, Double> e : VarianceComponents.lambdasInMemory(stats, scoreScales).entrySet()) {
                 lambdas.add(e.getKey(), lambdaJson(e.getValue()));
             }
             manifest.add("lambdas", lambdas);
@@ -200,11 +207,21 @@ public final class FitArtifact {
         }
     }
 
-    public static Map<String, VarianceComponents.KeyStats> read(final String artifactUri, final String planHash, final String block) {
+    /**
+     * @param requiresInfo a level of the block is composed on the logit score scale and reads Σ b(1 − b) from the
+     *                     artifact: an artifact written before that statistic existed is refused (every key would read
+     *                     no information and fall back to its parent silently) — refit it ({@code fit.artifact.refit: true})
+     */
+    public static Map<String, VarianceComponents.KeyStats> read(final String artifactUri, final String planHash, final String block,
+                                                                 final boolean requiresInfo) {
         final String path = statsPath(artifactUri, planHash, block);
         final Map<String, VarianceComponents.KeyStats> stats = new HashMap<>();
         try (final DataFileReader<GenericRecord> reader = new DataFileReader<>(
                 new SeekableByteArrayInput(ResourceUtil.readBytes(path)), new GenericDatumReader<>(SCHEMA))) {
+            if (requiresInfo && reader.getSchema().getField("sumInfo") == null) {
+                throw new IllegalStateException("fit artifact " + path + " was written before the score-type offset estimator (no sumInfo statistic):"
+                        + " a logit offset term would read no information from it; refit the block (fit.artifact.refit: true)");
+            }
             while (reader.hasNext()) {
                 final GenericRecord record = reader.next();
                 final VarianceComponents.KeyStats s = new VarianceComponents.KeyStats();
@@ -214,6 +231,8 @@ public final class FitArtifact {
                 // absent in artifacts written before the offset sum existed: the reader schema's default fills 0
                 final Object sumOff = record.get("sumOff");
                 s.sumOff = sumOff == null ? 0d : (Double) sumOff;
+                final Object sumInfo = record.get("sumInfo");
+                s.sumInfo = sumInfo == null ? 0d : (Double) sumInfo;
                 stats.put(entryKey(record.get("level").toString(), record.get("key").toString()), s);
             }
         } catch (final IOException e) {
