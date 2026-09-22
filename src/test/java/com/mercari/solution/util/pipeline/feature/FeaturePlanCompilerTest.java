@@ -3812,6 +3812,27 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(negative.getDiagnostics().getMessages().stream().noneMatch(m -> "fit.fold.purge".equals(m.code()) && m.level() == Diagnostics.Level.error), negative::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, purge: P1D}")), "fit.fold.ignored"));
+
+        // fit.fold.until: the cross-fit is confined to the blocks up to the until block, later rows read forward — the
+        // coordinates carry the block and the lag of the level's target / offset (an outcome: settlement + ingestion)
+        final FeaturePlan until = compile(SOURCES, spec.replace(fold, "fold: {by: time, embargo: P40D, until: \"2025-06-30\"}"));
+        Assertions.assertFalse(until.getDiagnostics().hasErrors(), until::describe);
+        final OutputColumn untilMean = until.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit") && c.getCanonicalName().endsWith("e2__n")).findFirst().orElseThrow();
+        Assertions.assertEquals(Long.toString(2025 * 12L + 5), untilMean.getCoordinates().get("untilBlock"), "month blocks: June 2025");
+        Assertions.assertTrue(Long.parseLong(untilMean.getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, untilMean.getCoordinates()::toString);
+        final OutputColumn untilCount = until.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit") && c.getCanonicalName().endsWith("seller_id__n")).findFirst().orElseThrow();
+        Assertions.assertEquals("0", untilCount.getCoordinates().get("forwardLagMillis"), "a row count has no lag");
+        Assertions.assertNull(mean.getCoordinates().get("untilBlock"), "no until: every block is a fold");
+        Assertions.assertTrue(until.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code()) && m.message().contains("fit.fold.until")), until::describe);
+        // an instant is accepted too, a malformed value is its own error, and until without by: time is ignored with a warning
+        Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00Z\"}"))
+                .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"June 2025\"}")), "fit.fold.until"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, until: \"2025-06-30\"}")), "fit.fold.ignored"));
+        // the training period is in the plan hash
+        Assertions.assertNotEquals(until.getHash(), compile(SOURCES, spec.replace(fold, "fold: {by: time, embargo: P40D, until: \"2025-07-31\"}")).getHash());
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: static, blocks: {bucket: month}")), "fit.fold.ignored"));
         // joint under a time fold: one error for the block, not one per keySet (enc has two)
         final FeaturePlan joint = compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",

@@ -581,9 +581,18 @@ is a fold:
   out-of-fold statistics read a minority of the data: the engine logs a warning and counts the rows in the counter
   `feature/timeFold_<level>_excludedOverHalf` (the input's block span is only known at run time) — use smaller blocks
   or a shorter purge / embargo.
-- `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` without `by: time` are ignored with
-  a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`), a negative `purge` / `embargo` is an error
-  (`fit.fold.negative`). `estimator: joint` solves hash folds only
+- **`until: <instant | date>`** (`2025-06-30`, `2025-06-30T00:00:00Z`; UTC) ends the training period: the cross-fit
+  runs within the blocks up to the block of `until` (a training row reads the other training blocks minus its purge /
+  embargo range, never a later block), and a row of a later block reads **forward** — the blocks before its own whose
+  targets were known at predictAt (the block that ends before `event + predictAt offset − the target's lag`, as
+  `fit.mode: forward` reads; no window, no `minBlocks`). One batch thus yields the out-of-fold values of the training
+  rows and the walk-forward values of the evaluation rows, without the evaluation rows reading later outcomes; λ
+  under `weights: varianceComponents` is estimated on the training period. The artifact keeps the whole-input totals.
+  Choose the blocks with the purge in mind: both round up to whole blocks, so a 7-day purge on month blocks leaves
+  whole months out — make the blocks about as long as the purge (weekly blocks for a 7-day purge).
+- `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` / `until` without `by: time` are
+  ignored with a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`), a negative `purge` / `embargo`
+  is an error (`fit.fold.negative`), a malformed `until` is `fit.fold.until`. `estimator: joint` solves hash folds only
   (`fit.fold.time.joint`). A keySet key derived from a past target stays an error (`fit.groupBy.required`) — the
   entity's rows in the other blocks carry this row's outcome in their key, and `groupBy` does not help here: use
   `by: row` with `groupBy`.
