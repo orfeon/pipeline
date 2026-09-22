@@ -2782,7 +2782,7 @@ public class FeatureTransformTest {
                       scope: population
                       type: transitionStats
                       sequenceOf: {entity: seller, field: condition_grade}
-                      emit: [{toValueProb: good}]
+                      emit: [{toValueProb: good}, ownValueProb, surprisal, entropy]
                       blend: {perEntity: false, priorWeight: 2}
                     - name: grade_own
                       scope: population
@@ -2790,6 +2790,12 @@ public class FeatureTransformTest {
                       sequenceOf: {entity: seller, field: condition_grade}
                       emit: [{toValueProb: good}]
                       blend: {priorWeight: 2}
+                    - name: qty_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: quantity}
+                      emit: [distribution, expected, entropy]
+                      blend: {perEntity: false, priorWeight: 2}
                     - name: prev
                       scope: sequence
                       entity: seller
@@ -2821,6 +2827,37 @@ public class FeatureTransformTest {
             Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_grade_next_to_good"));
             Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
             Assertions.assertEquals(2.0 / 3, byKey.get("D/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
+            // the readouts of the same distribution: D is good, so its own value's probability is P(good), its surprisal
+            // -ln of that, and the entropy is over {good: 2/3, fair: 1/3}; B (P(good) = 1/2) is a coin; A has no state
+            Assertions.assertEquals(2.0 / 3, byKey.get("D/s1").getAsDouble("f_grade_next_ownValueProb"), 1e-9);
+            Assertions.assertEquals(-Math.log(2.0 / 3), byKey.get("D/s1").getAsDouble("f_grade_next_surprisal"), 1e-9);
+            Assertions.assertEquals(-(2.0 / 3 * Math.log(2.0 / 3) + 1.0 / 3 * Math.log(1.0 / 3)), byKey.get("D/s1").getAsDouble("f_grade_next_entropy"), 1e-9);
+            Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble("f_grade_next_ownValueProb"), 1e-9);
+            Assertions.assertEquals(Math.log(2), byKey.get("B/s1").getAsDouble("f_grade_next_entropy"), 1e-9);
+            // C/s1 is fair, and the map holds good and fair only: its own value's share is what good leaves
+            Assertions.assertEquals(1 - byKey.get("C/s1").getAsDouble("f_grade_next_to_good"), byKey.get("C/s1").getAsDouble("f_grade_next_ownValueProb"), 1e-9);
+            for (final String readout : List.of("ownValueProb", "surprisal", "entropy")) Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_grade_next_" + readout), readout);
+            // expected / entropy on an integer code (quantity), checked against the map they read: the readouts must
+            // agree with the distribution emitted next to them, keys and all (an entity's first event has no state)
+            int seen = 0;
+            for (final Map.Entry<String, MElement> e : byKey.entrySet()) {
+                final Object m = e.getValue().getPrimitiveValue("f_qty_next_to");
+                if (m == null) {
+                    Assertions.assertNull(e.getValue().getPrimitiveValue("f_qty_next_expected"), e.getKey());
+                    Assertions.assertNull(e.getValue().getPrimitiveValue("f_qty_next_entropy"), e.getKey());
+                    continue;
+                }
+                double mean = 0, entropy = 0;
+                for (final Map.Entry<?, ?> bin : ((Map<?, ?>) m).entrySet()) {
+                    final double p = ((Number) bin.getValue()).doubleValue();
+                    mean += Double.parseDouble(bin.getKey().toString()) * p;
+                    if (p > 0) entropy -= p * Math.log(p);
+                }
+                Assertions.assertEquals(mean, e.getValue().getAsDouble("f_qty_next_expected"), 1e-9, e.getKey());
+                Assertions.assertEquals(entropy, e.getValue().getAsDouble("f_qty_next_entropy"), 1e-9, e.getKey());
+                seen++;
+            }
+            Assertions.assertTrue(seen >= 3, "the quantity transitions were never read: " + seen);
             // per entity: D's own (s1, fair) cell is empty, so it backs off to the pooled fair level — the effective
             // leaf, whose one row leaves the marginal as it does under the pooled declaration: the same 2/3, not
             // (1 + 2 · 0.6) / (1 + 2) against a marginal that still holds that row. s2's first transition (C/s2,

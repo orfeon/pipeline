@@ -890,6 +890,7 @@ keyed pass of their own and schedule like the blocks they stand for.
     sequenceOf: {entity: seller, field: condition_grade}
     order: 1                                   # previous values that make the state (1..4, default 1)
     emit: [{toValueProb: good}, distribution]  # grade_next_to_good (FLOAT64) and the map grade_next_to
+                                               # also: ownValueProb | surprisal | entropy | expected (one FLOAT64 each)
     blend: {perEntity: true, priorWeight: 20}  # optional: the entity's own transitions, shrunk toward everyone's
 ```
 
@@ -902,7 +903,15 @@ is strictly past, leak-checked and windowless like any expanding encoding, and a
 `lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
 entities: `(state) → … → marginal`. `{toValueProb: v}` emits the probability of one next value (0 when it has no
 mass, null when nothing is known yet) — `v` is written as the field holds it, a number for an integer code
-(`{toValueProb: 0}` → `<name>_to_0`); `distribution` emits the whole map. An entity's first event has no previous
+(`{toValueProb: 0}` → `<name>_to_0`); `distribution` emits the whole map. Four **readouts** of the distribution
+take one column each, `<name>_<readout>`: `ownValueProb` is the probability the state gave to *the row's own
+value* — how usual this step was for the entity, without listing every value — and `surprisal` its `−ln`
+(null when the value has no mass); `entropy` is `−Σ p ln p` of the map (how undecided the state is); `expected`
+is `Σ v · p`, the probability-weighted mean of an integer code (an ordered band, a bin index: the field must be
+numeric, `transitionStats.emit`). `ownValueProb` and `surprisal` read the row's own value, so they are as
+available as the field: on an **outcome** field they are availability violations — usable as an intermediate
+target or a label, not as a feature (`transitionStats.emit.own` hint) — while `entropy`, `expected` and
+`toValueProb` read the distribution only. All are null when nothing is known yet. An entity's first event has no previous
 value, so its state levels are empty and it reads the marginal; a state never seen before reads its parent. It is
 always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
 outcome the usual window shift applies to the lag and to the counted transitions alike.

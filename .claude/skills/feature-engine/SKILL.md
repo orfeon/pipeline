@@ -173,7 +173,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   `OperatorCatalog.VECTOR_FUNCS`, `polyfit` expands to one column per coefficient),
   and the hidden-level readers of a lattice: `share`, `fitStat`, `compose` (a scalar, or a map when the
   `family` coordinate is `dirichletMultinomial`; `targets[].values` turns that map into an intermediate read
-  by one `mapValue` row column per listed category — `expandDistributionValues`), `deviation`, `effectiveN` (λ from `setLambdas`, the
+  by one `mapValue` row column per listed category — `expandDistributionValues`); `mapReadout` is the other reader of the map (transitionStats `emit`: `ownValueProb` / `surprisal` take the
+  row's own value through the `field` coordinate — availability decides —, `entropy` / `expected` the map alone), `deviation`, `effectiveN` (λ from `setLambdas`, the
   variance-components side input). `joint` columns are population-scope lookup columns filled by
   `JointSpec.apply` in the fit stage, not row columns.
 - `ContextEvaluator.evaluateColumn` — one group at a time, driven by a per-column `Plan` built once in
