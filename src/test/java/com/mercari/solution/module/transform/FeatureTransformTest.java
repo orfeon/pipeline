@@ -3500,6 +3500,71 @@ public class FeatureTransformTest {
     }
 
     /**
+     * {@code fit.fold.until}: the cross-fit of {@link #testTimeFoldFit} confined to the blocks up to Jan 25 (block 2873:
+     * A = 2869, B = 2870 and C = 2872 are training rows), while D (block 2874) reads forward — the blocks before its
+     * usable one: the count level has no lag (usable 2873), the sold level lags 6 days 30 minutes (usable 2872), so both
+     * read A, B and C. Training rows never read D: A/s1 reads C alone (D lies after the until block), B/s1 nothing (C
+     * lies in the purge after it), C/s1 reads A and B.
+     */
+    @Test
+    public void testTimeFoldUntil() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n",
+                "      fit: {mode: fold, blocks: {size: P7D}, fold: {by: time, purge: P7D, embargo: P7D, until: \"2025-01-25\"}}\n      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final Map<String, double[]> expected = Map.of(
+                    "A/s1", new double[]{1, 1.0},        // C (D is after the training period)
+                    "C/s1", new double[]{2, 0.5},        // A, B
+                    "D/s1", new double[]{3, 2.0 / 3},    // forward: A, B, C
+                    "A/s2", new double[]{1, 1.0},        // C
+                    "C/s2", new double[]{1, 0.0});       // A
+            for (final Map.Entry<String, double[]> e : expected.entrySet()) {
+                final MElement row = byKey.get(e.getKey());
+                Assertions.assertEquals((long) e.getValue()[0], ((Number) row.getPrimitiveValue("f_enc__seller_id__count")).longValue(), e.getKey());
+                Assertions.assertEquals(e.getValue()[1], row.getAsDouble("f_enc__seller_id__e2__mean"), 1e-9, e.getKey());
+            }
+            // B/s1: C lies in the purge after B and D after the training period — nothing to read
+            Assertions.assertEquals(0L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * {@code fit.fold.until} with {@code weights: varianceComponents}: λ is estimated on the training period alone
+     * ({@code _TimeFoldTrainingTotals} → {@code _TimeFoldVc}; the whole-input totals pass is not built without an
+     * artifact to write). Over the training rows (s1: A, B, C sold 1, 0, 1; s2: A, C sold 0, 1) the between-key variance
+     * truncates to 0 — full shrinkage, so every row reads its leave-node-out global term: the training row C/s1 the
+     * other training rows outside its purge (A/s2, unsold: 0), the evaluation row D/s1 the five rows before its usable
+     * block (s2's A and C: 1/2, effectiveN 5).
+     */
+    @Test
+    public void testTimeFoldUntilVarianceComponents() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {weights: varianceComponents, priorWeight: 1, output: [composed, effectiveN]}")
+                .replace("      output:\n", "      fit: {mode: fold, blocks: {size: P7D}, fold: {by: time, purge: P7D, embargo: P7D, until: \"2025-01-25\"}}\n      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "_TimeFoldTrainingTotals"), names::toString);
+        Assertions.assertTrue(hasTransform(names, "features", "_TimeFoldVc"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_TimeFoldTotals"), "no artifact: the whole-input pass is not built");
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(0.0, byKey.get("C/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9, byKey.get("C/s1")::toString);
+            Assertions.assertEquals(0.5, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9, byKey.get("D/s1")::toString);
+            Assertions.assertEquals(5.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean__neff"), 1e-9, byKey.get("D/s1")::toString);
+            Assertions.assertEquals(3L, byKey.get("D/s1").getAsLong("f_enc__seller_id__count"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * Uniqueness weights of overlapping labels: a row's 20-day label window overlaps the windows of the seller's rows
      * within 20 days on either side, counted by a past and a future COUNT(1); the weight {@code 1 / (1 + overlaps)} is a
      * post-event column declared as {@code output.roles.weight}. s1 lists on days 0, 2, 19 and 31, s2 on days 0 and 19.

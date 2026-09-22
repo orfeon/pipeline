@@ -3534,6 +3534,7 @@ public final class FeaturePlanCompiler {
         fitSpec.foldBy = spec.fit.foldBy;
         fitSpec.purge = spec.fit.purge;
         fitSpec.embargo = spec.fit.embargo;
+        fitSpec.untilMillis = spec.fit.untilMillis;
         FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
@@ -3543,10 +3544,10 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.groupBy = groupBy;
         fitSpec.folds = folds;
-        if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
-            diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo are ignored");
-        } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null)) {
-            diagnostics.warning("fit.fold.ignored", loc, "purge / embargo need fit.fold.by: time (hash folds have no time order): they are ignored");
+        if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null || fitSpec.untilMillis != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
+            diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo / until are ignored");
+        } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null || fitSpec.untilMillis != null)) {
+            diagnostics.warning("fit.fold.ignored", loc, "purge / embargo / until need fit.fold.by: time (hash folds have no time order): they are ignored");
         }
         // static and fold both fit sufficient statistics over the input and apply them by lookup; fold
         // subtracts the row's own fold so a row never sees its own contribution (out-of-fold statistics)
@@ -3561,7 +3562,11 @@ public final class FeaturePlanCompiler {
                     + (fitSpec.purge == null ? ", for a target reading a label the label's horizon on both sides of it (the default purge)" : ", the purge " + fitSpec.purge + " on both sides of it")
                     + (fitSpec.embargo == null ? "" : " and the embargo " + fitSpec.embargo + " after the purge")
                     + " (rounded up to whole blocks: 2·purge + embargo + 1 blocks are left out; the engine warns when that is more than half of the input's blocks);"
-                    + " the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.untilMillis == null
+                            ? " the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                            : " the cross-fit stays within the blocks up to " + java.time.Instant.ofEpochMilli(fitSpec.untilMillis) + " (fit.fold.until: the other blocks of the training period"
+                                    + " include rows AFTER it), and a row of a later block reads the blocks before its own whose targets were known at predictAt (forward, no cross-fit) — one batch"
+                                    + " yields the out-of-fold training values and the walk-forward evaluation values")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
@@ -4250,7 +4255,7 @@ public final class FeaturePlanCompiler {
             if (fitSpec.refit) c.coordinates.put("refit", "true");
         }
         if (mode == FitMode.fold && fitSpec.isTimeFold()) {
-            timeFoldCoordinates(c, targetReference, def, fitSpec);
+            timeFoldCoordinates(c, targetReference, offsetColumn, def, fitSpec);
         } else if (mode == FitMode.fold) {
             // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
             // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
@@ -4315,10 +4320,7 @@ public final class FeaturePlanCompiler {
      */
     private void forwardCoordinates(final OutputColumn c, final Window window, final String targetReference, final String offsetColumn,
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
-        final List<String> references = new ArrayList<>();
-        if (targetReference != null) references.add(targetReference);
-        if (offsetColumn != null) references.add(offsetColumn);
-        forwardCoordinates(c, window, references, def, fitSpec);
+        forwardCoordinates(c, window, fitReferences(targetReference, offsetColumn), def, fitSpec);
     }
 
     /**
@@ -4333,21 +4335,7 @@ public final class FeaturePlanCompiler {
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
         blockCoordinates(c, blocks);
         c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
-        long lag = 0;
-        for (final String reference : references) {
-            if (reference == null) continue;
-            final Ref ref = resolve(reference);
-            if (ref == null) continue;
-            final AvailableAt at = ref.availableAt();
-            if (at == null || at.isPreEvent()) continue;
-            if (!at.isStatic()) {
-                // once per block and reference: this runs per column, and a block has rank (x embedded values) of them
-                if (hintedBlocks.add("fit.mode.forward.dynamic:" + def.name + ":" + reference)) diagnostics.error("fit.mode.forward.dynamic", loc, "fit.mode forward needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
-                continue;
-            }
-            lag = Math.max(lag, at.getOffset().toMillis());
-        }
-        c.coordinates.put("forwardLagMillis", Long.toString(lag));
+        c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(references, def, "fit.mode forward")));
         // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
         if (window != null && window.onCalendar()) {
             if (blocks.clock() == null || !blocks.clock().name().equals(window.clock)) {
@@ -4424,16 +4412,57 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
     }
 
+    /** The fields a lookup fit reads from a past row: the target and the offset baseline, in that order. */
+    private static List<String> fitReferences(final String targetReference, final String offsetColumn) {
+        final List<String> references = new ArrayList<>();
+        if (targetReference != null) references.add(targetReference);
+        if (offsetColumn != null) references.add(offsetColumn);
+        return references;
+    }
+
+    /**
+     * The availability lag of a forward-read block: the largest static post-event availability offset among the
+     * references (target, offset, inputs) — the block must be complete AND its targets known at predictAt; a
+     * pre-event / attribute-only reference has none. A dynamic availability is an error, reported once per reference.
+     *
+     * @param setting what asks for the forward read, named in the error ({@code fit.mode forward}, {@code fit.fold.until})
+     */
+    private long availabilityLag(final List<String> references, final FeatureDef def, final String setting) {
+        long lag = 0;
+        for (final String reference : references) {
+            if (reference == null) continue;
+            final Ref ref = resolve(reference);
+            if (ref == null) continue;
+            final AvailableAt at = ref.availableAt();
+            if (at == null || at.isPreEvent()) continue;
+            if (!at.isStatic()) {
+                // once per block and reference: this runs per column, and a block has rank (x embedded values) of them
+                if (hintedBlocks.add("fit.mode.forward.dynamic:" + def.name + ":" + reference)) diagnostics.error("fit.mode.forward.dynamic", def.location(), setting + " needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
+                continue;
+            }
+            lag = Math.max(lag, at.getOffset().toMillis());
+        }
+        return lag;
+    }
+
     /**
      * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge on both sides
      * of it (a training row whose label window overlaps the row's — before or after it — describes the same period;
      * default = the horizon of the target's label, info {@code fit.fold.purge}) and the embargo beyond the purge after
-     * it, both rounded up to whole blocks.
+     * it, both rounded up to whole blocks. With {@code fit.fold.until} the cross-fit is confined to the blocks up to
+     * the until block ({@code untilBlock}) and a row of a later block reads forward — the blocks before its own whose
+     * targets were known at predictAt, the lag being the target's / offset's availability ({@code forwardLagMillis},
+     * as for {@code fit.mode forward}).
      */
-    private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+    private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final String offsetColumn, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
         blockCoordinates(c, blocks);
         c.coordinates.put("foldBy", "time");
+        if (fitSpec.untilMillis != null) {
+            c.coordinates.put("untilBlock", Long.toString(blocks.indexOf(fitSpec.untilMillis)));
+            c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(fitReferences(targetReference, offsetColumn), def,
+                    "fit.fold.until (the rows after the training period read forward)")));
+        }
         Duration purge = fitSpec.purge;
         if (purge == null && targetReference != null) {
             purge = labelHorizon(canonicalOf(targetReference), new HashSet<>());
