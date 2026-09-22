@@ -46,8 +46,14 @@ public class DynamicsTest {
         return path;
     }
 
+    /** The event of a row, or null for a row without a value (which the evaluator never folds). */
     private static Dynamics.Event event(final Dynamics family, final SequenceEvaluator.Past p) {
         return family.event(p.millis(), SequenceEvaluator.finite(p.values().get("x")));
+    }
+
+    private static void fold(final Dynamics family, final Dynamics.State state, final SequenceEvaluator.Past p, final int sign) {
+        final Dynamics.Event e = event(family, p);
+        if (e != null) family.update(state, e, sign);
     }
 
     private static void assertClose(final String at, final Object expected, final Object actual, final double tolerance) {
@@ -70,7 +76,7 @@ public class DynamicsTest {
             final List<SequenceEvaluator.Past> path = path(random, 120);
             final Dynamics.State state = c.family().create();
             for (int i = 0; i < path.size(); i++) {
-                c.family().update(state, event(c.family(), path.get(i)), 1);
+                fold(c.family(), state, path.get(i), 1);
                 final long now = path.get(i).millis() + 3_600_000L * (1 + random.nextInt(48));
                 final List<SequenceEvaluator.Past> window = path.subList(0, i + 1);
                 for (int j = 0; j < c.dimension(); j++) {
@@ -97,8 +103,8 @@ public class DynamicsTest {
             int evict = 0;
             for (int i = 0; i < path.size(); i++) {
                 final long now = path.get(i).millis() + 60_000L;
-                c.family().update(state, event(c.family(), path.get(i)), 1);
-                while (path.get(evict).millis() < now - maxAge) c.family().update(state, event(c.family(), path.get(evict++)), -1);
+                fold(c.family(), state, path.get(i), 1);
+                while (path.get(evict).millis() < now - maxAge) fold(c.family(), state, path.get(evict++), -1);
                 if (i % 997 != 0 && i != path.size() - 1) continue;
                 final List<SequenceEvaluator.Past> window = path.subList(evict, i + 1);
                 for (int j = 0; j < c.dimension(); j++) {
@@ -107,7 +113,7 @@ public class DynamicsTest {
                 }
             }
             // evicting everything empties the state exactly
-            while (evict < path.size()) c.family().update(state, event(c.family(), path.get(evict++)), -1);
+            while (evict < path.size()) fold(c.family(), state, path.get(evict++), -1);
             Assertions.assertNull(c.family().readAt(state, Summary.Readout.of("component", 0), T0), c.name());
             Assertions.assertEquals(0, c.family().count(state), c.name());
         }
@@ -121,9 +127,8 @@ public class DynamicsTest {
             final List<SequenceEvaluator.Past> path = path(random, 90);
             final Dynamics.State whole = c.family().create(), first = c.family().create(), second = c.family().create(), third = c.family().create();
             for (int i = 0; i < path.size(); i++) {
-                final Dynamics.Event e = event(c.family(), path.get(i));
-                c.family().update(whole, e, 1);
-                c.family().update(i < 30 ? first : i < 55 ? second : third, e, 1);
+                fold(c.family(), whole, path.get(i), 1);
+                fold(c.family(), i < 30 ? first : i < 55 ? second : third, path.get(i), 1);
             }
             // associativity: (first ⊕ second) ⊕ third, and the identity on either side
             c.family().merge(first, c.family().create());
@@ -148,7 +153,7 @@ public class DynamicsTest {
                 final List<SequenceEvaluator.Past> path = path(random, 300);
                 final Dynamics.State state = family.create();
                 for (int i = 0; i < path.size(); i++) {
-                    family.update(state, event(family, path.get(i)), 1);
+                    fold(family, state, path.get(i), 1);
                     final long now = path.get(i).millis() + 3_600_000L;
                     final Double former = formerEwma(path.subList(0, i + 1), halflife, byTime, now);
                     assertClose("h" + halflife + "/" + byTime + "@" + i, former, family.readAt(state, Summary.Readout.of("component", 0), now), 1e-12);
@@ -158,13 +163,20 @@ public class DynamicsTest {
         }
     }
 
-    /** The scan formula of {@code ewma} before PR-U4a: weights 0.5^(steps / halflife) from the current row. */
+    /**
+     * The scan formula of {@code ewma} before PR-U4a: weights 0.5^(steps / halflife) from the current row — the events
+     * clock counting the valued rows after each one (a row without a value is no event of the channel).
+     */
     private static Double formerEwma(final List<SequenceEvaluator.Past> window, final double halflife, final boolean byTime, final long now) {
         double num = 0, den = 0;
+        int valued = 0;
+        for (final SequenceEvaluator.Past p : window) if (FeatureValues.toDouble(p.values().get("x")) != null) valued++;
+        int seen = 0;
         for (int i = 0; i < window.size(); i++) {
             final Double v = FeatureValues.toDouble(window.get(i).values().get("x"));
             if (v == null) continue;
-            final double steps = byTime ? (now - window.get(i).millis()) / DAY : (window.size() - 1 - i);
+            seen++;
+            final double steps = byTime ? (now - window.get(i).millis()) / DAY : (valued - seen);
             final double w = Math.pow(0.5, steps / halflife);
             num += w * v;
             den += w;
@@ -217,13 +229,72 @@ public class DynamicsTest {
         final Dynamics fourier = new Dynamics(Dynamics.Measure.fourier, 1, null, 4d, false);
         final Dynamics.State wave = fourier.create();
         fourier.update(wave, fourier.event(T0, 2d), 1);
-        fourier.update(wave, fourier.event(T0 + 1, null), 1); // a missing value still advances the events clock
+        Assertions.assertNull(fourier.event(T0 + 1, null), "a missing value is no event of the channel");
+        fourier.update(wave, fourier.event(T0 + 2, 0d), 1);
         // the value is one event old: phase 2π / 4
-        assertClose("c0", 2d, fourier.readAt(wave, Summary.Readout.of("component", 0), T0 + 1), 1e-12);
-        assertClose("c1", 2 * Math.cos(Math.PI / 2), fourier.readAt(wave, Summary.Readout.of("component", 1), T0 + 1), 1e-12);
-        assertClose("s1", 2 * Math.sin(Math.PI / 2), fourier.readAt(wave, Summary.Readout.of("component", 2), T0 + 1), 1e-12);
+        assertClose("c0", 1d, fourier.readAt(wave, Summary.Readout.of("component", 0), T0 + 2), 1e-12);
+        assertClose("c1", 2 * Math.cos(Math.PI / 2) / 2, fourier.readAt(wave, Summary.Readout.of("component", 1), T0 + 2), 1e-12);
+        assertClose("s1", 2 * Math.sin(Math.PI / 2) / 2, fourier.readAt(wave, Summary.Readout.of("component", 2), T0 + 2), 1e-12);
         Assertions.assertEquals("s1", Dynamics.componentName(Dynamics.Measure.fourier, 2));
         Assertions.assertEquals("c1", Dynamics.componentName(Dynamics.Measure.fourier, 1));
+    }
+
+    /**
+     * A row without a value is no event of the channel: on the time clock it does not move the read position — the
+     * exponential components of a channel whose newest rows are missing stay those read at its newest value, instead
+     * of growing like (θ·gap)^j / j! over the gap between that value and the missing row (the divergence the read
+     * position at the newest event was meant to rule out) — and on the events clock it is not counted: folding
+     * [x, missing, y] equals folding [x, y]. The scan path agrees on both.
+     */
+    @Test
+    public void testMissingValueIsNoEventOfTheChannel() {
+        final long day = 86_400_000L;
+        final Dynamics high = new Dynamics(Dynamics.Measure.exponential, 8, 7d, null, true);
+        final Dynamics.State state = high.create();
+        final List<SequenceEvaluator.Past> path = new ArrayList<>();
+        final double[] values = {30, 45, 80, 35};
+        for (int i = 0; i < values.length; i++) {
+            path.add(new SequenceEvaluator.Past(T0 + i * 3 * day, Map.of("x", values[i])));
+            fold(high, state, path.get(path.size() - 1), 1);
+        }
+        final double[] before = new double[9];
+        for (int j = 0; j <= 8; j++) before[j] = (Double) high.readAt(state, Summary.Readout.of("component", j), T0 + 12 * day);
+        // two missing rows, the last one 200 days after the newest value
+        final Map<String, Object> missing = new HashMap<>();
+        missing.put("x", null);
+        path.add(new SequenceEvaluator.Past(T0 + 100 * day, missing));
+        path.add(new SequenceEvaluator.Past(T0 + 209 * day, missing));
+        fold(high, state, path.get(4), 1);
+        fold(high, state, path.get(5), 1);
+        final long now = T0 + 210 * day;
+        for (int j = 0; j <= 8; j++) {
+            final Object read = high.readAt(state, Summary.Readout.of("component", j), now);
+            assertClose("L" + j + " unchanged by missing rows", before[j], read, 1e-12);
+            assertClose("scan L" + j, before[j], high.project(path, "x", now, j), 1e-9);
+            Assertions.assertTrue(Math.abs(((Double) read)) <= 80 * 1.5, "bounded by the values' scale: " + read);
+        }
+        Assertions.assertEquals(4, high.count(state), 0d);
+
+        // the events clock counts the channel's valued events only
+        for (final Case c : List.of(new Case("exponential3", new Dynamics(Dynamics.Measure.exponential, 3, 2d, null, false), 4),
+                new Case("fourier2", new Dynamics(Dynamics.Measure.fourier, 2, null, 5d, false), 5),
+                new Case("legendre3", new Dynamics(Dynamics.Measure.legendre, 3, null, null, false), 4))) {
+            final Dynamics family = c.family();
+            final Dynamics.State withGap = family.create(), without = family.create();
+            fold(family, withGap, path.get(0), 1);
+            fold(family, without, path.get(0), 1);
+            fold(family, withGap, path.get(4), 1);           // missing
+            fold(family, withGap, path.get(1), 1);
+            fold(family, without, path.get(1), 1);
+            fold(family, withGap, path.get(2), 1);
+            fold(family, without, path.get(2), 1);
+            final List<SequenceEvaluator.Past> gapped = List.of(path.get(0), path.get(4), path.get(1), path.get(2));
+            for (int j = 0; j < c.dimension(); j++) {
+                final Object expected = family.readAt(without, Summary.Readout.of("component", j), now);
+                assertClose(c.name() + " events " + j, expected, family.readAt(withGap, Summary.Readout.of("component", j), now), 1e-12);
+                assertClose(c.name() + " events scan " + j, expected, family.project(gapped, "x", now, j), 1e-12);
+            }
+        }
     }
 
     /** The two Legendre evaluations the paths use agree: the monomial coefficients (running state) and Bonnet's recurrence (scan). */

@@ -234,23 +234,48 @@ without `distribution` is an error (`encoding.target.values`).
 
 **Baseline offset (`offset: <baseline>`).** A block may subtract a named baseline from its target
 (`offset: market` with `baselines: [{name: market, ...}]`; the block then computes at `predictAt`,
-`encoding.offset.computeAt`). The offset is an additive term on the shrinkage scale:
+`encoding.offset.computeAt`). The baseline is read from the **past rows** next to their outcome, never from
+the current row (the value is the residual term alone), so its availability counts on the past side like the
+target's: a baseline over pre-event market fields costs nothing, while a baseline over an outcome field (a
+settled price) shifts the window near edge by that outcome's lag — `windowShift`, exactly as a target of
+that kind does — and delays the blocks a `fit.mode: forward` fit may read (a `fit.mode: static` / `fold`
+fit is unchanged: its statistics are an artifact of the fit boundary). A target-less level (the row counts
+behind `count` / `share`) reads no baseline and takes no shift from it. Such a baseline is a valid offset
+even though the current row cannot see its own value yet — so `baselines[].emit` of it stays an
+`availability.violation`, unless the emitted copy is the evaluation baseline (`output.roles.baseline`),
+which is post-event by declaration like a label: status `label`, never a feature, read by the evaluation
+after the fact. A baseline's `context` is one event: its rows share the event time, so the value a past
+row contributes is known at that row's own lag — a context whose rows spread over hours would read
+outcomes settled later than the row's lag says. The offset is an additive term on the
+shrinkage scale:
 
 - `scale: identity` (default) — every statistic is taken over `target − baseline`: `mean` / `rate` are the
   key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is
-  missing (or NaN) has no residual: it is left out of every statistic of the block, `count` included, in the
-  expanding replay and in the static / fold / forward fits alike.
-- `scale: logit` / `log` — each level's own term is `t(observed) − t(mean baseline)` over the level's rows
-  (the observed-over-expected **log-odds ratio** on logit, the Poisson-offset MLE `log(Σy / Σb)` on log),
-  the leaf shrinks that term toward the parent's term, and the **composed value is the term itself** — a
-  residual on the scale, *not* a probability or rate — with `deviations` on the same scale (info
-  `encoding.offset.additive`). The levels keep a hidden `Σ baseline` (`<level>__sumoff`) next to
+  missing (or NaN) has no residual: it is left out of every statistic of the target, the target's `count`
+  included, in the expanding replay and in the static / fold / forward fits alike (the target-less row count
+  and `share` count every row).
+- `scale: logit` / `log` — each level's own term is the **score-type** estimate of the key's log-odds
+  (log-rate) ratio against its baseline: `S / V` with `S = Σ(y − b)` over the level's rows and `V` their
+  information at the baseline, `Σ b(1 − b)` on logit and `Σb` on log — one scoring step from the baseline,
+  exact to first order, and finite for every key: a key with no success in n rows reads `−Σb / V`, which
+  grows with n toward `−1 / (1 − b̄)` instead of diverging (the transformed mean `logit(ȳ) − logit(b̄)` is
+  undefined there and a clamp would leak its constant into the value). The leaf shrinks that term toward
+  the parent's term **by information**, `V / (V + λ′)`, so a key of rare events is trusted less than a key
+  of the same row count at even odds; `λ′` is `priorWeight` rows of the average information of the lattice's
+  coarsest (root) level (a declared `priorWeight` keeps its meaning of "rows of average information"), or under
+  `weights: varianceComponents` `1 / τ²` with the between-key variance τ² estimated on the score scale. The
+  **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
+  `deviations` on the same scale and `effectiveN` in rows (info `encoding.offset.additive`). The levels
+  keep a hidden `Σ baseline` (`<level>__sumoff`) and, on logit, `Σ b(1 − b)` (`<level>__suminfo`) next to
   `Σ(y − b)`, in the expanding replay and in the static / fold / forward artifacts alike; `std` and the
-  quantiles stay statistics of the identity residual. A level whose mean baseline is outside the scale
-  (`Σ baseline ≤ 0`, or `≥ n` on logit — e.g. a baseline that is 0 for every row of a cold-start key) has
-  no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
-  same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
-  stays on the residual statistics above.
+  quantiles stay statistics of the identity residual. A level whose rows carry no information (every
+  baseline at 0 or 1 — e.g. a baseline that is 0 for every row of a cold-start key) has no term of its own
+  and falls back to its parent, as an unseen level does. `estimator: joint` fits the same per-cell terms
+  weighted by their information (a cell without information is skipped). A keySet with its own
+  identity-scale or disabled `shrinkage` stays on the residual statistics above. The plan hash of a spec with an
+  offset on logit / log names this estimator, so an artifact fitted by the earlier transformed-mean estimator is
+  not addressed by it (the block is fitted again); an artifact pinned by `fit.artifact.id` that predates the
+  `suminfo` statistic is refused with a refit advice.
 
 ### Two-series and fractional-difference ops (sequence `regression`, `fracdiff`)
 
@@ -1386,15 +1411,28 @@ projection of the path onto a basis `b_j` under the measure `w`:
   counts — and `time` in days. On `time`, `fourier` and `legendre` measure age from the current row's time
   (`legendre`: u = (event − first event) / (row − first event)), while `exponential` measures it from the newest
   past event: its higher components would otherwise grow with the entity's inactivity (≈ (gap / halflife)^j), so the
-  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way. A missing value (null / NaN / ±Infinity) is still an event on the `events` clock; it adds no
-  weight.
+  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way.
+- **What an event is.** An event of a channel is a past row **with a value** for it. A row whose value is missing
+  (null / NaN / ±Infinity) is no event of that channel: it adds no weight, it does not count on the `events`
+  clock (ages count the channel's valued events), and on `time` it does not move the read position — the newest
+  past event is the newest *valued* one, so a run of missing rows after the last value never enters a component
+  (a cancelled entry with no result leaves the entity's components where its last result left them). Under
+  `legendre` the same rule sets the span's origin: it is the oldest row of the window **with a value**, so leading
+  missing rows do not stretch u. The channels
+  of one block are folded from the same rows, so a channel with a value on a row moves while one without does not —
+  the `timeAugment` channel is the constant 1, which every row has, so that one channel still counts every row of
+  the window (its ages and its read position are its own, not the value channels').
+  The `events` clock of the other summaries is counted the same way but over their own events: the log-signature's
+  time channel is the ordinal among the **complete points** (every channel present), and `trend` orders the present
+  values among its last `k` rows.
 - **Reading the components.** Component 0 is the (decay-weighted) mean. The higher Laguerre components weigh
   recent and older events with opposite signs (`L_1 = 1 − u`): a trend of the value against its age. The Fourier
   components pick up periodicity at `period`, `period / 2`, …; the Legendre ones the shape of the path over the
   window (level, slope, curvature, …). The `time` channel's components describe *when* the events happened
-  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same events as the
+  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same window as the
   block's value channels: when a channel is an outcome whose window is shifted, the `time` channel takes the
-  latest channel's shift too (`sequence.lift.align` when the channels differ).
+  latest channel's shift too (`sequence.lift.align` when the channels differ). Inside that window it counts every
+  row (see *What an event is*), where a value channel counts only the rows carrying its value.
 - **Cost.** Every measure is a running state: `exponential` and `fourier` are exact under any spacing and evict
   under `maxAge` in O(1) per row; `legendre` rescales with the window's span, so it runs on a running state without
   `maxAge` and re-reads the window under one. None of them keeps the key's history without a window (no
@@ -1410,8 +1448,10 @@ projection of the path onto a basis `b_j` under the measure `w`:
   ```
 
   The path is piecewise linear through the events' points (an event contributes when every channel is present;
-  `timeAugment` adds the event's time — days on `time`, its ordinal on `events`, ticks on a calendar — as the last
-  channel). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
+  `timeAugment` adds the event's time — days on `time`, its ordinal among the complete points on `events`, ticks on
+  a calendar — as the last channel; on `events` the time channel's own increment is the number of points minus one
+  and the areas with it order the other channels' increments by point count, so use `decayBy: time` when the
+  timing of the events matters). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
   `{block}_{window}_logsig_{word}`, the channels lettered `a, b, c, …` in lift order (info
   `sequence.dynamics.logsignature` prints the legend). Words of one letter are the channels' total increments over the
   window, `ab` the Lévy area between channels a and b (signed: which moved first), longer words the higher-order
@@ -1428,7 +1468,8 @@ projection of the path onto a basis `b_j` under the measure `w`:
   (`sequence.dynamics.depth`); `sequence.dynamics.order` / `.halflife` / `.period` / `.parameter` (a parameter of
   the other family included) check the parameters; channels must be numeric (`sequence.lift.type`); a block emitting
   more than 64 component columns is `sequence.dynamics.size`; a malformed `compress` is `sequence.compress`.
-- `trend` (an op) is the same arithmetic as `regression`: the beta of the last `k` present values on their order.
+- `trend` (an op) is the same arithmetic as `regression`: the beta of the present values among the last `k` rows on
+  their order (a missing row shortens the fit; it neither counts as a position nor extends the tail).
 
 ### Availability check
 
@@ -1467,8 +1508,9 @@ output:
 - **roles** name what a consumer must not treat as a feature. Every role must resolve (an input field,
   a context / entity for `group` / `entity`, a baseline for `baseline`; `output.roles.unresolved`
   otherwise). An input field with a role is passed through whatever `passThrough` says. A `baseline`
-  role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): baselines
-  are intermediate columns today, so derive the value as a feature (`shareOfTotal`) and name that column.
+  role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): give it
+  `baselines[].emit` (a baseline over an outcome is then post-event by declaration — status `label`, never a
+  feature — like a label or the training weight).
 - **include** is the projection: only the listed columns (canonical or output names; a `<name>_isnull`
   entry keeps its base column) are emitted, plus the pass-through fields and the role columns. Names matching no column are a
   warning (`output.include.unknown`) — the list may come from another plan version. An empty list is an error

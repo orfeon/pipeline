@@ -360,8 +360,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
 - **The general form** (`lift` + `summarize.dynamics`, family `lti`): each (channel, halflife) of a block is one
   `Dynamics` state — a vector, one entry per component — shared by the component columns through the `stateKey`
   coordinate (`ColumnPlan.stateKey` keys the `KeyState`, so the second component column finds its state already
-  advanced). The contribution of an event is `Dynamics.Event(millis, value)` — a missing value is still an event
-  (it advances the events clock); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
+  advanced). The contribution of an event is `Dynamics.Event(millis, value)` — none for a missing value, which is
+  no event of the channel (§9.6.6 read position); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
   time (fourier / legendre; exponential reads at the newest event — §9.6.6 read position). Measures (§9.6.6): `exponential` (Laguerre basis under `e^(−θ·age)`, `ewma` = order 0 — the `ewma` op is
   sugar: its columns carry `measure: exponential, order: 0` and run on the same state, so it is no longer an
   unbounded scan), `fourier` (rotation per harmonic, optionally damped) — both groups — and `legendre` (power
@@ -649,26 +649,44 @@ sequential read per DoFn instance; the whole forward series of a stage must fit 
 series holds four arrays over the blocks a key touches), which the artifact writer already assumed.
 
 **Baseline offset on a logit / log scale** (spec §3 rule 5). An offset block whose shrinkage scale is not the
-identity registers one more hidden statistic per lattice level, `<level>__sumoff` = Σ baseline over the rows the
-level's `sum` counts (`PopulationEvaluator.SUM_OFFSET`, served incrementally by the same moments summary as
-`sum`, with the baseline as its contribution); the
-gate is per lattice (`FeaturePlanCompiler.offsetTerm`: offset block, shrinkage enabled, scale not identity —
-passed into `levelStats`), so an identity-scale or unshrunk lattice of the same block, and every identity-scale
-plan, is unchanged. `Shrinkage.Level` carries the column (`offColumn`, a fourth token in the `levels`
-coordinate) and the static `Shrinkage.own` computes the level's term `t((Σ(y − b) + Σb) / n) − t(Σb / n)` with
-leave-node-out over all three sums — null (no estimate at that level, like `n = 0`) when the mean baseline is
-outside the transform's open domain (`Shrinkage.baselineDefined`: `Σb ≤ 0` on log / logit, `Σb ≥ n` on logit),
-where the term is undefined and the transform's clamp would otherwise leak ±13.8 / −27.6 into it; `compose`
-returns the shrunk term through `Shrinkage.output` (no inverse transform under an offset term). The rows a
-level counts and sums are the same on every engine: `FeatureValues.offsetTarget` (target present and, under an
-offset, baseline present — NaN counts as missing) is the one rule behind the replay's `count` / `sum` / `sumoff`
-and the fit-side extract DoFns. On the fit side the extracted value is that pair `(y − b, b)`
-(`VarianceComponents.valueCoder`), `KeyStats` / `ForwardBlocks.Series` / `JointFit.Cell` carry `sumOff`, the
-artifact schema gains a defaulted `sumOff` field (older artifacts read 0), `FitApplyDoFn` fills the hidden
-column from it, and `JointFit.solve(offset = true)` uses the same `Shrinkage.own` per cell as `z_c` with the
-observed statistic's delta-method weight (a cell with an undefined baseline is skipped like an empty one),
-`estimate` returning η itself. The diagnostic is the info `encoding.offset.additive` (the former
-`encoding.offset.scale` rejection is gone).
+identity registers more hidden statistics per lattice level: `<level>__sumoff` = Σ baseline over the rows the
+level's `sum` counts (`PopulationEvaluator.SUM_OFFSET`) and, on logit, `<level>__suminfo` = Σ b(1 − b)
+(`PopulationEvaluator.SUM_INFO`, the Fisher information of those rows at their baseline; on log the information
+is Σb, so the level reads `sumoff` for it) — both served incrementally by the same moments summary as `sum`,
+with the baseline / its information as the contribution; the gate is per lattice
+(`FeaturePlanCompiler.offsetScale`: offset block, shrinkage enabled, scale not identity — passed into
+`levelStats`), so an identity-scale or unshrunk lattice of the same block, and every identity-scale plan, is
+unchanged. `Shrinkage.Level` carries the columns (`offColumn` / `infoColumn`, the fourth and fifth tokens of the
+`levels` coordinate; `isScore()` = has an information column) and the composition is the **score-type
+estimate**: `Shrinkage.ownScore` computes the level's term `S / V = Σ(y − b) / V` with leave-node-out over the
+sums — one Fisher-scoring step from the baseline, finite for every level, null (no estimate at that level, like
+`n = 0`) when `V ≤ 0` — and `estimate` shrinks it by information, `w = V / (V + λ′)`. The pseudo-count of a
+score level is on the score scale: a declared `priorWeight` (rows) is converted once per composition by the
+root level's information per row (`Shrinkage.rootInfoPerRow`, the coarsest level's totals — "priorWeight rows of
+average information"; one constant for the whole lattice when that level is the global one, the key's own average
+when the lattice stops at a keyed level), an estimated entry of the `lambdas` map
+is `1 / τ²` already (`Shrinkage.lambdaFromScore`, the DerSimonian–Laird moment estimator over the keys' terms
+`S_k / V_k` with sampling variance `1 / V_k`) and is used as is; `effectiveN` is converted back to rows.
+`compose` returns the shrunk term through `Shrinkage.output` (no inverse transform under an offset term). The
+old transformed mean `t(ȳ) − t(b̄)` is gone: at Σy = 0 or n it was undefined and its clamp leaked ±13.8 / −27.6
+into the value, growing with n — the "most extreme value for the least informed cell" the consumer run found.
+The rows a level counts and sums are the same on every engine: `FeatureValues.offsetTarget` (target present
+and, under an offset, baseline present — NaN counts as missing) is the one rule behind the replay's `count` /
+`sum` / `sumoff` / `suminfo` and the fit-side extract DoFns. On the fit side the extracted value is the pair
+`(y − b, b)` (`VarianceComponents.valueCoder`), `KeyStats` / `ForwardBlocks.Series` / `JointFit.Cell` carry
+`sumOff` and `sumInfo` (Σ b(1 − b) is accumulated whatever the scale — the Combine does not know it), the
+level's score scale travels as the `scoreScale` coordinate of its hidden columns → `FitLevel.scoreScale` /
+`LevelSpec.scoreScale` → the `scoreScales` map every λ derivation takes (`VarianceComponents.lambdaOf`: the
+`Moments` accumulate the identity moments and the score moments of both transformed scales, and the level's
+scale picks), the artifact schema gains a defaulted `sumInfo` field (`FitArtifact.read(…, requiresInfo)` refuses
+an artifact without it for a logit offset block — every key would silently read no information — with a refit
+advice; a log block reads Σb and needs none), `FitApplyDoFn` fills the hidden columns from it, and
+`JointFit.solve(offset = true)` fits the same score terms per cell (`z_c = S_c / V_c`, `w_c = V_c`, the ridge
+`λ′` on the score scale — `priorWeight · Solution.infoPerRow` or `lambdaFromScore` over the contexts; a cell
+without information is skipped like an empty one), `estimate` returning η itself. The diagnostic is the info
+`encoding.offset.additive`. A logit / log scale *without* an offset still composes the transformed mean
+`t(Σy / n)` with its clamp — the same defect class for a key with no success; the identity scale or an
+offset is the answer there for now.
 
 **Joint estimator and conjugate families.** `estimator: joint` is a fit-stage estimator: the lattice's
 statistics-carrying levels (an `additive` entry expands to the main-effect key lists) become the effect
@@ -1311,9 +1329,19 @@ component is a weighted mean:
   Exponential reads at the newest event on the time clock too: moved by `T(θΔ)`, the weighted mean of `L_j` over
   events all at least Δ old grows like `(θΔ)^j / j!` with the entity's inactivity (order 16 reaches ~1e20 after
   half a year at a 7-day halflife), so the gap is left to its own feature (`sinceEvent`); order 0 — `ewma` — is
-  independent of the read position either way.
+  independent of the read position either way. **The newest event is the newest row with a value for the channel**
+  (`Dynamics.event` returns null for a missing value, so the evaluator folds nothing): a missing row moves neither
+  the state's position nor the events clock. Before that rule a missing row advanced `newest` without adding mass,
+  and a cancelled entry after a long gap put the read position Δ past the last value — exactly the growth above,
+  found in a consumer run as components of 4 000 on a series of 30–80. Each channel's state has its own position:
+  a channel with a value on a row moves while one without stays — and `timeAugment`'s constant channel
+  (`Dynamics.value` with a null field is always 1) has a value on every row, so it alone still counts them all: its
+  ordinals and its read position are its own, not the value channels'. The three summaries count their `events` clock
+  over their own events — `lti`: the channel's valued rows; the log-signature's time channel: the ordinal among
+  the complete points (every channel present); `trend`: the present values among its last `k` rows (the tail stays
+  `k` rows: the retained history is bounded by rows, not by present values) — and the docs say so.
 - **The time channel** (`timeAugment`) reads no field, so on its own its window would never be shifted. It
-  describes the events the value channels see, so the compiler classifies it with the latest availability among
+  describes the rows of the window the value channels see, so the compiler classifies it with the latest availability among
   the block's channels (`classifyPast`'s `alignWith`: aligned, not a past input — no lineage, no projection).
 - **Channel names.** A `lift.exprs` entry `{expr, as}` names its channel segment; an unnamed one keeps the
   anonymous `{block}__e{n}` (a spec-wide counter — `sequence.lift.anonymous`), and two channels of one block with

@@ -179,9 +179,14 @@ of a block may share an `as:` only if they select the same rows (`window.as`).
 
 `decayBy` = the clock (`events` default: newest past event = age 0; `time`: days — to the current row for
 fourier / legendre, to the newest past event for exponential, whose higher components would otherwise grow with
-the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are strings or `{expr, as}`; name them
+the gap; add `sinceEvent` `unit: [days]` for the gap). An event of a channel is a row **with a value**: a missing
+value neither counts on the `events` clock nor moves the `time` read position (the newest past event is the newest
+valued one) and, under `legendre`, does not set the span's origin. The log-signature's `events` time channel counts
+complete points, `trend` the present values among its
+last `k` rows. `lift.exprs` entries are strings or `{expr, as}`; name them
 (`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
-channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
+channel `time` (components 1.. only), shifted like the latest of the block's channels; being the constant 1 it has a
+value on every row, so it counts every row of the window where a value channel counts only its valued ones. Every measure keeps no history
 without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
 (windows × halflifes × channels × components). Channels must be numeric / bool.
 
@@ -224,7 +229,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}
     - {expr: "<numeric expr>", stats: [mean]}
-  offset: <baselines[].name>                     # target minus baseline; on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
+  offset: <baselines[].name>                     # target minus baseline, read from the past rows like the target (a baseline over an outcome shifts the window, not a violation); on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
   combine: product | zip
   naming: "{block}__{keys}__{window}__{target}__{stat}"   # default; empty segments collapse
   shrinkage:

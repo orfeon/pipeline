@@ -618,13 +618,16 @@ public final class FeatureStages {
 
     /**
      * One fitted lattice level of a static block: hidden columns it fills ({@code n}, {@code sum}, {@code sumsq} and,
-     * for an offset block on a logit / log scale, {@code sumoff} = Σ baseline) and how its statistics are keyed.
+     * for an offset block on a logit / log scale, {@code sumoff} = Σ baseline — plus {@code suminfo} = Σ b(1 − b) on
+     * logit), how its statistics are keyed, and the score scale it is composed on ({@code scoreScale}: logit / log for
+     * an offset term, null otherwise — the λ estimate and the artifact manifest read it).
      */
-    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, String offSumColumn, List<String> keys, String field,
+    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, String offSumColumn, String infoSumColumn, String scoreScale,
+                    List<String> keys, String field,
                     String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds,
                     Forward forward, TimeFold timeFold) implements Serializable {
         VarianceComponents.LevelSpec spec() {
-            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds);
+            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds, scoreScale);
         }
         /** fit.mode fold: out-of-fold statistics, always fitted in-pipeline (an artifact only holds the totals). */
         boolean isFold() {
@@ -716,6 +719,8 @@ public final class FeatureStages {
                     names.contains(base + "__sum") ? base + "__sum" : null,
                     names.contains(base + "__sumsq") ? base + "__sumsq" : null,
                     names.contains(base + "__" + PopulationEvaluator.SUM_OFFSET) ? base + "__" + PopulationEvaluator.SUM_OFFSET : null,
+                    names.contains(base + "__" + PopulationEvaluator.SUM_INFO) ? base + "__" + PopulationEvaluator.SUM_INFO : null,
+                    c.getCoordinates().get("scoreScale"),
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
@@ -724,6 +729,13 @@ public final class FeatureStages {
                     Forward.of(c), TimeFold.of(c)));
         }
         return new ArrayList<>(levels.values());
+    }
+
+    /** The score levels among fitted levels ({@link VarianceComponents#scoreScalesOf}): level id → scale name. */
+    static Map<String, String> scoreScalesOf(final List<FitLevel> levels) {
+        final Map<String, String> scales = new HashMap<>();
+        for (final FitLevel level : levels) if (level.scoreScale() != null) scales.put(level.id(), level.scoreScale());
+        return scales;
     }
 
     /**
@@ -783,7 +795,7 @@ public final class FeatureStages {
             statsView = perKey.apply(label + "_StatsView", View.asMap());
             sideInputs.add(statsView);
             if (needsLambdas) {
-                lambdasView = VarianceComponents.lambdasFromKeyStats(perKey, label + "_Vc");
+                lambdasView = VarianceComponents.lambdasFromKeyStats(perKey, scoreScalesOf(fitted), label + "_Vc");
                 sideInputs.add(lambdasView);
             }
             if (!writeBlocks.isEmpty()) writeArtifacts(perKey, writeBlocks, fitted, planHash, null, label + "_WriteStatic");
@@ -814,7 +826,7 @@ public final class FeatureStages {
                 if (needsLambdas) {
                     final PCollection<KV<String, VarianceComponents.KeyStats>> training = untilBlocks.isEmpty() ? totals
                             : seriesTotals(allSeries, levelIds(timeFolds), untilBlocks, label + "_TimeFoldTrainingTotals");
-                    timeFoldLambdasView = VarianceComponents.lambdasFromKeyStats(training, label + "_TimeFoldVc");
+                    timeFoldLambdasView = VarianceComponents.lambdasFromKeyStats(training, scoreScalesOf(timeFolds), label + "_TimeFoldVc");
                     sideInputs.add(timeFoldLambdasView);
                 }
                 if (!writeTimeFoldBlocks.isEmpty()) writeArtifacts(totals, writeTimeFoldBlocks, timeFolds, planHash, null, label + "_WriteTimeFold");
@@ -824,7 +836,7 @@ public final class FeatureStages {
                     // only the forward levels enter the per-block λ Combine (built only when something reads it)
                     final PCollection<KV<String, ForwardBlocks.Series>> series = timeFolds.isEmpty()
                             ? allSeries : seriesOf(allSeries, levelIds(forward), label + "_ForwardOnly");
-                    forwardLambdasView = VarianceComponents.lambdasByBlockView(series, label + "_ForwardVc");
+                    forwardLambdasView = VarianceComponents.lambdasByBlockView(series, scoreScalesOf(forward), label + "_ForwardVc");
                 }
                 if (needsLambdas) sideInputs.add(forwardLambdasView);
                 if (!writeForwardBlocks.isEmpty()) {
@@ -2291,7 +2303,7 @@ public final class FeatureStages {
                         @ProcessElement
                         public void processElement(final ProcessContext c) {
                             final VarianceComponents.KeyStats s = c.element().getValue();
-                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq, s.sumOff));
+                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq, s.sumOff, s.sumInfo));
                         }
                     }))
                     .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(JointFit.Cell.class))
@@ -2554,7 +2566,7 @@ public final class FeatureStages {
                 .apply(label + "_Flatten", Flatten.pCollections())
                 .apply(label + "_Group", GroupByKey.create())
                 .apply(label, ParDo
-                        .of(new WriteArtifactDoFn(uris, levelsOfBlock, planHash, lambdasView))
+                        .of(new WriteArtifactDoFn(uris, levelsOfBlock, planHash, lambdasView, scoreScalesOf(levels)))
                         .withSideInputs(lambdasView == null ? List.of() : List.of(lambdasView)));
     }
 
@@ -2565,13 +2577,16 @@ public final class FeatureStages {
         private final String planHash;
         /** fit.mode forward: the manifest records λ per block of the block's levels */
         private final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView;
+        /** the score levels (level id → scale): their manifest λ is estimated on the score scale */
+        private final Map<String, String> scoreScales;
 
         WriteArtifactDoFn(final Map<String, String> uris, final Map<String, List<String>> levels, final String planHash,
-                          final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView) {
+                          final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView, final Map<String, String> scoreScales) {
             this.uris = uris;
             this.levels = levels;
             this.planHash = planHash;
             this.lambdasView = lambdasView;
+            this.scoreScales = new HashMap<>(scoreScales);
         }
 
         @ProcessElement
@@ -2594,7 +2609,7 @@ public final class FeatureStages {
                 }
                 extra.add("lambdasByBlock", byBlock);
             }
-            FitArtifact.write(uris.get(block), planHash, block, blockStats, blockLevels, extra);
+            FitArtifact.write(uris.get(block), planHash, block, blockStats, blockLevels, extra, scoreScales);
         }
     }
 
@@ -2674,11 +2689,14 @@ public final class FeatureStages {
         public void setup() {
             super.setup();
             loaded = new HashMap<>();
+            // a block with a logit offset term reads Σ b(1 − b): an artifact from before that statistic is refused
+            final Set<String> infoBlocks = new HashSet<>();
+            for (final FitLevel level : levels) if (level.infoSumColumn() != null) infoBlocks.add(level.block());
             for (final Map.Entry<String, String> e : loadBlocks.entrySet()) {
                 final String path = FitArtifact.statsPath(e.getValue(), planHash, e.getKey());
-                loaded.putAll(ARTIFACT_CACHE.computeIfAbsent(path, p -> FitArtifact.read(e.getValue(), planHash, e.getKey())));
+                loaded.putAll(ARTIFACT_CACHE.computeIfAbsent(path, p -> FitArtifact.read(e.getValue(), planHash, e.getKey(), infoBlocks.contains(e.getKey()))));
             }
-            loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded);
+            loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded, scoreScalesOf(levels));
             counters = new HashMap<>();
             warnedLevels = new HashSet<>();
             loadedModels = new HashMap<>();
@@ -2854,6 +2872,7 @@ public final class FeatureStages {
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
                     if (level.offSumColumn() != null) values.put(level.offSumColumn(), stats == null ? 0d : stats.sumOff);
+                    if (level.infoSumColumn() != null) values.put(level.infoSumColumn(), stats == null ? 0d : stats.sumInfo);
                 }
                 if (rowLambdas != null) evaluator.setLambdas(rowLambdas); // the λ of the row's usable block, per forward level
                 for (final StaticFitBlock<?> block : blocks) apply(block, model(c, block), values);

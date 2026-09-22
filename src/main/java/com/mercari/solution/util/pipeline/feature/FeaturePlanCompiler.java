@@ -693,7 +693,10 @@ public final class FeaturePlanCompiler {
             e.coordinates.put("baseline", baseline.name());
             addSelfInput(e, c.canonicalName);
             e.validFor = c.validFor;
-            e.status = Status.staticSafe;
+            // the row's own baseline value: available when its inputs are (a baseline over an outcome is a valid
+            // offset — read from past rows — but emitting it puts the outcome on the row, a violation like any other)
+            if (e.availableAt == null) e.availableAt = AvailableAt.atEventTime();
+            e.status = rowStatus(e.availableAt, e.computeAt);
             register(e);
             baselineEmits.put(baseline.name(), e.canonicalName);
         }
@@ -951,11 +954,19 @@ public final class FeaturePlanCompiler {
         return null;
     }
 
+    /**
+     * §6.2 verdict of a row-side availability against the column's computeAt: at or before it is safe, statically
+     * after it is a violation, and an availability that is not decidable statically is filtered per row.
+     */
+    private static Status rowStatus(final AvailableAt availableAt, final AvailableAt computeAt) {
+        return availableAt.isStaticallyAtOrBefore(computeAt) ? Status.staticSafe
+                : availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+    }
+
     private void finishRow(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         c.validFor = def.validFor;
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         register(c);
     }
 
@@ -1184,8 +1195,7 @@ public final class FeaturePlanCompiler {
         for (final String key : context.keys()) addSelfInput(c, key);
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         if (def.validFor != null || c.validFor == null) c.validFor = def.validFor; // an op may have inherited one (softmax offset)
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
             // group-constant only within its own context: parent placement requires the grouping context
             c.placement = Placement.parent;
@@ -1927,8 +1937,10 @@ public final class FeaturePlanCompiler {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
             channels.add(new Channel(null, "time"));
-            // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
-            // events the value channels see (a shifted window) rather than the events the entity had
+            // the time channel reads no field: it takes the most delayed channel's availability, so its window is the
+            // one the value channels see (a shifted window) rather than every event the entity had. Inside that window
+            // it still describes every row: the constant 1 is present on all of them, where a value channel is an
+            // event only on the rows that carry its value (Dynamics: a row without a value is no event of the channel)
             final Set<AvailableAt> availabilities = new LinkedHashSet<>();
             for (final Channel channel : channels) {
                 final Ref ref = channel.reference() == null ? null : resolve(channel.reference());
@@ -3365,8 +3377,7 @@ public final class FeaturePlanCompiler {
     private void finishStaticFitted(final OutputColumn c, final FeatureDef def) {
         final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
         c.availableAt = AvailableAt.max(selfSide, c.computeAt);
-        c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(selfSide, c.computeAt);
         c.validFor = def.validFor;
     }
 
@@ -3463,8 +3474,9 @@ public final class FeaturePlanCompiler {
                 if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
                 if (fitSpec.refit) c.coordinates.put("refit", "true");
                 if (offsetColumn != null) {
+                    // read from the training rows only (the example's target minus its baseline), like the target
                     c.coordinates.put("offset", offsetColumn);
-                    addSelfInput(c, offsetColumn);
+                    addPastInput(c, offsetColumn);
                 }
                 for (final String f : def.fields) addSelfInput(c, f);
                 addPastInput(c, target);
@@ -3752,11 +3764,13 @@ public final class FeaturePlanCompiler {
             lattices.add(new Lattice(ks, shrinkage, levels, additiveAt));
         }
         if (lattices.stream().anyMatch(l -> offsetTerm(def, l.shrinkage))) {
-            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline next to
-            // Σ(y − b) (hidden __sumoff), each level's term is t(observed) − t(mean baseline), and the composed value is
-            // that term (a log-odds / log-rate ratio against the baseline), not a probability / rate
+            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline (and, on
+            // logit, Σ b(1 − b)) next to Σ(y − b), each level's term is the score-type one-step estimate S / V from the
+            // baseline, and the composed value is that term (a log-odds / log-rate ratio against the baseline), not a
+            // probability / rate
             diagnostics.info("encoding.offset.additive", loc, "offset '" + def.offset + "' on a logit / log shrinkage scale: the composed value is the additive term on that scale"
-                    + " (t(key's observed statistic) − t(its mean baseline), shrunk toward the parent's term; deviations on the same scale) — not a probability / rate");
+                    + " (the key's score-type estimate sum(y - b) / information, one scoring step from the baseline, shrunk toward the parent's term by information;"
+                    + " deviations on the same scale) - not a probability / rate");
         }
 
         // expansion: keySet × window × target × stat (product) or zip(keySet, target) × window × stat
@@ -3781,10 +3795,10 @@ public final class FeaturePlanCompiler {
                 for (final Window window : windowsOf(lattice.keySet)) {
                     // a shrunk distribution needs the per-category shares of the level, the scalar statistics its sum
                     if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, offsetTerm(def, lattice.shrinkage), computeAt, mode, fitSpec, false);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, offsetScale(def, lattice.shrinkage), computeAt, mode, fitSpec, false);
                     }
                     if (distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, true);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, null, computeAt, mode, fitSpec, true);
                     }
                 }
             }
@@ -3836,7 +3850,7 @@ public final class FeaturePlanCompiler {
                         }
                         // unshrunk: the statistic is read straight from the leaf's (n, Σy, Σy²), never as an offset term
                         // static / fold: no window (lookupWindow is null); forward: the keySet's maxAge rounded to blocks
-                        final Shrinkage.Level leaf = levelStats(def, ks.keys, window, target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, false);
+                        final Shrinkage.Level leaf = levelStats(def, ks.keys, window, target.name, target.reference, offsetColumn, null, computeAt, mode, fitSpec, false);
                         final OutputColumn c = newColumn(def.name, Scope.row, "fitStat", canonical, s.output(), computeAt);
                         c.fitted = true;
                         c.coordinates.put("keys", String.join(",", ks.keys));
@@ -3868,7 +3882,7 @@ public final class FeaturePlanCompiler {
                     }
                     // lattice: hidden statistics per level, composed in a row column
                     final boolean distribution = "distribution".equals(stat);
-                    final boolean offsetTerm = offsetTerm(def, lattice.shrinkage);
+                    final Shrinkage.Scale offsetTerm = offsetScale(def, lattice.shrinkage);
                     final List<Shrinkage.Level> levels = new ArrayList<>();
                     for (final List<String> levelKeys : lattice.levels) {
                         if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
@@ -4000,6 +4014,7 @@ public final class FeaturePlanCompiler {
             addSelfInput(c, l.nColumn());
             addSelfInput(c, l.sumColumn());
             if (l.offColumn() != null) addSelfInput(c, l.offColumn());
+            if (l.infoColumn() != null) addSelfInput(c, l.infoColumn());
         }
     }
 
@@ -4024,8 +4039,7 @@ public final class FeaturePlanCompiler {
     private void finishComposed(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         // the hidden statistics are available at computeAt by construction; the composed value inherits that
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         c.validFor = def.validFor;
         register(c);
     }
@@ -4044,10 +4058,19 @@ public final class FeaturePlanCompiler {
         return def.offset != null && shrinkage.enabled && shrinkage.scale != Shrinkage.Scale.identity;
     }
 
-    /** @param offsetTerm the level is composed as an offset term ({@link #offsetTerm}): register its hidden Σ baseline too */
+    /** The scale the block's offset term is composed on ({@link #offsetTerm}), null when the block has no offset term. */
+    private static Shrinkage.Scale offsetScale(final FeatureDef def, final Shrinkage shrinkage) {
+        return offsetTerm(def, shrinkage) ? shrinkage.scale : null;
+    }
+
+    /**
+     * @param offsetScale the scale the level is composed on as an offset term ({@link #offsetScale}; null = no offset
+     *                    term): register its hidden Σ baseline too and, on logit, its Σ b(1 − b) — the information the
+     *                    score-type term divides by ({@link Shrinkage#ownScore}; on log the information is Σ baseline)
+     */
     private Shrinkage.Level levelStats(final FeatureDef def, final List<String> levelKeys, final Window window,
                                        final String targetName, final String targetReference, final String offsetColumn,
-                                       final boolean offsetTerm,
+                                       final Shrinkage.Scale offsetScale,
                                        final AvailableAt computeAt, final FitMode mode, final FeatureSpec.FitSpec fitSpec,
                                        final boolean distribution) {
         final String token = levelKeys.isEmpty() ? Shrinkage.GLOBAL : String.join("_", levelKeys);
@@ -4056,16 +4079,32 @@ public final class FeaturePlanCompiler {
         final String nName = base + "__n";
         final String valueName = base + (distribution ? "__dist" : "__sum");
         final String offName = base + "__" + PopulationEvaluator.SUM_OFFSET;
+        final String infoName = base + "__" + PopulationEvaluator.SUM_INFO;
         final boolean isStatic = mode.isLookup();
-        // an offset term also keeps Σ baseline (the level's term is t(observed) − t(mean baseline))
-        final boolean offsetSum = offsetTerm && !distribution && targetReference != null;
+        // an offset term also keeps Σ baseline and, on logit, Σ b(1 − b) (the level's term is S / V)
+        final boolean offsetSum = offsetScale != null && !distribution && targetReference != null;
+        final boolean offsetInfo = offsetSum && offsetScale == Shrinkage.Scale.logit;
         // static / fold fits also keep Σy² so std can be derived from the artifact
         final List<String> stats = new ArrayList<>(distribution ? List.of("count", "distribution") : isStatic ? List.of("count", "sum", "sumsq") : List.of("count", "sum"));
         if (offsetSum) stats.add(PopulationEvaluator.SUM_OFFSET);
+        if (offsetInfo) stats.add(PopulationEvaluator.SUM_INFO);
         for (final String stat : stats) {
-            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; case PopulationEvaluator.SUM_OFFSET -> offName; default -> base + "__sumsq"; };
+            final String name = switch (stat) {
+                case "count" -> nName;
+                case "sum", "distribution" -> valueName;
+                case PopulationEvaluator.SUM_OFFSET -> offName;
+                case PopulationEvaluator.SUM_INFO -> infoName;
+                default -> base + "__sumsq";
+            };
             if (!"count".equals(stat) && targetReference == null) continue;
-            if (columnsByCanonical.containsKey(name)) continue;
+            final OutputColumn existing = columnsByCanonical.get(name);
+            if (existing != null) {
+                // the level's hidden columns are shared: an unshrunk statistic of the same keys (fit.mode static / fold /
+                // forward reads n / Σy / Σy² straight from the leaf) may have registered them before the lattice did, so
+                // the score scale is stamped on whatever is already there — the engine reads it from any of them
+                if (offsetSum) existing.coordinates.put("scoreScale", offsetScale.name());
+                continue;
+            }
             final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
                     "distribution".equals(stat) ? Schema.FieldType.map(Schema.FieldType.FLOAT64) : Schema.FieldType.FLOAT64, computeAt);
             c.intermediate = true;
@@ -4074,9 +4113,12 @@ public final class FeaturePlanCompiler {
             level.keys = levelKeys;
             level.windows = window == null ? new ArrayList<>() : List.of(window);
             populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
+            // the engine reads the score scale of a level from its hidden columns (the fit stage's λ estimate, the artifact)
+            if (offsetSum) c.coordinates.put("scoreScale", offsetScale.name());
             register(c);
         }
-        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null, null);
+        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null,
+                offsetSum ? (offsetInfo ? infoName : offName) : null, null);
     }
 
     /**
@@ -4228,7 +4270,8 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("foldKeys", String.join(",", foldKeys));
             c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
-        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, offsetColumn, def, fitSpec);
+        // a target-less level (row counts, share denominators) never reads the baseline: no lag from it either
+        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, targetReference == null ? null : offsetColumn, def, fitSpec);
         c.coordinates.put("keys", String.join(",", ks.keys));
         if (window != null) {
             c.coordinates.put("window", window.token());
@@ -4247,9 +4290,13 @@ public final class FeaturePlanCompiler {
         for (final String key : ks.keys) addSelfInput(c, key);
         // target-less statistics (count / share denominators) count rows: the keys are self reads (keying), not projected
         if (targetReference != null) addPastInput(c, targetReference);
+        // the offset is read where the target is: from the past rows (their baseline next to their outcome), never
+        // from the current row — the composed value is the term δ alone. So its availability is the past side's, like
+        // the target's (a baseline over an outcome shifts the window near edge, or delays a forward block), and a
+        // baseline the row itself may not see yet is still a valid offset (spec §3 rule 3). A target-less level
+        // (row counts, share denominators) counts every row and reads no baseline: it takes no shift from it
         if (offsetColumn != null) {
-            addSelfInput(c, offsetColumn);
-            addPastInput(c, offsetColumn);
+            if (targetReference != null) addPastInput(c, offsetColumn);
             c.coordinates.put("offset", def.offset);
         }
         if (window != null && window.filter != null) {
@@ -4494,9 +4541,10 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
-            // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
+            // a column declared as the label, the training weight or the evaluation baseline (output.roles.label / weight /
+            // baseline) is post-event by declaration, like a future window's: never a feature, read by the evaluation after
+            // the fact (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role) || "baseline".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;
@@ -4981,7 +5029,35 @@ public final class FeaturePlanCompiler {
     static String hash(final JsonElement sourcesDocument, final JsonObject parameters) {
         // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
         // the identity of what was fitted
-        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters)));
+        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters))
+                // an offset term on logit / log is the score-type estimate since PR #176 (its levels keep sum b(1 - b)):
+                // an artifact of the transformed-mean estimator, addressed by the same spec, must not be found
+                + (declaresOffsetTerm(parameters) ? "\u0000" + OFFSET_ESTIMATOR : ""));
+    }
+
+    /** The estimator of an offset term on a transformed scale, part of the plan hash of a spec declaring one. */
+    static final String OFFSET_ESTIMATOR = "offset-estimator:score";
+
+    /** Whether any block declares an offset with a logit / log shrinkage scale (on the block or one of its keySets). */
+    static boolean declaresOffsetTerm(final JsonObject parameters) {
+        if (parameters == null || !parameters.has("features") || !parameters.get("features").isJsonArray()) return false;
+        for (final JsonElement f : parameters.getAsJsonArray("features")) {
+            if (!f.isJsonObject() || !f.getAsJsonObject().has("offset")) continue;
+            final JsonObject block = f.getAsJsonObject();
+            if (transformedScale(block.get("shrinkage"))) return true;
+            if (block.has("keySets") && block.get("keySets").isJsonArray()) {
+                for (final JsonElement ks : block.getAsJsonArray("keySets")) {
+                    if (ks.isJsonObject() && transformedScale(ks.getAsJsonObject().get("shrinkage"))) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean transformedScale(final JsonElement shrinkage) {
+        if (shrinkage == null || !shrinkage.isJsonObject()) return false;
+        final String scale = SourceContract.Json.string(shrinkage.getAsJsonObject(), "scale");
+        return "logit".equals(scale) || "log".equals(scale);
     }
 
     /**

@@ -425,21 +425,44 @@ Notes:
      reference `offset` / `baseline` change meaning.
   2. Validation hints when an encoding of an outcome target exists, a baseline is declared and no
      `offset` is given (never applied automatically).
-  3. A block referencing an offset has `availableAt = max(target, baseline)`. Because a past row's
-     baseline must be time-consistent or the offset itself leaks, the market fields a baseline reads
-     must be `evidence: measured` (or per-field `allowDeclared`, §2.3).
+  3. An offset is read where the target is read — from the past rows (an encoding's history, a fit's
+     training rows), each row's baseline next to its own outcome — never from the current row: the
+     composed value is the term δ alone (rule 5). So the baseline's availability joins the target's on the
+     **past side** of the availability check (§6.2): a baseline over pre-event market fields costs nothing,
+     a baseline over an outcome (a settled price) shifts the window near edge like an outcome target, and
+     delays the blocks a forward fit may read (a static / fold fit is unchanged: its statistics are an
+     artifact of the fit boundary, §6.1); the current row's own baseline value is never required
+     to be available. A target-less level (row counts, share denominators) reads no baseline and takes no
+     shift from it. Availability *is* required for everything that does read the baseline on the row —
+     `type: residual`, the `softmax` offset and `baselines[].emit` — which take the ordinary row verdict,
+     so emitting an outcome baseline stays an `availability.violation`; the one exception is the copy
+     `output.roles.baseline` names, which is post-event by declaration like a label (status `label`: never
+     a feature, read by the evaluation after the fact). A baseline's `context` is one event — its rows
+     share the event time — so the value a past row contributes is known at that row's own lag; a context
+     whose rows spread in time would read outcomes settled later than the row's lag (the same
+     contemporaneity a context target relies on). Because a past row's baseline must be time-consistent or
+     the offset itself leaks, the market fields a baseline reads must be `evidence: measured` (or
+     per-field `allowDeclared`, §2.3).
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,
-     `target − baseline` on identity. Each lattice level estimates its own δ from sufficient statistics as
-     `t(ȳ) − t(b̄)` — the level's observed statistic against the mean baseline of the same rows (the
-     observed-over-expected log-odds ratio on logit, the exact Poisson-offset MLE `log(Σy / Σb)` on log,
-     the mean residual on identity), so the levels keep `Σb` next to `Σ(y − b)`; shrinkage pulls a level's δ
-     toward its parent's, and the composed value **is δ** (the residual effect on the scale), not
-     `t⁻¹(t(baseline) + δ)` — the consumer adds it to its own baseline term or feeds it to a model as the
-     market-orthogonal component. A row without a baseline has no residual and is outside every statistic of
-     the block (its `count` too); a level whose mean baseline is outside the scale's domain (`Σb ≤ 0`, or
-     `Σb ≥ n` on logit) has no δ of its own and defers to its parent, like a level with no rows.
+     `log(μ) = log(baseline) + δ` on log, `target − baseline` on identity. Each lattice level estimates its
+     own δ from sufficient statistics by **one scoring step from the baseline**, `δ̂ = S / V` with
+     `S = Σ(y − b)` the score of the log-likelihood at δ = 0 and `V` its Fisher information — `Σ b(1 − b)` on
+     logit, `Σb` on log (the mean residual `S / n` on identity) — so the levels keep `Σb` (and `Σ b(1 − b)`)
+     next to `Σ(y − b)`. The one-step estimate is exact to first order in δ, finite for every level (a key
+     with no success reads `−Σb / V`, bounded by `−1 / (1 − b̄)` on logit, where the transformed mean
+     `t(ȳ) − t(b̄)` was undefined and its clamp leaked a constant that grew with n) and conservative for a
+     large |δ|. Shrinkage pulls a level's δ toward its parent's by **information**, `V / (V + λ′)`: a key of
+     rare events shrinks more than a key of the same row count at even odds; `λ′` is `priorWeight` rows of
+     the root level's average information (`priorWeight · V_root / n_root`) or, under
+     `weights: varianceComponents`, `1 / τ²` with τ² the between-key variance of the terms estimated on the
+     score scale (the DerSimonian–Laird moment estimator, sampling variance `1 / V_k`). The composed value
+     **is δ** (the residual effect on the scale), not `t⁻¹(t(baseline) + δ)` — the consumer adds it to its
+     own baseline term or feeds it to a model as the market-orthogonal component. A row without a baseline
+     has no residual and is outside every statistic of its target (the target's `count` too; the target-less
+     row count and `share` count every row); a level whose rows carry no information (`V ≤ 0`: every
+     baseline at 0 or 1) has no δ of its own and defers to its parent, like a level with no rows.
 - **computeAt**: a block may declare `computeAt` (default `predictAt`). "When the prediction runs" and
   "when this feature is computed" differ in general — columns computable in the morning coexist with
   columns computed at the last minute after market data arrives. The check is
@@ -682,11 +705,14 @@ the present values — one output column per component `{block}_{window}_{channe
 `legendre` measure age from the current row (a phase and a span, both bounded) and `exponential` from the newest past
 event: read from the row, the weighted mean of `L_j` over events all at least the gap old grows like
 `(θ·gap)^j / j!`, so the gap stays a feature of its own (`sinceEvent`); order 0 does not depend on the readout
-position. `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
+position. An event of a channel is a row with a value for it: a missing value is no event — it neither counts on the
+events clock nor moves the read position, which is the newest *valued* event (a run of missing rows after the last
+value never enters a component). `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
 the channels (an expression desugars like an op's `expr`; `{expr, as}` names its channel, which is otherwise the
 spec-wide anonymous `{block}__e{n}`); `lift.timeAugment` adds the constant channel 1, whose components describe when
-the events happened — the same events the value channels see, so it takes the latest channel's availability (§6.2
-window shift) although it reads no field. A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
+the rows of the window happened — it sees the same window as the value channels, so it takes the latest channel's
+availability (§6.2 window shift) although it reads no field, but the constant 1 is present on every row of it, so it
+counts rows where a value channel counts only the rows carrying its value (its positions are its own). A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
 are bounded (`sequence.dynamics.size`). The measures differ in algebra: the exponential and Fourier states move
 exactly under any spacing and evict (groups), the Legendre state rescales with its span, so it evicts nothing and a
 `maxAge` window re-reads it.

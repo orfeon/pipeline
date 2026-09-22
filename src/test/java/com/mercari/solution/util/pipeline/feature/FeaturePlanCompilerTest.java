@@ -747,9 +747,11 @@ public class FeaturePlanCompilerTest {
 
     /**
      * An offset on a logit / log shrinkage scale is accepted: the block's levels keep a hidden Σ baseline
-     * ({@code __sumoff}) next to Σ(y − b), the composed column reads it through its {@code levels} coordinate, and
-     * an info diagnostic says the value is the additive term on the scale. On identity nothing changes (no extra
-     * column), and the joint estimator accepts the same declaration.
+     * ({@code __sumoff}) next to Σ(y − b) — and on logit the information Σ b(1 − b) ({@code __suminfo}) the score-type
+     * term divides by; on log that information is Σ baseline itself — the composed column reads them through its
+     * {@code levels} coordinate, the hidden columns carry the score scale for the engine, and an info diagnostic says
+     * the value is the additive term on the scale. On identity nothing changes (no extra column), and the joint
+     * estimator accepts the same declaration.
      */
     @Test
     public void testOffsetOnLogitScaleKeepsBaselineSum() {
@@ -764,25 +766,123 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(off.getCoordinates().get("field"), column(plan, "enc__seller_id__e2__sum").getCoordinates().get("field"));
         Assertions.assertNotNull(plan.getColumn("enc__global__e2__sumoff"));
         Assertions.assertNotNull(plan.getColumn("enc__category__365d__e2__sumoff"));
+        final OutputColumn info = column(plan, "enc__seller_id__e2__suminfo");
+        Assertions.assertTrue(info.isIntermediate());
+        Assertions.assertEquals("suminfo", info.getCoordinates().get("stat"));
+        Assertions.assertEquals("logit", info.getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("logit", column(plan, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
         Assertions.assertEquals("compose", composed.getOperator());
         Assertions.assertEquals("logit", composed.getCoordinates().get("scale"));
-        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff"), composed.getCoordinates().get("levels"));
+        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff,enc__seller_id__e2__suminfo"), composed.getCoordinates().get("levels"));
         Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__sumoff"));
+        Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__suminfo"));
+        final Shrinkage.Level leaf = Shrinkage.parseLevels(composed.getCoordinates().get("levels")).get(0);
+        Assertions.assertEquals("enc__seller_id__e2__suminfo", leaf.infoColumn());
         // the target-less count / share levels have no baseline sum
         Assertions.assertNull(plan.getColumn("enc__seller_id__sumoff"));
+        Assertions.assertNull(plan.getColumn("enc__seller_id__suminfo"));
+        // log: the information is Σ baseline — no extra column, the level reads sumoff for it
+        final FeaturePlan log = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log}"));
+        Assertions.assertFalse(log.getDiagnostics().hasErrors(), log::describe);
+        Assertions.assertNull(log.getColumn("enc__seller_id__e2__suminfo"));
+        Assertions.assertEquals("log", column(log, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("enc__seller_id__e2__sumoff", Shrinkage.parseLevels(column(log, "enc__seller_id__e2__mean").getCoordinates().get("levels")).get(0).infoColumn());
 
         final FeaturePlan identity = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
         Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
         Assertions.assertFalse(hasCode(identity, "encoding.offset.additive"));
         Assertions.assertNull(identity.getColumn("enc__seller_id__e2__sumoff"));
+        Assertions.assertNull(column(identity, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         Assertions.assertFalse(column(identity, "enc__seller_id__e2__mean").getCoordinates().get("levels").contains("sumoff"));
+
+        // the plan hash of an offset term names the estimator: an artifact of the transformed-mean estimator, addressed by the
+        // same spec, is not found (a keySet-level scale counts too; identity and no offset are unsalted)
+        final JsonObject logitJson = Config.convertConfigJson(logit, Config.Format.yaml);
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(logitJson));
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market")
+                .replace("      - keys: [category]\n", "      - keys: [category]\n        shrinkage: {scale: log}\n"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2, scale: logit}"), Config.Format.yaml)));
+        Assertions.assertEquals(FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(Config.convertConfigJson(SOURCES, Config.Format.yaml)) + "\u0000"
+                + FeaturePlanCompiler.canonical(FeaturePlanCompiler.withoutArtifact(logitJson)) + "\u0000" + FeaturePlanCompiler.OFFSET_ESTIMATOR), plan.getHash());
 
         final FeaturePlan joint = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log, estimator: joint}\n    fit: {mode: static}"));
         Assertions.assertFalse(joint.getDiagnostics().hasErrors(), joint::describe);
         Assertions.assertTrue(hasCode(joint, "encoding.offset.additive"), joint::describe);
         Assertions.assertEquals("joint", column(joint, "enc__seller_id__e2__mean").getOperator());
         Assertions.assertEquals("market", column(joint, "enc__seller_id__e2__mean").getCoordinates().get("offset"));
+    }
+
+    /**
+     * A baseline over an outcome field is a valid offset (spec §3 rule 3): the baseline is read from the past rows next
+     * to their outcome, never from the current row, so its availability joins the target's on the past side. The
+     * expanding block's levels shift their window by the outcome's lag exactly as an outcome target does (the composed
+     * value, read from the shifted statistics, stays staticSafe), a forward fit delays the blocks it may read by the same
+     * lag, a static fit is unchanged — and emitting that baseline as a column of the row is still a violation.
+     */
+    @Test
+    public void testOffsetOverOutcomeBaselineShiftsTheWindow() {
+        final String marketLine = "  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        Assertions.assertTrue(SPEC.contains(marketLine));
+        final String settled = SPEC.replace(marketLine, marketLine + "\n  - {name: settled, context: session, expr: \"share(1 / final_price)\"}");
+        final Duration outcomeLag = Duration.ofDays(6).plusMinutes(38);   // settlement + ingestion + the predictAt offset
+
+        // a pre-event target too, so the shift its level takes is the baseline's alone (sold has the same lag itself)
+        final String withPrice = settled.replace("      - {expr: \"sold >= 1\", stats: [mean]}\n", "      - {expr: \"sold >= 1\", stats: [mean]}\n      - {field: start_price, stats: [mean]}\n");
+        Assertions.assertNotEquals(settled, withPrice);
+        final FeaturePlan plan = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    shrinkage: {priorWeight: 2, scale: logit}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "availability.violation"), plan::describe);
+        // the target-less count reads no baseline (it counts every row): no shift from the offset
+        final OutputColumn count = column(plan, "enc__seller_id__count");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, count.getStatus(), plan::describe);
+        Assertions.assertFalse(count.getPastInputs().contains("__baseline_settled"), count::describe);
+        // a target's level reads the baseline next to the target: the pre-event target's level shifts by the baseline's lag
+        final OutputColumn priceN = column(plan, "enc__seller_id__start_price__n");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, priceN.getStatus(), plan::describe);
+        Assertions.assertEquals(outcomeLag, priceN.getWindowShift());
+        Assertions.assertTrue(priceN.getPastInputs().contains("__baseline_settled"), priceN::describe);
+        final OutputColumn n = column(plan, "enc__seller_id__e2__n");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, n.getStatus());
+        Assertions.assertEquals(outcomeLag, n.getWindowShift());
+        final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, composed.getStatus(), plan::describe);
+        Assertions.assertFalse(composed.getInputs().contains("__baseline_settled"), "the composed value never reads the row's own baseline");
+        Assertions.assertTrue(composed.getDerivedFrom().contains("outcome"), composed::describe);
+        // a pre-event baseline shifts nothing, and without an offset the pre-event target's level shifts nothing
+        final FeaturePlan market = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(market, "enc__seller_id__count").getStatus(), market::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(market, "enc__seller_id__start_price__n").getStatus(), market::describe);
+        final FeaturePlan plain = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2}"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plain, "enc__seller_id__start_price__n").getStatus(), plain::describe);
+
+        // the row cannot see its own settled baseline: emitting it is the violation it always was — unless it is the
+        // evaluation baseline (output.roles.baseline), post-event by declaration like a label: status label, never a feature
+        final String emitting = settled.replace("expr: \"share(1 / final_price)\"}", "expr: \"share(1 / final_price)\", emit: settledProb}")
+                .replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled");
+        final FeaturePlan emitted = compile(SOURCES, emitting);
+        Assertions.assertTrue(hasCode(emitted, "availability.violation"), emitted::describe);
+        final FeaturePlan role = compile(SOURCES, emitting.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  roles: {baseline: settled}"));
+        Assertions.assertFalse(role.getDiagnostics().hasErrors(), role::describe);
+        Assertions.assertEquals(OutputColumn.Status.label, column(role, "settledProb").getStatus(), role::describe);
+        Assertions.assertEquals("f_settledProb", role.getRoleColumns().get("baseline"), role::describe);
+        // (a screen excludes a status-label column from its candidates: FeatureLineage.labels collects every one)
+
+        // lookup fits: static is unchanged, forward delays the readable blocks by the baseline's lag
+        final FeaturePlan statik = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: static}"));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(statik, "enc__seller_id__e2__mean").getStatus(), statik::describe);
+        final FeaturePlan forward = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        // (under a lookup fit the visible statistics read the hidden levels, which carry the geometry): the row-count level
+        // takes no lag from the baseline it never reads, a target's level takes the baseline's
+        Assertions.assertEquals("0", column(forward, "enc__seller_id__n").getCoordinates().get("forwardLagMillis"), forward::describe);
+        Assertions.assertTrue(Long.parseLong(column(forward, "enc__seller_id__e2__n").getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, forward::describe);
+        final FeaturePlan forwardPrice = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertTrue(Long.parseLong(column(forwardPrice, "enc__seller_id__start_price__n").getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, forwardPrice::describe);
+        final FeaturePlan forwardMarket = compile(SOURCES, withPrice.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertEquals("0", column(forwardMarket, "enc__seller_id__start_price__n").getCoordinates().get("forwardLagMillis"), forwardMarket::describe);
     }
 
     /**
