@@ -734,6 +734,25 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("session_time", column(noTie, "enc__seller_id__e2__n").getCoordinates().get("foldKeys"));
     }
 
+    /**
+     * A diagnostic raised once per keySet / window / column with the same text is reported once: the
+     * varianceComponents info is parsed per keySet (two here) and the advice does not change with the keySet, while
+     * messages that name their column stay one per column.
+     */
+    @Test
+    public void testIdenticalDiagnosticsAreReportedOnce() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {weights: varianceComponents}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> "encoding.shrinkage.weights".equals(m.code())).count(), plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().filter(m -> "availability.windowShift".equals(m.code())).count() > 1, plan::describe);
+        final Diagnostics diagnostics = new Diagnostics();
+        diagnostics.info("a.b", "x", "same");
+        diagnostics.info("a.b", "x", "same");
+        diagnostics.info("a.b", "y", "same");
+        diagnostics.warning("a.b", "x", "same");
+        Assertions.assertEquals(3, diagnostics.getMessages().size());
+    }
+
     @Test
     public void testOffsetRequiresPredictAtComputeAt() {
         final String spec = SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    computeAt: \"event_time - PT1H\"");
@@ -3785,7 +3804,7 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
         // the purge is two-sided and the embargo extends it (the info spells out the width left out)
         Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code())
-                && m.message().contains("on both sides") && m.message().contains("2·purge + embargo + 1")), plan::describe);
+                && m.message().contains("on both sides") && m.message().contains("2*purge + embargo + 1")), plan::describe);
 
         // a declared purge wins over the label's horizon and is inherited by the blocks (10 days of 7-day blocks → 2)
         final FeaturePlan declared = compile(SOURCES, spec.replace("fold: {by: time, embargo: P40D}", "fold: {by: time, purge: P10D, embargo: P40D}"));
@@ -3833,6 +3852,7 @@ public class FeaturePlanCompilerTest {
                     windows: [{maxAge: 3, clock: business}]
                     ops:
                       - {type: aggregate, field: start_price, funcs: [mean]}
+                      - {type: aggregate, field: sold, funcs: [count]}
                       - {type: ewma, field: start_price, halflife: [2], decayBy: business}
                   - name: enc_days
                     scope: population
@@ -3857,6 +3877,16 @@ public class FeaturePlanCompilerTest {
         final OutputColumn ewma = column(plan, "days_3business_start_price_ewma2");
         Assertions.assertEquals("business", ewma.getCoordinates().get("decayBy"));
         Assertions.assertNotNull(ewma.getClocks().get("business"));
+        // an outcome under a calendar window: the near edge shifts on wall time (6 days 38 minutes), which the info
+        // states in ticks of the clock (consecutive days: one tick a day) against the window's 3 ticks
+        final OutputColumn shifted = column(plan, "days_3business_sold_count");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, shifted.getStatus());
+        final Diagnostics.Message shift = plan.getDiagnostics().getMessages().stream()
+                .filter(m -> "availability.windowShift".equals(m.code()) && m.message().startsWith("days_3business_sold_count:")).findFirst().orElseThrow();
+        Assertions.assertTrue(shift.message().contains("~6.0 of the window's 3 tick(s)"), shift::message);
+        Assertions.assertTrue(shift.message().contains("business"), shift::message);
+        Assertions.assertFalse(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "availability.windowShift".equals(m.code())
+                && m.message().startsWith("recent_n5_sold_count:") && m.message().contains("tick")), "a wall-time window says nothing about ticks");
         // forward blocks of 5 ticks; the keySet window of 7 ticks reads 2 blocks
         final OutputColumn level = plan.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
                 && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
@@ -3889,7 +3919,7 @@ public class FeaturePlanCompilerTest {
         rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {bucket: month, clock: business}"), "fit.blocks.clock");
         rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: P3D, clock: business}]"), "window.clock");
         rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: events}]"), "window.clock");
-        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
+        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: aggregate, field: sold, funcs: [count]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
                 "    entity: seller\n    direction: future\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}"), "clock.direction");
         for (final Map.Entry<String, String> e : rejected.entrySet()) {
             Assertions.assertNotEquals(spec, e.getKey(), e.getValue());

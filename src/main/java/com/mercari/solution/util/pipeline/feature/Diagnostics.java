@@ -24,24 +24,33 @@ public class Diagnostics implements Serializable {
 
     private final List<Message> messages = new ArrayList<>();
 
+    /**
+     * Adds a message unless an identical one (level, code, location and text) was added before: an expansion that runs
+     * once per keySet / window / column raises the same advice for each of them, and one line of it says as much as
+     * five (a message that differs in any word - a column name, a count - is kept).
+     */
+    private void add(final Message message) {
+        if (!messages.contains(message)) messages.add(message);
+    }
+
     public void error(final String code, final String location, final String message) {
-        messages.add(new Message(Level.error, code, location, message));
+        add(new Message(Level.error, code, location, message));
     }
 
     public void warning(final String code, final String location, final String message) {
-        messages.add(new Message(Level.warning, code, location, message));
+        add(new Message(Level.warning, code, location, message));
     }
 
     public void hint(final String code, final String location, final String message) {
-        messages.add(new Message(Level.hint, code, location, message));
+        add(new Message(Level.hint, code, location, message));
     }
 
     public void info(final String code, final String location, final String message) {
-        messages.add(new Message(Level.info, code, location, message));
+        add(new Message(Level.info, code, location, message));
     }
 
     public void addAll(final Diagnostics other) {
-        messages.addAll(other.messages);
+        for (final Message m : other.messages) add(m);
     }
 
     public boolean hasErrors() {

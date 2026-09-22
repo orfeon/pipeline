@@ -175,7 +175,7 @@ public final class Shrinkage implements Serializable {
                     case "varianceComponents" -> {
                         weights = "varianceComponents";
                         diagnostics.info("encoding.shrinkage.weights", location,
-                                "weights: varianceComponents estimates λ = σ²/τ² per level from the whole batch (method of moments); the estimate is not time-expanding (structural, §6.3)");
+                                "weights: varianceComponents estimates lambda = sigma^2/tau^2 per level from the whole batch (method of moments); the estimate is not time-expanding (structural, section 6.3)");
                     }
                     case "heldOut" -> diagnostics.error("encoding.shrinkage.weights", location, "weights: heldOut is not implemented yet");
                     default -> diagnostics.error("encoding.shrinkage.weights", location, "weights must be fixed | varianceComponents | heldOut: " + w);

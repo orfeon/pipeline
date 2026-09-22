@@ -1276,7 +1276,9 @@ The steps always run in the order slice → diff → normalize; all three are op
   readout (`length` included): a vector with a hole has no defined readout. A readout that is undefined on
   the vector at hand — too few elements, a `normalize` whose denominator is 0, a non-finite result — is
   null, never NaN. An empty vector (an empty array, or a slice beyond it) has `length` 0 and no other
-  readout. A `repeated` input field without a value arrives as the empty array, not as null.
+  readout. A `repeated` input field without a value arrives as the empty array, not as null - and BigQuery
+  does not distinguish a NULL array from an empty one, so a row without an array reads `length` 0 there (no
+  `_isnull` indicator on `length`: the row op has a value) while its other readouts are null.
 - **Availability and lineage** are the array field's own: the readouts are ordinary row columns, so an
   `expr` composes them (`bids_last / bids_mean`), a context / sequence / encoding block consumes them, and
   an array that is an outcome is rejected like any other outcome field (`availability.violation`).

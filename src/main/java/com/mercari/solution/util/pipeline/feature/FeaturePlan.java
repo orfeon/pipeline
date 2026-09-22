@@ -479,9 +479,9 @@ public class FeaturePlan implements Serializable {
             queries.add(new AuditQuery("audit" + (n++), a.keys(), List.of("entity " + a.entity()), sql,
                     "entities." + a.entity() + ".minInterval " + a.minInterval() + " is a declaration the plan relies on (it lets " + a.columns().size()
                             + " column(s) read an outcome without a window shift of up to " + a.shift() + "): every row counted here follows the entity's"
-                            + " previous event by less than it and may read an outcome that was not yet known — the run counts the same events as"
-                            + " feature/minInterval_" + a.entity() + "_below (BigQuery form; a gap of zero — rows sharing a timestamp, which never see"
-                            + " each other — is not a violation, and where several rows share the later timestamp this query counts one of them and the"
+                            + " previous event by less than it and may read an outcome that was not yet known - the run counts the same events as"
+                            + " feature/minInterval_" + a.entity() + "_below (BigQuery form; a gap of zero - rows sharing a timestamp, which never see"
+                            + " each other - is not a violation, and where several rows share the later timestamp this query counts one of them and the"
                             + " counter counts each)"
                             + (derived.isEmpty() ? "" : "; keys " + derived + " are intermediate columns: run on the relation that derives them")));
         }

@@ -1135,7 +1135,7 @@ public final class FeatureStages {
                 if (loose > 0) {
                     // columns that continue nothing are what fit.align exists to prevent: the run says how often it happened
                     LOG.warn("{} {}: {} change point(s) shared too little with the fit before them to anchor every column (fit.align): the columns without a"
-                                    + " predecessor there are that fit's own leading components and do not continue the earlier blocks — a longer fit.window,"
+                                    + " predecessor there are that fit's own leading components and do not continue the earlier blocks - a longer fit.window,"
                                     + " larger blocks or a smaller rank give consecutive fits more in common",
                             artifact().name(), block(), loose);
                 }
@@ -1900,7 +1900,7 @@ public final class FeatureStages {
         public Smooth fit(final Svd.Moments m, final boolean loud) {
             final Smooth fitted = Smooth.fit(m, basis, penaltyOrder, lambda, loud);
             if (loud) {
-                LOG.info("smooth {}: fitted {} coefficients on {} rows (λ = {}{}, edf = {})", block, fitted.coefficients.length, fitted.n,
+                LOG.info("smooth {}: fitted {} coefficients on {} rows (lambda = {}{}, edf = {})", block, fitted.coefficients.length, fitted.n,
                         fitted.lambda, !fitted.estimated ? "" : fitted.limit == null ? " by REML" : " = the end of the REML search, the " + fitted.limit + " limit", fitted.edf);
             }
             return fitted;

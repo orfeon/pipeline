@@ -12,6 +12,7 @@
   <packaging>${packaging}</packaging>
 
   <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!-- The prism image bundles the prism release of this version: bump prism.zip.sha256 (prism profile) with it. -->
     <beam.version>2.76.0</beam.version>
 
