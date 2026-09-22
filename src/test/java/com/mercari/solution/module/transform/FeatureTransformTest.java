@@ -2500,6 +2500,35 @@ public class FeatureTransformTest {
         Assertions.assertTrue(written.isEmpty(), written::toString);
     }
 
+    /**
+     * {@code entities[].minInterval: P7D} lets the seller's outcome windows read without a shift (the outcome is
+     * known within 6 days and 30 minutes of its event). The declaration is trusted, so the keyed replay counts the
+     * rows that contradict it: s1's events are Jan 1, 3, 20 and Feb 1, s2's Jan 1 and 20 — B/s1 follows A/s1 by two
+     * days, every other row by more than a week. Nothing else changes: the counted row still reads the shifted
+     * window's answer of the declaration-free spec, since the fixture has no outcome inside the gap.
+     */
+    @Test
+    public void testMinIntervalCounter() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertEquals("staticSafe", schema.getField("f_recent_n5_sold_lag1").getOptions().get("feature.status"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) count++;
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        final org.apache.beam.sdk.PipelineResult result = pipeline.run();
+        result.waitUntilFinish();
+        long below = -1;
+        for (final org.apache.beam.sdk.metrics.MetricResult<Long> counter : result.metrics().queryMetrics(org.apache.beam.sdk.metrics.MetricsFilter.builder()
+                .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.named("feature", "minInterval_seller_below")).build()).getCounters()) {
+            below = Math.max(below, 0) + counter.getAttempted();
+        }
+        Assertions.assertEquals(1, below, "B/s1, two days after A/s1");
+    }
+
     private static final String ADDITIVE_BLOCKS = """
                     - name: by_price
                       scope: population

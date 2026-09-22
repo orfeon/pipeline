@@ -1393,7 +1393,11 @@ A sequence references other rows' event times, so whether `event_time(t') + δ' 
    evaluated.
 2. **Static (conservative, `minInterval`)**: when a per-entity minimum event interval is declared on
    the source or the entity, `minInterval ≥ δ' + δ_predict` makes the window safe without a shift.
-   Entities appearing several times a day defeat it, so tier 1 takes precedence.
+   Entities appearing several times a day defeat it, so tier 1 takes precedence. The declaration is
+   trusted at compile time and audited (§7): the plan records every column whose `staticSafe` rests on it
+   with the shift absorbed (`FeaturePlan.MinIntervalAudit`), emits an audit query counting the input's
+   events that follow their predecessor sooner, and the keyed replay counts those rows at run time
+   (`feature/minInterval_<entity>_below`). A violation is reported, never repaired per row.
 3. **Run time (availability filter)**: when δ' is not bounded by a constant (`atRowCreation`, per-row
    delays), the engine filters the window's past rows by `effectiveAvailableAt(t') ≤ computeAt(t)`
    before aggregating. **Provided `ingestionLag` really bounds reality from above**, this matches the

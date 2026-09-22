@@ -59,6 +59,8 @@ public final class FeaturePlanCompiler {
     /** Hint codes already reported per block (some hints are per block, not per column). */
     private final Set<String> hintedBlocks = new HashSet<>();
     private final List<FeaturePlan.ObservedAtAudit> observedAtAudits = new ArrayList<>();
+    /** Per entity, the columns whose staticSafe rests on its declared minInterval, and the largest shift it absorbed. */
+    private final Map<String, FeaturePlan.MinIntervalAudit> minIntervalAudits = new LinkedHashMap<>();
     private int anonymousCounter = 0;
 
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
@@ -94,7 +96,8 @@ public final class FeaturePlanCompiler {
         final Schema outputSchema = buildSchema();
         final String hash = hash(sourcesDocument, parameters);
         final String outputHash = outputHash(hash);
-        return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits);
+        return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits,
+                new ArrayList<>(minIntervalAudits.values()));
     }
 
     /**
@@ -2319,7 +2322,7 @@ public final class FeaturePlanCompiler {
             for (final String o : filterRefs.others) addPastInput(c, o);
         }
         if (isFuture(def)) classifyFuture(c, window);
-        else classifyPast(c, pooled ? null : entity.minInterval(), alignWith);
+        else classifyPast(c, pooled ? null : entity, alignWith);
         c.validFor = def.validFor;
         register(c);
     }
@@ -2393,11 +2396,12 @@ public final class FeaturePlanCompiler {
         c.status = Status.label;
     }
 
-    private void classifyPast(final OutputColumn c, final Duration minInterval) {
-        classifyPast(c, minInterval, List.of());
+    private void classifyPast(final OutputColumn c, final EntityDef entity) {
+        classifyPast(c, entity, List.of());
     }
 
-    private void classifyPast(final OutputColumn c, final Duration minInterval, final List<String> alignWith) {
+    private void classifyPast(final OutputColumn c, final EntityDef entity, final List<String> alignWith) {
+        final Duration minInterval = entity == null ? null : entity.minInterval();
         final Set<String> pastSide = new LinkedHashSet<>(c.pastInputs);
         pastSide.addAll(alignWith);
         AvailableAt past = null;
@@ -2423,6 +2427,19 @@ public final class FeaturePlanCompiler {
         } else if (minInterval != null && minInterval.compareTo(shift) >= 0) {
             c.status = Status.staticSafe;
             c.coordinates.put("minInterval", minInterval.toString());
+            c.coordinates.put("minIntervalEntity", entity.name());
+            // the declaration is trusted here and verified nowhere: recorded for the audit query and the run-time counter
+            final FeaturePlan.MinIntervalAudit before = minIntervalAudits.get(entity.name());
+            final List<String> relying = new ArrayList<>(before == null ? List.of() : before.columns());
+            relying.add(c.canonicalName);
+            minIntervalAudits.put(entity.name(), new FeaturePlan.MinIntervalAudit(entity.name(), entity.keys(), minInterval,
+                    before == null || before.shift().compareTo(shift) < 0 ? shift : before.shift(), relying));
+            if (hintedBlocks.add("entity.minInterval:" + entity.name())) {
+                diagnostics.info("entity.minInterval", "entities." + entity.name(), "minInterval " + minInterval + " is a declaration, not a check: it lets windows"
+                        + " over entity " + entity.name() + " read an outcome without a shift of up to " + shift + " (staticSafe). An event that follows the"
+                        + " entity's previous one sooner than that may read an outcome not yet known — the plan's audit query counts such events in the"
+                        + " input, and the run counts them as feature/minInterval_" + entity.name() + "_below; declare the interval the data has");
+            }
         } else {
             c.status = Status.windowShift;
             c.windowShift = shift;

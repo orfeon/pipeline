@@ -2396,6 +2396,46 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(statik, "smooth.fit.align"), statik::describe);
     }
 
+    /**
+     * An entity's {@code minInterval} is a declaration the compiler trusts: it turns the window shift of an outcome
+     * (settlement + ingestion of {@code sold}, PT144H38M here) into {@code staticSafe} when it is at least as long. The
+     * plan says what rests on it — the columns, the shift absorbed — with an audit query over the input, an info, and
+     * the run-time counter's name; an entity whose declaration absorbs nothing appears nowhere.
+     */
+    @Test
+    public void testMinIntervalAudit() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn mean = column(plan, "recent_n5_sold_mean");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, mean.getStatus());
+        Assertions.assertEquals("PT168H", mean.getCoordinates().get("minInterval"));
+        Assertions.assertEquals("seller", mean.getCoordinates().get("minIntervalEntity"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plan, "recent_n5_start_price_lag1").getStatus());
+        Assertions.assertNull(column(plan, "recent_n5_start_price_lag1").getCoordinates().get("minIntervalEntity"), "an attribute needs no shift: nothing rests on the declaration");
+        Assertions.assertEquals(1, plan.getMinIntervalAudits().size(), plan::describe);
+        final FeaturePlan.MinIntervalAudit audit = plan.getMinIntervalAudits().get(0);
+        Assertions.assertEquals("seller", audit.entity());
+        Assertions.assertEquals(List.of("seller_id"), audit.keys());
+        Assertions.assertEquals(java.time.Duration.ofDays(7), audit.minInterval());
+        Assertions.assertEquals(column(compile(SOURCES, SPEC), "recent_n5_sold_mean").getWindowShift(), audit.shift());
+        Assertions.assertTrue(audit.columns().contains("recent_n5_sold_mean"), audit::describe);
+        Assertions.assertFalse(audit.columns().contains("recent_n5_start_price_lag1"), audit::describe);
+        Assertions.assertTrue(hasCode(plan, "entity.minInterval"), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("entity.minInterval")).count(), "once per entity");
+        final FeaturePlan.AuditQuery query = plan.getAuditQueries().stream().filter(q -> q.stages().contains("entity seller")).findFirst().orElseThrow(() -> new AssertionError(plan.describe()));
+        Assertions.assertTrue(query.sql().contains("LAG(session_time) OVER (PARTITION BY seller_id ORDER BY session_time)"), query.sql());
+        Assertions.assertTrue(query.sql().contains("gap_seconds < 604800"), query.sql());
+        Assertions.assertTrue(query.note().contains("feature/minInterval_seller_below"), query.note());
+        Assertions.assertTrue(plan.describe().contains("-- minInterval audit"), plan::describe);
+        Assertions.assertEquals(1, plan.toJson().getAsJsonArray("minIntervalAudit").size());
+        // a declaration shorter than the shift absorbs nothing: the window stays shifted and no audit is raised
+        final FeaturePlan shorter = compile(SOURCES, SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P5D}"));
+        Assertions.assertEquals(OutputColumn.Status.windowShift, column(shorter, "recent_n5_sold_mean").getStatus());
+        Assertions.assertTrue(shorter.getMinIntervalAudits().isEmpty());
+        Assertions.assertFalse(hasCode(shorter, "entity.minInterval"));
+        Assertions.assertTrue(compile(SOURCES, SPEC).getMinIntervalAudits().isEmpty());
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population

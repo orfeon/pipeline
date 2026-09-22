@@ -2863,6 +2863,20 @@ public final class FeatureStages {
             bufferedFields.addAll(population.bufferedFields());
         }
 
+        /**
+         * The declared {@code minInterval} (millis) per entity that a column of this stage rests on for its
+         * {@code staticSafe} (the {@code minInterval} / {@code minIntervalEntity} coordinates): what the keyed replay
+         * audits against the gaps it sees. Empty for a stage that relies on none.
+         */
+        Map<String, Long> minIntervals() {
+            final Map<String, Long> floors = new LinkedHashMap<>();
+            for (final OutputColumn c : columns) {
+                final String entity = c.getCoordinates().get("minIntervalEntity"), declared = c.getCoordinates().get("minInterval");
+                if (entity != null && declared != null) floors.put(entity, java.time.Duration.parse(declared).toMillis());
+            }
+            return floors;
+        }
+
         static Scope kindOf(final OutputColumn c) {
             if ("isnull".equals(c.getOperator())) return Scope.row;
             if ("baseline".equals(c.getOperator())) return c.getScope() == Scope.context ? Scope.context : Scope.row;
@@ -3318,6 +3332,14 @@ public final class FeatureStages {
          * window {@code (t, t + maxAge]}; the output keeps the real event time.
          */
         private final boolean mirrored;
+        /**
+         * The declared {@code minInterval} per entity this stage's columns rest on ({@link StageEvaluator#minIntervals}),
+         * and the counter {@code feature/minInterval_<entity>_below} of the rows that follow the key's previous event
+         * by less: the compiler trusts the declaration for a {@code staticSafe} (DSL spec §6.2 tier 2), the replay is
+         * where the actual gaps are seen. Rows sharing a timestamp are invisible to each other and are not counted.
+         */
+        private final Map<String, Long> minIntervals;
+        private transient Map<String, Counter> belowMinInterval;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
@@ -3326,6 +3348,17 @@ public final class FeatureStages {
             this.sorter = sorter;
             this.label = label;
             this.mirrored = mirrored;
+            this.minIntervals = mirrored ? Map.of() : evaluator.minIntervals();
+        }
+
+        private void auditInterval(final long millis, final long previousMillis) {
+            if (minIntervals.isEmpty() || previousMillis == Long.MIN_VALUE) return;
+            final long gap = millis - previousMillis;
+            for (final Map.Entry<String, Long> e : minIntervals.entrySet()) {
+                if (gap >= e.getValue()) continue;
+                if (belowMinInterval == null) belowMinInterval = new HashMap<>();
+                belowMinInterval.computeIfAbsent(e.getKey(), entity -> Metrics.counter("feature", "minInterval_" + entity + "_below")).inc();
+            }
         }
 
         /** The replay clock of an event time: itself, or {@code −t} for a future stage (ascending in replay order). */
@@ -3407,15 +3440,18 @@ public final class FeatureStages {
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
-            long pendingMillis = Long.MIN_VALUE;
+            long pendingMillis = Long.MIN_VALUE, previousMillis = Long.MIN_VALUE;
             for (final KV<Long, MElement> row : rows) {
                 final MElement input = row.getValue();
                 final long millis = clock(input.getTimestamp().getMillis());
                 if (millis != pendingMillis) {
                     history.addAll(pending);
                     pending.clear();
+                    previousMillis = pendingMillis;
                     pendingMillis = millis;
                 }
+                // how far this row is from the key's previous event time is what minInterval declared
+                auditInterval(millis, previousMillis);
                 evaluate(c, input, history, sequenceState, populationState, pending, false);
             }
         }
