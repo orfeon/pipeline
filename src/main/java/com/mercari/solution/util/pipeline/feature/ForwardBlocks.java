@@ -163,17 +163,24 @@ public final class ForwardBlocks implements Serializable {
         final double[] sumSq;
         /** Cumulative Σ baseline of the offset rows (zeros without an offset). */
         final double[] sumOff;
+        /** Cumulative Σ b(1 − b) of the offset rows (zeros without an offset): the logit-scale information. */
+        final double[] sumInfo;
 
         public Series(final long[] blocks, final double[] n, final double[] sum, final double[] sumSq) {
-            this(blocks, n, sum, sumSq, new double[blocks.length]);
+            this(blocks, n, sum, sumSq, new double[blocks.length], new double[blocks.length]);
         }
 
         public Series(final long[] blocks, final double[] n, final double[] sum, final double[] sumSq, final double[] sumOff) {
+            this(blocks, n, sum, sumSq, sumOff, new double[blocks.length]);
+        }
+
+        public Series(final long[] blocks, final double[] n, final double[] sum, final double[] sumSq, final double[] sumOff, final double[] sumInfo) {
             this.blocks = blocks;
             this.n = n;
             this.sum = sum;
             this.sumSq = sumSq;
             this.sumOff = sumOff;
+            this.sumInfo = sumInfo;
         }
 
         public int size() { return blocks.length; }
@@ -197,6 +204,7 @@ public final class ForwardBlocks implements Serializable {
             stats.sum = sum[position] - (from < 0 ? 0 : sum[from]);
             stats.sumSq = sumSq[position] - (from < 0 ? 0 : sumSq[from]);
             stats.sumOff = sumOff[position] - (from < 0 ? 0 : sumOff[from]);
+            stats.sumInfo = sumInfo[position] - (from < 0 ? 0 : sumInfo[from]);
             return stats.n <= 0 ? null : stats;
         }
 

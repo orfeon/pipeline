@@ -240,17 +240,28 @@ without `distribution` is an error (`encoding.target.values`).
   key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is
   missing (or NaN) has no residual: it is left out of every statistic of the block, `count` included, in the
   expanding replay and in the static / fold / forward fits alike.
-- `scale: logit` / `log` — each level's own term is `t(observed) − t(mean baseline)` over the level's rows
-  (the observed-over-expected **log-odds ratio** on logit, the Poisson-offset MLE `log(Σy / Σb)` on log),
-  the leaf shrinks that term toward the parent's term, and the **composed value is the term itself** — a
-  residual on the scale, *not* a probability or rate — with `deviations` on the same scale (info
-  `encoding.offset.additive`). The levels keep a hidden `Σ baseline` (`<level>__sumoff`) next to
+- `scale: logit` / `log` — each level's own term is the **score-type** estimate of the key's log-odds
+  (log-rate) ratio against its baseline: `S / V` with `S = Σ(y − b)` over the level's rows and `V` their
+  information at the baseline, `Σ b(1 − b)` on logit and `Σb` on log — one scoring step from the baseline,
+  exact to first order, and finite for every key: a key with no success in n rows reads `−Σb / V`, which
+  grows with n toward `−1 / (1 − b̄)` instead of diverging (the transformed mean `logit(ȳ) − logit(b̄)` is
+  undefined there and a clamp would leak its constant into the value). The leaf shrinks that term toward
+  the parent's term **by information**, `V / (V + λ′)`, so a key of rare events is trusted less than a key
+  of the same row count at even odds; `λ′` is `priorWeight` rows of the global level's average information
+  (a declared `priorWeight` keeps its meaning of "rows of average information"), or under
+  `weights: varianceComponents` `1 / τ²` with the between-key variance τ² estimated on the score scale. The
+  **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
+  `deviations` on the same scale and `effectiveN` in rows (info `encoding.offset.additive`). The levels
+  keep a hidden `Σ baseline` (`<level>__sumoff`) and, on logit, `Σ b(1 − b)` (`<level>__suminfo`) next to
   `Σ(y − b)`, in the expanding replay and in the static / fold / forward artifacts alike; `std` and the
-  quantiles stay statistics of the identity residual. A level whose mean baseline is outside the scale
-  (`Σ baseline ≤ 0`, or `≥ n` on logit — e.g. a baseline that is 0 for every row of a cold-start key) has
-  no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
-  same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
-  stays on the residual statistics above.
+  quantiles stay statistics of the identity residual. A level whose rows carry no information (every
+  baseline at 0 or 1 — e.g. a baseline that is 0 for every row of a cold-start key) has no term of its own
+  and falls back to its parent, as an unseen level does. `estimator: joint` fits the same per-cell terms
+  weighted by their information (a cell without information is skipped). A keySet with its own
+  identity-scale or disabled `shrinkage` stays on the residual statistics above. A static / fold / forward
+  artifact written before the `suminfo` statistic existed is refused by a logit offset block (refit it with
+  `fit.artifact.refit: true`); a log offset block reads its information from `sumoff` and needs no refit,
+  though its values change with the estimator.
 
 ### Two-series and fractional-difference ops (sequence `regression`, `fracdiff`)
 

@@ -213,9 +213,10 @@ sequence ops never see the current row.
   in the plan and keep `maxFeatures` tight.
 - **Residual against a baseline**: `offset: <baselines[].name>` on the block subtracts the baseline from
   the target. With `scale: logit` / `log` the composed column is the key's **log-odds / log-rate ratio
-  against its mean baseline** (shrunk toward the parent's), i.e. the effect *orthogonal to the baseline*
-  — the right target when a feature is judged by its excess information over a market baseline; the
-  plan reports it as info `encoding.offset.additive`. On identity it is the mean residual.
+  against its baseline** — the score-type one-step estimate `Σ(y − b) / information`, finite for a key
+  with no success, shrunk toward the parent's by information — i.e. the effect *orthogonal to the
+  baseline*, the right target when a feature is judged by its excess information over a market baseline;
+  the plan reports it as info `encoding.offset.additive`. On identity it is the mean residual.
 - A lattice (`hierarchy` / `structure`) shrinks sparse keys toward coarser contexts. `additive` /
   `structure: cross` need the single-key keySets in the same block and an explicit `shrinkage.scale`.
 - The **global level** (`[]`, or any `share` denominator) is one key holding every row — a single

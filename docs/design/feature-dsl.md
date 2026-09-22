@@ -431,15 +431,23 @@ Notes:
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,
-     `target − baseline` on identity. Each lattice level estimates its own δ from sufficient statistics as
-     `t(ȳ) − t(b̄)` — the level's observed statistic against the mean baseline of the same rows (the
-     observed-over-expected log-odds ratio on logit, the exact Poisson-offset MLE `log(Σy / Σb)` on log,
-     the mean residual on identity), so the levels keep `Σb` next to `Σ(y − b)`; shrinkage pulls a level's δ
-     toward its parent's, and the composed value **is δ** (the residual effect on the scale), not
-     `t⁻¹(t(baseline) + δ)` — the consumer adds it to its own baseline term or feeds it to a model as the
-     market-orthogonal component. A row without a baseline has no residual and is outside every statistic of
-     the block (its `count` too); a level whose mean baseline is outside the scale's domain (`Σb ≤ 0`, or
-     `Σb ≥ n` on logit) has no δ of its own and defers to its parent, like a level with no rows.
+     `log(μ) = log(baseline) + δ` on log, `target − baseline` on identity. Each lattice level estimates its
+     own δ from sufficient statistics by **one scoring step from the baseline**, `δ̂ = S / V` with
+     `S = Σ(y − b)` the score of the log-likelihood at δ = 0 and `V` its Fisher information — `Σ b(1 − b)` on
+     logit, `Σb` on log (the mean residual `S / n` on identity) — so the levels keep `Σb` (and `Σ b(1 − b)`)
+     next to `Σ(y − b)`. The one-step estimate is exact to first order in δ, finite for every level (a key
+     with no success reads `−Σb / V`, bounded by `−1 / (1 − b̄)` on logit, where the transformed mean
+     `t(ȳ) − t(b̄)` was undefined and its clamp leaked a constant that grew with n) and conservative for a
+     large |δ|. Shrinkage pulls a level's δ toward its parent's by **information**, `V / (V + λ′)`: a key of
+     rare events shrinks more than a key of the same row count at even odds; `λ′` is `priorWeight` rows of
+     the root level's average information (`priorWeight · V_root / n_root`) or, under
+     `weights: varianceComponents`, `1 / τ²` with τ² the between-key variance of the terms estimated on the
+     score scale (the DerSimonian–Laird moment estimator, sampling variance `1 / V_k`). The composed value
+     **is δ** (the residual effect on the scale), not `t⁻¹(t(baseline) + δ)` — the consumer adds it to its
+     own baseline term or feeds it to a model as the market-orthogonal component. A row without a baseline
+     has no residual and is outside every statistic of the block (its `count` too); a level whose rows carry
+     no information (`V ≤ 0`: every baseline at 0 or 1) has no δ of its own and defers to its parent, like
+     a level with no rows.
 - **computeAt**: a block may declare `computeAt` (default `predictAt`). "When the prediction runs" and
   "when this feature is computed" differ in general — columns computable in the morning coexist with
   columns computed at the last minute after market data arrives. The check is

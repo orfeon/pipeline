@@ -473,8 +473,11 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
 
 - `weights: heldOut` (`encoding.shrinkage.weights`), `estimator: joint` under `fit.mode: expanding` (the
   row-local replay has no cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` +
-  `expandEncoding`. (An `offset` on a logit / log scale is implemented: hidden `__sumoff` per level,
-  `Shrinkage.Level.offColumn`, `KeyStats.sumOff`, info `encoding.offset.additive`.)
+  `expandEncoding`. (An `offset` on a logit / log scale is implemented as the score-type estimate `S / V`:
+  hidden `__sumoff` (+ `__suminfo` on logit) per level, `Shrinkage.Level.offColumn` / `infoColumn`,
+  `Shrinkage.ownScore` / `lambdaFromScore`, `KeyStats.sumOff` / `sumInfo`, the `scoreScale` coordinate →
+  `scoreScales` map of every λ derivation, info `encoding.offset.additive`; engine doc §9.2 "Baseline offset".
+  A logit / log scale WITHOUT an offset still composes the transformed mean with its clamp — open.)
 - nested encoding targets (`targets[].field.ref`) —
   `encoding.nested`; ordering of fits is the open question. (`structure: sequence` is implemented: the keys are a
   path declared most recent first and `expandEncoding` derives the suffix chain `(k1..kn) → (k1..kn−1) → … → (k1)` as

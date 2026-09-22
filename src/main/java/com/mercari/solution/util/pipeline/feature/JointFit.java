@@ -30,7 +30,10 @@ import java.util.*;
  * solved once as a ridge / BLUP system on the cells of the lattice (the cross of every key field a level
  * uses, aggregated to (n, Σy, Σy²) in one pass): minimise {@code Σ_cells w_c (z_c − μ − Σ e)² + Σ_level
  * λ_level ‖e_level‖²} with {@code z_c = t(ȳ_c)} on the declared scale and the delta-method weight
- * {@code w_c = n_c · v(ȳ_c)} (v = 1 / p(1−p) / μ for identity / logit / log). Unlike the sequential estimator
+ * {@code w_c = n_c · v(ȳ_c)} (v = 1 / p(1−p) / μ for identity / logit / log) — or, under a baseline offset on a
+ * transformed scale, the score-type cell term {@code z_c = S_c / V_c} weighted by its information {@code w_c = V_c}
+ * ({@link Shrinkage#ownScore}: the one-step estimate of the offset term, with λ then on the score scale — a
+ * pseudo-count in rows times the fit's information per row, or {@link Shrinkage#lambdaFromScore}). Unlike the sequential estimator
  * (main effects first, interactions on the residual) the joint solve separates confounded contexts without
  * an order-dependent bias; unlike back-off it needs the whole cell table, so it lives in the fit stage
  * ({@code fit.mode: static | fold | forward}) and not in the row-local expanding replay.
@@ -66,20 +69,35 @@ public final class JointFit implements Serializable {
 
     /**
      * One aggregated cell (or a fold / block tagged part of one): the finest partition of the lattice.
-     * {@code sumOff} is the cell's Σ baseline under an offset block (0 otherwise), so the cell's observed statistic
-     * is {@code (sum + sumOff) / n} and its mean baseline {@code sumOff / n}.
+     * {@code sumOff} is the cell's Σ baseline under an offset block and {@code sumInfo} its Σ b(1 − b) (0 otherwise):
+     * the cell's information is {@code sumInfo} on logit, {@code sumOff} on log.
      */
-    public record Cell(String key, double n, double sum, double sumSq, double sumOff) implements Serializable {
+    public record Cell(String key, double n, double sum, double sumSq, double sumOff, double sumInfo) implements Serializable {
         public Cell(final String key, final double n, final double sum, final double sumSq) {
-            this(key, n, sum, sumSq, 0d);
+            this(key, n, sum, sumSq, 0d, 0d);
+        }
+
+        public Cell(final String key, final double n, final double sum, final double sumSq, final double sumOff) {
+            this(key, n, sum, sumSq, sumOff, 0d);
+        }
+
+        /** The cell's information on a transformed scale ({@link Shrinkage#information}), 0 on identity. */
+        double information(final Shrinkage.Scale scale) {
+            return switch (scale) {
+                case identity -> 0d;
+                case logit -> sumInfo;
+                case log -> sumOff;
+            };
         }
     }
 
     /** The fitted effects of one solve. */
     public static final class Solution implements Serializable {
         public double mu = Double.NaN;
-        /** Per effect level (the non-global levels, lattice order): λ used (+∞ = level fixed at 0). */
+        /** Per effect level (the non-global levels, lattice order): λ used (+∞ = level fixed at 0) — on the score scale for an offset term. */
         public double[] lambdas;
+        /** The fit's information per row under an offset term (λ / infoPerRow = the pseudo-count in rows); 1 otherwise. */
+        public double infoPerRow = 1;
         /** Per effect level: context key → effect on the transform scale. */
         public List<Map<String, Double>> effects;
         /** Leaf context key → n (rows of the fit), for effectiveN. */
@@ -228,8 +246,8 @@ public final class JointFit implements Serializable {
     }
 
     private static void merge(final Map<String, Cell> into, final String key, final Cell part) {
-        into.merge(key, new Cell(key, part.n(), part.sum(), part.sumSq(), part.sumOff()),
-                (a, b) -> new Cell(key, a.n() + b.n(), a.sum() + b.sum(), a.sumSq() + b.sumSq(), a.sumOff() + b.sumOff()));
+        into.merge(key, new Cell(key, part.n(), part.sum(), part.sumSq(), part.sumOff(), part.sumInfo()),
+                (a, b) -> new Cell(key, a.n() + b.n(), a.sum() + b.sum(), a.sumSq() + b.sumSq(), a.sumOff() + b.sumOff(), a.sumInfo() + b.sumInfo()));
     }
 
     /** {@code total − part}; null when nothing remains. */
@@ -237,7 +255,7 @@ public final class JointFit implements Serializable {
         if (total == null) return null;
         final double n = total.n() - part.n();
         if (n <= 1e-9) return null;
-        return new Cell(total.key(), n, total.sum() - part.sum(), total.sumSq() - part.sumSq(), total.sumOff() - part.sumOff());
+        return new Cell(total.key(), n, total.sum() - part.sum(), total.sumSq() - part.sumSq(), total.sumOff() - part.sumOff(), total.sumInfo() - part.sumInfo());
     }
 
     /** Delta-method weight factor of the transformed cell mean: 1 / p(1−p) / μ. */
@@ -262,10 +280,12 @@ public final class JointFit implements Serializable {
      * is null on a level (see {@link FeatureValues#keyWithNulls}) carries no indicator for that level: it
      * still informs the intercept and the levels whose keys it has.
      *
-     * @param offset the cells' targets are offset by a baseline: {@code z_c = t(ȳ_c) − t(b̄_c)} with
-     *               {@code ȳ_c = (Σ(y − b) + Σb) / n} the observed statistic and {@code b̄_c = Σb / n} the mean baseline
-     *               ({@link Shrinkage#own}: the additive term on the scale, spec §3 rule 5; on identity the mean
-     *               residual as before), weighted by the observed statistic's delta-method factor
+     * @param offset the cells' targets are offset by a baseline: on a transformed scale the cell term is the score-type
+     *               one-step estimate {@code z_c = S_c / V_c} ({@link Shrinkage#ownScore}, spec §3 rule 5) weighted by
+     *               its information {@code w_c = V_c}, and λ is on the score scale — the pseudo-count in rows times
+     *               the fit's information per row, or {@link Shrinkage#lambdaFromScore} over the contexts; a cell
+     *               without information ({@code V_c ≤ 0}) has no term and is left out. On identity the mean residual
+     *               as before
      */
     public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
                                  final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight) {
@@ -275,9 +295,10 @@ public final class JointFit implements Serializable {
         solution.lambdas = new double[L];
         solution.effects = new ArrayList<>();
         for (int l = 0; l < L; l++) solution.effects.add(new HashMap<>());
+        final boolean score = offset && scale != Shrinkage.Scale.identity;
         final List<Cell> cells = new ArrayList<>();
-        // a cell without rows — or, under an offset, whose mean baseline is outside the scale's domain — has no term
-        for (final Cell c : input) if (c.n() > 0 && (!offset || Shrinkage.baselineDefined(scale, c.n(), c.sumOff()))) cells.add(c);
+        // a cell without rows — or, under an offset term, without information (every baseline at 0 or 1) — has no term
+        for (final Cell c : input) if (c.n() > 0 && (!score || c.information(scale) > 0)) cells.add(c);
         if (cells.isEmpty()) return solution;
         cells.sort(Comparator.comparing(Cell::key));
         final int m = cells.size();
@@ -285,14 +306,24 @@ public final class JointFit implements Serializable {
         double maxZ = 0, rows = 0;
         for (int i = 0; i < m; i++) {
             final Cell c = cells.get(i);
-            // the observed statistic (Σy / n: the residual plus the baseline under an offset) sets the delta-method weight
-            final double observed = (c.sum() + (offset ? c.sumOff() : 0)) / c.n();
-            z[i] = Shrinkage.own(scale, c.n(), c.sum(), c.sumOff(), offset);
-            w[i] = c.n() * varianceFactor(scale, observed);
+            if (score) {
+                // the one-step term of the cell, weighted by the information behind it
+                z[i] = Shrinkage.ownScore(c.sum(), c.information(scale));
+                w[i] = c.information(scale);
+            } else {
+                // the observed statistic (Σy / n) sets the delta-method weight of the transformed mean
+                z[i] = Shrinkage.own(scale, c.n(), c.sum());
+                w[i] = c.n() * varianceFactor(scale, c.sum() / c.n());
+            }
             maxZ = Math.max(maxZ, Math.abs(z[i]));
             rows += c.n();
         }
         solution.rows = rows;
+        if (score) {
+            double information = 0;
+            for (int i = 0; i < m; i++) information += w[i];
+            solution.infoPerRow = information / rows;
+        }
         // contexts of every level: the projection of the cell onto the level's key fields (−1 = a null key: no indicator)
         final int[][] ctx = new int[L][m];
         final List<List<String>> contextKeys = new ArrayList<>();
@@ -342,17 +373,32 @@ public final class JointFit implements Serializable {
                 sumSq[k] += cells.get(i).sumSq();
             }
             if (l == 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), nsum[0][k]);
-            double lambda = priorWeight;
+            // the pseudo-count: in rows — or, on the score scale, λ′ = priorWeight · (the fit's information per row), so a
+            // declared pseudo-count keeps its meaning of "rows of average information" across the estimators
+            double lambda = score ? priorWeight * solution.infoPerRow : priorWeight;
             if ("varianceComponents".equals(weights)) {
-                double totalN = 0, totalSum = 0, totalSumSq = 0, sumSqOverN = 0, sumNSq = 0;
-                for (int k = 0; k < K; k++) {
-                    totalN += nsum[l][k];
-                    totalSum += sum[k];
-                    totalSumSq += sumSq[k];
-                    sumSqOverN += sum[k] * sum[k] / nsum[l][k];
-                    sumNSq += nsum[l][k] * nsum[l][k];
+                final Double estimated;
+                if (score) {
+                    // the contexts' score statistics: every context here has information (its cells do), w = V
+                    double sumV = 0, sumV2 = 0, sumS = 0, sumS2OverV = 0;
+                    for (int k = 0; k < K; k++) {
+                        sumV += wsum[l][k];
+                        sumV2 += wsum[l][k] * wsum[l][k];
+                        sumS += sum[k];
+                        sumS2OverV += sum[k] * sum[k] / wsum[l][k];
+                    }
+                    estimated = Shrinkage.lambdaFromScore(K, sumV, sumV2, sumS, sumS2OverV);
+                } else {
+                    double totalN = 0, totalSum = 0, totalSumSq = 0, sumSqOverN = 0, sumNSq = 0;
+                    for (int k = 0; k < K; k++) {
+                        totalN += nsum[l][k];
+                        totalSum += sum[k];
+                        totalSumSq += sumSq[k];
+                        sumSqOverN += sum[k] * sum[k] / nsum[l][k];
+                        sumNSq += nsum[l][k] * nsum[l][k];
+                    }
+                    estimated = Shrinkage.lambdaFromMoments(K, totalN, totalSum, totalSumSq, sumSqOverN, sumNSq);
                 }
-                final Double estimated = Shrinkage.lambdaFromMoments(K, totalN, totalSum, totalSumSq, sumSqOverN, sumNSq);
                 if (estimated != null) lambda = estimated;
             }
             solution.lambdas[l] = lambda;
@@ -366,9 +412,10 @@ public final class JointFit implements Serializable {
             numerator[l] = new double[K];
             delta[l] = new double[K];
             ridge[l] = new double[K];
-            // the row pseudo-count λ in the units of the context's weights: λ · v̄ (v̄ = 1 on the identity scale)
+            // the row pseudo-count λ in the units of the context's weights: λ · v̄ (v̄ = 1 on the identity scale) — on the
+            // score scale λ is in those units already (the weights are the information)
             final double lambda = Math.max(solution.lambdas[l], 1e-9);
-            for (int k = 0; k < K; k++) ridge[l][k] = lambda * (wsum[l][k] / nsum[l][k]);
+            for (int k = 0; k < K; k++) ridge[l][k] = score ? lambda : lambda * (wsum[l][k] / nsum[l][k]);
         }
         double totalW = 0, mu = 0;
         for (int i = 0; i < m; i++) {
@@ -468,7 +515,7 @@ public final class JointFit implements Serializable {
         final String key = FeatureValues.key(row, effectLevels.get(0).keys());
         if (key == null) return null;
         final double n = s.leafN.getOrDefault(key, 0d);
-        final double lambda = s.lambdas[0];
+        final double lambda = s.lambdas[0] / s.infoPerRow; // in rows (a score-scale λ divided by the information per row)
         return Double.isInfinite(lambda) ? s.rows : n + lambda;
     }
 
@@ -530,6 +577,7 @@ public final class JointFit implements Serializable {
                 writer.create(SCHEMA, bytes);
                 writer.append(record("mu", "", "", s.mu));
                 writer.append(record("rows", "", "", s.rows));
+                writer.append(record("infoPerRow", "", "", s.infoPerRow));
                 for (int l = 0; l < effectLevels.size(); l++) {
                     final String token = effectLevels.get(l).token();
                     writer.append(record("lambda", token, "", s.lambdas[l]));
@@ -563,6 +611,7 @@ public final class JointFit implements Serializable {
             manifest.add("lambdas", lambdas);
             manifest.add("contexts", contexts);
             manifest.addProperty("rows", s.rows);
+            if (fit.offset && fit.scale != Shrinkage.Scale.identity) manifest.addProperty("infoPerRow", s.infoPerRow);
             manifest.addProperty("iterations", s.iterations);
             manifest.addProperty("maxDelta", s.maxDelta);
             manifest.addProperty("entries", entries);
@@ -604,6 +653,7 @@ public final class JointFit implements Serializable {
                 switch (kind) {
                     case "mu" -> s.mu = value;
                     case "rows" -> s.rows = value;
+                    case "infoPerRow" -> s.infoPerRow = value;
                     case "lambda" -> { if (levelIndex.containsKey(level)) s.lambdas[levelIndex.get(level)] = value; }
                     case "effect" -> { if (levelIndex.containsKey(level)) s.effects.get(levelIndex.get(level)).put(key, value); }
                     case "leafN" -> s.leafN.put(key, value);
