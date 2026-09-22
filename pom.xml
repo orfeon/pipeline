@@ -12,7 +12,10 @@
   <packaging>${packaging}</packaging>
 
   <properties>
+    <!-- sources are UTF-8 whatever the platform default is (a Windows build reads them as CP932 otherwise);
+         reporting.outputEncoding does the same for the generated reports (the JaCoCo HTML declares UTF-8) -->
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <!-- The prism image bundles the prism release of this version: bump prism.zip.sha256 (prism profile) with it. -->
     <beam.version>2.76.0</beam.version>
 

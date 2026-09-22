@@ -32,12 +32,19 @@ public final class Durations {
         final int t = s.indexOf('T');
         final String periodPart = t < 0 ? s : s.substring(0, t);
         final String timePart = t < 0 ? null : "PT" + s.substring(t + 1);
-        final Period period = Period.parse(periodPart);
-        Duration duration = Duration.ofDays(period.getYears() * 365L + period.getMonths() * 30L + period.getDays());
-        if (timePart != null) {
-            duration = duration.plus(Duration.parse(timePart));
+        try {
+            final Period period = Period.parse(periodPart);
+            Duration duration = Duration.ofDays(period.getYears() * 365L + period.getMonths() * 30L + period.getDays());
+            if (timePart != null) {
+                duration = duration.plus(Duration.parse(timePart));
+            }
+            return duration;
+        } catch (final DateTimeParseException e) {
+            // every caller reports a malformed duration as a diagnostic by catching IllegalArgumentException:
+            // a DateTimeParseException (not one) would escape the compile as an unhandled exception
+            throw new IllegalArgumentException("Unsupported duration: " + text
+                    + " (expected an ISO-8601 duration or period, e.g. PT10M | P7D | P2Y)", e);
         }
-        return duration;
     }
 
     /** Short token used in generated column names: P365D → 365d, PT10M → 10m, P2Y → 730d. */

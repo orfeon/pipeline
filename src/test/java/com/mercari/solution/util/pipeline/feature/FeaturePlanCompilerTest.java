@@ -3062,6 +3062,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(Duration.ofDays(730), Durations.parse("P2Y"));
         Assertions.assertEquals("365d", Durations.shortName(Durations.parse("P365D")));
         Assertions.assertEquals("10m", Durations.shortName(Durations.parse("PT10M")));
+        // a malformed duration is an IllegalArgumentException: every caller reports it as a diagnostic by catching
+        // that one, so a DateTimeParseException would escape the compile as an unhandled exception instead
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Durations.parse("P1X"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> AvailableAt.parseTimeExpression("event_time - P1X"));
+        final FeaturePlan malformed = compile(SOURCES, SPEC.replace("predictAt: \"event_time - PT8M\"", "predictAt: \"event_time - P1X\""));
+        Assertions.assertTrue(hasCode(malformed, "predictAt.invalid"), malformed::describe);
+        // and the fallback predictAt is event_time, not the pre-event sentinel: a window shift measured against that
+        // one overflows a millisecond count instead of reporting the missing declaration
+        final FeaturePlan missing = compile(SOURCES, SPEC.replace("predictAt: \"event_time - PT8M\"\n", ""));
+        Assertions.assertTrue(hasCode(missing, "predictAt.missing"), missing::describe);
     }
 
     // ------------------------------------------------------------------------------------------

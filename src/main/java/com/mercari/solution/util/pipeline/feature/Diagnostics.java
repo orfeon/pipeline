@@ -3,7 +3,9 @@ package com.mercari.solution.util.pipeline.feature;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -23,6 +25,8 @@ public class Diagnostics implements Serializable {
     }
 
     private final List<Message> messages = new ArrayList<>();
+    /** The messages recorded, for the duplicate test: a scan of the list is quadratic over a plan with many columns. */
+    private final Set<Message> recorded = new HashSet<>();
 
     /**
      * Adds a message unless an identical one (level, code, location and text) was added before: an expansion that runs
@@ -30,7 +34,7 @@ public class Diagnostics implements Serializable {
      * five (a message that differs in any word - a column name, a count - is kept).
      */
     private void add(final Message message) {
-        if (!messages.contains(message)) messages.add(message);
+        if (recorded.add(message)) messages.add(message);
     }
 
     public void error(final String code, final String location, final String message) {
@@ -50,6 +54,7 @@ public class Diagnostics implements Serializable {
     }
 
     public void addAll(final Diagnostics other) {
+        if (other == this) return;
         for (final Message m : other.messages) add(m);
     }
 

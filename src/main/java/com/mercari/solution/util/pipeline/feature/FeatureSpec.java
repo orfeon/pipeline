@@ -649,6 +649,12 @@ public class FeatureSpec implements Serializable {
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
     public AvailableAt predictAt;
+    /**
+     * The predictAt a missing / unparsable declaration falls back to, so the rest of the report is still produced
+     * (the error is already recorded). It is {@code event_time}, never {@code atEventTime}: that one is the far-past
+     * sentinel, and a window shift measured against it ({@code past - predictAt}) overflows a millisecond count.
+     */
+    private static final AvailableAt PREDICT_AT_FALLBACK = AvailableAt.eventRelative(Duration.ZERO);
     public List<EntityDef> entities = new ArrayList<>();
     public List<ContextDef> contexts = new ArrayList<>();
     public List<BaselineDef> baselines = new ArrayList<>();
@@ -687,7 +693,7 @@ public class FeatureSpec implements Serializable {
         spec.predictAtExpression = Json.string(parameters, "predictAt");
         if (spec.predictAtExpression == null) {
             diagnostics.error("predictAt.missing", "predictAt", "predictAt is required");
-            spec.predictAt = AvailableAt.atEventTime();
+            spec.predictAt = PREDICT_AT_FALLBACK;
         } else {
             try {
                 spec.predictAt = AvailableAt.parseTimeExpression(spec.predictAtExpression);
@@ -696,7 +702,7 @@ public class FeatureSpec implements Serializable {
                 }
             } catch (final IllegalArgumentException e) {
                 diagnostics.error("predictAt.invalid", "predictAt", e.getMessage());
-                spec.predictAt = AvailableAt.atEventTime();
+                spec.predictAt = PREDICT_AT_FALLBACK;
             }
         }
 

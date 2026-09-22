@@ -4405,15 +4405,23 @@ public final class FeaturePlanCompiler {
      * A calendar window ({@code maxAge: N, clock: X}) is bounded in ticks at its far edge but shifted on wall time at its
      * near edge, so a shift longer than the clock's spacing hides the newest ticks whatever N is: the info says how
      * many of the N ticks the shift covers on average (shift / mean tick spacing), so a window is not designed one or two
-     * ticks wider than it can ever read. Empty for a wall-time window.
+     * ticks wider than it can ever read. A shift that reaches the far edge (N ticks or more) leaves nothing inside the
+     * window for any row - the far edge is not shifted with it ({@code SequenceEvaluator.farEdge}) - and the clause says
+     * so instead. Empty for a wall-time window.
      */
     private static String shiftInTicks(final OutputColumn c) {
         final String clockName = c.coordinates.get("windowClock");
         final Clock clock = clockName == null ? null : c.clocks.get(clockName);
-        if (clock == null || c.windowShift == null) return "";
-        final double ticks = (double) c.windowShift.toMillis() / clock.meanSpacingMillis();
-        return String.format("; on the clock '%s' that is ~%.1f of the window's %s tick(s) (mean spacing %s): the newest ticks are never visible",
-                clockName, ticks, c.coordinates.get("maxAgeTicks"), java.time.Duration.ofMillis(clock.meanSpacingMillis()));
+        final String maxAgeTicks = c.coordinates.get("maxAgeTicks");
+        if (clock == null || c.windowShift == null || maxAgeTicks == null) return "";
+        final long spacing = clock.meanSpacingMillis();
+        final double ticks = (double) c.windowShift.toMillis() / spacing;
+        final String effect = ticks >= Long.parseLong(maxAgeTicks) ? "the shift covers the whole window, which holds no row at all"
+                : ticks >= 1 ? "the newest ticks are never visible"
+                : "part of the newest tick is never visible";
+        // Locale.ROOT: the report is text a consumer greps, not a localized number
+        return String.format(Locale.ROOT, "; on the clock '%s' that is ~%.1f of the window's %s tick(s) (mean spacing %s): %s",
+                clockName, ticks, maxAgeTicks, Duration.ofMillis(spacing), effect);
     }
 
     /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */
