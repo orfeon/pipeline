@@ -2529,6 +2529,39 @@ public class FeatureTransformTest {
         Assertions.assertEquals(1, below, "B/s1, two days after A/s1");
     }
 
+    /**
+     * A second window over the same entity, reduced by a {@code $self} filter to a finer key, rests on the declaration
+     * too — and B/s1 is still counted once: the audit is kept by the stage keyed by the entity, not by every stage
+     * that relies on it (the reduced stage would not even see the A → B gap: A/s1 is good, B/s1 is good, but C/s1 is
+     * fair, and its sub-key history starts elsewhere).
+     */
+    @Test
+    public void testMinIntervalCountedOncePerEntity() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}")
+                .replace("            - {maxEvents: 5}\n", "            - {maxEvents: 5}\n            - {filter: \"condition_grade = $self.condition_grade\", as: sameGrade}\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_recent_sameGrade_sold_lag1"), schema::toString);
+        Assertions.assertEquals("staticSafe", schema.getField("f_recent_sameGrade_sold_lag1").getOptions().get("feature.status"));
+        final Set<String> keyedStages = new HashSet<>();
+        for (final String name : transformNames()) if (name.contains("_sequence") || name.contains("_population")) keyedStages.add(name.replaceAll("/.*", "") + ":" + name.replaceAll(".*/(Stage\\d+)_.*", "$1"));
+        Assertions.assertTrue(keyedStages.size() >= 2, "two keyed stages over the seller: " + keyedStages);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) count++;
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        final org.apache.beam.sdk.PipelineResult result = pipeline.run();
+        result.waitUntilFinish();
+        long below = 0;
+        for (final org.apache.beam.sdk.metrics.MetricResult<Long> counter : result.metrics().queryMetrics(org.apache.beam.sdk.metrics.MetricsFilter.builder()
+                .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.named("feature", "minInterval_seller_below")).build()).getCounters()) {
+            below += counter.getAttempted();
+        }
+        Assertions.assertEquals(1, below, "B/s1 once, not once per stage");
+    }
+
     private static final String ADDITIVE_BLOCKS = """
                     - name: by_price
                       scope: population

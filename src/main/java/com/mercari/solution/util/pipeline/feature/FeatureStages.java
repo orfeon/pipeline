@@ -338,7 +338,7 @@ public final class FeatureStages {
     }
 
     /** The shared objects of the stage wiring: one stage = one ParDo / GroupByKey, whatever wave it runs in. */
-    private static final class Wiring {
+    static final class Wiring {
         private final FeaturePlan plan;
         private final Map<String, OutputColumn> columns;
         private final Coder<MElement> elementCoder;
@@ -383,7 +383,7 @@ public final class FeatureStages {
          * </ul>
          * Future stages replay in descending time and are never granted a {@code minInterval}, so they are skipped.
          */
-        private static Map<Integer, Map<String, Long>> assignMinIntervalAudits(final FeaturePlan plan, final Map<String, OutputColumn> columns) {
+        static Map<Integer, Map<String, Long>> assignMinIntervalAudits(final FeaturePlan plan, final Map<String, OutputColumn> columns) {
             final Map<String, List<String>> entityKeys = new HashMap<>();
             for (final FeatureSpec.EntityDef e : plan.getSpec().entities) entityKeys.put(e.name(), e.keys());
             final Map<String, Long> declared = new LinkedHashMap<>();

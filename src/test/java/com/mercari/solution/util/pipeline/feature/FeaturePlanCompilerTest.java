@@ -2436,6 +2436,50 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(compile(SOURCES, SPEC).getMinIntervalAudits().isEmpty());
     }
 
+    /**
+     * The counter is kept by ONE keyed stage per entity, the one keyed by the entity itself: a window reduced by a
+     * {@code $self} equality filter runs under a finer key (entity keys + the filter field) and would see the gaps of
+     * that sub-key, not the entity's; and every keyed stage replays the same rows, so two stages counting would count
+     * a row twice. The reduced-key stage is used only when no exact one rests on the declaration.
+     */
+    @Test
+    public void testMinIntervalAuditIsAssignedToOneStagePerEntity() {
+        final String declared = SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}");
+        final String filter = "- {filter: \"condition_grade = $self.condition_grade\", as: sameGrade}";
+        final FeaturePlan both = compile(SOURCES, declared.replace("- {maxEvents: 5}", "- {}\n      " + filter));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertEquals("seller_id,condition_grade", column(both, "recent_sameGrade_sold_mean").getCoordinates().get("stageKeys"));
+        Assertions.assertEquals("seller", column(both, "recent_sameGrade_sold_mean").getCoordinates().get("minIntervalEntity"), "the reduced window rests on it too");
+        Assertions.assertEquals("seller", column(both, "recent_all_sold_mean").getCoordinates().get("minIntervalEntity"));
+        final Map<String, OutputColumn> columns = new java.util.HashMap<>();
+        for (final OutputColumn c : both.getColumns()) columns.put(c.getCanonicalName(), c);
+        final Map<Integer, Map<String, Long>> assigned = FeatureStages.Wiring.assignMinIntervalAudits(both, columns);
+        Assertions.assertEquals(1, assigned.size(), assigned::toString);
+        final int stage = assigned.keySet().iterator().next();
+        Assertions.assertEquals(List.of("seller_id"), both.getStages().get(stage).keys(), both::describe);
+        Assertions.assertEquals(Map.of("seller", 7L * 86_400_000L), assigned.get(stage));
+        // only the reduced window rests on it: that stage is the fallback
+        final String reducedBlock = """
+            features:
+              - name: recent
+                scope: sequence
+                entity: seller
+                windows:
+                  - {filter: "condition_grade = $self.condition_grade", as: sameGrade}
+                ops:
+                  - {type: aggregate, field: sold, funcs: [mean]}
+            """;
+        final FeaturePlan reducedOnly = compile(SOURCES, declared.substring(0, declared.indexOf("features:\n")) + reducedBlock + declared.substring(declared.indexOf("output:\n")));
+        Assertions.assertFalse(reducedOnly.getDiagnostics().hasErrors(), reducedOnly::describe);
+        columns.clear();
+        for (final OutputColumn c : reducedOnly.getColumns()) columns.put(c.getCanonicalName(), c);
+        final Map<Integer, Map<String, Long>> fallback = FeatureStages.Wiring.assignMinIntervalAudits(reducedOnly, columns);
+        Assertions.assertEquals(1, fallback.size(), fallback::toString);
+        Assertions.assertEquals(List.of("seller_id", "condition_grade"), reducedOnly.getStages().get(fallback.keySet().iterator().next()).keys(), reducedOnly::describe);
+        // nothing rests on the declaration: nothing is assigned
+        Assertions.assertTrue(FeatureStages.Wiring.assignMinIntervalAudits(compile(SOURCES, SPEC), columns).isEmpty());
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population
