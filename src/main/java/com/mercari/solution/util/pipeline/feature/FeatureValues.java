@@ -21,6 +21,23 @@ public final class FeatureValues {
 
     private FeatureValues() {}
 
+    /**
+     * A {@code weightBy} operand as the double the expression engine evaluates: a number as itself, a boolean as 0 / 1,
+     * a numeric string as its number — and any other string as a stable 52-bit hash of its text (FNV-1a), so an
+     * equality {@code field == $self.field} holds exactly for equal texts. Only {@code ==} / {@code !=} are meaningful
+     * on such a value; the compiler says so (info {@code sequence.weightBy.identity}). Null for null / an unsupported value.
+     */
+    public static Double weightOperand(final Object value) {
+        final Double d = toDouble(value);
+        if (d != null || !(value instanceof String s)) return d;
+        long hash = 0xcbf29ce484222325L;
+        for (int i = 0; i < s.length(); i++) {
+            hash ^= s.charAt(i);
+            hash *= 0x100000001b3L;
+        }
+        return (double) (hash >>> 12); // 52 bits: exactly representable, non-negative
+    }
+
     public static Double toDouble(final Object value) {
         if (value == null) return null;
         if (value instanceof Number n) return n.doubleValue();

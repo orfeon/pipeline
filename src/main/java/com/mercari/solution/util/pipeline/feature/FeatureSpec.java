@@ -293,6 +293,21 @@ public class FeatureSpec implements Serializable {
         public String position;
         /** vector: polynomial degree of the {@code polyfit} readout (null = 2). */
         public Integer degree;
+        /** vector: the {@code polyfit} coefficients to emit ({@code coefficients: [1, 2]}; empty = every one up to {@code degree}). */
+        public List<Integer> coefficients = new ArrayList<>();
+        /** vector: {@code resample: <length>} — the vector interpolated onto that many positions, after the other steps (null = none). */
+        public Integer resample;
+        /** vector: {@code pad: {length, mode: edge | zero, side: end | start}} — the vector extended to the length (null = none). */
+        public Integer padLength;
+        public String padMode;
+        public String padSide;
+        /** vector: {@code pad} was declared in a form other than an object (a compile error). */
+        public boolean padMalformed;
+        /**
+         * sequence: the block's default {@code weightBy}, applied at parse time to every aggregate op that declares none
+         * of its own (kept here for the report; the ops carry the effective expression).
+         */
+        public String weightBy;
 
         // context / sequence
         public String context;
@@ -900,6 +915,20 @@ public class FeatureSpec implements Serializable {
         def.normalize = Json.string(o, "normalize");
         def.position = Json.string(o, "position");
         def.degree = Json.integer(o, "degree");
+        for (final Double d : doubles(o, "coefficients", diagnostics, loc)) {
+            if (d != null && d == Math.rint(d)) def.coefficients.add(d.intValue());
+            else diagnostics.error("row.vector.coefficients", loc, "coefficients must list integers (the polyfit coefficient indices): " + d);
+        }
+        def.resample = Json.integer(o, "resample");
+        if (o.has("pad") && !o.get("pad").isJsonNull()) {
+            if (o.get("pad").isJsonObject()) {
+                def.padLength = Json.integer(o.getAsJsonObject("pad"), "length");
+                def.padMode = Json.string(o.getAsJsonObject("pad"), "mode");
+                def.padSide = Json.string(o.getAsJsonObject("pad"), "side");
+            } else {
+                def.padMalformed = true;
+            }
+        }
 
         def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
@@ -916,6 +945,17 @@ public class FeatureSpec implements Serializable {
                 final Op op = parseOp(e, diagnostics, loc);
                 if (op != null) def.ops.add(op);
             }
+        }
+        // a block-level weightBy is the default of the block's aggregate ops (an op's own wins): one kernel, written once
+        def.weightBy = Json.string(o, "weightBy");
+        if (def.weightBy != null) {
+            boolean applied = false;
+            for (final Op op : def.ops) {
+                if (!"aggregate".equals(op.type)) continue;
+                if (op.weightBy == null) op.weightBy = def.weightBy;
+                applied = true;
+            }
+            if (!applied) diagnostics.warning("sequence.weightBy.block", loc, "weightBy on the block is the default of its aggregate ops, and the block has none: it is ignored");
         }
         if (o.has("lift") && o.get("lift").isJsonObject()) {
             final JsonObject lift = o.getAsJsonObject("lift");

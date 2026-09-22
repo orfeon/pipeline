@@ -1086,6 +1086,12 @@ event and weighs it by how similar it is to the current row instead:
 
 - The expression is numeric (the row `expr` syntax; operands numeric / bool). A name reads the **past
   event**, `$self.<field>` reads the **current row**; a weight without `$self` is a plain per-event weight.
+  A **string** operand is compared by identity — the expression reads a stable hash of the text, so
+  `category == $self.category ? 1 : 0.25` (a category match) is exact and `!=` too, while `<`, `>` and
+  arithmetic over it are meaningless (info `sequence.weightBy.identity`).
+- `weightBy` on the **block** is the default of its aggregate ops (an op's own `weightBy` wins): one kernel,
+  written once, for several aggregates. A block with no aggregate op ignores it with a warning
+  (`sequence.weightBy.block`).
 - An event contributes when its value is present (not null / NaN / ±Infinity) and its weight is a positive
   finite number. A null operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
   is null gets `count` 0 and null for the rest.
@@ -1253,12 +1259,15 @@ becomes scalar columns: optional vector → vector **steps**, then one column pe
   slice: {from: -3}          # 1. elements [from, to); a negative index counts from the end; bounds are clamped
   diff: 1                    # 2. differences of adjacent elements, applied <diff> times
   normalize: mean            # 3. sum | mean | l2 | zscore — rescaled by the vector's own statistic
+  resample: 12               # 4. the vector interpolated onto 12 equally spaced positions of its span (a fixed length)
+  pad: {length: 12, mode: edge, side: end}   # 4. or extended to 12 elements with its edge value (or zero), at the end (or start); never truncated
   position: unit             # slope / polyfit positions: index (default: 0, 1, 2 …) | unit (index / (n − 1), in [0, 1])
-  funcs: [mean, slope, polyfit]
+  funcs: [mean, slope, polyfit, vector]
   degree: 2                  # polyfit degree, 1..5 (default 2)
+  coefficients: [1, 2]       # the polyfit coefficients to emit (default: every one up to degree)
 ```
 
-The steps always run in the order slice → diff → normalize; all three are optional. Readouts:
+The steps always run in the order slice → diff → normalize → resample / pad; all of them are optional. Readouts:
 
 | func | output | value |
 |---|---|---|
@@ -1268,7 +1277,8 @@ The steps always run in the order slice → diff → normalize; all three are op
 | `argmin` / `argmax` | `<name>_<func>` int64 | index of the first minimum / maximum **within the vector the steps produced** (a slice re-bases it to 0) |
 | `norm` | `<name>_norm` float64 | Euclidean length |
 | `slope` | `<name>_slope` float64 | least-squares slope over the positions (needs 2 elements; with `position: index` the value of the sequence `trend`) |
-| `polyfit` | `<name>_poly0` … `<name>_poly<degree>` float64 | least-squares polynomial coefficients in ascending order, `c0 + c1·p + …` (needs `degree + 1` elements) |
+| `polyfit` | `<name>_poly0` … `<name>_poly<degree>` float64 | least-squares polynomial coefficients in ascending order, `c0 + c1·p + …` (needs `degree + 1` elements); `coefficients: [1, 2]` emits only those (the level `poly0` is often not a feature) |
+| `vector` | `<name>_vector` array<float64> | the vector the steps produced, as an array column: with `resample` / `pad` an array of varying length becomes one of fixed length, which an array `svd` (`input: <name>_vector`) takes; null for the empty vector |
 
 - **Positions.** `index` measures `slope` / `polyfit` per element; `unit` spreads the elements over [0, 1],
   which makes the coefficients comparable between rows whose arrays differ in length.

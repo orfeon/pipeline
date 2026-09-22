@@ -19,10 +19,11 @@ public final class VectorOps {
 
     /**
      * One {@code vector} column resolved from its coordinates: the steps applied to the array (slice → diff →
-     * normalize, in that order) and the readout taken from the result.
+     * normalize → resample / pad, in that order) and the readout taken from the result — or, for the {@code vector}
+     * readout, the stepped vector itself as an array column.
      */
     public record Plan(String func, Integer from, Integer to, int diff, String normalize, boolean unitPosition,
-                       int degree, int coefficient) implements Serializable {
+                       int degree, int coefficient, Integer resample, Integer padLength, String padMode, String padSide) implements Serializable {
 
         public static Plan of(final Map<String, String> coordinates) {
             return new Plan(coordinates.get("func"),
@@ -32,7 +33,11 @@ public final class VectorOps {
                     coordinates.get("normalize"),
                     "unit".equals(coordinates.get("position")),
                     Integer.parseInt(coordinates.getOrDefault("degree", "0")),
-                    Integer.parseInt(coordinates.getOrDefault("coefficient", "0")));
+                    Integer.parseInt(coordinates.getOrDefault("coefficient", "0")),
+                    coordinates.containsKey("resample") ? Integer.valueOf(coordinates.get("resample")) : null,
+                    coordinates.containsKey("padLength") ? Integer.valueOf(coordinates.get("padLength")) : null,
+                    coordinates.getOrDefault("padMode", "edge"),
+                    coordinates.getOrDefault("padSide", "end"));
         }
 
         /** The column's value for an array field value (null when the array or the readout is undefined). */
@@ -43,6 +48,15 @@ public final class VectorOps {
             x = VectorOps.diff(x, diff);
             if (normalize != null) x = VectorOps.normalize(x, normalize);
             if (x == null) return null;
+            if (resample != null) x = VectorOps.resample(x, resample);
+            if (padLength != null) x = VectorOps.pad(x, padLength, padMode, padSide);
+            if ("vector".equals(func)) {
+                // the empty vector has no readout but its length: an array svd would otherwise fix its dimension on it
+                if (x.length == 0) return null;
+                final List<Double> out = new java.util.ArrayList<>(x.length);
+                for (final double v : x) out.add(v);
+                return out;
+            }
             if ("polyfit".equals(func)) {
                 final double[] coefficients = polyfit(x, positions(x.length, unitPosition), degree);
                 return coefficients == null ? null : finite(coefficients[coefficient]);
@@ -116,6 +130,47 @@ public final class VectorOps {
         if (scale == 0 || !Double.isFinite(scale)) return null;
         final double[] out = new double[x.length];
         for (int i = 0; i < x.length; i++) out[i] = (x[i] - shift) / scale;
+        return out;
+    }
+
+    /**
+     * The vector linearly interpolated onto {@code length} equally spaced positions of its own span (the first and the
+     * last element kept): the same shape at a fixed length, whether the array was shorter or longer. A single element
+     * is repeated; the empty vector stays empty (nothing to interpolate).
+     */
+    public static double[] resample(final double[] x, final int length) {
+        final int m = x.length;
+        if (m == 0 || m == length) return x;
+        final double[] out = new double[length];
+        if (m == 1) {
+            java.util.Arrays.fill(out, x[0]);
+            return out;
+        }
+        for (int j = 0; j < length; j++) {
+            final double p = length == 1 ? 0d : (double) j * (m - 1) / (length - 1);
+            final int i = Math.min(m - 2, (int) Math.floor(p));
+            final double t = p - i;
+            out[j] = x[i] + t * (x[i + 1] - x[i]);
+        }
+        return out;
+    }
+
+    /**
+     * The vector extended to {@code length} elements — at its {@code end} (default) or its {@code start} — with the
+     * nearest element ({@code edge}, default) or zeros ({@code zero}); a vector of that length or longer is returned as
+     * is (padding never truncates), the empty vector is padded with zeros (it has no edge).
+     */
+    public static double[] pad(final double[] x, final int length, final String mode, final String side) {
+        final int m = x.length;
+        if (m >= length) return x;
+        final boolean zero = "zero".equals(mode) || m == 0;
+        final boolean start = "start".equals(side);
+        final double[] out = new double[length];
+        final int offset = start ? length - m : 0;
+        System.arraycopy(x, 0, out, offset, m);
+        final double fill = zero ? 0d : start ? x[0] : x[m - 1];
+        if (start) java.util.Arrays.fill(out, 0, offset, fill);
+        else java.util.Arrays.fill(out, m, length, fill);
         return out;
     }
 

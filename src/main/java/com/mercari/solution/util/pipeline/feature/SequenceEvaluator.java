@@ -918,7 +918,7 @@ public class SequenceEvaluator implements Serializable {
     private static Object weightedAggregate(final String func, final List<Past> window, final String field, final Weight weight, final Map<String, Object> row) {
         final Map<String, Double> variables = new HashMap<>();
         for (int i = 0; i < weight.selfVariables().size(); i++) {
-            variables.put(weight.selfVariables().get(i), FeatureValues.toDouble(row.get(weight.selfFields().get(i))));
+            variables.put(weight.selfVariables().get(i), FeatureValues.weightOperand(row.get(weight.selfFields().get(i))));
         }
         final double[] ws = new double[window.size()], xs = new double[window.size()];
         int n = 0;
@@ -926,7 +926,7 @@ public class SequenceEvaluator implements Serializable {
         for (final Past p : window) {
             final Double x = field == null ? Double.valueOf(0d) : finite(p.values().get(field));
             if (x == null) continue;
-            for (final String f : weight.pastFields()) variables.put(f, FeatureValues.toDouble(p.values().get(f)));
+            for (final String f : weight.pastFields()) variables.put(f, FeatureValues.weightOperand(p.values().get(f)));
             final double w = weight.expression().evaluate(variables);
             if (!(w > 0) || Double.isInfinite(w)) continue;
             ws[n] = w;
