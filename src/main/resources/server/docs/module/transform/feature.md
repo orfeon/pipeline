@@ -714,8 +714,9 @@ ordered by explained variance (`<name>_0` carries the most) — both hold for a 
 fit with `fit.align: none`; under the default forward alignment the columns are a rotated basis of the same
 subspace, so they are neither uncorrelated nor ordered (see *Alignment of forward fits*). The fit needs only (n, Σx, Σxxᵀ), accumulated
 relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
-Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
-the vector length, tens to a few hundred). Components of a static fit are oriented so the largest loading is positive (a
+Combine over the rows, no row leaves the workers — and solves the d × d covariance on the driver for its `rank`
+leading components (d = the vector length, tens to a few hundred; beyond 128 dimensions by the library
+decomposition `spectralEmbedding` uses). Components of a static fit are oriented so the largest loading is positive (a
 re-fit reproduces the scores). A vector with a missing component (null / NaN) takes no part in the fit and
 reads null scores. An array input must have one length: vectors of another length are skipped (and read
 null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array
@@ -934,7 +935,10 @@ is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplu
 values than `rank`. A value the cap keeps but whose every co-occurrence partner it dropped reads null too: with no
 co-occurrence row it has no position, rather than the origin of the fitted space. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
 under `fit.mode: forward`, where a row reads the complete blocks before it and the usual `window` / `minBlocks` apply)
-— and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. The cap is
+— and the eigenproblem is solved on one worker: up to 128 values by the same Jacobi sweep every earlier fit used,
+beyond that by a tridiagonal decomposition (Householder, then QR) that takes 0.15 s for 700 values and 0.5 s for
+1024 where the sweep took 7–15 s — so a forward fit's solve, once per change point, stops being the stage that sets
+the run time. The matrix itself is dense in the distinct values, hence the cap. The cap is
 applied before the pairs are counted (one extra pass over the fit input ranks the values by co-occurrence mass), so
 the Combine state is bounded by `maxValues` rather than by the field's cardinality; under `fit.mode: forward` those
 values are chosen over the whole input while the counts stay per block — when the field has more values than

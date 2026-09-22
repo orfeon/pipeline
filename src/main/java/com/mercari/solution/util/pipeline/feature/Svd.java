@@ -16,9 +16,11 @@ import java.util.List;
  * "Compress" step of §1.4): the vector is centred (and optionally standardised) with the whole-input moments and
  * projected onto the leading {@code rank} right singular vectors, giving {@code rank} decorrelated scores ordered
  * by explained variance. Fitted from sufficient statistics only — (n, Σx, Σxxᵀ) is one {@code Combine} over the
- * rows, so no row leaves the workers — and the d × d covariance is diagonalised on the driver (cyclic Jacobi;
- * d is the vector length, tens to a few hundred). The components' sign is fixed (largest-magnitude loading
- * positive) so a re-fit on the same data reproduces the same scores.
+ * rows, so no row leaves the workers — and the d × d covariance is solved on the driver for its {@code rank}
+ * leading components ({@link SymmetricEigen}: the cyclic Jacobi sweep of {@link #jacobi} up to 128 dimensions, the
+ * library's symmetric decomposition beyond; d is the vector length, tens to a few hundred). The
+ * components' sign is fixed (largest-magnitude loading positive) so a re-fit on the same data reproduces the same
+ * scores.
  *
  * <p>A forward fit replaces that rule by {@link #alignTo}, which rotates each fit into the coordinates of the one
  * before it: the columns then span the same subspace but are no longer its eigenvectors, so the scores are neither
@@ -246,14 +248,14 @@ public final class Svd implements Serializable, FitArtifact.Model {
         }
         double trace = 0;
         for (int i = 0; i < d; i++) trace += c[i][i];
-        final double[][] eigen = jacobi(c);
         final int k = Math.min(rank, d);
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(c, k, false);
         if (warn && k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
         final double[][] components = new double[k][];
         final double[] variances = new double[k];
         for (int r = 0; r < k; r++) {
-            components[r] = eigen[r + 1].clone();
-            variances[r] = Math.max(0, eigen[0][r]);
+            components[r] = eigen.vectors()[r].clone();
+            variances[r] = Math.max(0, eigen.values()[r]);
             final double sign = sign(components[r]);
             if (sign < 0) for (int i = 0; i < d; i++) components[r][i] = -components[r][i];
         }

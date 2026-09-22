@@ -270,4 +270,45 @@ public class SpectralTest {
         Assertions.assertTrue(Spectral.fromJson(com.google.gson.JsonParser.parseString(Spectral.fit(new Spectral.PairCounts(), 2, 256, false).toJson().toString()).getAsJsonObject()).isEmpty());
     }
 
+    /** Sequences over 200 values in ten communities: a value is followed by one of its own kind, now and then by any. */
+    private static Spectral.PairCounts communities(final int steps, final long seed) {
+        final Random random = new Random(seed);
+        final Spectral.PairCounts state = new Spectral.PairCounts();
+        int community = 0;
+        String before = "v000";
+        for (int i = 0; i < steps; i++) {
+            if (random.nextDouble() < 0.15) community = random.nextInt(10);
+            final String value = String.format("v%03d", community * 20 + random.nextInt(20));
+            state.add(value, before, 1);
+            before = value;
+        }
+        return state;
+    }
+
+    /**
+     * Beyond {@link SymmetricEigen#DENSE_LIMIT} values the eigenproblem is solved by the library decomposition rather
+     * than the Jacobi sweep: the same embedding to rounding — the sweep is run on the same PPMI matrix here as the
+     * reference — and the same bits from one call to the next.
+     */
+    @Test
+    public void testLargeVocabulary() {
+        final Spectral.PairCounts state = communities(40_000, 1);
+        final Spectral spectral = Spectral.fit(state, 4, 256, false);
+        Assertions.assertTrue(spectral.vocabulary.length > SymmetricEigen.DENSE_LIMIT, spectral.vocabulary.length + " values");
+        // the communities are what the leading components see: a value sits closer to its own kind than to another
+        Assertions.assertTrue(cosine(spectral.embed("v001"), spectral.embed("v002")) > cosine(spectral.embed("v001"), spectral.embed("v101")));
+        final Spectral again = Spectral.fit(state, 4, 256, false);
+        for (final String value : spectral.vocabulary) Assertions.assertArrayEquals(spectral.embed(value), again.embed(value), 0, value);
+        // the sweep, on the matrix the fit built: the same eigenvalues, and the same coordinates up to each column's sign
+        final double[][] ppmi = Spectral.ppmiOf(state, spectral.vocabulary);
+        final double[][] sweep = Svd.jacobi(ppmi, true);
+        for (int r = 0; r < 4; r++) {
+            Assertions.assertEquals(sweep[0][r], spectral.eigenvalues[r], 1e-9, "eigenvalue " + r);
+            final double scale = Math.sqrt(Math.abs(sweep[0][r]));
+            double dot = 0;
+            for (int i = 0; i < spectral.vocabulary.length; i++) dot += sweep[r + 1][i] * scale * spectral.embedding[i][r];
+            Assertions.assertEquals(Math.abs(sweep[0][r]), Math.abs(dot), 1e-8, "component " + r);
+        }
+    }
+
 }

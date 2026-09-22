@@ -24,9 +24,10 @@ import java.util.TreeSet;
  *
  * <p>The fit state is the pair counts ({@link PairCounts}): a sum of per-row contributions, hence a
  * {@link Summary} monoid — one {@code Combine} per time block, merged over the blocks a row may read
- * ({@link BlockSeries}) — and the small symmetric eigenproblem (one row per value) is solved on one worker with the
- * Jacobi rotation of {@link Svd}. Components are oriented so their largest loading is positive: a re-fit on the same
- * data reproduces the columns.
+ * ({@link BlockSeries}) — and the symmetric eigenproblem (one row per value) is solved on one worker for its
+ * {@code rank} leading components ({@link SymmetricEigen}: the Jacobi rotation of {@link Svd} up to 128 values, the
+ * library's symmetric decomposition beyond). Components are oriented so their largest loading is
+ * positive: a re-fit on the same data reproduces the columns.
  *
  * <p>The {@code maxValues} vocabulary cap is applied by the engine before the pairs are counted (the
  * co-occurrence-mass pre-pass of FeatureStages.vocabularyView), because the state is quadratic in the values it
@@ -308,6 +309,37 @@ public final class Spectral implements Serializable, FitArtifact.Model {
         final int v = kept.size();
         final int dropped = ordered.size() - v;
         final String[] vocabulary = kept.toArray(new String[0]);
+        final double[][] ppmi = ppmiOf(state, vocabulary);
+        boolean informative = false;
+        for (final double[] row : ppmi) for (final double x : row) informative |= x > 0;
+        // every co-occurrence at or below independence: the matrix is all zeros, and so would every coordinate be —
+        // the origin for every value, indistinguishable from a fitted position. Nothing was learnt: read null
+        if (!informative) {
+            if (warn) LOG.warn("spectralEmbedding: no pair of the {} value(s) co-occurs more than chance in {} pair(s) (the PPMI matrix is all zeros);"
+                    + " no embedding, every value maps to null", v, state.pairs);
+            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, ordered.size());
+        }
+        // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix)
+        final int k = Math.min(rank, v);
+        final SymmetricEigen.Result eigen = SymmetricEigen.leading(ppmi, k, true);
+        final double[][] embedding = new double[v][k];
+        final double[] eigenvalues = new double[k];
+        for (int r = 0; r < k; r++) {
+            final double[] vector = eigen.vectors()[r];
+            eigenvalues[r] = eigen.values()[r];
+            final double scale = Svd.sign(vector) * Math.sqrt(Math.abs(eigenvalues[r]));
+            for (int i = 0; i < v; i++) embedding[i][r] = scale * vector[i];
+        }
+        return new Spectral(vocabulary, embedding, eigenvalues, state.pairs, dropped);
+    }
+
+    /**
+     * The positive pointwise mutual information matrix of the pairs among {@code vocabulary} (in that order):
+     * {@code max(0, ln(C_ab · T / (r_a · r_b)))} over the symmetric counts {@code C} (a pair adds one to both (a, b)
+     * and (b, a), two to the diagonal when a = b), zero where a pair never co-occurred.
+     */
+    static double[][] ppmiOf(final PairCounts state, final String[] vocabulary) {
+        final int v = vocabulary.length;
         final Map<String, Integer> at = new HashMap<>();
         for (int i = 0; i < v; i++) at.put(vocabulary[i], i);
         final double[][] c = new double[v][v];
@@ -329,32 +361,12 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             total += rowSum[i];
         }
         final double[][] ppmi = new double[v][v];
-        boolean informative = false;
         for (int i = 0; i < v; i++) {
             for (int j = 0; j < v; j++) {
                 if (c[i][j] > 0) ppmi[i][j] = Math.max(0, Math.log(c[i][j] * total / (rowSum[i] * rowSum[j])));
-                informative |= ppmi[i][j] > 0;
             }
         }
-        // every co-occurrence at or below independence: the matrix is all zeros, and so would every coordinate be —
-        // the origin for every value, indistinguishable from a fitted position. Nothing was learnt: read null
-        if (!informative) {
-            if (warn) LOG.warn("spectralEmbedding: no pair of the {} value(s) co-occurs more than chance in {} pair(s) (the PPMI matrix is all zeros);"
-                    + " no embedding, every value maps to null", v, state.pairs);
-            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, ordered.size());
-        }
-        // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix)
-        final double[][] eigen = Svd.jacobi(ppmi, true);
-        final int k = Math.min(rank, v);
-        final double[][] embedding = new double[v][k];
-        final double[] eigenvalues = new double[k];
-        for (int r = 0; r < k; r++) {
-            final double[] vector = eigen[r + 1];
-            eigenvalues[r] = eigen[0][r];
-            final double scale = Svd.sign(vector) * Math.sqrt(Math.abs(eigenvalues[r]));
-            for (int i = 0; i < v; i++) embedding[i][r] = scale * vector[i];
-        }
-        return new Spectral(vocabulary, embedding, eigenvalues, state.pairs, dropped);
+        return ppmi;
     }
 
     // ------------------------------------------------------------------------------------------
