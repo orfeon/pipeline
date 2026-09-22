@@ -928,7 +928,7 @@ public final class FeaturePlanCompiler {
                 || (def.padMode != null && !List.of("edge", "zero").contains(def.padMode)) || (def.padSide != null && !List.of("end", "start").contains(def.padSide))) {
             diagnostics.error("row.vector.pad", loc, "pad must be {length: >= 1, mode: edge | zero (default edge), side: end | start (default end)}");
             valid = false;
-        } else if ((def.padMode != null || def.padSide != null) && def.padLength == null) {
+        } else if (def.padDeclared && def.padLength == null) {
             diagnostics.error("row.vector.pad", loc, "pad requires 'length' (the length the vector is extended to)");
             valid = false;
         }
@@ -2148,8 +2148,18 @@ public final class FeaturePlanCompiler {
             for (final String r : refs.others) valid &= numericWeightOperand(r, r, loc, identity);
             for (final String r : refs.self) valid &= numericWeightOperand(r, "$self." + r, loc, identity);
             if (!identity.isEmpty()) {
-                diagnostics.info("sequence.weightBy.identity", loc, "weightBy operand(s) " + identity + " are strings, compared by identity: the expression reads a hash of the text,"
-                        + " so == and != (a category match: c == $self.c ? 1 : 0.25) are exact and <, > and arithmetic over them are meaningless");
+                // a hash answers == / != only: reading it as a magnitude (a difference, a kernel) is silently
+                // nonsense — the weight would be ~1e15, so exp(-...) is 0 and every aggregate reads 0 / null
+                final List<String> magnitudes = identity.stream().filter(s -> !comparedByIdentity(op.weightBy, s)).toList();
+                if (magnitudes.isEmpty()) {
+                    diagnostics.info("sequence.weightBy.identity", loc, "weightBy operand(s) " + identity + " are strings, compared by identity: the expression reads a hash of the text,"
+                            + " so == and != (a category match: c == $self.c ? 1 : 0.25) are exact and <, > and arithmetic over them are meaningless");
+                } else {
+                    diagnostics.error("sequence.weightBy.identity", loc, "weightBy string operand(s) " + magnitudes + " are read outside == / !=: a string is compared by identity"
+                            + " (the expression reads a hash of the text), so <, > and arithmetic over it are meaningless — write a category match (c == $self.c ? 1 : 0.25)"
+                            + " or declare the operand as a number");
+                    valid = false;
+                }
             }
             try {
                 com.mercari.solution.util.ExpressionUtil.createDefaultExpression(op.weightBy.replace("$self.", FeatureValues.SELF_PREFIX));
@@ -2162,6 +2172,29 @@ public final class FeaturePlanCompiler {
                     + "the aggregate scans its window per row — bound the window with maxAge or maxEvents");
             return Optional.of(refs);
         }).orElse(null);
+    }
+
+    /**
+     * Whether every occurrence of the operand in the weight expression is an operand of {@code ==} / {@code !=} —
+     * the only comparison a hashed text answers ({@link FeatureValues#weightOperand}). Whitespace and parentheses
+     * around the operand are skipped; anything else reads the hash as a magnitude.
+     *
+     * @param operand the operand as written: a past field's name, or {@code $self.<field>}
+     */
+    private static boolean comparedByIdentity(final String expression, final String operand) {
+        final Matcher m = Pattern.compile("(?<![\\w.$])" + Pattern.quote(operand) + "(?!\\w)").matcher(expression);
+        boolean found = false;
+        while (m.find()) {
+            found = true;
+            int l = m.start();
+            while (l > 0 && (Character.isWhitespace(expression.charAt(l - 1)) || expression.charAt(l - 1) == '(')) l--;
+            int r = m.end();
+            while (r < expression.length() && (Character.isWhitespace(expression.charAt(r)) || expression.charAt(r) == ')')) r++;
+            final boolean equality = (l >= 2 && (expression.startsWith("==", l - 2) || expression.startsWith("!=", l - 2)))
+                    || expression.startsWith("==", r) || expression.startsWith("!=", r);
+            if (!equality) return false;
+        }
+        return found;
     }
 
     /** @param identity collects the string operands (compared by identity: {@link FeatureValues#weightOperand}) */

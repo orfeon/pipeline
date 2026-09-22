@@ -560,6 +560,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
         Assertions.assertTrue(hasCode(identity, "sequence.weightBy.identity"), identity::describe);
         Assertions.assertTrue(column(identity, "recent_n5_same_count").getPastInputs().contains("category"));
+        // a hash is not a magnitude: a string read outside == / != would silently swamp the kernel (exp(-1e14) = 0)
+        final FeaturePlan magnitude = compile(SOURCES, spec.replace(kernel, "exp(-abs(category - $self.category) / 50)"));
+        Assertions.assertTrue(hasCode(magnitude, "sequence.weightBy.identity"), magnitude::describe);
+        Assertions.assertTrue(magnitude.getDiagnostics().hasErrors(), magnitude::describe);
         // a block-level weightBy is the default of the aggregate ops without their own; without one it is ignored with a warning
         final FeaturePlan blockLevel = compile(SOURCES, SPEC.replace("  - name: recent\n    scope: sequence\n", "  - name: recent\n    scope: sequence\n    weightBy: \"" + kernel + "\"\n")
                 .replace(plain, plain + "\n      - {type: aggregate, field: start_price, funcs: [mean], weightBy: \"1\", as: flat}"));
@@ -568,6 +572,14 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("1", column(blockLevel, "recent_n5_flat_mean").getCoordinates().get("weightBy"), "the op's own weight wins");
         Assertions.assertNull(column(blockLevel, "recent_n5_sold_lag1").getCoordinates().get("weightBy"), "a lag is not weighted");
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("  - name: relative\n    scope: context\n", "  - name: relative\n    scope: context\n    weightBy: \"1\"\n")), "sequence.weightBy.block"));
+        // min / max / first / last have no weighted form: the block default leaves such an op alone and says so,
+        // instead of turning it into a sequence.weightBy.func error the user never asked for
+        final FeaturePlan unweighted = compile(SOURCES, SPEC.replace("  - name: recent\n    scope: sequence\n", "  - name: recent\n    scope: sequence\n    weightBy: \"" + kernel + "\"\n")
+                .replace(plain, "- {type: aggregate, field: sold, funcs: [count, mean]}\n      - {type: aggregate, field: start_price, funcs: [max], as: peak}"));
+        Assertions.assertFalse(unweighted.getDiagnostics().hasErrors(), unweighted::describe);
+        Assertions.assertTrue(hasCode(unweighted, "sequence.weightBy.block"), unweighted::describe);
+        Assertions.assertNull(column(unweighted, "recent_n5_peak_max").getCoordinates().get("weightBy"));
+        Assertions.assertEquals(kernel, column(unweighted, "recent_n5_sold_mean").getCoordinates().get("weightBy"));
 
         // a field-less weighted count: Σw over the visible rows
         final FeaturePlan count = compile(SOURCES, SPEC.replace(plain, "- {type: aggregate, weightBy: \"" + kernel + "\", as: near}"));
@@ -1992,6 +2004,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(withPath.apply("pad: {length: 4, mode: repeat}"), "row.vector.pad"));
         Assertions.assertTrue(hasCode(withPath.apply("pad: {mode: zero}"), "row.vector.pad"));
         Assertions.assertTrue(hasCode(withPath.apply("pad: 4"), "row.vector.pad"));
+        // a misspelled key or an empty object would otherwise drop the padding silently (a varying length downstream)
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {lenght: 4}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {length: 4, sied: start}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {}"), "row.vector.pad"));
         Assertions.assertFalse(withPath.apply("pad: {length: 4}").getDiagnostics().hasErrors(), "edge / end are the defaults");
 
         // an outcome-like array cannot feed a feature before it is known

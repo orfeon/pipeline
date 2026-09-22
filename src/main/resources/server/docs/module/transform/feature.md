@@ -1088,10 +1088,15 @@ event and weighs it by how similar it is to the current row instead:
   event**, `$self.<field>` reads the **current row**; a weight without `$self` is a plain per-event weight.
   A **string** operand is compared by identity — the expression reads a stable hash of the text, so
   `category == $self.category ? 1 : 0.25` (a category match) is exact and `!=` too, while `<`, `>` and
-  arithmetic over it are meaningless (info `sequence.weightBy.identity`).
+  arithmetic over it are meaningless (info `sequence.weightBy.identity`; reading a string operand outside
+  `==` / `!=` is the same code as an **error**). A numeric-looking text is read as its number, so `"007"`
+  and `"7"` are the same category: hash-compare the values you mean to compare, or declare the field
+  numeric.
 - `weightBy` on the **block** is the default of its aggregate ops (an op's own `weightBy` wins): one kernel,
   written once, for several aggregates. A block with no aggregate op ignores it with a warning
-  (`sequence.weightBy.block`).
+  (`sequence.weightBy.block`), and an aggregate op whose `funcs` have no weighted form (`min` / `max` /
+  `first` / `last`) is left unweighted and reported under the same code — declare the weight on the op, or
+  split those funcs into their own block.
 - An event contributes when its value is present (not null / NaN / ±Infinity) and its weight is a positive
   finite number. A null operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
   is null gets `count` 0 and null for the rest.
@@ -1109,8 +1114,11 @@ event and weighs it by how similar it is to the current row instead:
   update of a plain aggregate. Give the window a `maxAge` or `maxEvents`; without either the column keeps
   the key's whole history and is listed by the `sequence.window.unbounded` hint.
 - A plain and a weighted aggregate of one field in one block would share a column name: set `as:` on one.
-- Diagnostics: `sequence.weightBy.op`, `sequence.weightBy.func`, `sequence.weightBy.type` (a non-numeric
-  operand), `sequence.weightBy.parse`.
+- Diagnostics: `sequence.weightBy.op`, `sequence.weightBy.func`, `sequence.weightBy.type` (an operand that
+  is neither numeric / bool nor a string — a timestamp, say), `sequence.weightBy.parse`,
+  `sequence.weightBy.identity` (info: string operands compared by identity; error: one read outside
+  `==` / `!=`), `sequence.weightBy.block` (warning: the block's default applies to no aggregate op, or not
+  to an op whose funcs have no weighted form).
 
 ### Naming, conditions and placement notes
 
@@ -1287,6 +1295,10 @@ The steps always run in the order slice → diff → normalize → resample / pa
   the vector at hand — too few elements, a `normalize` whose denominator is 0, a non-finite result — is
   null, never NaN. An empty vector (an empty array, or a slice beyond it) has `length` 0 and no other
   readout. A `repeated` input field without a value arrives as the empty array, not as null.
+  **`pad` runs before the readouts**, so under `pad` the empty vector is no longer empty: it becomes
+  `length` zeros (it has no edge value to repeat) and reads like any other vector — an absent array then
+  enters an array `svd` fit as a zero observation instead of being skipped. Use `resample` alone, or keep
+  the rows with an array, when that matters.
 - **Availability and lineage** are the array field's own: the readouts are ordinary row columns, so an
   `expr` composes them (`bids_last / bids_mean`), a context / sequence / encoding block consumes them, and
   an array that is an outcome is rejected like any other outcome field (`availability.violation`).
@@ -1294,7 +1306,10 @@ The steps always run in the order slice → diff → normalize → resample / pa
   them with an `expr`.
 - Diagnostics: `row.vector.input` (not an array of numbers), `row.vector.funcs` (missing / unknown /
   listed twice), `row.vector.slice`, `row.vector.diff`, `row.vector.normalize`, `row.vector.position`,
-  `row.vector.degree` (out of 1..5; a warning when `degree` is set without `polyfit`).
+  `row.vector.degree` (out of 1..5; a warning when `degree` is set without `polyfit`),
+  `row.vector.coefficients` (indices outside 0..degree or repeated; a warning without `polyfit`),
+  `row.vector.resample` (< 1), `row.vector.pad` (not an object `{length, mode, side}`, an unknown key, a
+  missing `length`, a `length` < 1 or a `mode` / `side` outside edge / zero and end / start).
 
 Every parameter is part of the plan hash. The array field itself still passes through to the output
 unless `output.passThrough` / `include` drops it, and `type: svd` takes the same kind of field as its vector.

@@ -150,7 +150,8 @@ public final class VectorOps {
             final double p = length == 1 ? 0d : (double) j * (m - 1) / (length - 1);
             final int i = Math.min(m - 2, (int) Math.floor(p));
             final double t = p - i;
-            out[j] = x[i] + t * (x[i + 1] - x[i]);
+            // the convex form, not x[i] + t (x[i+1] − x[i]): exact at t = 0 / 1, so the first and last element are kept
+            out[j] = (1 - t) * x[i] + t * x[i + 1];
         }
         return out;
     }
