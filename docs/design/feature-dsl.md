@@ -682,7 +682,9 @@ the present values — one output column per component `{block}_{window}_{channe
 `legendre` measure age from the current row (a phase and a span, both bounded) and `exponential` from the newest past
 event: read from the row, the weighted mean of `L_j` over events all at least the gap old grows like
 `(θ·gap)^j / j!`, so the gap stays a feature of its own (`sinceEvent`); order 0 does not depend on the readout
-position. `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
+position. An event of a channel is a row with a value for it: a missing value is no event — it neither counts on the
+events clock nor moves the read position, which is the newest *valued* event (a run of missing rows after the last
+value never enters a component). `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
 the channels (an expression desugars like an op's `expr`; `{expr, as}` names its channel, which is otherwise the
 spec-wide anonymous `{block}__e{n}`); `lift.timeAugment` adds the constant channel 1, whose components describe when
 the events happened — the same events the value channels see, so it takes the latest channel's availability (§6.2

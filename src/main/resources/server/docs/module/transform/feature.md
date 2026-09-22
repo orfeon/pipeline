@@ -1377,8 +1377,16 @@ projection of the path onto a basis `b_j` under the measure `w`:
   counts — and `time` in days. On `time`, `fourier` and `legendre` measure age from the current row's time
   (`legendre`: u = (event − first event) / (row − first event)), while `exponential` measures it from the newest
   past event: its higher components would otherwise grow with the entity's inactivity (≈ (gap / halflife)^j), so the
-  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way. A missing value (null / NaN / ±Infinity) is still an event on the `events` clock; it adds no
-  weight.
+  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way.
+- **What an event is.** An event of a channel is a past row **with a value** for it. A row whose value is missing
+  (null / NaN / ±Infinity) is no event of that channel: it adds no weight, it does not count on the `events`
+  clock (ages count the channel's valued events), and on `time` it does not move the read position — the newest
+  past event is the newest *valued* one, so a run of missing rows after the last value never enters a component
+  (a cancelled entry with no result leaves the entity's components where its last result left them). The channels
+  of one block are folded from the same rows, so a channel with a value on a row moves while one without does not.
+  The `events` clock of the other summaries is counted the same way but over their own events: the log-signature's
+  time channel is the ordinal among the **complete points** (every channel present), and `trend` orders the present
+  values among its last `k` rows.
 - **Reading the components.** Component 0 is the (decay-weighted) mean. The higher Laguerre components weigh
   recent and older events with opposite signs (`L_1 = 1 − u`): a trend of the value against its age. The Fourier
   components pick up periodicity at `period`, `period / 2`, …; the Legendre ones the shape of the path over the
@@ -1401,8 +1409,10 @@ projection of the path onto a basis `b_j` under the measure `w`:
   ```
 
   The path is piecewise linear through the events' points (an event contributes when every channel is present;
-  `timeAugment` adds the event's time — days on `time`, its ordinal on `events`, ticks on a calendar — as the last
-  channel). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
+  `timeAugment` adds the event's time — days on `time`, its ordinal among the complete points on `events`, ticks on
+  a calendar — as the last channel; on `events` the time channel's own increment is the number of points minus one
+  and the areas with it order the other channels' increments by point count, so use `decayBy: time` when the
+  timing of the events matters). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
   `{block}_{window}_logsig_{word}`, the channels lettered `a, b, c, …` in lift order (info
   `sequence.dynamics.logsignature` prints the legend). Words of one letter are the channels' total increments over the
   window, `ab` the Lévy area between channels a and b (signed: which moved first), longer words the higher-order
@@ -1419,7 +1429,8 @@ projection of the path onto a basis `b_j` under the measure `w`:
   (`sequence.dynamics.depth`); `sequence.dynamics.order` / `.halflife` / `.period` / `.parameter` (a parameter of
   the other family included) check the parameters; channels must be numeric (`sequence.lift.type`); a block emitting
   more than 64 component columns is `sequence.dynamics.size`; a malformed `compress` is `sequence.compress`.
-- `trend` (an op) is the same arithmetic as `regression`: the beta of the last `k` present values on their order.
+- `trend` (an op) is the same arithmetic as `regression`: the beta of the present values among the last `k` rows on
+  their order (a missing row shortens the fit; it neither counts as a position nor extends the tail).
 
 ### Availability check
 

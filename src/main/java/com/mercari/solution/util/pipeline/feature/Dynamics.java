@@ -32,8 +32,13 @@ import java.util.Map;
  * are taken at the current row's time (a phase / a span measured from now, both bounded); the exponential readout is
  * taken at the newest event, like the events clock: its weighted mean of {@code L_j(θ·age)} would grow as
  * {@code (θ·gap)^j / j!} with the gap since the entity's last event, so the gap is left to its own feature
- * ({@code sinceEvent}) and order 0 — {@code ewma} — is unchanged (it does not depend on the readout position). A row
- * with a missing value is still an event: on the events clock it advances the position; it contributes no mass.
+ * ({@code sinceEvent}) and order 0 — {@code ewma} — is unchanged (it does not depend on the readout position).
+ * <b>An event of the channel is a row with a value</b>: a row whose value is missing is not an event of this
+ * channel at all — it neither moves the state's position (the read position stays at the newest event <i>with a
+ * value</i>, so the gap since it never enters a component: a missing newest row would otherwise reproduce the
+ * growth above between the last value and itself) nor advances the events clock, on which ages count the
+ * channel's valued events. The channels of one block are folded from the same rows, so a channel with a value on
+ * that row moves while one without does not.
  *
  * <p>No periodic re-fold: {@code Φ} is contractive (exponential) or a rotation (fourier), so the rounding an
  * eviction leaves decays with the state or stays at the scale of the values folded in, and a state whose window
@@ -54,17 +59,15 @@ public final class Dynamics implements Summary<Dynamics.State> {
 
     static final double DAY_MILLIS = 86_400_000d;
 
-    /** One event of the path: its time and its value ({@code NaN} = missing — still an event, no mass). */
+    /** One event of the path: its time and its (present) value — a row without a value is no event of the channel. */
     public record Event(long millis, double value) implements Serializable {}
 
     public static final class State implements Serializable {
-        /** Events summarised, missing values included (the events clock). */
-        long rows;
-        /** Time of the newest event (the time clock's state position). */
+        /** Time of the newest event — the newest row with a value: the state's position on the time clock. */
         long newest;
         /** legendre: time of the first event (the origin of the power sums). */
         long origin;
-        /** Present values summarised. */
+        /** Events summarised (every one has a value): the events clock. */
         double n;
         /** exponential / fourier: the measure's mass over the present values at the newest event. */
         double den;
@@ -159,11 +162,15 @@ public final class Dynamics implements Summary<Dynamics.State> {
         return (component % 2 == 1 ? "c" : "s") + k;
     }
 
+    /** The event of a value at a time, or null without a value (a missing value is no event of the channel). */
     public Event event(final long millis, final Double value) {
-        return new Event(millis, value == null ? Double.NaN : value);
+        return value == null || Double.isNaN(value) ? null : new Event(millis, value);
     }
 
-    /** The event a past row contributes to a channel ({@code field} null = the constant channel 1, time augmentation). */
+    /**
+     * The event a past row contributes to a channel ({@code field} null = the constant channel 1, time augmentation),
+     * or null when the row has no value for it.
+     */
     public Event event(final SequenceEvaluator.Past p, final String field) {
         return event(p.millis(), value(p, field));
     }
@@ -186,50 +193,42 @@ public final class Dynamics implements Summary<Dynamics.State> {
     }
 
     private void add(final State st, final Event e) {
-        final boolean present = !Double.isNaN(e.value());
+        if (Double.isNaN(e.value())) return; // no value, no event (the contribution is null before it gets here)
         if (measure == Measure.legendre) {
-            if (st.rows == 0) st.origin = e.millis();
-            if (present) {
-                final double position = byTime ? distance(e.millis(), st.origin) : st.rows;
-                double power = 1;
-                for (int k = 0; k <= order; k++) {
-                    st.s[k] += e.value() * power;
-                    power *= position;
-                }
-                st.n++;
+            if (st.n == 0) st.origin = e.millis();
+            final double position = byTime ? distance(e.millis(), st.origin) : st.n;
+            double power = 1;
+            for (int k = 0; k <= order; k++) {
+                st.s[k] += e.value() * power;
+                power *= position;
             }
         } else {
-            if (st.rows > 0) propagate(st, byTime ? distance(e.millis(), st.newest) : 1);
-            if (present) {
-                // K(0): every Laguerre polynomial and every cosine is 1 at age 0, every sine 0
-                if (measure == Measure.exponential) {
-                    for (int j = 0; j <= order; j++) st.s[j] += e.value();
-                } else {
-                    st.s[0] += e.value();
-                    for (int k = 1; k <= order; k++) st.s[2 * k - 1] += e.value();
-                }
-                st.den += 1;
-                st.n++;
+            if (st.n > 0) propagate(st, byTime ? distance(e.millis(), st.newest) : 1);
+            // K(0): every Laguerre polynomial and every cosine is 1 at age 0, every sine 0
+            if (measure == Measure.exponential) {
+                for (int j = 0; j <= order; j++) st.s[j] += e.value();
+            } else {
+                st.s[0] += e.value();
+                for (int k = 1; k <= order; k++) st.s[2 * k - 1] += e.value();
             }
+            st.den += 1;
         }
-        st.rows++;
+        st.n++;
         st.newest = e.millis();
     }
 
     /** Evicts the oldest event of the state (the keyed replay evicts in time order). */
     private void remove(final State st, final Event e) {
         if (measure == Measure.legendre) throw new UnsupportedOperationException("a legendre state is not invertible");
-        if (!Double.isNaN(e.value())) {
-            final double age = byTime ? distance(st.newest, e.millis()) : st.rows - 1;
-            final double w = Math.exp(-theta * age);
-            if (w > 0) {
-                final double[] k = kernel(age, w);
-                for (int j = 0; j < k.length; j++) st.s[j] -= e.value() * k[j];
-                st.den -= w;
-            }
-            st.n--;
+        if (Double.isNaN(e.value()) || st.n <= 0) return;
+        final double age = byTime ? distance(st.newest, e.millis()) : st.n - 1;
+        final double w = Math.exp(-theta * age);
+        if (w > 0) {
+            final double[] k = kernel(age, w);
+            for (int j = 0; j < k.length; j++) st.s[j] -= e.value() * k[j];
+            st.den -= w;
         }
-        st.rows--;
+        st.n--;
         // an emptied window starts over: no rounding residue left by the evictions
         if (st.n == 0) {
             java.util.Arrays.fill(st.s, 0);
@@ -296,8 +295,8 @@ public final class Dynamics implements Summary<Dynamics.State> {
      */
     @Override
     public void merge(final State into, final State other) {
-        if (other.rows == 0) return;
-        if (into.rows == 0) {
+        if (other.n == 0) return;
+        if (into.n == 0) {
             copy(other, into);
             return;
         }
@@ -314,10 +313,10 @@ public final class Dynamics implements Summary<Dynamics.State> {
                     into.origin = other.origin;
                 }
             } else {
-                addShifted(into.s, other.s, into.rows);
+                addShifted(into.s, other.s, into.n);
             }
         } else if (!byTime) {
-            propagate(into, other.rows);
+            propagate(into, other.n);
             for (int j = 0; j < into.s.length; j++) into.s[j] += other.s[j];
             into.den += other.den;
         } else if (other.newest >= into.newest) {
@@ -331,7 +330,6 @@ public final class Dynamics implements Summary<Dynamics.State> {
             for (int j = 0; j < into.s.length; j++) into.s[j] += moved.s[j];
             into.den += moved.den;
         }
-        into.rows += other.rows;
         into.n += other.n;
         into.newest = Math.max(into.newest, other.newest);
     }
@@ -351,7 +349,6 @@ public final class Dynamics implements Summary<Dynamics.State> {
     }
 
     private static void copy(final State from, final State to) {
-        to.rows = from.rows;
         to.newest = from.newest;
         to.origin = from.origin;
         to.n = from.n;
@@ -364,7 +361,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
         return st.n;
     }
 
-    /** The component at the state's own position (the newest event). */
+    /** The component at the state's own position (the newest event with a value). */
     @Override
     public Object read(final State st, final Readout readout) {
         return readAt(st, readout, st.newest);
@@ -381,7 +378,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
         final double value;
         switch (measure) {
             case legendre -> {
-                final double span = byTime ? distance(nowMillis, st.origin) : st.rows - 1;
+                final double span = byTime ? distance(nowMillis, st.origin) : st.n - 1;
                 if (!(span > 0)) {
                     // one position only: every event sits at u = 1, where every P_j is 1
                     value = st.s[0] / st.n;
@@ -394,7 +391,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
                     value = sum / st.n;
                 }
             }
-            // read at the newest event on either clock (the class comment: bounded in the gap since it)
+            // read at the newest event with a value on either clock (the class comment: bounded in the gap since it)
             case exponential -> {
                 if (!(st.den > 0)) return null;
                 value = st.s[j] / st.den;
@@ -418,34 +415,41 @@ public final class Dynamics implements Summary<Dynamics.State> {
     /**
      * The direct projection of a window (the scan path): each event's kernel at its age from the readout position,
      * weighted relative to the newest event (the weight's common factor cancels in the ratio, and the newest event
-     * never underflows); a {@code null} field is the constant channel 1 (time augmentation).
+     * never underflows); a {@code null} field is the constant channel 1 (time augmentation). The events of the
+     * channel are the rows of the window with a value: the origin, the newest event and the ordinals count those.
      */
     public Object project(final List<SequenceEvaluator.Past> window, final String field, final long nowMillis, final int component) {
-        if (window.isEmpty()) return null;
         final int size = window.size();
+        final long[] millis = new long[size];
+        final double[] values = new double[size];
+        int events = 0;
+        for (final SequenceEvaluator.Past p : window) {
+            final Double x = value(p, field);
+            if (x == null) continue;
+            millis[events] = p.millis();
+            values[events] = x;
+            events++;
+        }
+        if (events == 0) return null;
         double num = 0, mass = 0;
         if (measure == Measure.legendre) {
-            final long origin = window.get(0).millis();
-            final double span = byTime ? distance(nowMillis, origin) : size - 1;
-            for (int i = 0; i < size; i++) {
-                final Double x = value(window.get(i), field);
-                if (x == null) continue;
-                final double u = span > 0 ? (byTime ? distance(window.get(i).millis(), origin) : i) / span : 1;
-                num += x * legendre(2 * u - 1, component);
+            final long origin = millis[0];
+            final double span = byTime ? distance(nowMillis, origin) : events - 1;
+            for (int i = 0; i < events; i++) {
+                final double u = span > 0 ? (byTime ? distance(millis[i], origin) : i) / span : 1;
+                num += values[i] * legendre(2 * u - 1, component);
                 mass++;
             }
         } else {
-            final long newest = window.get(size - 1).millis();
+            final long newest = millis[events - 1];
             // the exponential readout is taken at the newest event (the class comment), fourier's at now
             final double delta = byTime && measure == Measure.fourier ? Math.max(0, distance(nowMillis, newest)) : 0;
-            for (int i = 0; i < size; i++) {
-                final Double x = value(window.get(i), field);
-                if (x == null) continue;
-                final double age = byTime ? distance(newest, window.get(i).millis()) : size - 1 - i;
+            for (int i = 0; i < events; i++) {
+                final double age = byTime ? distance(newest, millis[i]) : events - 1 - i;
                 final double w = Math.exp(-theta * age);
                 if (w == 0) continue;
                 mass += w;
-                num += w * x * basis(age + delta, component);
+                num += w * values[i] * basis(age + delta, component);
             }
         }
         if (!(mass > 0)) return null;
