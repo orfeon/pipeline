@@ -687,8 +687,9 @@ events clock nor moves the read position, which is the newest *valued* event (a 
 value never enters a component). `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
 the channels (an expression desugars like an op's `expr`; `{expr, as}` names its channel, which is otherwise the
 spec-wide anonymous `{block}__e{n}`); `lift.timeAugment` adds the constant channel 1, whose components describe when
-the events happened — the same events the value channels see, so it takes the latest channel's availability (§6.2
-window shift) although it reads no field. A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
+the rows of the window happened — it sees the same window as the value channels, so it takes the latest channel's
+availability (§6.2 window shift) although it reads no field, but the constant 1 is present on every row of it, so it
+counts rows where a value channel counts only the rows carrying its value (its positions are its own). A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
 are bounded (`sequence.dynamics.size`). The measures differ in algebra: the exponential and Fourier states move
 exactly under any spacing and evict (groups), the Legendre state rescales with its span, so it evicts nothing and a
 `maxAge` window re-reads it.

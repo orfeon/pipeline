@@ -276,8 +276,10 @@ public class DynamicsTest {
         Assertions.assertEquals(4, high.count(state), 0d);
 
         // the events clock counts the channel's valued events only
-        for (final Dynamics family : List.of(new Dynamics(Dynamics.Measure.exponential, 3, 2d, null, false),
-                new Dynamics(Dynamics.Measure.fourier, 2, null, 5d, false), new Dynamics(Dynamics.Measure.legendre, 3, null, null, false))) {
+        for (final Case c : List.of(new Case("exponential3", new Dynamics(Dynamics.Measure.exponential, 3, 2d, null, false), 4),
+                new Case("fourier2", new Dynamics(Dynamics.Measure.fourier, 2, null, 5d, false), 5),
+                new Case("legendre3", new Dynamics(Dynamics.Measure.legendre, 3, null, null, false), 4))) {
+            final Dynamics family = c.family();
             final Dynamics.State withGap = family.create(), without = family.create();
             fold(family, withGap, path.get(0), 1);
             fold(family, without, path.get(0), 1);
@@ -287,10 +289,10 @@ public class DynamicsTest {
             fold(family, withGap, path.get(2), 1);
             fold(family, without, path.get(2), 1);
             final List<SequenceEvaluator.Past> gapped = List.of(path.get(0), path.get(4), path.get(1), path.get(2));
-            for (int j = 0; j < 3; j++) {
+            for (int j = 0; j < c.dimension(); j++) {
                 final Object expected = family.readAt(without, Summary.Readout.of("component", j), now);
-                assertClose("events " + j, expected, family.readAt(withGap, Summary.Readout.of("component", j), now), 1e-12);
-                assertClose("events scan " + j, expected, family.project(gapped, "x", now, j), 1e-12);
+                assertClose(c.name() + " events " + j, expected, family.readAt(withGap, Summary.Readout.of("component", j), now), 1e-12);
+                assertClose(c.name() + " events scan " + j, expected, family.project(gapped, "x", now, j), 1e-12);
             }
         }
     }

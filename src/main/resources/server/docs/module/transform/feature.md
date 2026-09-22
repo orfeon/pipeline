@@ -1382,8 +1382,12 @@ projection of the path onto a basis `b_j` under the measure `w`:
   (null / NaN / ±Infinity) is no event of that channel: it adds no weight, it does not count on the `events`
   clock (ages count the channel's valued events), and on `time` it does not move the read position — the newest
   past event is the newest *valued* one, so a run of missing rows after the last value never enters a component
-  (a cancelled entry with no result leaves the entity's components where its last result left them). The channels
-  of one block are folded from the same rows, so a channel with a value on a row moves while one without does not.
+  (a cancelled entry with no result leaves the entity's components where its last result left them). Under
+  `legendre` the same rule sets the span's origin: it is the oldest row of the window **with a value**, so leading
+  missing rows do not stretch u. The channels
+  of one block are folded from the same rows, so a channel with a value on a row moves while one without does not —
+  the `timeAugment` channel is the constant 1, which every row has, so that one channel still counts every row of
+  the window (its ages and its read position are its own, not the value channels').
   The `events` clock of the other summaries is counted the same way but over their own events: the log-signature's
   time channel is the ordinal among the **complete points** (every channel present), and `trend` orders the present
   values among its last `k` rows.
@@ -1391,9 +1395,10 @@ projection of the path onto a basis `b_j` under the measure `w`:
   recent and older events with opposite signs (`L_1 = 1 − u`): a trend of the value against its age. The Fourier
   components pick up periodicity at `period`, `period / 2`, …; the Legendre ones the shape of the path over the
   window (level, slope, curvature, …). The `time` channel's components describe *when* the events happened
-  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same events as the
+  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same window as the
   block's value channels: when a channel is an outcome whose window is shifted, the `time` channel takes the
-  latest channel's shift too (`sequence.lift.align` when the channels differ).
+  latest channel's shift too (`sequence.lift.align` when the channels differ). Inside that window it counts every
+  row (see *What an event is*), where a value channel counts only the rows carrying its value.
 - **Cost.** Every measure is a running state: `exponential` and `fourier` are exact under any spacing and evict
   under `maxAge` in O(1) per row; `legendre` rescales with the window's span, so it runs on a running state without
   `maxAge` and re-reads the window under one. None of them keeps the key's history without a window (no

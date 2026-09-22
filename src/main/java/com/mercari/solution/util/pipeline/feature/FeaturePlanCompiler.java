@@ -1927,8 +1927,10 @@ public final class FeaturePlanCompiler {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
             channels.add(new Channel(null, "time"));
-            // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
-            // events the value channels see (a shifted window) rather than the events the entity had
+            // the time channel reads no field: it takes the most delayed channel's availability, so its window is the
+            // one the value channels see (a shifted window) rather than every event the entity had. Inside that window
+            // it still describes every row: the constant 1 is present on all of them, where a value channel is an
+            // event only on the rows that carry its value (Dynamics: a row without a value is no event of the channel)
             final Set<AvailableAt> availabilities = new LinkedHashSet<>();
             for (final Channel channel : channels) {
                 final Ref ref = channel.reference() == null ? null : resolve(channel.reference());

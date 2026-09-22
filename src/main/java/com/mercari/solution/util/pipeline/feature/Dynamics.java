@@ -38,7 +38,9 @@ import java.util.Map;
  * value</i>, so the gap since it never enters a component: a missing newest row would otherwise reproduce the
  * growth above between the last value and itself) nor advances the events clock, on which ages count the
  * channel's valued events. The channels of one block are folded from the same rows, so a channel with a value on
- * that row moves while one without does not.
+ * that row moves while one without does not — and the constant channel of {@code timeAugment} ({@code field} null)
+ * has a value on every row, so it alone still counts every row of the window: its components are not read at the
+ * value channels' positions.
  *
  * <p>No periodic re-fold: {@code Φ} is contractive (exponential) or a rotation (fourier), so the rounding an
  * eviction leaves decays with the state or stays at the scale of the values folded in, and a state whose window
@@ -162,9 +164,12 @@ public final class Dynamics implements Summary<Dynamics.State> {
         return (component % 2 == 1 ? "c" : "s") + k;
     }
 
-    /** The event of a value at a time, or null without a value (a missing value is no event of the channel). */
+    /**
+     * The event of a value at a time, or null without a value — null, NaN or ±∞ is no event of the channel (the same
+     * rule as {@link SequenceEvaluator#finite}: a non-finite contribution would poison the running state for good).
+     */
     public Event event(final long millis, final Double value) {
-        return value == null || Double.isNaN(value) ? null : new Event(millis, value);
+        return value == null || !Double.isFinite(value) ? null : new Event(millis, value);
     }
 
     /**
@@ -193,7 +198,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
     }
 
     private void add(final State st, final Event e) {
-        if (Double.isNaN(e.value())) return; // no value, no event (the contribution is null before it gets here)
+        if (!Double.isFinite(e.value())) return; // no value, no event (the contribution is null before it gets here)
         if (measure == Measure.legendre) {
             if (st.n == 0) st.origin = e.millis();
             final double position = byTime ? distance(e.millis(), st.origin) : st.n;
@@ -220,7 +225,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
     /** Evicts the oldest event of the state (the keyed replay evicts in time order). */
     private void remove(final State st, final Event e) {
         if (measure == Measure.legendre) throw new UnsupportedOperationException("a legendre state is not invertible");
-        if (Double.isNaN(e.value()) || st.n <= 0) return;
+        if (!Double.isFinite(e.value()) || st.n <= 0) return;
         final double age = byTime ? distance(st.newest, e.millis()) : st.n - 1;
         final double w = Math.exp(-theta * age);
         if (w > 0) {
@@ -419,37 +424,40 @@ public final class Dynamics implements Summary<Dynamics.State> {
      * channel are the rows of the window with a value: the origin, the newest event and the ordinals count those.
      */
     public Object project(final List<SequenceEvaluator.Past> window, final String field, final long nowMillis, final int component) {
-        final int size = window.size();
-        final long[] millis = new long[size];
-        final double[] values = new double[size];
+        // the channel's events: their count and bounds first (the ages below are measured from them), no copy of the window
         int events = 0;
+        long origin = 0, newest = 0;
         for (final SequenceEvaluator.Past p : window) {
-            final Double x = value(p, field);
-            if (x == null) continue;
-            millis[events] = p.millis();
-            values[events] = x;
+            if (value(p, field) == null) continue;
+            if (events == 0) origin = p.millis();
+            newest = p.millis();
             events++;
         }
         if (events == 0) return null;
         double num = 0, mass = 0;
+        int i = 0;
         if (measure == Measure.legendre) {
-            final long origin = millis[0];
             final double span = byTime ? distance(nowMillis, origin) : events - 1;
-            for (int i = 0; i < events; i++) {
-                final double u = span > 0 ? (byTime ? distance(millis[i], origin) : i) / span : 1;
-                num += values[i] * legendre(2 * u - 1, component);
+            for (final SequenceEvaluator.Past p : window) {
+                final Double x = value(p, field);
+                if (x == null) continue;
+                final double u = span > 0 ? (byTime ? distance(p.millis(), origin) : i) / span : 1;
+                i++;
+                num += x * legendre(2 * u - 1, component);
                 mass++;
             }
         } else {
-            final long newest = millis[events - 1];
             // the exponential readout is taken at the newest event (the class comment), fourier's at now
             final double delta = byTime && measure == Measure.fourier ? Math.max(0, distance(nowMillis, newest)) : 0;
-            for (int i = 0; i < events; i++) {
-                final double age = byTime ? distance(newest, millis[i]) : events - 1 - i;
+            for (final SequenceEvaluator.Past p : window) {
+                final Double x = value(p, field);
+                if (x == null) continue;
+                final double age = byTime ? distance(newest, p.millis()) : events - 1 - i;
+                i++;
                 final double w = Math.exp(-theta * age);
                 if (w == 0) continue;
                 mass += w;
-                num += w * values[i] * basis(age + delta, component);
+                num += w * x * basis(age + delta, component);
             }
         }
         if (!(mass > 0)) return null;
@@ -465,8 +473,11 @@ public final class Dynamics implements Summary<Dynamics.State> {
         return component % 2 == 1 ? Math.cos(h * omega * age) : Math.sin(h * omega * age);
     }
 
+    /** The constant channel's value, shared: {@code Double.valueOf} allocates, and {@link #project} reads it per row. */
+    private static final Double ONE = 1d;
+
     private static Double value(final SequenceEvaluator.Past p, final String field) {
-        return field == null ? Double.valueOf(1d) : SequenceEvaluator.finite(p.values().get(field));
+        return field == null ? ONE : SequenceEvaluator.finite(p.values().get(field));
     }
 
     /** L_0..L_order at u (the three-term recurrence). */

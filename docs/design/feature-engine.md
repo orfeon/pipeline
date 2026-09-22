@@ -1309,12 +1309,14 @@ component is a weighted mean:
   the state's position nor the events clock. Before that rule a missing row advanced `newest` without adding mass,
   and a cancelled entry after a long gap put the read position Δ past the last value — exactly the growth above,
   found in a consumer run as components of 4 000 on a series of 30–80. Each channel's state has its own position:
-  a channel with a value on a row moves while one without stays. The three summaries count their `events` clock
+  a channel with a value on a row moves while one without stays — and `timeAugment`'s constant channel
+  (`Dynamics.value` with a null field is always 1) has a value on every row, so it alone still counts them all: its
+  ordinals and its read position are its own, not the value channels'. The three summaries count their `events` clock
   over their own events — `lti`: the channel's valued rows; the log-signature's time channel: the ordinal among
   the complete points (every channel present); `trend`: the present values among its last `k` rows (the tail stays
   `k` rows: the retained history is bounded by rows, not by present values) — and the docs say so.
 - **The time channel** (`timeAugment`) reads no field, so on its own its window would never be shifted. It
-  describes the events the value channels see, so the compiler classifies it with the latest availability among
+  describes the rows of the window the value channels see, so the compiler classifies it with the latest availability among
   the block's channels (`classifyPast`'s `alignWith`: aligned, not a past input — no lineage, no projection).
 - **Channel names.** A `lift.exprs` entry `{expr, as}` names its channel segment; an unnamed one keeps the
   anonymous `{block}__e{n}` (a spec-wide counter — `sequence.lift.anonymous`), and two channels of one block with
