@@ -2113,10 +2113,16 @@ public class FeatureTransformTest {
     /** The market baseline of each row: share(1 / current_bid_t10) within its session. */
     private static final double MARKET_A1 = 55.0 / 175, MARKET_A2 = 120.0 / 175, MARKET_B1 = 1.0, MARKET_C1 = 70.0 / 160, MARKET_C2 = 90.0 / 160, MARKET_D1 = 1.0;
 
+    /** The logit-scale information of a row at its baseline, b(1 − b) (0 for the lone rows B1 and D1 whose baseline is 1). */
+    private static double info(final double b) {
+        return b * (1 - b);
+    }
+
     /**
-     * Expanding encoding with a baseline offset on the logit scale: the composed value is the shrunk log-odds ratio
-     * of the seller's observed sale rate against its mean market baseline (spec §3 rule 5), the global term being
-     * the leave-node-out counterpart; on the identity scale the same declaration is the mean residual as before.
+     * Expanding encoding with a baseline offset on the logit scale: the composed value is the seller's score-type
+     * log-odds term against its market baseline, S / V = Σ(y − b) / Σ b(1 − b) (spec §3 rule 5), shrunk by
+     * information toward the leave-node-out global term; on the identity scale the same declaration is the mean
+     * residual as before.
      */
     @Test
     public void testOffsetOnLogitScale() throws java.io.IOException {
@@ -2132,12 +2138,15 @@ public class FeatureTransformTest {
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             // Jan 3: no outcome has reached the system yet
             Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
-            // Feb 1, s1: own rows A (1), B (0), C (1) → observed 2/3 vs mean baseline (bA1 + bB1 + bC1) / 3;
-            // global without s1 = s2's rows A (0), C (1) → observed 1/2 vs (bA2 + bC2) / 2; w = 3 / (3 + 1)
-            final double own = logit(2.0 / 3) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1) / 3);
-            final double root = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
-            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
-            Assertions.assertEquals(0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__dev0"), 1e-9);
+            // Feb 1, s1: own rows A (1), B (0), C (1) → S = Σ(y − b), V = Σ b(1 − b) (B carries no information, b = 1);
+            // global without s1 = s2's rows A (0), C (1); the weight is V against priorWeight (1) rows of the root's
+            // information per row (5 rows in the global level)
+            final double ownS = (1 - MARKET_A1) + (0 - MARKET_B1) + (1 - MARKET_C1), ownV = info(MARKET_A1) + info(MARKET_B1) + info(MARKET_C1);
+            final double rootS = (0 - MARKET_A2) + (1 - MARKET_C2), rootV = info(MARKET_A2) + info(MARKET_C2);
+            final double own = ownS / ownV, root = rootS / rootV;
+            final double w = ownV / (ownV + 1 * (ownV + rootV) / 5);
+            Assertions.assertEquals(root + w * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(w * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__dev0"), 1e-9);
             return null;
         });
         pipeline.run();
@@ -2197,10 +2206,9 @@ public class FeatureTransformTest {
     }
 
     /**
-     * The outcome baseline of {@link #testOffsetOverOutcomeBaseline} on the logit scale: the hidden Σ baseline level
-     * ({@code __sumoff}) takes the same shift as the sums, so on Feb 1 the seller's term is logit(observed 2/3) minus
-     * logit(the mean settled share of A, B and C), shrunk toward the leave-node-out global term, and on Jan 3 nothing is
-     * visible yet.
+     * The outcome baseline of {@link #testOffsetOverOutcomeBaseline} on the logit scale: the hidden Σ b(1 − b) level
+     * ({@code __suminfo}) takes the same shift as the sums, so on Feb 1 the seller's term is the score-type S / V over
+     * A, B and C, shrunk by information toward the leave-node-out global term, and on Jan 3 nothing is visible yet.
      */
     @Test
     public void testOffsetOverOutcomeBaselineOnLogitScale() throws java.io.IOException {
@@ -2214,9 +2222,14 @@ public class FeatureTransformTest {
             final Map<String, MElement> byKey = new HashMap<>();
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"), "Jan 3: the Jan 1 settlement is not known yet");
-            final double own = logit(2.0 / 3) - logit((sA1 + sB1 + sC1) / 3);
-            final double root = logit(0.5) - logit((sA2 + sC2) / 2);
-            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            // the score term S / V of s1 over A, B, C (B carries no information: its share is 1) against the leave-node-out
+            // global term over s2's A, C; the weight is V against priorWeight (1) rows of the root's information per row
+            // (the five rows settled before Feb 1)
+            final double ownS = (1 - sA1) + (0 - sB1) + (1 - sC1), ownV = info(sA1) + info(sB1) + info(sC1);
+            final double rootS = (0 - sA2) + (1 - sC2), rootV = info(sA2) + info(sC2);
+            final double own = ownS / ownV, root = rootS / rootV;
+            final double w = ownV / (ownV + 1 * (ownV + rootV) / 5);
+            Assertions.assertEquals(root + w * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
             return null;
         });
         pipeline.run();
@@ -2234,10 +2247,14 @@ public class FeatureTransformTest {
                 .replace("- {expr: \"sold >= 1\", stats: [mean]}",
                         "- {expr: \"sold >= 1\", stats: [mean]}\n          offset: market\n          shrinkage: {priorWeight: 1, scale: logit}")
                 .replace("      output:\n", "      fit: {mode: static, artifact: {uri: \"" + dir + "\"}}\n      output:\n");
-        // s1: rows A, B, C, D → observed 3/4 vs mean baseline; global without s1 = s2's rows → 1/2 vs its mean baseline; w = 4/5
-        final double own = logit(0.75) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1 + MARKET_D1) / 4);
-        final double root = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
-        final double expected = root + 0.8 * (own - root);
+        // s1: rows A, B, C, D → the score term S / V (B and D carry no information, b = 1); global without s1 = s2's rows;
+        // the weight is V against priorWeight (1) rows of the root's information per row (6 rows)
+        final double ownS = (1 - MARKET_A1) + (0 - MARKET_B1) + (1 - MARKET_C1) + (1 - MARKET_D1);
+        final double ownV = info(MARKET_A1) + info(MARKET_B1) + info(MARKET_C1) + info(MARKET_D1);
+        final double rootS = (0 - MARKET_A2) + (1 - MARKET_C2), rootV = info(MARKET_A2) + info(MARKET_C2);
+        final double own = ownS / ownV, root = rootS / rootV;
+        final double w = ownV / (ownV + 1 * (ownV + rootV) / 6);
+        final double expected = root + w * (own - root);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             for (final MElement row : rows) {
@@ -2270,9 +2287,9 @@ public class FeatureTransformTest {
     }
 
     /**
-     * {@code estimator: joint} with an offset on the logit scale solves the ridge over each cell's log-odds ratio
-     * against its mean baseline: the estimate is the additive term (finite, ordered like the cells' own terms),
-     * and the artifact manifest records the offset.
+     * {@code estimator: joint} with an offset on the logit scale solves the ridge over each cell's score-type
+     * log-odds term S / V weighted by its information: the estimate is the additive term (finite, ordered like the
+     * cells' own terms), and the artifact manifest records the offset and the fit's information per row.
      */
     @Test
     public void testJointEstimatorOffsetOnLogitScale() throws java.io.IOException {
@@ -2288,9 +2305,10 @@ public class FeatureTransformTest {
             final double s1 = byKey.get("A/s1").getAsDouble("f_enc__seller_id__e1__mean");
             final double s2 = byKey.get("A/s2").getAsDouble("f_enc__seller_id__e1__mean");
             Assertions.assertTrue(Double.isFinite(s1) && Double.isFinite(s2));
-            // s1 sells 3/4 against a mean baseline of ~0.69 (positive term), s2 1/2 against ~0.62 (negative term)
-            final double z1 = logit(0.75) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1 + MARKET_D1) / 4);
-            final double z2 = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
+            // s1 sells more than its baselines predict (positive term), s2 less (negative term)
+            // (B and D carry no information: their baseline is 1)
+            final double z1 = ((1 - MARKET_A1) + (0 - MARKET_B1) + (1 - MARKET_C1) + (1 - MARKET_D1)) / (info(MARKET_A1) + info(MARKET_B1) + info(MARKET_C1) + info(MARKET_D1));
+            final double z2 = ((0 - MARKET_A2) + (1 - MARKET_C2)) / (info(MARKET_A2) + info(MARKET_C2));
             Assertions.assertTrue(z1 > 0 && z2 < 0);
             Assertions.assertTrue(s1 > s2, s1 + " > " + s2);
             // the ridge pulls both terms toward the intercept, which lies between them
@@ -2304,6 +2322,7 @@ public class FeatureTransformTest {
         final String manifest = java.nio.file.Files.readString(new java.io.File(files[0], "enc__seller_id__e1.joint.manifest.json").toPath());
         Assertions.assertTrue(manifest.contains("\"offset\":true"), manifest);
         Assertions.assertTrue(manifest.contains("\"scale\":\"logit\""), manifest);
+        Assertions.assertTrue(manifest.contains("\"infoPerRow\":"), manifest);
     }
 
     /** The row vectors [start_price, current_bid_t10] of the auction rows. */

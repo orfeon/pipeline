@@ -747,9 +747,11 @@ public class FeaturePlanCompilerTest {
 
     /**
      * An offset on a logit / log shrinkage scale is accepted: the block's levels keep a hidden Σ baseline
-     * ({@code __sumoff}) next to Σ(y − b), the composed column reads it through its {@code levels} coordinate, and
-     * an info diagnostic says the value is the additive term on the scale. On identity nothing changes (no extra
-     * column), and the joint estimator accepts the same declaration.
+     * ({@code __sumoff}) next to Σ(y − b) — and on logit the information Σ b(1 − b) ({@code __suminfo}) the score-type
+     * term divides by; on log that information is Σ baseline itself — the composed column reads them through its
+     * {@code levels} coordinate, the hidden columns carry the score scale for the engine, and an info diagnostic says
+     * the value is the additive term on the scale. On identity nothing changes (no extra column), and the joint
+     * estimator accepts the same declaration.
      */
     @Test
     public void testOffsetOnLogitScaleKeepsBaselineSum() {
@@ -764,19 +766,46 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(off.getCoordinates().get("field"), column(plan, "enc__seller_id__e2__sum").getCoordinates().get("field"));
         Assertions.assertNotNull(plan.getColumn("enc__global__e2__sumoff"));
         Assertions.assertNotNull(plan.getColumn("enc__category__365d__e2__sumoff"));
+        final OutputColumn info = column(plan, "enc__seller_id__e2__suminfo");
+        Assertions.assertTrue(info.isIntermediate());
+        Assertions.assertEquals("suminfo", info.getCoordinates().get("stat"));
+        Assertions.assertEquals("logit", info.getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("logit", column(plan, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
         Assertions.assertEquals("compose", composed.getOperator());
         Assertions.assertEquals("logit", composed.getCoordinates().get("scale"));
-        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff"), composed.getCoordinates().get("levels"));
+        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff,enc__seller_id__e2__suminfo"), composed.getCoordinates().get("levels"));
         Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__sumoff"));
+        Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__suminfo"));
+        final Shrinkage.Level leaf = Shrinkage.parseLevels(composed.getCoordinates().get("levels")).get(0);
+        Assertions.assertEquals("enc__seller_id__e2__suminfo", leaf.infoColumn());
         // the target-less count / share levels have no baseline sum
         Assertions.assertNull(plan.getColumn("enc__seller_id__sumoff"));
+        Assertions.assertNull(plan.getColumn("enc__seller_id__suminfo"));
+        // log: the information is Σ baseline — no extra column, the level reads sumoff for it
+        final FeaturePlan log = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log}"));
+        Assertions.assertFalse(log.getDiagnostics().hasErrors(), log::describe);
+        Assertions.assertNull(log.getColumn("enc__seller_id__e2__suminfo"));
+        Assertions.assertEquals("log", column(log, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
+        Assertions.assertEquals("enc__seller_id__e2__sumoff", Shrinkage.parseLevels(column(log, "enc__seller_id__e2__mean").getCoordinates().get("levels")).get(0).infoColumn());
 
         final FeaturePlan identity = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
         Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
         Assertions.assertFalse(hasCode(identity, "encoding.offset.additive"));
         Assertions.assertNull(identity.getColumn("enc__seller_id__e2__sumoff"));
+        Assertions.assertNull(column(identity, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         Assertions.assertFalse(column(identity, "enc__seller_id__e2__mean").getCoordinates().get("levels").contains("sumoff"));
+
+        // the plan hash of an offset term names the estimator: an artifact of the transformed-mean estimator, addressed by the
+        // same spec, is not found (a keySet-level scale counts too; identity and no offset are unsalted)
+        final JsonObject logitJson = Config.convertConfigJson(logit, Config.Format.yaml);
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(logitJson));
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market")
+                .replace("      - keys: [category]\n", "      - keys: [category]\n        shrinkage: {scale: log}\n"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2, scale: logit}"), Config.Format.yaml)));
+        Assertions.assertEquals(FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(Config.convertConfigJson(SOURCES, Config.Format.yaml)) + "\u0000"
+                + FeaturePlanCompiler.canonical(FeaturePlanCompiler.withoutArtifact(logitJson)) + "\u0000" + FeaturePlanCompiler.OFFSET_ESTIMATOR), plan.getHash());
 
         final FeaturePlan joint = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log, estimator: joint}\n    fit: {mode: static}"));
         Assertions.assertFalse(joint.getDiagnostics().hasErrors(), joint::describe);

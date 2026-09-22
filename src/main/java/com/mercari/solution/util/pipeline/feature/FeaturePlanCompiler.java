@@ -3757,11 +3757,13 @@ public final class FeaturePlanCompiler {
             lattices.add(new Lattice(ks, shrinkage, levels, additiveAt));
         }
         if (lattices.stream().anyMatch(l -> offsetTerm(def, l.shrinkage))) {
-            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline next to
-            // Σ(y − b) (hidden __sumoff), each level's term is t(observed) − t(mean baseline), and the composed value is
-            // that term (a log-odds / log-rate ratio against the baseline), not a probability / rate
+            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline (and, on
+            // logit, Σ b(1 − b)) next to Σ(y − b), each level's term is the score-type one-step estimate S / V from the
+            // baseline, and the composed value is that term (a log-odds / log-rate ratio against the baseline), not a
+            // probability / rate
             diagnostics.info("encoding.offset.additive", loc, "offset '" + def.offset + "' on a logit / log shrinkage scale: the composed value is the additive term on that scale"
-                    + " (t(key's observed statistic) − t(its mean baseline), shrunk toward the parent's term; deviations on the same scale) — not a probability / rate");
+                    + " (the key's score-type estimate sum(y - b) / information, one scoring step from the baseline, shrunk toward the parent's term by information;"
+                    + " deviations on the same scale) - not a probability / rate");
         }
 
         // expansion: keySet × window × target × stat (product) or zip(keySet, target) × window × stat
@@ -3786,10 +3788,10 @@ public final class FeaturePlanCompiler {
                 for (final Window window : windowsOf(lattice.keySet)) {
                     // a shrunk distribution needs the per-category shares of the level, the scalar statistics its sum
                     if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, offsetTerm(def, lattice.shrinkage), computeAt, mode, fitSpec, false);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, offsetScale(def, lattice.shrinkage), computeAt, mode, fitSpec, false);
                     }
                     if (distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, true);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, null, computeAt, mode, fitSpec, true);
                     }
                 }
             }
@@ -3841,7 +3843,7 @@ public final class FeaturePlanCompiler {
                         }
                         // unshrunk: the statistic is read straight from the leaf's (n, Σy, Σy²), never as an offset term
                         // static / fold: no window (lookupWindow is null); forward: the keySet's maxAge rounded to blocks
-                        final Shrinkage.Level leaf = levelStats(def, ks.keys, window, target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, false);
+                        final Shrinkage.Level leaf = levelStats(def, ks.keys, window, target.name, target.reference, offsetColumn, null, computeAt, mode, fitSpec, false);
                         final OutputColumn c = newColumn(def.name, Scope.row, "fitStat", canonical, s.output(), computeAt);
                         c.fitted = true;
                         c.coordinates.put("keys", String.join(",", ks.keys));
@@ -3873,7 +3875,7 @@ public final class FeaturePlanCompiler {
                     }
                     // lattice: hidden statistics per level, composed in a row column
                     final boolean distribution = "distribution".equals(stat);
-                    final boolean offsetTerm = offsetTerm(def, lattice.shrinkage);
+                    final Shrinkage.Scale offsetTerm = offsetScale(def, lattice.shrinkage);
                     final List<Shrinkage.Level> levels = new ArrayList<>();
                     for (final List<String> levelKeys : lattice.levels) {
                         if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
@@ -4005,6 +4007,7 @@ public final class FeaturePlanCompiler {
             addSelfInput(c, l.nColumn());
             addSelfInput(c, l.sumColumn());
             if (l.offColumn() != null) addSelfInput(c, l.offColumn());
+            if (l.infoColumn() != null) addSelfInput(c, l.infoColumn());
         }
     }
 
@@ -4048,10 +4051,19 @@ public final class FeaturePlanCompiler {
         return def.offset != null && shrinkage.enabled && shrinkage.scale != Shrinkage.Scale.identity;
     }
 
-    /** @param offsetTerm the level is composed as an offset term ({@link #offsetTerm}): register its hidden Σ baseline too */
+    /** The scale the block's offset term is composed on ({@link #offsetTerm}), null when the block has no offset term. */
+    private static Shrinkage.Scale offsetScale(final FeatureDef def, final Shrinkage shrinkage) {
+        return offsetTerm(def, shrinkage) ? shrinkage.scale : null;
+    }
+
+    /**
+     * @param offsetScale the scale the level is composed on as an offset term ({@link #offsetScale}; null = no offset
+     *                    term): register its hidden Σ baseline too and, on logit, its Σ b(1 − b) — the information the
+     *                    score-type term divides by ({@link Shrinkage#ownScore}; on log the information is Σ baseline)
+     */
     private Shrinkage.Level levelStats(final FeatureDef def, final List<String> levelKeys, final Window window,
                                        final String targetName, final String targetReference, final String offsetColumn,
-                                       final boolean offsetTerm,
+                                       final Shrinkage.Scale offsetScale,
                                        final AvailableAt computeAt, final FitMode mode, final FeatureSpec.FitSpec fitSpec,
                                        final boolean distribution) {
         final String token = levelKeys.isEmpty() ? Shrinkage.GLOBAL : String.join("_", levelKeys);
@@ -4060,16 +4072,32 @@ public final class FeaturePlanCompiler {
         final String nName = base + "__n";
         final String valueName = base + (distribution ? "__dist" : "__sum");
         final String offName = base + "__" + PopulationEvaluator.SUM_OFFSET;
+        final String infoName = base + "__" + PopulationEvaluator.SUM_INFO;
         final boolean isStatic = mode.isLookup();
-        // an offset term also keeps Σ baseline (the level's term is t(observed) − t(mean baseline))
-        final boolean offsetSum = offsetTerm && !distribution && targetReference != null;
+        // an offset term also keeps Σ baseline and, on logit, Σ b(1 − b) (the level's term is S / V)
+        final boolean offsetSum = offsetScale != null && !distribution && targetReference != null;
+        final boolean offsetInfo = offsetSum && offsetScale == Shrinkage.Scale.logit;
         // static / fold fits also keep Σy² so std can be derived from the artifact
         final List<String> stats = new ArrayList<>(distribution ? List.of("count", "distribution") : isStatic ? List.of("count", "sum", "sumsq") : List.of("count", "sum"));
         if (offsetSum) stats.add(PopulationEvaluator.SUM_OFFSET);
+        if (offsetInfo) stats.add(PopulationEvaluator.SUM_INFO);
         for (final String stat : stats) {
-            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; case PopulationEvaluator.SUM_OFFSET -> offName; default -> base + "__sumsq"; };
+            final String name = switch (stat) {
+                case "count" -> nName;
+                case "sum", "distribution" -> valueName;
+                case PopulationEvaluator.SUM_OFFSET -> offName;
+                case PopulationEvaluator.SUM_INFO -> infoName;
+                default -> base + "__sumsq";
+            };
             if (!"count".equals(stat) && targetReference == null) continue;
-            if (columnsByCanonical.containsKey(name)) continue;
+            final OutputColumn existing = columnsByCanonical.get(name);
+            if (existing != null) {
+                // the level's hidden columns are shared: an unshrunk statistic of the same keys (fit.mode static / fold /
+                // forward reads n / Σy / Σy² straight from the leaf) may have registered them before the lattice did, so
+                // the score scale is stamped on whatever is already there — the engine reads it from any of them
+                if (offsetSum) existing.coordinates.put("scoreScale", offsetScale.name());
+                continue;
+            }
             final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
                     "distribution".equals(stat) ? Schema.FieldType.map(Schema.FieldType.FLOAT64) : Schema.FieldType.FLOAT64, computeAt);
             c.intermediate = true;
@@ -4078,9 +4106,12 @@ public final class FeaturePlanCompiler {
             level.keys = levelKeys;
             level.windows = window == null ? new ArrayList<>() : List.of(window);
             populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
+            // the engine reads the score scale of a level from its hidden columns (the fit stage's λ estimate, the artifact)
+            if (offsetSum) c.coordinates.put("scoreScale", offsetScale.name());
             register(c);
         }
-        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null, null);
+        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null,
+                offsetSum ? (offsetInfo ? infoName : offName) : null, null);
     }
 
     /**
@@ -4967,7 +4998,35 @@ public final class FeaturePlanCompiler {
     static String hash(final JsonElement sourcesDocument, final JsonObject parameters) {
         // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
         // the identity of what was fitted
-        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters)));
+        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters))
+                // an offset term on logit / log is the score-type estimate since PR #176 (its levels keep sum b(1 - b)):
+                // an artifact of the transformed-mean estimator, addressed by the same spec, must not be found
+                + (declaresOffsetTerm(parameters) ? "\u0000" + OFFSET_ESTIMATOR : ""));
+    }
+
+    /** The estimator of an offset term on a transformed scale, part of the plan hash of a spec declaring one. */
+    static final String OFFSET_ESTIMATOR = "offset-estimator:score";
+
+    /** Whether any block declares an offset with a logit / log shrinkage scale (on the block or one of its keySets). */
+    static boolean declaresOffsetTerm(final JsonObject parameters) {
+        if (parameters == null || !parameters.has("features") || !parameters.get("features").isJsonArray()) return false;
+        for (final JsonElement f : parameters.getAsJsonArray("features")) {
+            if (!f.isJsonObject() || !f.getAsJsonObject().has("offset")) continue;
+            final JsonObject block = f.getAsJsonObject();
+            if (transformedScale(block.get("shrinkage"))) return true;
+            if (block.has("keySets") && block.get("keySets").isJsonArray()) {
+                for (final JsonElement ks : block.getAsJsonArray("keySets")) {
+                    if (ks.isJsonObject() && transformedScale(ks.getAsJsonObject().get("shrinkage"))) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean transformedScale(final JsonElement shrinkage) {
+        if (shrinkage == null || !shrinkage.isJsonObject()) return false;
+        final String scale = SourceContract.Json.string(shrinkage.getAsJsonObject(), "scale");
+        return "logit".equals(scale) || "log".equals(scale);
     }
 
     /**

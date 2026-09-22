@@ -25,11 +25,19 @@ import java.util.Map;
  * estimator). {@code t} is the declared scale (identity / logit / log); the composed value is returned on
  * the original scale, deviations on the transform scale.
  *
- * <p><b>Baseline offset</b> (spec §3 rule 5: the offset is an additive term on the shrinkage scale). Each
- * level's own estimate becomes {@code t(ȳ) − t(b̄)} — observed statistic minus mean baseline of the same rows,
- * both read from the hidden sums ({@code Σ(y − b)} and {@code Σb}, see {@link #own}) — the levels shrink that
- * term toward the parent's, and the composed value is the term itself (a log-odds / log-rate ratio against
- * the baseline; on identity the mean residual, as without the extra sum).
+ * <p><b>Baseline offset</b> (spec §3 rule 5: the offset is an additive term δ on the shrinkage scale,
+ * {@code logit(p) = logit(b) + δ} on logit, {@code log(μ) = log(b) + δ} on log). Each level's own estimate is the
+ * <b>score-type</b> one-step estimate from the baseline, {@code δ̂ = S / V} with {@code S = Σ(y − b)} the score of
+ * the log-likelihood at δ = 0 and {@code V = Σ b(1 − b)} (logit) / {@code Σb} (log) its Fisher information — one
+ * Newton step from the baseline, exact to first order in δ and finite for every cell, a cell with no success
+ * included (the transformed mean {@code t(ȳ) − t(b̄)} is undefined there and its clamp leaked the constant
+ * ±13.8 / −27.6 into the value, growing with n). The levels shrink that term toward the parent's with the weight
+ * {@code V / (V + λ′)} — the information the level holds against the prior's, so a key of rare events shrinks
+ * more than a key of the same row count at even odds — where λ′ is the pseudo-count in rows times the root
+ * level's information per row (or, under variance components, 1 / τ² estimated on the score scale,
+ * {@link #lambdaFromScore}); the composed value is the term itself (a log-odds / log-rate ratio against the
+ * baseline; on identity the mean residual, as without the extra sums). Both {@code S} and {@code V} are sums
+ * over the level's rows, so every fit mode serves the estimate from its sufficient statistics.
  *
  * <p><b>Conjugate families</b> (§5.1.1, §5.5 {@code family}). Shrinkage is "add pseudo sufficient statistics
  * inherited from the parent": with pseudo-count {@code m = λ} the posterior mean of every conjugate family is
@@ -234,15 +242,23 @@ public final class Shrinkage implements Serializable {
     /**
      * One lattice level resolved to the hidden statistics columns of the row. {@code additive} levels carry
      * the main-effect chains instead of statistics. {@code offColumn} is the level's hidden Σ baseline (the
-     * {@code __sumoff} column an offset block on a logit / log scale registers, see {@link #own}); null otherwise.
+     * {@code __sumoff} column an offset block on a logit / log scale registers) and {@code infoColumn} its Fisher
+     * information {@code V} — the {@code __suminfo} column (Σ b(1 − b)) on logit, the Σ baseline column itself on
+     * log; both null otherwise. A level with an information column is composed by the score-type estimate
+     * ({@link #ownScore}); the others by the transformed mean ({@link #own}).
      */
-    public record Level(String token, String nColumn, String sumColumn, String offColumn, List<List<Level>> mainEffects) implements Serializable {
+    public record Level(String token, String nColumn, String sumColumn, String offColumn, String infoColumn, List<List<Level>> mainEffects) implements Serializable {
         public Level(final String token, final String nColumn, final String sumColumn, final List<List<Level>> mainEffects) {
-            this(token, nColumn, sumColumn, null, mainEffects);
+            this(token, nColumn, sumColumn, null, null, mainEffects);
         }
 
         boolean isAdditive() {
             return mainEffects != null;
+        }
+
+        /** Whether the level is composed on the score scale (an offset term on logit / log). */
+        boolean isScore() {
+            return infoColumn != null;
         }
     }
 
@@ -326,10 +342,25 @@ public final class Shrinkage implements Serializable {
         final Level leaf = levels.get(leafIndex);
         final double leafN = n(row, leaf.nColumn());
         final double leafSum = n(row, leaf.sumColumn());
-        final double leafOff = leaf.offColumn() == null ? 0 : n(row, leaf.offColumn());
+        final double leafInfo = leaf.infoColumn() == null ? 0 : n(row, leaf.infoColumn());
         final double[] effectiveN = new double[1];
-        final Double est = estimate(row, levels, 0, leafIndex, leafN, leafSum, leafOff, deviations, effectiveN, lambdas, false);
+        final Double est = estimate(row, levels, 0, leafIndex, leafN, leafSum, leafInfo, deviations, effectiveN, lambdas,
+                false, rootInfoPerRow(row, levels));
         return new Composition(est == null ? null : output(scale, est, levels.get(0).offColumn() != null), deviations, est == null ? null : effectiveN[0]);
+    }
+
+    /**
+     * The information per row of the chain's root — the coarsest level, its whole totals — which converts a
+     * pseudo-count in rows into the score scale ({@code λ′ = priorWeight · ī}): "priorWeight rows of average
+     * information". One constant for the whole lattice when the coarsest level is the global one (the usual case);
+     * a lattice that stops at a keyed level reads that level's own average instead, so λ′ then varies with the key.
+     * 1 without a score level, or when the root holds nothing.
+     */
+    private static double rootInfoPerRow(final Map<String, Object> row, final List<Level> levels) {
+        final Level root = levels.get(levels.size() - 1);
+        if (!root.isScore()) return 1;
+        final double n = n(row, root.nColumn()), info = n(row, root.infoColumn());
+        return n > 0 && info > 0 ? info / n : 1;
     }
 
     /**
@@ -353,31 +384,46 @@ public final class Shrinkage implements Serializable {
     }
 
     /**
-     * A level's (or a joint cell's) own estimate on the transform scale: {@code t(Σy / n)} — or, under a baseline
-     * offset, the additive term {@code t(ȳ) − t(b̄)} with {@code ȳ = (Σ(y − b) + Σb) / n} the observed statistic and
-     * {@code b̄ = Σb / n} the mean baseline of the same rows (the observed-over-expected log-odds ratio on logit, the
-     * exact Poisson-offset MLE {@code log(Σy / Σb)} on log). On the identity scale both forms are {@code Σ(y − b) / n},
-     * so the hidden sum alone decides there. Null — no estimate, as for {@code n = 0} — when the mean baseline lies
-     * outside the open domain of the transform ({@link #baselineDefined}): the term is undefined there, and the
-     * transform's clamp would otherwise leak its constant (±13.8 on logit, −27.6 on log) into the term.
+     * A level's own estimate on the transform scale without an offset term: {@code t(Σy / n)} — on the identity scale
+     * also under an offset, where the hidden sum is {@code Σ(y − b)} and the estimate the mean residual.
      *
-     * @param n      the rows of the level (> 0)
-     * @param sum    Σ(y − b) of those rows (Σy without an offset)
-     * @param sumOff Σb of the same rows (ignored without an offset)
-     * @param offset whether the target is offset by a baseline
+     * @param n   the rows of the level (> 0)
+     * @param sum Σy of those rows (Σ(y − b) under an identity offset)
      */
-    static Double own(final Scale scale, final double n, final double sum, final double sumOff, final boolean offset) {
-        if (!offset || scale == Scale.identity) return transform(scale, sum / n);
-        if (!baselineDefined(scale, n, sumOff)) return null;
-        return transform(scale, (sum + sumOff) / n) - transform(scale, sumOff / n);
+    static double own(final Scale scale, final double n, final double sum) {
+        return transform(scale, sum / n);
     }
 
-    /** Whether the mean baseline {@code Σb / n} lies in the open domain of the scale: (0, ∞) on log, (0, 1) on logit. */
-    static boolean baselineDefined(final Scale scale, final double n, final double sumOff) {
+    /**
+     * A level's (or a joint cell's) own score-type estimate of the offset term: {@code δ̂ = S / V}, the one-step
+     * (Fisher scoring) estimate from the baseline — {@code S = Σ(y − b)}, {@code V = Σ b(1 − b)} on logit and
+     * {@code Σb} on log. Exact to first order in δ, finite whatever the counts (no transform, no clamp), and
+     * conservative for a large |δ|: a key with no success in n rows reads {@code −Σb / V}, which grows with n toward
+     * {@code −1 / (1 − b̄)} on logit (−1 on log) instead of diverging. Null when the rows carry no information
+     * ({@code V ≤ 0}: every baseline at 0 or 1), as for {@code n = 0}.
+     *
+     * @param sum  S, Σ(y − b) of the level's rows
+     * @param info V, the information of the same rows
+     */
+    static Double ownScore(final double sum, final double info) {
+        return info > 0 ? sum / info : null;
+    }
+
+    /**
+     * The Fisher information one row contributes at its baseline: {@code b(1 − b)} on logit, {@code b} on log, 1
+     * otherwise. The baseline is clamped to the scale's domain first ([0, 1] on logit, [0, ∞) on log): a declared
+     * baseline is an arbitrary expression, and an out-of-domain value would otherwise make a row's contribution
+     * <i>negative</i> — a sign flip (or a near-cancelling denominator) in {@link #ownScore}, where the transformed
+     * mean used to clamp. A baseline at the edge of the domain contributes no information, as before.
+     */
+    public static double information(final Scale scale, final double baseline) {
         return switch (scale) {
-            case identity -> true;
-            case log -> sumOff > 0;
-            case logit -> sumOff > 0 && sumOff < n;
+            case identity -> 1d;
+            case logit -> {
+                final double b = Math.min(1, Math.max(0, baseline));
+                yield b * (1 - b);
+            }
+            case log -> Math.max(0, baseline);
         };
     }
 
@@ -390,32 +436,38 @@ public final class Shrinkage implements Serializable {
         return offset && scale != Scale.identity ? eta : inverse(scale, eta);
     }
 
-    private double lambda(final Level level, final Map<String, Double> lambdas) {
-        if (lambdas == null) return priorWeight;
-        final Double l = lambdas.get(level.nColumn());
-        return l == null ? priorWeight : l;
+    /**
+     * The level's estimated pseudo-count (variance components, keyed by the level's {@code n} column), or null when
+     * there is none and {@link #priorWeight} applies. For a score level an estimated entry is {@code λ′ = 1 / τ²} on
+     * the score scale already ({@link #lambdaFromScore}) and is used as is; {@code priorWeight} is in rows and is
+     * converted by the caller.
+     */
+    private static Double estimatedLambda(final Level level, final Map<String, Double> lambdas) {
+        return lambdas == null ? null : lambdas.get(level.nColumn());
     }
 
     /**
-     * @param leafIndex the chain's effective leaf, whose statistics are {@code looN} / {@code looSum} / {@code looOff}:
-     *                  the levels above it contain them; the (empty) levels below it and the leaf itself do not
+     * @param leafIndex     the chain's effective leaf, whose statistics are {@code looN} / {@code looSum} / {@code looInfo}:
+     *                      the levels above it contain them; the (empty) levels below it and the leaf itself do not
+     * @param rootInfoPerRow the root's information per row ({@link #rootInfoPerRow}): converts a pseudo-count in rows
+     *                      into the score scale for the score levels
      */
     private Double estimate(final Map<String, Object> row, final List<Level> levels, final int index, final int leafIndex,
-                            final double looN, final double looSum, final double looOff, final Double[] deviations, final double[] effectiveN,
-                            final Map<String, Double> lambdas, final boolean subtractLeaf) {
+                            final double looN, final double looSum, final double looInfo, final Double[] deviations, final double[] effectiveN,
+                            final Map<String, Double> lambdas, final boolean subtractLeaf, final double rootInfoPerRow) {
         final Level level = levels.get(index);
         if (level.isAdditive()) {
             // sequential estimator: parent of the cell is the additive prediction of the main effects.
             // every main-effect level also contains the cell's rows, so leave-node-out subtracts the leaf
             // statistics at every level of the main chains (subtractLeaf = true).
-            final Double root = estimate(row, levels, index + 1, leafIndex, looN, looSum, looOff, deviations, effectiveN, lambdas, false);
+            final Double root = estimate(row, levels, index + 1, leafIndex, looN, looSum, looInfo, deviations, effectiveN, lambdas, false, rootInfoPerRow);
             if (root == null) return null;
             double sum = root;
             for (final List<Level> main : level.mainEffects()) {
                 final Double[] mainDev = new Double[main.size()];
                 final double[] ignored = new double[1];
                 // a main chain is a list of its own: the leaf is none of its levels (-1), every one of them contains it
-                final Double mainEst = estimate(row, main, 0, -1, looN, looSum, looOff, mainDev, ignored, lambdas, true);
+                final Double mainEst = estimate(row, main, 0, -1, looN, looSum, looInfo, mainDev, ignored, lambdas, true, rootInfoPerRow);
                 if (mainEst != null) sum += mainEst - root;
             }
             deviations[index] = sum - root;
@@ -423,19 +475,19 @@ public final class Shrinkage implements Serializable {
         }
         double n = n(row, level.nColumn());
         double s = n(row, level.sumColumn());
-        final boolean hasOffset = level.offColumn() != null;
-        double off = hasOffset ? n(row, level.offColumn()) : 0;
+        final boolean score = level.isScore();
+        double info = score ? n(row, level.infoColumn()) : 0;
         if ((index > leafIndex || subtractLeaf) && leaveNodeOut) {
             n -= looN;
             s -= looSum;
-            off -= looOff;
+            info -= looInfo;
         }
-        final Double own = n > 0 ? own(scale, n, s, off, hasOffset) : null;
+        final Double own = n <= 0 ? null : score ? ownScore(s, info) : Double.valueOf(own(scale, n, s));
         if (index == levels.size() - 1) {
             effectiveN[0] = n;
             return own;
         }
-        final Double parent = estimate(row, levels, index + 1, leafIndex, looN, looSum, looOff, deviations, effectiveN, lambdas, subtractLeaf);
+        final Double parent = estimate(row, levels, index + 1, leafIndex, looN, looSum, looInfo, deviations, effectiveN, lambdas, subtractLeaf, rootInfoPerRow);
         if (own == null) {
             deviations[index] = 0d;
             return parent;
@@ -445,12 +497,18 @@ public final class Shrinkage implements Serializable {
             deviations[index] = 0d;
             return own;
         }
-        final double lambda = lambda(level, lambdas);
-        final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : n / (n + lambda);
+        // the shrinkage weight: rows against the pseudo-count in rows — or, on the score scale, the level's information
+        // against the prior's (λ′ = 1 / τ²: the estimated one as is, a declared pseudo-count times the root's information
+        // per row), so the effective sample size stays in rows either way
+        final Double estimated = estimatedLambda(level, lambdas);
+        final double lambda = estimated != null ? estimated : score ? priorWeight * rootInfoPerRow : priorWeight;
+        final double mass = score ? info : n;
+        final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : mass / (mass + lambda);
         final double dev = w * (own - parent);
         deviations[index] = dev;
-        // effective sample size: own n plus the prior mass actually backed by the parent (§5.5 rule 6)
-        effectiveN[0] = n + (lambda == 0 ? 0 : Double.isInfinite(lambda) ? effectiveN[0] : lambda * Math.min(1, effectiveN[0] / lambda));
+        // effective sample size: own n plus the prior mass actually backed by the parent (§5.5 rule 6), in rows
+        final double lambdaRows = score ? lambda / rootInfoPerRow : lambda;
+        effectiveN[0] = n + (lambdaRows == 0 ? 0 : Double.isInfinite(lambdaRows) ? effectiveN[0] : lambdaRows * Math.min(1, effectiveN[0] / lambdaRows));
         return parent + dev;
     }
 
@@ -517,7 +575,8 @@ public final class Shrinkage implements Serializable {
             effectiveN[0] = n;
             return own;
         }
-        final double lambda = lambda(level, lambdas);
+        final Double estimated = estimatedLambda(level, lambdas);
+        final double lambda = estimated == null ? priorWeight : estimated;
         final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : n / (n + lambda);
         final Map<String, Double> composed = new java.util.TreeMap<>();
         for (final String category : union(own.keySet(), parent.keySet())) {
@@ -556,6 +615,27 @@ public final class Shrinkage implements Serializable {
         return sigma2 / tau2;
     }
 
+    /**
+     * The score-scale pseudo-count {@code λ′ = 1 / τ²} of one level from its keys' score statistics — the moment
+     * estimator of the between-key variance of the one-step terms {@code δ̂_k = S_k / V_k}, whose sampling variance is
+     * {@code 1 / V_k} (DerSimonian–Laird): {@code Q = Σ S_k² / V_k − (Σ S_k)² / Σ V_k} has expectation
+     * {@code (K − 1) + τ² (Σ V_k − Σ V_k² / Σ V_k)}. A non-positive τ² (no signal at this level) yields +∞, i.e. full
+     * shrinkage; fewer than two keys, or no information, yields null (fall back to priorWeight). Keys without
+     * information ({@code V_k ≤ 0}) are not keys of the level here — they have no term of their own.
+     *
+     * @param keyCount K (keys with {@code V_k > 0}), {@code sumV} Σ V_k, {@code sumV2} Σ V_k², {@code sumS} Σ S_k,
+     *                 {@code sumS2OverV} Σ S_k² / V_k
+     */
+    public static Double lambdaFromScore(final long keyCount, final double sumV, final double sumV2, final double sumS, final double sumS2OverV) {
+        if (keyCount < 2 || sumV <= 0) return null;
+        final double q = sumS2OverV - sumS * sumS / sumV;
+        final double denominator = sumV - sumV2 / sumV;
+        if (denominator <= 0) return null;
+        final double tau2 = (q - (keyCount - 1)) / denominator;
+        if (tau2 <= 0) return Double.POSITIVE_INFINITY;
+        return 1 / tau2;
+    }
+
     /** Serializes a level chain into a coordinate string; the row evaluator rebuilds it with {@link #parseLevels}. */
     static String encodeLevels(final List<Level> levels) {
         final StringBuilder sb = new StringBuilder();
@@ -572,7 +652,9 @@ public final class Shrinkage implements Serializable {
                 sb.append(')');
             } else {
                 sb.append(l.token()).append(',').append(l.nColumn()).append(',').append(l.sumColumn());
-                if (l.offColumn() != null) sb.append(',').append(l.offColumn());
+                // positional: the information column is the fifth token, so an absent offset column still takes its slot
+                if (l.offColumn() != null || l.infoColumn() != null) sb.append(',').append(l.offColumn() == null ? "" : l.offColumn());
+                if (l.infoColumn() != null) sb.append(',').append(l.infoColumn());
             }
         }
         return sb.toString();
@@ -593,7 +675,9 @@ public final class Shrinkage implements Serializable {
                 int end = i;
                 while (end < text.length() && text.charAt(end) != ';') end++;
                 final String[] parts = text.substring(i, end).split(",", -1);
-                levels.add(new Level(parts[0], parts[1], parts[2], parts.length > 3 && !parts[3].isEmpty() ? parts[3] : null, null));
+                levels.add(new Level(parts[0], parts[1], parts[2],
+                        parts.length > 3 && !parts[3].isEmpty() ? parts[3] : null,
+                        parts.length > 4 && !parts[4].isEmpty() ? parts[4] : null, null));
                 i = end;
             }
             if (i < text.length() && text.charAt(i) == ';') i++;
