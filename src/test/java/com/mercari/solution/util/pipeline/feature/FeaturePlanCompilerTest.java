@@ -555,6 +555,32 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.weightBy.scan")).count(), "reported once, not per window");
         Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, spec.replace("/ 50)", "/ 25)")).getHash(), "the weight is a semantic parameter");
 
+        // a string operand is compared by identity (a category match), with an info saying only == / != are meaningful
+        final FeaturePlan identity = compile(SOURCES, SPEC.replace(plain, "- {type: aggregate, field: sold, funcs: [count], weightBy: \"category == $self.category ? 1 : 0.25\", as: same}"));
+        Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
+        Assertions.assertTrue(hasCode(identity, "sequence.weightBy.identity"), identity::describe);
+        Assertions.assertTrue(column(identity, "recent_n5_same_count").getPastInputs().contains("category"));
+        // a hash is not a magnitude: a string read outside == / != would silently swamp the kernel (exp(-1e14) = 0)
+        final FeaturePlan magnitude = compile(SOURCES, spec.replace(kernel, "exp(-abs(category - $self.category) / 50)"));
+        Assertions.assertTrue(hasCode(magnitude, "sequence.weightBy.identity"), magnitude::describe);
+        Assertions.assertTrue(magnitude.getDiagnostics().hasErrors(), magnitude::describe);
+        // a block-level weightBy is the default of the aggregate ops without their own; without one it is ignored with a warning
+        final FeaturePlan blockLevel = compile(SOURCES, SPEC.replace("  - name: recent\n    scope: sequence\n", "  - name: recent\n    scope: sequence\n    weightBy: \"" + kernel + "\"\n")
+                .replace(plain, plain + "\n      - {type: aggregate, field: start_price, funcs: [mean], weightBy: \"1\", as: flat}"));
+        Assertions.assertFalse(blockLevel.getDiagnostics().hasErrors(), blockLevel::describe);
+        Assertions.assertEquals(kernel, column(blockLevel, "recent_n5_sold_mean").getCoordinates().get("weightBy"));
+        Assertions.assertEquals("1", column(blockLevel, "recent_n5_flat_mean").getCoordinates().get("weightBy"), "the op's own weight wins");
+        Assertions.assertNull(column(blockLevel, "recent_n5_sold_lag1").getCoordinates().get("weightBy"), "a lag is not weighted");
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("  - name: relative\n    scope: context\n", "  - name: relative\n    scope: context\n    weightBy: \"1\"\n")), "sequence.weightBy.block"));
+        // min / max / first / last have no weighted form: the block default leaves such an op alone and says so,
+        // instead of turning it into a sequence.weightBy.func error the user never asked for
+        final FeaturePlan unweighted = compile(SOURCES, SPEC.replace("  - name: recent\n    scope: sequence\n", "  - name: recent\n    scope: sequence\n    weightBy: \"" + kernel + "\"\n")
+                .replace(plain, "- {type: aggregate, field: sold, funcs: [count, mean]}\n      - {type: aggregate, field: start_price, funcs: [max], as: peak}"));
+        Assertions.assertFalse(unweighted.getDiagnostics().hasErrors(), unweighted::describe);
+        Assertions.assertTrue(hasCode(unweighted, "sequence.weightBy.block"), unweighted::describe);
+        Assertions.assertNull(column(unweighted, "recent_n5_peak_max").getCoordinates().get("weightBy"));
+        Assertions.assertEquals(kernel, column(unweighted, "recent_n5_sold_mean").getCoordinates().get("weightBy"));
+
         // a field-less weighted count: Σw over the visible rows
         final FeaturePlan count = compile(SOURCES, SPEC.replace(plain, "- {type: aggregate, weightBy: \"" + kernel + "\", as: near}"));
         Assertions.assertFalse(count.getDiagnostics().hasErrors(), count::describe);
@@ -572,8 +598,9 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [count, mean, std]", "funcs: [mean, max]"));
         Assertions.assertTrue(hasCode(func, "sequence.weightBy.func"), func::describe);
         Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("count | sum | mean")), "the message lists the weighted funcs");
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "condition_grade - $self.start_price")), "sequence.weightBy.type"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.condition_grade")), "sequence.weightBy.type"));
+        // a timestamp is neither numeric nor a text compared by identity
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "session_time - $self.start_price")), "sequence.weightBy.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.session_time")), "sequence.weightBy.type"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "exp(-abs(start_price")), "sequence.weightBy.parse"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.nosuchfield")), "reference.unresolved"));
 
@@ -2073,6 +2100,39 @@ public class FeaturePlanCompilerTest {
         for (final String func : OperatorCatalog.VECTOR_FUNCS) {
             if (!"polyfit".equals(func)) Assertions.assertNotNull(VectorOps.read(func, new double[]{1, 3, 2}, VectorOps.positions(3, false)), func);
         }
+
+        // polyfit coefficients can be picked (the level is often not a feature), the stepped vector can be emitted as an
+        // array at a fixed length (resample / pad) and fed to an array svd, and the parameters are validated
+        Assertions.assertTrue(block.contains("funcs: [length, mean, argmax, slope, polyfit]\n        degree: 3"), "the text block runs at 8 spaces");
+        final String picked = block.replace("funcs: [length, mean, argmax, slope, polyfit]\n        degree: 3", "funcs: [polyfit, vector]\n        degree: 3\n        coefficients: [1, 2]\n        resample: 12\n        pad: {length: 12, mode: edge, side: start}")
+                .replace("      - name: bid_momentum\n        scope: row\n        expr: \"bids_slope / bids_mean\"\n", "")
+                + "      - name: path_pc\n        scope: population\n        type: svd\n        input: bids_vector\n        rank: 2\n";   // the text block runs at 6 / 8 before withEncoding strips 4
+        final FeaturePlan pickedPlan = compile(sources, withEncoding(picked).replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, bid_path], from: price_snapshots}"));
+        Assertions.assertFalse(pickedPlan.getDiagnostics().hasErrors(), pickedPlan::describe);
+        Assertions.assertNull(pickedPlan.getColumn("bids_poly0"));
+        Assertions.assertNotNull(pickedPlan.getColumn("bids_poly1"));
+        Assertions.assertNotNull(pickedPlan.getColumn("bids_poly2"));
+        Assertions.assertNull(pickedPlan.getColumn("bids_poly3"));
+        final OutputColumn vector = column(pickedPlan, "bids_vector");
+        Assertions.assertEquals(Schema.Type.array, vector.getFieldType().getType());
+        Assertions.assertEquals("12", vector.getCoordinates().get("resample"));
+        Assertions.assertEquals("12", vector.getCoordinates().get("padLength"));
+        Assertions.assertEquals("start", vector.getCoordinates().get("padSide"));
+        Assertions.assertEquals("edge", vector.getCoordinates().get("padMode"));
+        Assertions.assertEquals("bids_vector", column(pickedPlan, "path_pc_0").getCoordinates().get("arrayField"), pickedPlan::describe);
+        final java.util.function.Function<String, FeaturePlan> withPath = extra -> compile(sources, withEncoding(block.replace("degree: 3", "degree: 3\n        " + extra))
+                .replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, bid_path], from: price_snapshots}"));
+        Assertions.assertTrue(hasCode(withPath.apply("coefficients: [1, 4]"), "row.vector.coefficients"));
+        Assertions.assertTrue(hasCode(withPath.apply("coefficients: [1, 1]"), "row.vector.coefficients"));
+        Assertions.assertTrue(hasCode(withPath.apply("resample: 0"), "row.vector.resample"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {length: 4, mode: repeat}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {mode: zero}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: 4"), "row.vector.pad"));
+        // a misspelled key or an empty object would otherwise drop the padding silently (a varying length downstream)
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {lenght: 4}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {length: 4, sied: start}"), "row.vector.pad"));
+        Assertions.assertTrue(hasCode(withPath.apply("pad: {}"), "row.vector.pad"));
+        Assertions.assertFalse(withPath.apply("pad: {length: 4}").getDiagnostics().hasErrors(), "edge / end are the defaults");
 
         // an outcome-like array cannot feed a feature before it is known
         final String outcome = SOURCES.replace("      - {name: final_price, type: double, availableAt: after(event), kind: outcome}\n",

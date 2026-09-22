@@ -265,6 +265,39 @@ public class FeatureTransformTest {
     }
 
     /**
+     * {@code weightBy} over a string operand — a category match, weight 1 for the same category and 0.25 for another —
+     * declared once on the block: s1 lists electronics only (B sees A: 1, C sees A and B: 2, D three), s2 toys only
+     * (C sees A: 1); the plain count of the same rows is the unweighted one.
+     */
+    @Test
+    public void testWeightByStringIdentity() throws java.io.IOException {
+        final String blocks = """
+                    - name: same
+                      scope: sequence
+                      entity: seller
+                      weightBy: "category == $self.category ? 1 : 0.25"
+                      ops:
+                        - {type: aggregate, funcs: [count]}
+                        - {type: aggregate, field: start_price, funcs: [mean]}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(0.0, byKey.get("A/s1").getAsDouble("f_same_all_count"), 1e-12);
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_same_all_count"), 1e-12);
+            Assertions.assertEquals(2.0, byKey.get("C/s1").getAsDouble("f_same_all_count"), 1e-12);
+            Assertions.assertEquals(3.0, byKey.get("D/s1").getAsDouble("f_same_all_count"), 1e-12);
+            Assertions.assertEquals(1.0, byKey.get("C/s2").getAsDouble("f_same_all_count"), 1e-12);
+            // the block's kernel weighs the mean too: D/s1 reads A (100), B (200), C (80) at weight 1 each
+            Assertions.assertEquals((100 + 200 + 80) / 3.0, byKey.get("D/s1").getAsDouble("f_same_all_start_price_mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * {@code weightBy}: the seller's past sessions weighed by how close their start price was to this listing's,
      * w = exp(−|Δprice| / 50). {@code sold} reaches the system 6 days after a session, so B/s1 (two days after A) sees
      * nothing yet; C/s1 (price 80) sees A (100, sold) and B (200, unsold); D/s1 (120) sees A, B and C (80, sold).
@@ -1886,6 +1919,62 @@ public class FeatureTransformTest {
                 }
             }
             Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * The {@code vector} readout with {@code resample}: arrays of two to four bids become three-element vectors, which an
+     * array svd (static, rank 1) takes as its input — every row with an array reads a score; a single bid is repeated
+     * (a constant vector, still three elements), the empty array stays empty (a length mismatch: no score) and a
+     * missing array arrives as the empty one.
+     */
+    @Test
+    public void testVectorResampledIntoSvd() throws java.io.IOException {
+        final String[][] rows = {
+                {"current_bid_t10: 120.0,", "[100.0, 110.0, 120.0]"}, {"current_bid_t10: 55.0, ", "[50.0, 55.0]"}, {"current_bid_t10: 210.0,", "[200.0, 205.0, 203.0, 210.0]"},
+                {"current_bid_t10: 90.0, ", "[90.0]"}, {"current_bid_t10: 70.0, ", null}, {"current_bid_t10: 130.0,", "[]"}};
+        String source = SOURCE_CONFIG.replace("        - {name: current_bid_t10, type: float64}\n",
+                "        - {name: current_bid_t10, type: float64}\n        - {name: bid_path, type: float64, mode: repeated}\n");
+        for (final String[] row : rows) {
+            if (row[1] != null) source = source.replace(row[0], row[0] + " bid_path: " + row[1] + ",");
+        }
+        final String blocks = """
+                    - name: path
+                      scope: row
+                      type: vector
+                      input: bid_path
+                      resample: 3
+                      funcs: [vector, length]
+                    - name: path_pc
+                      scope: population
+                      type: svd
+                      input: path_vector
+                      rank: 1
+                      fit: {mode: static}
+                """;
+        final String config = FEATURE_CONFIG
+                .replace("              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n",
+                        "              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n"
+                                + "              - {name: bid_path, type: array<float64>, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n")
+                .replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, bid_path], from: price_snapshots}")
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        Assertions.assertTrue(config.contains("array<float64>") && config.contains("current_bid_t10, bid_path]"), "the contract lines must match the text block's runtime indentation");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + config));
+        Assertions.assertEquals(Schema.Type.array, outputs.get("features").getSchema().getField("f_path_vector").getFieldType().getType());
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows_ -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows_) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            for (final String id : List.of("A/s1", "A/s2", "B/s1", "C/s1")) {
+                Assertions.assertEquals(3L, byKey.get(id).getAsLong("f_path_length"), id);
+                Assertions.assertNotNull(byKey.get(id).getPrimitiveValue("f_path_pc_0"), id);
+            }
+            // a repeated field without a value arrives as the empty array: length 0, no score (as for D)
+            Assertions.assertEquals(0L, byKey.get("C/s2").getAsLong("f_path_length"));
+            Assertions.assertNull(byKey.get("C/s2").getPrimitiveValue("f_path_pc_0"));
+            Assertions.assertEquals(0L, byKey.get("D/s1").getAsLong("f_path_length"), "the empty array stays empty");
+            Assertions.assertNull(byKey.get("D/s1").getPrimitiveValue("f_path_pc_0"), "a length mismatch reads no score");
             return null;
         });
         pipeline.run();

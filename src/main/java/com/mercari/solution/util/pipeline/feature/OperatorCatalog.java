@@ -165,7 +165,7 @@ public final class OperatorCatalog {
     }
 
     /** The readouts of the row {@code vector} op ({@link VectorOps#read}; {@code polyfit} expands to one column per coefficient). */
-    public static final List<String> VECTOR_FUNCS = List.of("length", "sum", "mean", "std", "min", "max", "argmin", "argmax", "first", "last", "slope", "norm", "polyfit");
+    public static final List<String> VECTOR_FUNCS = List.of("length", "sum", "mean", "std", "min", "max", "argmin", "argmax", "first", "last", "slope", "norm", "polyfit", "vector");
 
     /** The vector → vector rescalings of the row {@code vector} op ({@link VectorOps#normalize}). */
     public static final List<String> VECTOR_NORMALIZATIONS = List.of("sum", "mean", "l2", "zscore");
@@ -175,6 +175,7 @@ public final class OperatorCatalog {
         if (!VECTOR_FUNCS.contains(func)) return null;
         return switch (func) {
             case "length", "argmin", "argmax" -> I64;
+            case "vector" -> Schema.FieldType.array(F64);
             default -> F64;
         };
     }

@@ -293,7 +293,18 @@ public class FeatureSpec implements Serializable {
         public String position;
         /** vector: polynomial degree of the {@code polyfit} readout (null = 2). */
         public Integer degree;
-
+        /** vector: the {@code polyfit} coefficients to emit ({@code coefficients: [1, 2]}; empty = every one up to {@code degree}). */
+        public List<Integer> coefficients = new ArrayList<>();
+        /** vector: {@code resample: <length>} — the vector interpolated onto that many positions, after the other steps (null = none). */
+        public Integer resample;
+        /** vector: {@code pad: {length, mode: edge | zero, side: end | start}} — the vector extended to the length (null = none). */
+        public Integer padLength;
+        public String padMode;
+        public String padSide;
+        /** vector: {@code pad} was declared in a form other than an object, or with an unknown key (a compile error). */
+        public boolean padMalformed;
+        /** vector: {@code pad} was declared at all — a declaration without a {@code length} is a compile error. */
+        public boolean padDeclared;
         // context / sequence
         public String context;
         public boolean excludeSelf;
@@ -932,6 +943,25 @@ public class FeatureSpec implements Serializable {
         def.normalize = Json.string(o, "normalize");
         def.position = Json.string(o, "position");
         def.degree = Json.integer(o, "degree");
+        for (final Double d : doubles(o, "coefficients", diagnostics, loc)) {
+            if (d == Math.rint(d)) def.coefficients.add(d.intValue());
+            else diagnostics.error("row.vector.coefficients", loc, "coefficients must list integers (the polyfit coefficient indices): " + d);
+        }
+        def.resample = Json.integer(o, "resample");
+        if (o.has("pad") && !o.get("pad").isJsonNull()) {
+            def.padDeclared = true;
+            if (o.get("pad").isJsonObject()) {
+                final JsonObject pad = o.getAsJsonObject("pad");
+                def.padLength = Json.integer(pad, "length");
+                def.padMode = Json.string(pad, "mode");
+                def.padSide = Json.string(pad, "side");
+                // a misspelled key (len, siede ...) would otherwise drop the padding silently, and the varying
+                // length only shows up downstream (an array svd reading no score)
+                if (pad.keySet().stream().anyMatch(k -> !List.of("length", "mode", "side").contains(k))) def.padMalformed = true;
+            } else {
+                def.padMalformed = true;
+            }
+        }
 
         def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
@@ -947,6 +977,33 @@ public class FeatureSpec implements Serializable {
             for (final JsonElement e : arrayOf(o.get("ops"))) {
                 final Op op = parseOp(e, diagnostics, loc);
                 if (op != null) def.ops.add(op);
+            }
+        }
+        // a block-level weightBy is the default of the block's aggregate ops (an op's own wins): one kernel, written once;
+        // the ops carry the effective expression, the block keeps no copy
+        final String blockWeightBy = Json.string(o, "weightBy");
+        if (blockWeightBy != null) {
+            boolean applied = false;
+            final List<String> unweighted = new ArrayList<>();
+            for (final Op op : def.ops) {
+                if (!"aggregate".equals(op.type)) continue;
+                // min / max / first / last have no weighted form: a block default must not turn such an op into a
+                // sequence.weightBy.func error the user never asked for — it is left unweighted and reported
+                final List<String> without = op.funcs.stream().filter(f -> !OperatorCatalog.WEIGHTED_FUNCS.contains(f)).toList();
+                if (!without.isEmpty()) {
+                    unweighted.addAll(without);
+                    continue;
+                }
+                if (op.weightBy == null) op.weightBy = blockWeightBy;
+                applied = true;
+            }
+            if (!unweighted.isEmpty()) {
+                diagnostics.warning("sequence.weightBy.block", loc, "the block's weightBy does not apply to the aggregate func(s) " + unweighted
+                        + ", which have no weighted form (" + String.join(" | ", OperatorCatalog.WEIGHTED_FUNCS) + "): those ops stay unweighted"
+                        + " - split them into their own block, or declare the weight on each op instead");
+            }
+            if (!applied && unweighted.isEmpty()) {
+                diagnostics.warning("sequence.weightBy.block", loc, "weightBy on the block is the default of its aggregate ops, and the block has none: it is ignored");
             }
         }
         if (o.has("lift") && o.get("lift").isJsonObject()) {

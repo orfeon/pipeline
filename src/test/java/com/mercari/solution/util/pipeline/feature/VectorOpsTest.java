@@ -116,6 +116,38 @@ public class VectorOpsTest {
         Assertions.assertNotNull(VectorOps.polyfit(new double[]{1, 2, 4}, VectorOps.positions(3, false), 2));
     }
 
+    /**
+     * {@code resample} interpolates the vector onto a fixed length (the first and last elements kept, a straight
+     * line stays a straight line whether the array shrinks or grows), {@code pad} extends a short vector with its
+     * edge or zeros at either side and never truncates; the {@code vector} readout emits the stepped vector, so an
+     * array of varying length reaches an array svd at one length.
+     */
+    @Test
+    public void testResampleAndPad() {
+        Assertions.assertArrayEquals(new double[]{0, 2.5, 5, 7.5, 10}, VectorOps.resample(new double[]{0, 5, 10}, 5), 1e-12);
+        Assertions.assertArrayEquals(new double[]{0, 10}, VectorOps.resample(new double[]{0, 2.5, 5, 7.5, 10}, 2), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 1}, VectorOps.resample(new double[]{1}, 3), 0d);
+        Assertions.assertArrayEquals(new double[]{0}, VectorOps.resample(new double[]{0, 4, 8}, 1), 0d, "one position: the first element");
+        Assertions.assertEquals(0, VectorOps.resample(new double[0], 3).length);
+        Assertions.assertArrayEquals(new double[]{1, 2, 2, 2}, VectorOps.pad(new double[]{1, 2}, 4, "edge", "end"), 0d);
+        Assertions.assertArrayEquals(new double[]{1, 1, 1, 2}, VectorOps.pad(new double[]{1, 2}, 4, "edge", "start"), 0d);
+        Assertions.assertArrayEquals(new double[]{0, 0, 1, 2}, VectorOps.pad(new double[]{1, 2}, 4, "zero", "start"), 0d);
+        Assertions.assertArrayEquals(new double[]{1, 2, 3}, VectorOps.pad(new double[]{1, 2, 3}, 2, "edge", "end"), 0d, "never truncated");
+        Assertions.assertEquals(0, VectorOps.pad(new double[0], 2, "zero", "end").length, "nothing to pad from: the empty vector stays empty");
+        Assertions.assertEquals(List.of(1d, 3d, 2d), VectorOps.read("vector", new double[]{1, 3, 2}, VectorOps.positions(3, false)), "every catalog readout is served by read");
+        final Map<String, String> coordinates = new HashMap<>(Map.of("func", "vector", "resample", "4"));
+        Assertions.assertEquals(List.of(0d, 1d, 2d, 3d), VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
+        Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(List.of()), "the empty vector has no readout but its length (an svd must not fix its length on it)");
+        coordinates.put("padLength", "6");
+        Assertions.assertEquals(List.of(0d, 1d, 2d, 3d, 3d, 3d), VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
+        Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(List.of()), "the empty vector stays empty under pad: no vector, so no svd observation");
+        coordinates.put("func", "length");
+        Assertions.assertEquals(0L, VectorOps.Plan.of(coordinates).evaluate(List.of()));
+        coordinates.put("func", "length");
+        Assertions.assertEquals(6L, VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
+        Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(null));
+    }
+
     @Test
     public void testPlan() {
         final Map<String, String> coordinates = new HashMap<>();

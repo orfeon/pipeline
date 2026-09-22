@@ -917,10 +917,29 @@ public final class FeaturePlanCompiler {
             diagnostics.error("row.vector.degree", loc, "degree must be 1.." + MAX_VECTOR_DEGREE + ": " + degree);
             valid = false;
         }
+        if (!def.coefficients.isEmpty() && !polyfit) {
+            diagnostics.warning("row.vector.coefficients", loc, "coefficients only applies to the polyfit readout, which funcs does not list");
+        } else if (!def.coefficients.isEmpty() && (def.coefficients.stream().anyMatch(k -> k < 0 || k > degree) || new LinkedHashSet<>(def.coefficients).size() != def.coefficients.size())) {
+            diagnostics.error("row.vector.coefficients", loc, "coefficients must list distinct indices in 0..degree (" + degree + "): " + def.coefficients);
+            valid = false;
+        }
+        if (def.resample != null && def.resample < 1) {
+            diagnostics.error("row.vector.resample", loc, "resample must be >= 1 (the length the vector is interpolated onto): " + def.resample);
+            valid = false;
+        }
+        if (def.padMalformed || (def.padLength != null && def.padLength < 1)
+                || (def.padMode != null && !List.of("edge", "zero").contains(def.padMode)) || (def.padSide != null && !List.of("end", "start").contains(def.padSide))) {
+            diagnostics.error("row.vector.pad", loc, "pad must be {length: >= 1, mode: edge | zero (default edge), side: end | start (default end)}");
+            valid = false;
+        } else if (def.padDeclared && def.padLength == null) {
+            diagnostics.error("row.vector.pad", loc, "pad requires 'length' (the length the vector is extended to)");
+            valid = false;
+        }
         if (!valid) return;
         for (final String func : def.funcs) {
-            final int coefficients = "polyfit".equals(func) ? degree + 1 : 1;
-            for (int k = 0; k < coefficients; k++) {
+            final List<Integer> coefficients = !"polyfit".equals(func) ? List.of(0)
+                    : !def.coefficients.isEmpty() ? def.coefficients : java.util.stream.IntStream.rangeClosed(0, degree).boxed().toList();
+            for (final int k : coefficients) {
                 final String name = def.name + "_" + ("polyfit".equals(func) ? "poly" + k : func);
                 final OutputColumn c = newColumn(def.name, Scope.row, "vector", name, OperatorCatalog.vectorOutput(func), computeAt);
                 c.coordinates.put("func", func);
@@ -928,6 +947,12 @@ public final class FeaturePlanCompiler {
                 if (def.sliceTo != null) c.coordinates.put("sliceTo", Integer.toString(def.sliceTo));
                 if (def.diff != null && def.diff > 0) c.coordinates.put("diff", Integer.toString(def.diff));
                 if (def.normalize != null) c.coordinates.put("normalize", def.normalize);
+                if (def.resample != null) c.coordinates.put("resample", Integer.toString(def.resample));
+                if (def.padLength != null) {
+                    c.coordinates.put("padLength", Integer.toString(def.padLength));
+                    c.coordinates.put("padMode", def.padMode == null ? VectorOps.DEFAULT_PAD_MODE : def.padMode);
+                    c.coordinates.put("padSide", def.padSide == null ? VectorOps.DEFAULT_PAD_SIDE : def.padSide);
+                }
                 if ("slope".equals(func) || "polyfit".equals(func)) c.coordinates.put("position", position);
                 if ("polyfit".equals(func)) {
                     c.coordinates.put("degree", Integer.toString(degree));
@@ -2131,8 +2156,23 @@ public final class FeaturePlanCompiler {
             }
             final References refs = expressionReferences(op.weightBy);
             boolean valid = true;
-            for (final String r : refs.others) valid &= numericWeightOperand(r, r, loc);
-            for (final String r : refs.self) valid &= numericWeightOperand(r, "$self." + r, loc);
+            final List<String> identity = new ArrayList<>();
+            for (final String r : refs.others) valid &= numericWeightOperand(r, r, loc, identity);
+            for (final String r : refs.self) valid &= numericWeightOperand(r, "$self." + r, loc, identity);
+            if (!identity.isEmpty()) {
+                // a hash answers == / != only: reading it as a magnitude (a difference, a kernel) is silently
+                // nonsense — the weight would be ~1e15, so exp(-...) is 0 and every aggregate reads 0 / null
+                final List<String> magnitudes = identity.stream().filter(s -> !comparedByIdentity(op.weightBy, s)).toList();
+                if (magnitudes.isEmpty()) {
+                    diagnostics.info("sequence.weightBy.identity", loc, "weightBy operand(s) " + identity + " are strings, compared by identity: the expression reads a hash of the text,"
+                            + " so == and != (a category match: c == $self.c ? 1 : 0.25) are exact and <, > and arithmetic over them are meaningless");
+                } else {
+                    diagnostics.error("sequence.weightBy.identity", loc, "weightBy string operand(s) " + magnitudes + " are read outside == / !=: a string is compared by identity"
+                            + " (the expression reads a hash of the text), so <, > and arithmetic over it are meaningless - write a category match (c == $self.c ? 1 : 0.25)"
+                            + " or declare the operand as a number");
+                    valid = false;
+                }
+            }
             try {
                 com.mercari.solution.util.ExpressionUtil.createDefaultExpression(op.weightBy.replace("$self.", FeatureValues.SELF_PREFIX));
             } catch (final RuntimeException e) {
@@ -2146,9 +2186,37 @@ public final class FeaturePlanCompiler {
         }).orElse(null);
     }
 
-    private boolean numericWeightOperand(final String reference, final String shown, final String loc) {
+    /**
+     * Whether every occurrence of the operand in the weight expression is an operand of {@code ==} / {@code !=} —
+     * the only comparison a hashed text answers ({@link FeatureValues#weightOperand}). Whitespace and parentheses
+     * around the operand are skipped; anything else reads the hash as a magnitude.
+     *
+     * @param operand the operand as written: a past field's name, or {@code $self.<field>}
+     */
+    private static boolean comparedByIdentity(final String expression, final String operand) {
+        final Matcher m = Pattern.compile("(?<![\\w.$])" + Pattern.quote(operand) + "(?!\\w)").matcher(expression);
+        boolean found = false;
+        while (m.find()) {
+            found = true;
+            int l = m.start();
+            while (l > 0 && (Character.isWhitespace(expression.charAt(l - 1)) || expression.charAt(l - 1) == '(')) l--;
+            int r = m.end();
+            while (r < expression.length() && (Character.isWhitespace(expression.charAt(r)) || expression.charAt(r) == ')')) r++;
+            final boolean equality = (l >= 2 && (expression.startsWith("==", l - 2) || expression.startsWith("!=", l - 2)))
+                    || expression.startsWith("==", r) || expression.startsWith("!=", r);
+            if (!equality) return false;
+        }
+        return found;
+    }
+
+    /** @param identity collects the string operands (compared by identity: {@link FeatureValues#weightOperand}) */
+    private boolean numericWeightOperand(final String reference, final String shown, final String loc, final List<String> identity) {
         final Ref ref = resolve(reference);
         if (ref == null || ref.type() == null || OperatorCatalog.isNumeric(ref.type()) || ref.type().getType() == Schema.Type.bool) return true;
+        if (ref.type().getType() == Schema.Type.string) {
+            identity.add(shown);
+            return true;
+        }
         diagnostics.error("sequence.weightBy.type", loc, "weightBy operand '" + shown + "' is not numeric (" + ref.type().getType() + "); the weight is evaluated as a double");
         return false;
     }

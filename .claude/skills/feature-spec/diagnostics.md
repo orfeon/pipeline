@@ -137,6 +137,9 @@ not expand because another block failed).
 | `row.vector.funcs` | error | `funcs` is missing, lists an unknown readout (the message lists the available ones) or lists one twice |
 | `row.vector.slice` / `row.vector.diff` / `row.vector.normalize` / `row.vector.position` | error | `slice` is an object `{from, to}`; `diff` ≥ 0; `normalize` is sum / mean / l2 / zscore; `position` is index / unit |
 | `row.vector.degree` | error / warning | polyfit `degree` must be 1..5; a warning when `degree` is set but `funcs` has no `polyfit` |
+| `row.vector.coefficients` | error / warning | `coefficients` lists distinct integer indices in `0..degree` (the polyfit coefficients to emit); a warning when it is set but `funcs` has no `polyfit` |
+| `row.vector.resample` | error | `resample` is the length the vector is interpolated onto: ≥ 1 |
+| `row.vector.pad` | error | `pad` is an object `{length: ≥ 1, mode: edge \| zero, side: end \| start}` — a missing `length` or an unknown key is an error (a typo would otherwise leave the vector at a varying length) |
 | `baselines.emit.duplicate` | error | `emit` name collides with a column or input field |
 
 ## Context
@@ -169,7 +172,9 @@ not expand because another block failed).
 | `sequence.self` | error | `$self` inside an op `expr` / `predicate`; use `window.filter`, or `lag` + a row `expr` |
 | `sequence.aggregate.func` | error | unknown aggregate function |
 | `sequence.weightBy.op` / `sequence.weightBy.func` | error | `weightBy` is only defined on `aggregate`, for count / sum / mean / avg / rate / std (min / max / first / last have no weighted form) |
-| `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool |
+| `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool — or a string, compared by identity (a timestamp is neither) |
+| `sequence.weightBy.identity` | info / error | a string operand is compared by identity (the expression reads a stable hash of its text): `c == $self.c ? 1 : 0.25` is exact, and so is `!=`. Reading such an operand outside `==` / `!=` (a difference, a kernel, `<` / `>`) is an **error** — the hash is not a magnitude. A numeric-looking text is read as its number, so `"007"` and `"7"` are one category |
+| `sequence.weightBy.block` | warning | `weightBy` declared on the block is the default of its aggregate ops (an op's own wins). The warning says it applied to nothing: the block has no aggregate op, or the op's `funcs` (`min` / `max` / `first` / `last`) have no weighted form and were left unweighted |
 | `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
 | `sequence.ewma.halflife` | error | `halflife` required and positive |
 | `clock.unknown` | error | `window.clock` / `decayBy` / `fit.blocks.clock` names neither a built-in clock (`time`, `events`) nor a calendar declared in the sources' `clocks:` |
