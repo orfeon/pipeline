@@ -4232,7 +4232,8 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("foldKeys", String.join(",", foldKeys));
             c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
-        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, offsetColumn, def, fitSpec);
+        // a target-less level (row counts, share denominators) never reads the baseline: no lag from it either
+        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, targetReference == null ? null : offsetColumn, def, fitSpec);
         c.coordinates.put("keys", String.join(",", ks.keys));
         if (window != null) {
             c.coordinates.put("window", window.token());
@@ -4254,9 +4255,10 @@ public final class FeaturePlanCompiler {
         // the offset is read where the target is: from the past rows (their baseline next to their outcome), never
         // from the current row — the composed value is the term δ alone. So its availability is the past side's, like
         // the target's (a baseline over an outcome shifts the window near edge, or delays a forward block), and a
-        // baseline the row itself may not see yet is still a valid offset (spec §3 rule 3)
+        // baseline the row itself may not see yet is still a valid offset (spec §3 rule 3). A target-less level
+        // (row counts, share denominators) counts every row and reads no baseline: it takes no shift from it
         if (offsetColumn != null) {
-            addPastInput(c, offsetColumn);
+            if (targetReference != null) addPastInput(c, offsetColumn);
             c.coordinates.put("offset", def.offset);
         }
         if (window != null && window.filter != null) {
@@ -4477,9 +4479,10 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
-            // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
+            // a column declared as the label, the training weight or the evaluation baseline (output.roles.label / weight /
+            // baseline) is post-event by declaration, like a future window's: never a feature, read by the evaluation after
+            // the fact (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role) || "baseline".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;

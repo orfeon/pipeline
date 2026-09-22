@@ -219,8 +219,10 @@ sequence ops never see the current row.
   read from the past rows next to their outcome, never from the current row, so a baseline over an
   outcome field (a settled price) is a valid offset: it shifts the window like an outcome target does
   (`windowShift`) instead of being a violation. The row's own value of such a baseline is still
-  post-event, so `baselines[].emit` of it — and an `output.roles.baseline` pointing at it — is an
-  `availability.violation`; emit only baselines the row itself may read.
+  post-event, so `baselines[].emit` of it is an `availability.violation` — except as the evaluation
+  baseline (`output.roles.baseline: <name>` with `emit`), which is post-event by declaration like a
+  label: status `label`, never a feature. A baseline's `context` must be one event (its rows share the
+  event time), or a past row's baseline reads outcomes settled after that row's lag.
 - A lattice (`hierarchy` / `structure`) shrinks sparse keys toward coarser contexts. `additive` /
   `structure: cross` need the single-key keySets in the same block and an explicit `shrinkage.scale`.
 - The **global level** (`[]`, or any `share` denominator) is one key holding every row — a single
