@@ -693,7 +693,10 @@ public final class FeaturePlanCompiler {
             e.coordinates.put("baseline", baseline.name());
             addSelfInput(e, c.canonicalName);
             e.validFor = c.validFor;
-            e.status = Status.staticSafe;
+            // the row's own baseline value: available when its inputs are (a baseline over an outcome is a valid
+            // offset — read from past rows — but emitting it puts the outcome on the row, a violation like any other)
+            if (e.availableAt == null) e.availableAt = AvailableAt.atEventTime();
+            e.status = rowStatus(e.availableAt, e.computeAt);
             register(e);
             baselineEmits.put(baseline.name(), e.canonicalName);
         }
@@ -951,11 +954,19 @@ public final class FeaturePlanCompiler {
         return null;
     }
 
+    /**
+     * §6.2 verdict of a row-side availability against the column's computeAt: at or before it is safe, statically
+     * after it is a violation, and an availability that is not decidable statically is filtered per row.
+     */
+    private static Status rowStatus(final AvailableAt availableAt, final AvailableAt computeAt) {
+        return availableAt.isStaticallyAtOrBefore(computeAt) ? Status.staticSafe
+                : availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+    }
+
     private void finishRow(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         c.validFor = def.validFor;
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         register(c);
     }
 
@@ -1184,8 +1195,7 @@ public final class FeaturePlanCompiler {
         for (final String key : context.keys()) addSelfInput(c, key);
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         if (def.validFor != null || c.validFor == null) c.validFor = def.validFor; // an op may have inherited one (softmax offset)
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
             // group-constant only within its own context: parent placement requires the grouping context
             c.placement = Placement.parent;
@@ -3365,8 +3375,7 @@ public final class FeaturePlanCompiler {
     private void finishStaticFitted(final OutputColumn c, final FeatureDef def) {
         final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
         c.availableAt = AvailableAt.max(selfSide, c.computeAt);
-        c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(selfSide, c.computeAt);
         c.validFor = def.validFor;
     }
 
@@ -3463,8 +3472,9 @@ public final class FeaturePlanCompiler {
                 if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
                 if (fitSpec.refit) c.coordinates.put("refit", "true");
                 if (offsetColumn != null) {
+                    // read from the training rows only (the example's target minus its baseline), like the target
                     c.coordinates.put("offset", offsetColumn);
-                    addSelfInput(c, offsetColumn);
+                    addPastInput(c, offsetColumn);
                 }
                 for (final String f : def.fields) addSelfInput(c, f);
                 addPastInput(c, target);
@@ -4022,8 +4032,7 @@ public final class FeaturePlanCompiler {
     private void finishComposed(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         // the hidden statistics are available at computeAt by construction; the composed value inherits that
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         c.validFor = def.validFor;
         register(c);
     }
@@ -4254,7 +4263,8 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("foldKeys", String.join(",", foldKeys));
             c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
-        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, offsetColumn, def, fitSpec);
+        // a target-less level (row counts, share denominators) never reads the baseline: no lag from it either
+        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, targetReference == null ? null : offsetColumn, def, fitSpec);
         c.coordinates.put("keys", String.join(",", ks.keys));
         if (window != null) {
             c.coordinates.put("window", window.token());
@@ -4273,9 +4283,13 @@ public final class FeaturePlanCompiler {
         for (final String key : ks.keys) addSelfInput(c, key);
         // target-less statistics (count / share denominators) count rows: the keys are self reads (keying), not projected
         if (targetReference != null) addPastInput(c, targetReference);
+        // the offset is read where the target is: from the past rows (their baseline next to their outcome), never
+        // from the current row — the composed value is the term δ alone. So its availability is the past side's, like
+        // the target's (a baseline over an outcome shifts the window near edge, or delays a forward block), and a
+        // baseline the row itself may not see yet is still a valid offset (spec §3 rule 3). A target-less level
+        // (row counts, share denominators) counts every row and reads no baseline: it takes no shift from it
         if (offsetColumn != null) {
-            addSelfInput(c, offsetColumn);
-            addPastInput(c, offsetColumn);
+            if (targetReference != null) addPastInput(c, offsetColumn);
             c.coordinates.put("offset", def.offset);
         }
         if (window != null && window.filter != null) {
@@ -4496,9 +4510,10 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
-            // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
+            // a column declared as the label, the training weight or the evaluation baseline (output.roles.label / weight /
+            // baseline) is post-event by declaration, like a future window's: never a feature, read by the evaluation after
+            // the fact (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role) || "baseline".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;

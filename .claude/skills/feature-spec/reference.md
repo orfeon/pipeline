@@ -224,7 +224,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}
     - {expr: "<numeric expr>", stats: [mean]}
-  offset: <baselines[].name>                     # target minus baseline; on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
+  offset: <baselines[].name>                     # target minus baseline, read from the past rows like the target (a baseline over an outcome shifts the window, not a violation); on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
   combine: product | zip
   naming: "{block}__{keys}__{window}__{target}__{stat}"   # default; empty segments collapse
   shrinkage:
