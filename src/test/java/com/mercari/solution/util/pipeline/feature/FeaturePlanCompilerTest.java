@@ -2396,6 +2396,90 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(statik, "smooth.fit.align"), statik::describe);
     }
 
+    /**
+     * An entity's {@code minInterval} is a declaration the compiler trusts: it turns the window shift of an outcome
+     * (settlement + ingestion of {@code sold}, PT144H38M here) into {@code staticSafe} when it is at least as long. The
+     * plan says what rests on it — the columns, the shift absorbed — with an audit query over the input, an info, and
+     * the run-time counter's name; an entity whose declaration absorbs nothing appears nowhere.
+     */
+    @Test
+    public void testMinIntervalAudit() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn mean = column(plan, "recent_n5_sold_mean");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, mean.getStatus());
+        Assertions.assertEquals("PT168H", mean.getCoordinates().get("minInterval"));
+        Assertions.assertEquals("seller", mean.getCoordinates().get("minIntervalEntity"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plan, "recent_n5_start_price_lag1").getStatus());
+        Assertions.assertNull(column(plan, "recent_n5_start_price_lag1").getCoordinates().get("minIntervalEntity"), "an attribute needs no shift: nothing rests on the declaration");
+        Assertions.assertEquals(1, plan.getMinIntervalAudits().size(), plan::describe);
+        final FeaturePlan.MinIntervalAudit audit = plan.getMinIntervalAudits().get(0);
+        Assertions.assertEquals("seller", audit.entity());
+        Assertions.assertEquals(List.of("seller_id"), audit.keys());
+        Assertions.assertEquals(java.time.Duration.ofDays(7), audit.minInterval());
+        Assertions.assertEquals(column(compile(SOURCES, SPEC), "recent_n5_sold_mean").getWindowShift(), audit.shift());
+        Assertions.assertTrue(audit.columns().contains("recent_n5_sold_mean"), audit::describe);
+        Assertions.assertFalse(audit.columns().contains("recent_n5_start_price_lag1"), audit::describe);
+        Assertions.assertTrue(hasCode(plan, "entity.minInterval"), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("entity.minInterval")).count(), "once per entity");
+        final FeaturePlan.AuditQuery query = plan.getAuditQueries().stream().filter(q -> q.stages().contains("entity seller")).findFirst().orElseThrow(() -> new AssertionError(plan.describe()));
+        Assertions.assertTrue(query.sql().contains("LAG(session_time) OVER (PARTITION BY seller_id ORDER BY session_time)"), query.sql());
+        Assertions.assertTrue(query.sql().contains("gap_seconds < 604800"), query.sql());
+        Assertions.assertTrue(query.note().contains("feature/minInterval_seller_below"), query.note());
+        Assertions.assertTrue(plan.describe().contains("-- minInterval audit"), plan::describe);
+        Assertions.assertEquals(1, plan.toJson().getAsJsonArray("minIntervalAudit").size());
+        // a declaration shorter than the shift absorbs nothing: the window stays shifted and no audit is raised
+        final FeaturePlan shorter = compile(SOURCES, SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P5D}"));
+        Assertions.assertEquals(OutputColumn.Status.windowShift, column(shorter, "recent_n5_sold_mean").getStatus());
+        Assertions.assertTrue(shorter.getMinIntervalAudits().isEmpty());
+        Assertions.assertFalse(hasCode(shorter, "entity.minInterval"));
+        Assertions.assertTrue(compile(SOURCES, SPEC).getMinIntervalAudits().isEmpty());
+    }
+
+    /**
+     * The counter is kept by ONE keyed stage per entity, the one keyed by the entity itself: a window reduced by a
+     * {@code $self} equality filter runs under a finer key (entity keys + the filter field) and would see the gaps of
+     * that sub-key, not the entity's; and every keyed stage replays the same rows, so two stages counting would count
+     * a row twice. The reduced-key stage is used only when no exact one rests on the declaration.
+     */
+    @Test
+    public void testMinIntervalAuditIsAssignedToOneStagePerEntity() {
+        final String declared = SPEC.replace("- {name: seller, keys: [seller_id]}", "- {name: seller, keys: [seller_id], minInterval: P7D}");
+        final String filter = "- {filter: \"condition_grade = $self.condition_grade\", as: sameGrade}";
+        final FeaturePlan both = compile(SOURCES, declared.replace("- {maxEvents: 5}", "- {}\n      " + filter));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertEquals("seller_id,condition_grade", column(both, "recent_sameGrade_sold_mean").getCoordinates().get("stageKeys"));
+        Assertions.assertEquals("seller", column(both, "recent_sameGrade_sold_mean").getCoordinates().get("minIntervalEntity"), "the reduced window rests on it too");
+        Assertions.assertEquals("seller", column(both, "recent_all_sold_mean").getCoordinates().get("minIntervalEntity"));
+        final Map<String, OutputColumn> columns = new java.util.HashMap<>();
+        for (final OutputColumn c : both.getColumns()) columns.put(c.getCanonicalName(), c);
+        final Map<Integer, Map<String, Long>> assigned = FeatureStages.Wiring.assignMinIntervalAudits(both, columns);
+        Assertions.assertEquals(1, assigned.size(), assigned::toString);
+        final int stage = assigned.keySet().iterator().next();
+        Assertions.assertEquals(List.of("seller_id"), both.getStages().get(stage).keys(), both::describe);
+        Assertions.assertEquals(Map.of("seller", 7L * 86_400_000L), assigned.get(stage));
+        // only the reduced window rests on it: that stage is the fallback
+        final String reducedBlock = """
+            features:
+              - name: recent
+                scope: sequence
+                entity: seller
+                windows:
+                  - {filter: "condition_grade = $self.condition_grade", as: sameGrade}
+                ops:
+                  - {type: aggregate, field: sold, funcs: [mean]}
+            """;
+        final FeaturePlan reducedOnly = compile(SOURCES, declared.substring(0, declared.indexOf("features:\n")) + reducedBlock + declared.substring(declared.indexOf("output:\n")));
+        Assertions.assertFalse(reducedOnly.getDiagnostics().hasErrors(), reducedOnly::describe);
+        columns.clear();
+        for (final OutputColumn c : reducedOnly.getColumns()) columns.put(c.getCanonicalName(), c);
+        final Map<Integer, Map<String, Long>> fallback = FeatureStages.Wiring.assignMinIntervalAudits(reducedOnly, columns);
+        Assertions.assertEquals(1, fallback.size(), fallback::toString);
+        Assertions.assertEquals(List.of("seller_id", "condition_grade"), reducedOnly.getStages().get(fallback.keySet().iterator().next()).keys(), reducedOnly::describe);
+        // nothing rests on the declaration: nothing is assigned
+        Assertions.assertTrue(FeatureStages.Wiring.assignMinIntervalAudits(compile(SOURCES, SPEC), columns).isEmpty());
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population

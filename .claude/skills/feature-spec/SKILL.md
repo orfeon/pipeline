@@ -149,6 +149,10 @@ parameters:
   then counts rows observed after the declared availability / after predictAt (metrics
   `feature/observedAt_<field>_*`, run manifest deciles of `predictAt − observedAt`);
   `audit.observedAt: fail` turns it into a guard.
+- An `entities[].minInterval` that absorbs an outcome's window shift is trusted, not checked: the plan's
+  `-- minInterval audit` says which columns rest on it, the audit list carries a query counting the input's
+  events that follow their predecessor sooner, and the run counts them as
+  `feature/minInterval_<entity>_below`. Any count above zero: declare the interval the data has.
 - **Template arguments** (`sources`, `features` files and the config itself): only the exact form
   `${args.<name>}` is substituted — a bare `${name}` stays literal. The config's own `args:` block
   supplies the defaults; the `args` of `run-pipeline` / `launch-pipeline` (or `--args` on the CLI)

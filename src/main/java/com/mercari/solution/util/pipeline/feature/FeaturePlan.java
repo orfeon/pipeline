@@ -87,6 +87,22 @@ public class FeaturePlan implements Serializable {
     private final String hash;
     private final String outputHash;
     private final List<ObservedAtAudit> observedAtAudits;
+    private final List<MinIntervalAudit> minIntervalAudits;
+
+    /**
+     * An entity's {@code minInterval} that a column's {@code staticSafe} rests on (DSL spec §6.2 tier 2): the
+     * declaration says two events of the entity are at least {@code minInterval} apart, which is what lets a window
+     * read an outcome without the shift {@code shift} (the largest the declaration absorbed). Nothing verifies the
+     * declaration at compile time, so the plan carries it as an audit: a query over the input, and a run-time counter
+     * {@code feature/minInterval_<entity>_below} of the rows that follow the entity's previous event by less than it.
+     */
+    public record MinIntervalAudit(String entity, List<String> keys, java.time.Duration minInterval, java.time.Duration shift,
+                                   List<String> columns) implements Serializable {
+        public String describe() {
+            return entity + " keys=" + keys + " minInterval=" + minInterval + " absorbs shift " + shift + " for " + columns.size()
+                    + " column(s) [" + String.join(", ", columns.size() > 4 ? columns.subList(0, 4) : columns) + (columns.size() > 4 ? ", ..." : "") + "]";
+        }
+    }
 
     /**
      * One observedAt audit entry (DSL spec §7): an input field whose contract names the column holding its real
@@ -123,7 +139,8 @@ public class FeaturePlan implements Serializable {
                 final Diagnostics diagnostics,
                 final String hash,
                 final String outputHash,
-                final List<ObservedAtAudit> observedAtAudits) {
+                final List<ObservedAtAudit> observedAtAudits,
+                final List<MinIntervalAudit> minIntervalAudits) {
         this.spec = spec;
         this.sources = sources;
         this.inputFields = inputFields;
@@ -134,6 +151,7 @@ public class FeaturePlan implements Serializable {
         this.hash = hash;
         this.outputHash = outputHash;
         this.observedAtAudits = observedAtAudits;
+        this.minIntervalAudits = minIntervalAudits;
     }
 
     public FeatureSpec getSpec() { return spec; }
@@ -157,6 +175,7 @@ public class FeaturePlan implements Serializable {
     public String getOutputHash() { return outputHash; }
     /** The observedAt audit entries (input fields with an {@code observedAtField}), runnable ones and not. */
     public List<ObservedAtAudit> getObservedAtAudits() { return Collections.unmodifiableList(observedAtAudits); }
+    public List<MinIntervalAudit> getMinIntervalAudits() { return Collections.unmodifiableList(minIntervalAudits); }
     /** The audit entries the engine runs: observation column present and the audit not switched off. */
     public List<ObservedAtAudit> getRunnableObservedAtAudits() {
         if ("off".equals(spec.audit.observedAt)) return List.of();
@@ -413,9 +432,10 @@ public class FeaturePlan implements Serializable {
     }
 
     /**
-     * Hot-key audit queries: one per distinct key set of the keyed stages (context / sequence / population /
-     * groupBy), plus the row count for a global (single key) level. Keys that are not input fields are
-     * intermediate columns; their query must be run on the relation as it stands before that stage.
+     * Audit queries over the transform input: the hot keys — one per distinct key set of the keyed stages
+     * (context / sequence / population / groupBy), plus the row count for a global (single key) level — and one per
+     * entity whose declared {@code minInterval} the plan relies on. Keys that are not input fields are intermediate
+     * columns; their query must be run on the relation as it stands before that stage.
      */
     public List<AuditQuery> getAuditQueries() {
         final Map<List<String>, List<String>> byKeys = new java.util.LinkedHashMap<>();
@@ -444,7 +464,42 @@ public class FeaturePlan implements Serializable {
                     : "keys " + derived + " are intermediate columns: run on the relation as it stands before this stage (or on the expression that derives them)";
             queries.add(new AuditQuery(id, keys, e.getValue(), sql, note));
         }
+        // a declared minInterval is not checked at compile time: this query counts the input's events that contradict it
+        for (final MinIntervalAudit a : minIntervalAudits) {
+            final String keyList = String.join(", ", a.keys());
+            final String notNull = a.keys().stream().map(k -> k + " IS NOT NULL").collect(java.util.stream.Collectors.joining(" AND "));
+            final String time = spec.timeField;
+            final String previous = "LAG(" + time + ") OVER (PARTITION BY " + keyList + " ORDER BY " + time + ")";
+            // whole seconds, rounded up so no gap below the declaration escapes the comparison
+            final long limit = (a.minInterval().toMillis() + 999) / 1000;
+            final String sql = "SELECT COUNT(1) AS rows_below_min_interval, MIN(gap_seconds) AS min_gap_seconds FROM ("
+                    + "SELECT " + gapSeconds(time, previous) + " AS gap_seconds"
+                    + " FROM {input} WHERE " + notNull + ") WHERE gap_seconds IS NOT NULL AND gap_seconds > 0 AND gap_seconds < " + limit;
+            final List<String> derived = a.keys().stream().filter(k -> !inputFields.containsKey(k)).toList();
+            queries.add(new AuditQuery("audit" + (n++), a.keys(), List.of("entity " + a.entity()), sql,
+                    "entities." + a.entity() + ".minInterval " + a.minInterval() + " is a declaration the plan relies on (it lets " + a.columns().size()
+                            + " column(s) read an outcome without a window shift of up to " + a.shift() + "): every row counted here follows the entity's"
+                            + " previous event by less than it and may read an outcome that was not yet known — the run counts the same events as"
+                            + " feature/minInterval_" + a.entity() + "_below (BigQuery form; a gap of zero — rows sharing a timestamp, which never see"
+                            + " each other — is not a violation, and where several rows share the later timestamp this query counts one of them and the"
+                            + " counter counts each)"
+                            + (derived.isEmpty() ? "" : "; keys " + derived + " are intermediate columns: run on the relation that derives them")));
+        }
         return queries;
+    }
+
+    /**
+     * The gap in seconds between two values of the time field, in the BigQuery function its declared type takes:
+     * {@code TIMESTAMP_DIFF} only accepts TIMESTAMPs, and {@code time.field} may be a date or a datetime.
+     */
+    private String gapSeconds(final String time, final String previous) {
+        final SourceContract.FieldContract contract = inputFields.get(time);
+        final Schema.FieldType type = contract == null ? null : contract.getType();
+        return switch (type == null ? Schema.Type.timestamp : type.getType()) {
+            case date -> "DATE_DIFF(" + time + ", " + previous + ", DAY) * 86400";
+            case datetime -> "DATETIME_DIFF(" + time + ", " + previous + ", SECOND)";
+            default -> "TIMESTAMP_DIFF(" + time + ", " + previous + ", SECOND)";
+        };
     }
 
     /** Human readable dry-run report ({@code validate --expand}). */
@@ -476,13 +531,17 @@ public class FeaturePlan implements Serializable {
                         .append(" -> ").append(getEmittedColumns().size()).append(" columns emitted\n");
             }
         }
+        if (!minIntervalAudits.isEmpty()) {
+            sb.append("-- minInterval audit (declared, not verified; counters feature/minInterval_<entity>_below, query in -- audit)\n");
+            for (final MinIntervalAudit a : minIntervalAudits) sb.append("  ").append(a.describe()).append('\n');
+        }
         if (!observedAtAudits.isEmpty()) {
             sb.append("-- observedAt audit (").append(spec.audit.observedAt).append("; counters feature/observedAt_*, quantiles in the run manifest)\n");
             for (final ObservedAtAudit a : observedAtAudits) sb.append("  ").append(a.describe()).append('\n');
         }
         final List<AuditQuery> audit = getAuditQueries();
         if (!audit.isEmpty()) {
-            sb.append("-- audit (hot keys; {input} = the transform input relation)\n");
+            sb.append("-- audit (hot keys and declared intervals; {input} = the transform input relation)\n");
             for (final AuditQuery q : audit) sb.append("  ").append(q.describe()).append('\n');
         }
         if (!diagnostics.getMessages().isEmpty()) {
@@ -564,6 +623,22 @@ public class FeaturePlan implements Serializable {
             observedAtArray.add(o);
         }
         json.add("observedAtAudit", observedAtArray);
+        final JsonArray minIntervalArray = new JsonArray();
+        for (final MinIntervalAudit a : minIntervalAudits) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("entity", a.entity());
+            final JsonArray keys = new JsonArray();
+            a.keys().forEach(keys::add);
+            o.add("keys", keys);
+            o.addProperty("minInterval", a.minInterval().toString());
+            o.addProperty("shift", a.shift().toString());
+            final JsonArray columns = new JsonArray();
+            a.columns().forEach(columns::add);
+            o.add("columns", columns);
+            o.addProperty("counter", "feature/minInterval_" + a.entity() + "_below");
+            minIntervalArray.add(o);
+        }
+        json.add("minIntervalAudit", minIntervalArray);
         final JsonArray messages = new JsonArray();
         for (final Diagnostics.Message m : diagnostics.getMessages()) {
             final JsonObject o = new JsonObject();

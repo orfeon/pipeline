@@ -69,7 +69,7 @@ time; warnings and hints from the compiler are part of that report.
 | lineage    | required | Array<Object\>                 | Maps input fields to their source: `{fields: [...], from: <source name>, eventTime: <field>}`. Every field used by a feature must be declared here. |
 | time       | required | Object                         | `field`: the event-time field of the input (must equal the sources' `eventTime`). The transform re-timestamps every element from this field, so it is the time axis of all history windows regardless of the source's `timestampAttribute`; rows whose value is null go to the failure output. `orderTieBreak`: fields declaring a total order for rows that share a timestamp. History is strictly past **by timestamp**: rows sharing a timestamp never see each other, and a row later the same day does see that day's earlier rows — so a feature over "earlier events of the same day" needs the event's actual time here (a date-granularity field makes every same-day row invisible to the others). |
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
-| entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. |
+| entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. `minInterval` is a declaration the plan relies on and the run audits (see [minInterval audit](#mininterval-audit-declaration-vs-data)). |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `residualize`, `harville`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
@@ -1610,6 +1610,33 @@ Replace `{input}` with the relation that feeds the transform and run it on your 
 backfill: the top `row_count` is the number of rows one worker gathers in memory for that stage (see
 [Performance and sizing](#performance-and-sizing)). Keys that are intermediate columns (derived by an earlier
 stage) are flagged in the query's `note` — evaluate those on the relation as it stands before that stage.
+
+### minInterval audit (declaration vs. data)
+
+`entities[].minInterval` says that two events of an entity are never closer than that. The compiler trusts it:
+when the interval is at least the shift an outcome would otherwise impose on a window (its settlement +
+ingestion lag past predictAt), the window reads without the shift and its columns are `staticSafe` — with the
+declaration as the only guarantee that the outcome of the entity's previous event is known by the time the
+next one is predicted. An event that follows its predecessor sooner than declared may read an outcome that
+was not yet known: a leak the availability check cannot see, because it never sees the data.
+
+So a declaration that absorbs a shift is reported, not assumed: the plan says which columns rest on it and
+the largest shift it absorbed (`-- minInterval audit`, the `entity.minInterval` info, `plan.minIntervalAudit`),
+the audit list gains a query over the input that counts the events contradicting it (BigQuery form: the gap
+to the entity's previous event by `LAG … OVER (PARTITION BY <keys> ORDER BY <time>)`, counted where it is
+positive and below the interval), and the keyed stage that replays the entity counts the same events at run
+time as **`feature/minInterval_<entity>_below`** (a Beam counter, in the Dataflow UI with the other
+`feature/*` counters). A gap of zero — rows sharing a timestamp, which never see each other — is not a
+violation; where several rows share the later timestamp of a short gap the query counts one of them and the
+counter counts each. One stage counts each entity, the one keyed by the entity itself where a column of it
+rests on the declaration (a window reduced by a filter field is replayed under a finer key, and the counter
+then sees the gaps of that sub-key). A declaration shorter than every shift absorbs nothing, changes
+nothing, and is not audited.
+
+Any count above zero means the declaration is wrong for this data: declare the interval the data has
+(the query's `min_gap_seconds` says what it is) and let the affected windows take their shift, or accept that
+those rows read a few outcomes early. The counted rows are not corrected — a row-level fallback to the shift
+would make the columns' availability depend on the neighbourhood of each row, which the plan cannot express.
 
 ## Performance and sizing
 

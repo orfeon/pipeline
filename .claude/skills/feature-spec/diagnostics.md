@@ -25,6 +25,7 @@ not expand because another block failed).
 | `sources.fields.evidence` | error | must be `measured` or `declared` |
 | `sources.fields.declaredMarket` | error / warning | `kind: market` with `evidence: declared` is an error; `allowDeclared: true` + `justification` turns it into this warning. Prefer adding `observedAtField` |
 | `sources.fields.allowDeclared` | error | `allowDeclared: true` without a `justification` string |
+| `entity.minInterval` | info | the entity's declared `minInterval` lets windows over it read an outcome without a shift (`staticSafe`); it is trusted, not checked — the plan's audit query counts the input's events that follow their predecessor sooner, and the run counts them as `feature/minInterval_<entity>_below`. A count above zero: declare the interval the data has |
 | `sources.observedAt.missingInput` | warning | the declared `observedAtField` is not in the input relation, so the observedAt audit of that field cannot run: pass the observation-time column through from upstream |
 | `duration.invalid` | error | an ISO-8601 duration does not parse (`PT30M`, `P6D`, `P1Y`; no `1d`) |
 

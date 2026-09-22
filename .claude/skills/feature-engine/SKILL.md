@@ -386,7 +386,12 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    `finishContext`, `classifyPast` (sequence / expanding encoding: past side must be static →
    `staticSafe` / `windowShift` / `runtimeFilter`, `minInterval` can absorb the shift),
    `finishStaticFitted` (lookup fits: the artifact is available at `computeAt` by declaration, only
-   the row side decides). A violation that is consumed becomes a `_` intermediate; a terminal
+   the row side decides). A `minInterval` that absorbs a shift is recorded per entity (`FeaturePlan.MinIntervalAudit`,
+   the `minIntervalEntity` coordinate): audit SQL + `entity.minInterval` info at compile time, and `KeyedHistoryDoFn.auditInterval`
+   counts the rows below it as `feature/minInterval_<entity>_below` at run time (per row, against the key's previous distinct
+   event time; `Wiring.assignMinIntervalAudits` gives each entity exactly one stage — the one keyed by the entity itself where
+   possible — since every keyed stage replays the same rows and a reduced-key stage only sees its sub-key's gaps; future stages
+   excluded). Reported, never repaired per row. A violation that is consumed becomes a `_` intermediate; a terminal
    violation is `availability.violation`.
 8. **Plan hash / artifacts.** `withoutArtifact` strips `engine`, `fit.artifact`, the output
    projection (`output.include` / `includeSource` / `includeHash` / `manifest`) and `ops[].temperatureFrom`

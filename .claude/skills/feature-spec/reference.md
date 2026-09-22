@@ -23,7 +23,7 @@ and review a spec quickly.
 | `time.field` | yes | the event-time field (timestamp / datetime / date); must equal the sources' `eventTime`. Rows re-timestamped from it; null → failure |
 | `time.orderTieBreak` | recommended | fields ordering rows that share a timestamp |
 | `predictAt` | yes | `event_time - PT10M`, `event_time`, `event_time + PT1H` |
-| `entities` | for sequence | `{name, keys: [...], minInterval: <ISO-8601>}` |
+| `entities` | for sequence | `{name, keys: [...], minInterval: <ISO-8601>}` — `minInterval` absorbs an outcome's window shift when it is at least as long (`staticSafe` instead of `windowShift`); trusted, audited: `-- minInterval audit` in the plan, an audit query, the run counter `feature/minInterval_<entity>_below` |
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
