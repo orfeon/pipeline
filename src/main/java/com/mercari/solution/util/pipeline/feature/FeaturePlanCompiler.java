@@ -4998,7 +4998,35 @@ public final class FeaturePlanCompiler {
     static String hash(final JsonElement sourcesDocument, final JsonObject parameters) {
         // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
         // the identity of what was fitted
-        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters)));
+        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters))
+                // an offset term on logit / log is the score-type estimate since PR #176 (its levels keep sum b(1 - b)):
+                // an artifact of the transformed-mean estimator, addressed by the same spec, must not be found
+                + (declaresOffsetTerm(parameters) ? "\u0000" + OFFSET_ESTIMATOR : ""));
+    }
+
+    /** The estimator of an offset term on a transformed scale, part of the plan hash of a spec declaring one. */
+    static final String OFFSET_ESTIMATOR = "offset-estimator:score";
+
+    /** Whether any block declares an offset with a logit / log shrinkage scale (on the block or one of its keySets). */
+    static boolean declaresOffsetTerm(final JsonObject parameters) {
+        if (parameters == null || !parameters.has("features") || !parameters.get("features").isJsonArray()) return false;
+        for (final JsonElement f : parameters.getAsJsonArray("features")) {
+            if (!f.isJsonObject() || !f.getAsJsonObject().has("offset")) continue;
+            final JsonObject block = f.getAsJsonObject();
+            if (transformedScale(block.get("shrinkage"))) return true;
+            if (block.has("keySets") && block.get("keySets").isJsonArray()) {
+                for (final JsonElement ks : block.getAsJsonArray("keySets")) {
+                    if (ks.isJsonObject() && transformedScale(ks.getAsJsonObject().get("shrinkage"))) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean transformedScale(final JsonElement shrinkage) {
+        if (shrinkage == null || !shrinkage.isJsonObject()) return false;
+        final String scale = SourceContract.Json.string(shrinkage.getAsJsonObject(), "scale");
+        return "logit".equals(scale) || "log".equals(scale);
     }
 
     /**

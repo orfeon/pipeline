@@ -272,10 +272,10 @@ shrinkage scale:
   baseline at 0 or 1 — e.g. a baseline that is 0 for every row of a cold-start key) has no term of its own
   and falls back to its parent, as an unseen level does. `estimator: joint` fits the same per-cell terms
   weighted by their information (a cell without information is skipped). A keySet with its own
-  identity-scale or disabled `shrinkage` stays on the residual statistics above. A static / fold / forward
-  artifact written before the `suminfo` statistic existed is refused by a logit offset block (refit it with
-  `fit.artifact.refit: true`); a log offset block reads its information from `sumoff` and needs no refit,
-  though its values change with the estimator.
+  identity-scale or disabled `shrinkage` stays on the residual statistics above. The plan hash of a spec with an
+  offset on logit / log names this estimator, so an artifact fitted by the earlier transformed-mean estimator is
+  not addressed by it (the block is fitted again); an artifact pinned by `fit.artifact.id` that predates the
+  `suminfo` statistic is refused with a refit advice.
 
 ### Two-series and fractional-difference ops (sequence `regression`, `fracdiff`)
 

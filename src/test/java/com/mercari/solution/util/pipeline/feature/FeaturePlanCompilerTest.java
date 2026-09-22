@@ -796,6 +796,17 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNull(column(identity, "enc__seller_id__e2__n").getCoordinates().get("scoreScale"));
         Assertions.assertFalse(column(identity, "enc__seller_id__e2__mean").getCoordinates().get("levels").contains("sumoff"));
 
+        // the plan hash of an offset term names the estimator: an artifact of the transformed-mean estimator, addressed by the
+        // same spec, is not found (a keySet-level scale counts too; identity and no offset are unsalted)
+        final JsonObject logitJson = Config.convertConfigJson(logit, Config.Format.yaml);
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(logitJson));
+        Assertions.assertTrue(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market")
+                .replace("      - keys: [category]\n", "      - keys: [category]\n        shrinkage: {scale: log}\n"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"), Config.Format.yaml)));
+        Assertions.assertFalse(FeaturePlanCompiler.declaresOffsetTerm(Config.convertConfigJson(SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    shrinkage: {priorWeight: 2, scale: logit}"), Config.Format.yaml)));
+        Assertions.assertEquals(FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(Config.convertConfigJson(SOURCES, Config.Format.yaml)) + "\u0000"
+                + FeaturePlanCompiler.canonical(FeaturePlanCompiler.withoutArtifact(logitJson)) + "\u0000" + FeaturePlanCompiler.OFFSET_ESTIMATOR), plan.getHash());
+
         final FeaturePlan joint = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log, estimator: joint}\n    fit: {mode: static}"));
         Assertions.assertFalse(joint.getDiagnostics().hasErrors(), joint::describe);
         Assertions.assertTrue(hasCode(joint, "encoding.offset.additive"), joint::describe);

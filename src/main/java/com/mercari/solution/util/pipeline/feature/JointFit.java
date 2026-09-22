@@ -84,7 +84,7 @@ public final class JointFit implements Serializable {
         /** The cell's information on a transformed scale ({@link Shrinkage#information}), 0 on identity. */
         double information(final Shrinkage.Scale scale) {
             return switch (scale) {
-                case identity -> 0d;
+                case identity -> n;      // one per row, as Shrinkage.information reads it
                 case logit -> sumInfo;
                 case log -> sumOff;
             };
@@ -307,9 +307,10 @@ public final class JointFit implements Serializable {
         for (int i = 0; i < m; i++) {
             final Cell c = cells.get(i);
             if (score) {
-                // the one-step term of the cell, weighted by the information behind it
-                z[i] = Shrinkage.ownScore(c.sum(), c.information(scale));
-                w[i] = c.information(scale);
+                // the one-step term of the cell (S / V, the cells without information were left out above), weighted by V
+                final double information = c.information(scale);
+                z[i] = c.sum() / information;
+                w[i] = information;
             } else {
                 // the observed statistic (Σy / n) sets the delta-method weight of the transformed mean
                 z[i] = Shrinkage.own(scale, c.n(), c.sum());

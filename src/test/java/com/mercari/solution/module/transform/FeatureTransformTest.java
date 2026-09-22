@@ -2206,10 +2206,9 @@ public class FeatureTransformTest {
     }
 
     /**
-     * The outcome baseline of {@link #testOffsetOverOutcomeBaseline} on the logit scale: the hidden Σ baseline level
-     * ({@code __sumoff}) takes the same shift as the sums, so on Feb 1 the seller's term is logit(observed 2/3) minus
-     * logit(the mean settled share of A, B and C), shrunk toward the leave-node-out global term, and on Jan 3 nothing is
-     * visible yet.
+     * The outcome baseline of {@link #testOffsetOverOutcomeBaseline} on the logit scale: the hidden Σ b(1 − b) level
+     * ({@code __suminfo}) takes the same shift as the sums, so on Feb 1 the seller's term is the score-type S / V over
+     * A, B and C, shrunk by information toward the leave-node-out global term, and on Jan 3 nothing is visible yet.
      */
     @Test
     public void testOffsetOverOutcomeBaselineOnLogitScale() throws java.io.IOException {
@@ -2223,9 +2222,14 @@ public class FeatureTransformTest {
             final Map<String, MElement> byKey = new HashMap<>();
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"), "Jan 3: the Jan 1 settlement is not known yet");
-            final double own = logit(2.0 / 3) - logit((sA1 + sB1 + sC1) / 3);
-            final double root = logit(0.5) - logit((sA2 + sC2) / 2);
-            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            // the score term S / V of s1 over A, B, C (B carries no information: its share is 1) against the leave-node-out
+            // global term over s2's A, C; the weight is V against priorWeight (1) rows of the root's information per row
+            // (the five rows settled before Feb 1)
+            final double ownS = (1 - sA1) + (0 - sB1) + (1 - sC1), ownV = info(sA1) + info(sB1) + info(sC1);
+            final double rootS = (0 - sA2) + (1 - sC2), rootV = info(sA2) + info(sC2);
+            final double own = ownS / ownV, root = rootS / rootV;
+            final double w = ownV / (ownV + 1 * (ownV + rootV) / 5);
+            Assertions.assertEquals(root + w * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
             return null;
         });
         pipeline.run();
@@ -2302,7 +2306,8 @@ public class FeatureTransformTest {
             final double s2 = byKey.get("A/s2").getAsDouble("f_enc__seller_id__e1__mean");
             Assertions.assertTrue(Double.isFinite(s1) && Double.isFinite(s2));
             // s1 sells more than its baselines predict (positive term), s2 less (negative term)
-            final double z1 = ((1 - MARKET_A1) + (0 - MARKET_B1) + (1 - MARKET_C1) + (1 - MARKET_D1)) / (info(MARKET_A1) + info(MARKET_C1));
+            // (B and D carry no information: their baseline is 1)
+            final double z1 = ((1 - MARKET_A1) + (0 - MARKET_B1) + (1 - MARKET_C1) + (1 - MARKET_D1)) / (info(MARKET_A1) + info(MARKET_B1) + info(MARKET_C1) + info(MARKET_D1));
             final double z2 = ((0 - MARKET_A2) + (1 - MARKET_C2)) / (info(MARKET_A2) + info(MARKET_C2));
             Assertions.assertTrue(z1 > 0 && z2 < 0);
             Assertions.assertTrue(s1 > s2, s1 + " > " + s2);
