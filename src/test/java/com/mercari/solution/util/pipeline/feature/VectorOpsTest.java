@@ -133,13 +133,16 @@ public class VectorOpsTest {
         Assertions.assertArrayEquals(new double[]{1, 1, 1, 2}, VectorOps.pad(new double[]{1, 2}, 4, "edge", "start"), 0d);
         Assertions.assertArrayEquals(new double[]{0, 0, 1, 2}, VectorOps.pad(new double[]{1, 2}, 4, "zero", "start"), 0d);
         Assertions.assertArrayEquals(new double[]{1, 2, 3}, VectorOps.pad(new double[]{1, 2, 3}, 2, "edge", "end"), 0d, "never truncated");
-        Assertions.assertArrayEquals(new double[]{0, 0}, VectorOps.pad(new double[0], 2, "edge", "end"), 0d, "no edge: zeros");
+        Assertions.assertEquals(0, VectorOps.pad(new double[0], 2, "zero", "end").length, "nothing to pad from: the empty vector stays empty");
+        Assertions.assertEquals(List.of(1d, 3d, 2d), VectorOps.read("vector", new double[]{1, 3, 2}, VectorOps.positions(3, false)), "every catalog readout is served by read");
         final Map<String, String> coordinates = new HashMap<>(Map.of("func", "vector", "resample", "4"));
         Assertions.assertEquals(List.of(0d, 1d, 2d, 3d), VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
         Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(List.of()), "the empty vector has no readout but its length (an svd must not fix its length on it)");
         coordinates.put("padLength", "6");
         Assertions.assertEquals(List.of(0d, 1d, 2d, 3d, 3d, 3d), VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
-        Assertions.assertEquals(List.of(0d, 0d, 0d, 0d, 0d, 0d), VectorOps.Plan.of(coordinates).evaluate(List.of()), "padded with zeros, the empty vector is a vector");
+        Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(List.of()), "the empty vector stays empty under pad: no vector, so no svd observation");
+        coordinates.put("func", "length");
+        Assertions.assertEquals(0L, VectorOps.Plan.of(coordinates).evaluate(List.of()));
         coordinates.put("func", "length");
         Assertions.assertEquals(6L, VectorOps.Plan.of(coordinates).evaluate(List.of(0d, 3d)));
         Assertions.assertNull(VectorOps.Plan.of(coordinates).evaluate(null));

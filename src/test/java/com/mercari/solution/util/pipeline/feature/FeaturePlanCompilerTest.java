@@ -2098,7 +2098,7 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNotEquals(plan.getHash(), compile(sources, spec.replace("    diff: 1\n", "")).getHash());
         // every readout the catalog lists is served by VectorOps
         for (final String func : OperatorCatalog.VECTOR_FUNCS) {
-            if (!"polyfit".equals(func) && !"vector".equals(func)) Assertions.assertNotNull(VectorOps.read(func, new double[]{1, 3, 2}, VectorOps.positions(3, false)), func);
+            if (!"polyfit".equals(func)) Assertions.assertNotNull(VectorOps.read(func, new double[]{1, 3, 2}, VectorOps.positions(3, false)), func);
         }
 
         // polyfit coefficients can be picked (the level is often not a feature), the stepped vector can be emitted as an

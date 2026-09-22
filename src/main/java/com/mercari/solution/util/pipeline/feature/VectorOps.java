@@ -17,6 +17,10 @@ public final class VectorOps {
 
     private VectorOps() {}
 
+    /** The {@code pad} defaults, the one place the compiler and the plan read them from: the edge value, at the end. */
+    public static final String DEFAULT_PAD_MODE = "edge";
+    public static final String DEFAULT_PAD_SIDE = "end";
+
     /**
      * One {@code vector} column resolved from its coordinates: the steps applied to the array (slice → diff →
      * normalize → resample / pad, in that order) and the readout taken from the result — or, for the {@code vector}
@@ -36,8 +40,8 @@ public final class VectorOps {
                     Integer.parseInt(coordinates.getOrDefault("coefficient", "0")),
                     coordinates.containsKey("resample") ? Integer.valueOf(coordinates.get("resample")) : null,
                     coordinates.containsKey("padLength") ? Integer.valueOf(coordinates.get("padLength")) : null,
-                    coordinates.getOrDefault("padMode", "edge"),
-                    coordinates.getOrDefault("padSide", "end"));
+                    coordinates.getOrDefault("padMode", DEFAULT_PAD_MODE),
+                    coordinates.getOrDefault("padSide", DEFAULT_PAD_SIDE));
         }
 
         /** The column's value for an array field value (null when the array or the readout is undefined). */
@@ -50,13 +54,7 @@ public final class VectorOps {
             if (x == null) return null;
             if (resample != null) x = VectorOps.resample(x, resample);
             if (padLength != null) x = VectorOps.pad(x, padLength, padMode, padSide);
-            if ("vector".equals(func)) {
-                // the empty vector has no readout but its length: an array svd would otherwise fix its dimension on it
-                if (x.length == 0) return null;
-                final List<Double> out = new java.util.ArrayList<>(x.length);
-                for (final double v : x) out.add(v);
-                return out;
-            }
+            if ("vector".equals(func)) return x.length == 0 ? null : boxed(x);   // the empty vector has no readout but its length
             if ("polyfit".equals(func)) {
                 final double[] coefficients = polyfit(x, positions(x.length, unitPosition), degree);
                 return coefficients == null ? null : finite(coefficients[coefficient]);
@@ -159,12 +157,13 @@ public final class VectorOps {
     /**
      * The vector extended to {@code length} elements — at its {@code end} (default) or its {@code start} — with the
      * nearest element ({@code edge}, default) or zeros ({@code zero}); a vector of that length or longer is returned as
-     * is (padding never truncates), the empty vector is padded with zeros (it has no edge).
+     * is (padding never truncates), and the empty vector stays empty (nothing to pad from).
      */
     public static double[] pad(final double[] x, final int length, final String mode, final String side) {
         final int m = x.length;
-        if (m >= length) return x;
-        final boolean zero = "zero".equals(mode) || m == 0;
+        // nothing to pad from: the empty vector stays empty (it must not enter an svd as a zero observation)
+        if (m >= length || m == 0) return x;
+        final boolean zero = "zero".equals(mode);
         final boolean start = "start".equals(side);
         final double[] out = new double[length];
         final int offset = start ? length - m : 0;
@@ -172,6 +171,13 @@ public final class VectorOps {
         final double fill = zero ? 0d : start ? x[0] : x[m - 1];
         if (start) java.util.Arrays.fill(out, 0, offset, fill);
         else java.util.Arrays.fill(out, m, length, fill);
+        return out;
+    }
+
+    /** The vector as the array value of a column. */
+    private static List<Double> boxed(final double[] x) {
+        final List<Double> out = new java.util.ArrayList<>(x.length);
+        for (final double v : x) out.add(v);
         return out;
     }
 
@@ -191,6 +197,7 @@ public final class VectorOps {
         final int n = x.length;
         if ("length".equals(func)) return (long) n;
         if (n == 0) return null;
+        if ("vector".equals(func)) return boxed(x);
         return switch (func) {
             case "sum" -> finite(sum(x));
             case "mean" -> finite(sum(x) / n);

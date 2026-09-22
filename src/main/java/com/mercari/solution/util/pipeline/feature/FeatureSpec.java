@@ -305,12 +305,6 @@ public class FeatureSpec implements Serializable {
         public boolean padMalformed;
         /** vector: {@code pad} was declared at all — a declaration without a {@code length} is a compile error. */
         public boolean padDeclared;
-        /**
-         * sequence: the block's default {@code weightBy}, applied at parse time to every aggregate op that declares none
-         * of its own (kept here for the report; the ops carry the effective expression).
-         */
-        public String weightBy;
-
         // context / sequence
         public String context;
         public boolean excludeSelf;
@@ -985,9 +979,10 @@ public class FeatureSpec implements Serializable {
                 if (op != null) def.ops.add(op);
             }
         }
-        // a block-level weightBy is the default of the block's aggregate ops (an op's own wins): one kernel, written once
-        def.weightBy = Json.string(o, "weightBy");
-        if (def.weightBy != null) {
+        // a block-level weightBy is the default of the block's aggregate ops (an op's own wins): one kernel, written once;
+        // the ops carry the effective expression, the block keeps no copy
+        final String blockWeightBy = Json.string(o, "weightBy");
+        if (blockWeightBy != null) {
             boolean applied = false;
             final List<String> unweighted = new ArrayList<>();
             for (final Op op : def.ops) {
@@ -999,13 +994,13 @@ public class FeatureSpec implements Serializable {
                     unweighted.addAll(without);
                     continue;
                 }
-                if (op.weightBy == null) op.weightBy = def.weightBy;
+                if (op.weightBy == null) op.weightBy = blockWeightBy;
                 applied = true;
             }
             if (!unweighted.isEmpty()) {
                 diagnostics.warning("sequence.weightBy.block", loc, "the block's weightBy does not apply to the aggregate func(s) " + unweighted
                         + ", which have no weighted form (" + String.join(" | ", OperatorCatalog.WEIGHTED_FUNCS) + "): those ops stay unweighted"
-                        + " — split them into their own block, or declare the weight on each op instead");
+                        + " - split them into their own block, or declare the weight on each op instead");
             }
             if (!applied && unweighted.isEmpty()) {
                 diagnostics.warning("sequence.weightBy.block", loc, "weightBy on the block is the default of its aggregate ops, and the block has none: it is ignored");

@@ -950,8 +950,8 @@ public final class FeaturePlanCompiler {
                 if (def.resample != null) c.coordinates.put("resample", Integer.toString(def.resample));
                 if (def.padLength != null) {
                     c.coordinates.put("padLength", Integer.toString(def.padLength));
-                    c.coordinates.put("padMode", def.padMode == null ? "edge" : def.padMode);
-                    c.coordinates.put("padSide", def.padSide == null ? "end" : def.padSide);
+                    c.coordinates.put("padMode", def.padMode == null ? VectorOps.DEFAULT_PAD_MODE : def.padMode);
+                    c.coordinates.put("padSide", def.padSide == null ? VectorOps.DEFAULT_PAD_SIDE : def.padSide);
                 }
                 if ("slope".equals(func) || "polyfit".equals(func)) c.coordinates.put("position", position);
                 if ("polyfit".equals(func)) {
@@ -2168,7 +2168,7 @@ public final class FeaturePlanCompiler {
                             + " so == and != (a category match: c == $self.c ? 1 : 0.25) are exact and <, > and arithmetic over them are meaningless");
                 } else {
                     diagnostics.error("sequence.weightBy.identity", loc, "weightBy string operand(s) " + magnitudes + " are read outside == / !=: a string is compared by identity"
-                            + " (the expression reads a hash of the text), so <, > and arithmetic over it are meaningless — write a category match (c == $self.c ? 1 : 0.25)"
+                            + " (the expression reads a hash of the text), so <, > and arithmetic over it are meaningless - write a category match (c == $self.c ? 1 : 0.25)"
                             + " or declare the operand as a number");
                     valid = false;
                 }
