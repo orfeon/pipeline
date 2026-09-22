@@ -425,9 +425,14 @@ Notes:
      reference `offset` / `baseline` change meaning.
   2. Validation hints when an encoding of an outcome target exists, a baseline is declared and no
      `offset` is given (never applied automatically).
-  3. A block referencing an offset has `availableAt = max(target, baseline)`. Because a past row's
-     baseline must be time-consistent or the offset itself leaks, the market fields a baseline reads
-     must be `evidence: measured` (or per-field `allowDeclared`, §2.3).
+  3. An offset is read where the target is read — from the past rows (an encoding's history, a fit's
+     training rows), each row's baseline next to its own outcome — never from the current row: the
+     composed value is the term δ alone (rule 5). So the baseline's availability joins the target's on the
+     **past side** of the availability check (§6.2): a baseline over pre-event market fields costs nothing,
+     a baseline over an outcome (a settled price) shifts the window near edge like an outcome target, and
+     delays the blocks a forward fit may read; the current row's own baseline value is never required
+     to be available. Because a past row's baseline must be time-consistent or the offset itself leaks,
+     the market fields a baseline reads must be `evidence: measured` (or per-field `allowDeclared`, §2.3).
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,

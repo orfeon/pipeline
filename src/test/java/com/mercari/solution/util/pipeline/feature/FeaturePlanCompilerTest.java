@@ -786,6 +786,56 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * A baseline over an outcome field is a valid offset (spec §3 rule 3): the baseline is read from the past rows next
+     * to their outcome, never from the current row, so its availability joins the target's on the past side. The
+     * expanding block's levels shift their window by the outcome's lag exactly as an outcome target does (the composed
+     * value, read from the shifted statistics, stays staticSafe), a forward fit delays the blocks it may read by the same
+     * lag, a static fit is unchanged — and emitting that baseline as a column of the row is still a violation.
+     */
+    @Test
+    public void testOffsetOverOutcomeBaselineShiftsTheWindow() {
+        final String marketLine = "  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        Assertions.assertTrue(SPEC.contains(marketLine));
+        final String settled = SPEC.replace(marketLine, marketLine + "\n  - {name: settled, context: session, expr: \"share(1 / final_price)\"}");
+        final Duration outcomeLag = Duration.ofDays(6).plusMinutes(38);   // settlement + ingestion + the predictAt offset
+
+        final FeaturePlan plan = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    shrinkage: {priorWeight: 2, scale: logit}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "availability.violation"), plan::describe);
+        // the target-less count reads the baseline alone (a row without one is not counted): its shift is the baseline's
+        final OutputColumn count = column(plan, "enc__seller_id__count");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, count.getStatus(), plan::describe);
+        Assertions.assertEquals(outcomeLag, count.getWindowShift());
+        Assertions.assertTrue(count.getPastInputs().contains("__baseline_settled"), count::describe);
+        final OutputColumn n = column(plan, "enc__seller_id__e2__n");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, n.getStatus());
+        Assertions.assertEquals(outcomeLag, n.getWindowShift());
+        final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, composed.getStatus(), plan::describe);
+        Assertions.assertFalse(composed.getInputs().contains("__baseline_settled"), "the composed value never reads the row's own baseline");
+        Assertions.assertTrue(composed.getDerivedFrom().contains("outcome"), composed::describe);
+        // a pre-event baseline shifts nothing
+        final FeaturePlan market = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(market, "enc__seller_id__count").getStatus(), market::describe);
+
+        // the row cannot see its own settled baseline: emitting it is the violation it always was
+        final FeaturePlan emitted = compile(SOURCES, settled.replace("expr: \"share(1 / final_price)\"}", "expr: \"share(1 / final_price)\", emit: settledProb}")
+                .replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled"));
+        Assertions.assertTrue(hasCode(emitted, "availability.violation"), emitted::describe);
+
+        // lookup fits: static is unchanged, forward delays the readable blocks by the baseline's lag
+        final FeaturePlan statik = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: static}"));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(statik, "enc__seller_id__e2__mean").getStatus(), statik::describe);
+        final FeaturePlan forward = compile(SOURCES, settled.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: settled\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        // (under a lookup fit the visible count reads the hidden level; the level carries the geometry)
+        Assertions.assertTrue(Long.parseLong(column(forward, "enc__seller_id__n").getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, forward::describe);
+        final FeaturePlan forwardMarket = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    fit: {mode: forward, blocks: {size: P7D}}"));
+        Assertions.assertEquals("0", column(forwardMarket, "enc__seller_id__n").getCoordinates().get("forwardLagMillis"), forwardMarket::describe);
+    }
+
+    /**
      * quantileTransform accepts {@code fit.mode: forward} like svd: the column carries the block geometry, an outcome
      * input delays the blocks it may read (forwardLagMillis), a block without its own mode follows a top-level forward
      * fit, and the other modes stay rejected.

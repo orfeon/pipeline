@@ -215,7 +215,10 @@ sequence ops never see the current row.
   the target. With `scale: logit` / `log` the composed column is the key's **log-odds / log-rate ratio
   against its mean baseline** (shrunk toward the parent's), i.e. the effect *orthogonal to the baseline*
   — the right target when a feature is judged by its excess information over a market baseline; the
-  plan reports it as info `encoding.offset.additive`. On identity it is the mean residual.
+  plan reports it as info `encoding.offset.additive`. On identity it is the mean residual. The baseline is
+  read from the past rows next to their outcome, never from the current row, so a baseline over an
+  outcome field (final odds, a settled price) is a valid offset: it shifts the window like an outcome
+  target does (`windowShift`) instead of being a violation.
 - A lattice (`hierarchy` / `structure`) shrinks sparse keys toward coarser contexts. `additive` /
   `structure: cross` need the single-key keySets in the same block and an explicit `shrinkage.scale`.
 - The **global level** (`[]`, or any `share` denominator) is one key holding every row — a single

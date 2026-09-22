@@ -693,7 +693,10 @@ public final class FeaturePlanCompiler {
             e.coordinates.put("baseline", baseline.name());
             addSelfInput(e, c.canonicalName);
             e.validFor = c.validFor;
-            e.status = Status.staticSafe;
+            // the row's own baseline value: available when its inputs are (a baseline over an outcome is a valid
+            // offset — read from past rows — but emitting it puts the outcome on the row, a violation like any other)
+            e.status = e.availableAt.isStaticallyAtOrBefore(e.computeAt) ? Status.staticSafe
+                    : e.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
             register(e);
             baselineEmits.put(baseline.name(), e.canonicalName);
         }
@@ -3463,8 +3466,9 @@ public final class FeaturePlanCompiler {
                 if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
                 if (fitSpec.refit) c.coordinates.put("refit", "true");
                 if (offsetColumn != null) {
+                    // read from the training rows only (the example's target minus its baseline), like the target
                     c.coordinates.put("offset", offsetColumn);
-                    addSelfInput(c, offsetColumn);
+                    addPastInput(c, offsetColumn);
                 }
                 for (final String f : def.fields) addSelfInput(c, f);
                 addPastInput(c, target);
@@ -4242,8 +4246,11 @@ public final class FeaturePlanCompiler {
         for (final String key : ks.keys) addSelfInput(c, key);
         // target-less statistics (count / share denominators) count rows: the keys are self reads (keying), not projected
         if (targetReference != null) addPastInput(c, targetReference);
+        // the offset is read where the target is: from the past rows (their baseline next to their outcome), never
+        // from the current row — the composed value is the term δ alone. So its availability is the past side's, like
+        // the target's (a baseline over an outcome shifts the window near edge, or delays a forward block), and a
+        // baseline the row itself may not see yet is still a valid offset (spec §3 rule 3)
         if (offsetColumn != null) {
-            addSelfInput(c, offsetColumn);
             addPastInput(c, offsetColumn);
             c.coordinates.put("offset", def.offset);
         }
