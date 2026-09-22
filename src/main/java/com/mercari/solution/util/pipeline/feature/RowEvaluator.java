@@ -177,23 +177,31 @@ public class RowEvaluator implements Serializable {
                 // the map's entropy, or its probability-weighted mean over integer codes
                 final Object m = row.get(inputs.get(0));
                 if (!(m instanceof Map<?, ?> map) || map.isEmpty()) yield null;
-                switch (c.coordinates.get("readout")) {
+                final String readout = c.coordinates.get("readout");
+                switch (readout) {
                     case "ownValueProb", "surprisal" -> {
                         final Object own = row.get(c.coordinates.get("field"));
                         if (own == null) yield null;
-                        final double p = shareOf(map, ContextEvaluator.valueKey(own));
-                        yield "surprisal".equals(c.coordinates.get("readout")) ? (p > 0 ? Double.valueOf(-Math.log(p)) : null) : Double.valueOf(p);
+                        // the map is keyed by the value's own string form (Summary.Counts / the scan path both key
+                        // by toString), which is also how a toValueProb value is written: not ContextEvaluator.valueKey
+                        final Double p = shareOf(map, own.toString());
+                        if (p == null) yield null;
+                        yield "surprisal".equals(readout) ? (p > 0 ? Double.valueOf(-Math.log(p)) : null) : p;
                     }
                     case "entropy" -> {
                         double h = 0;
+                        boolean any = false;
                         for (final Object v : map.values()) {
                             final Double p = FeatureValues.toDouble(v);
-                            if (p != null && p > 0) h -= p * Math.log(p);
+                            if (p == null || p <= 0) continue;
+                            any = true;
+                            h -= p * Math.log(p);
                         }
-                        yield h;
+                        yield any ? Double.valueOf(h) : null;
                     }
                     case "expected" -> {
                         double e = 0;
+                        boolean any = false;
                         for (final Map.Entry<?, ?> entry : map.entrySet()) {
                             final Double p = FeatureValues.toDouble(entry.getValue());
                             if (p == null || entry.getKey() == null) continue;
@@ -202,10 +210,11 @@ public class RowEvaluator implements Serializable {
                             } catch (final NumberFormatException notNumeric) {
                                 yield null;
                             }
+                            any = true;
                         }
-                        yield e;
+                        yield any ? Double.valueOf(e) : null;
                     }
-                    default -> throw new IllegalStateException("unsupported map readout: " + c.coordinates.get("readout"));
+                    default -> throw new IllegalStateException("unsupported map readout: " + readout);
                 }
             }
             case "deviation" -> composition(c, row).deviations()[Integer.parseInt(c.coordinates.get("level"))];
@@ -214,8 +223,11 @@ public class RowEvaluator implements Serializable {
         };
     }
 
-    /** One category's share of a distribution map, 0 when it has none; keys may be CharSequence after a coder round trip. */
-    private static double shareOf(final Map<?, ?> map, final String value) {
+    /**
+     * One category's share of a distribution map: 0 when the map holds no mass for it, null when the entry it holds
+     * is not a number. Keys may be CharSequence after a coder round trip, hence the fallback over the entries.
+     */
+    private static Double shareOf(final Map<?, ?> map, final String value) {
         Object v = map.get(value);
         if (v == null) {
             for (final Map.Entry<?, ?> e : map.entrySet()) {
@@ -225,8 +237,7 @@ public class RowEvaluator implements Serializable {
                 }
             }
         }
-        final Double d = v == null ? null : FeatureValues.toDouble(v);
-        return d == null ? 0d : d;
+        return v == null ? Double.valueOf(0d) : FeatureValues.toDouble(v);
     }
 
     /** A Dirichlet-Multinomial column composes a category distribution instead of a scalar. */

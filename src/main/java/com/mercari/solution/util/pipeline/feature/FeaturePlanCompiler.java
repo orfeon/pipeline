@@ -2540,7 +2540,7 @@ public final class FeaturePlanCompiler {
         final List<String> foreign = new ArrayList<>();
         if (spectral) {
             if (def.order != null) foreign.add("order");
-            if (!def.emitValues.isEmpty() || def.emitDistribution) foreign.add("emit");
+            if (!def.emitValues.isEmpty() || def.emitDistribution || !def.emitReadouts.isEmpty()) foreign.add("emit");
             if (def.blendPerEntity != null || def.blendPriorWeight != null) foreign.add("blend");
         } else {
             if (def.cooccurWindow != null || def.cooccurWeighting != null) foreign.add("cooccur");
@@ -2611,15 +2611,16 @@ public final class FeaturePlanCompiler {
             diagnostics.error("transitionStats.blend", loc, "blend.priorWeight must be a positive number: " + def.blendPriorWeight);
             return;
         }
+        final List<String> path = sequencePath(def, order, computeAt);
+        if (path == null) return;
+        if (!rejectEncodingParameters(def, false)) return;
+        // the field is resolved and categorical by now (sequencePath said so): only 'expected' constrains it further
         final Ref fieldRef = resolve(def.sequenceField);
         if (def.emitReadouts.contains("expected") && (fieldRef == null || !OperatorCatalog.isNumeric(fieldRef.type()))) {
             diagnostics.error("transitionStats.emit", loc, "emit expected is the probability-weighted mean of the next value, so the field must be an integer code"
                     + " (a bin index, an ordered band); '" + def.sequenceField + "' is " + (fieldRef == null ? "unknown" : fieldRef.type().getType()));
             return;
         }
-        final List<String> path = sequencePath(def, order, computeAt);
-        if (path == null) return;
-        if (!rejectEncodingParameters(def, false)) return;
 
         // the chain of coarser states under the leaf: the pooled state, then its shorter suffixes, then the marginal
         final List<String> leaf = new ArrayList<>();
@@ -2662,8 +2663,9 @@ public final class FeaturePlanCompiler {
         // emit: [distribution, {toValueProb: …}] keeps the map next to its per-value columns
         final OutputColumn map = columnsByCanonical.get(def.name + "_to");
         // the map is a column of its own only when asked for: the per-value columns and the readouts read it
-        if (map != null) map.intermediate = !def.emitDistribution;
+        // (null when the desugared encoding failed to register it — expandEncoding said why)
         if (map != null) {
+            map.intermediate = !def.emitDistribution;
             for (final String readout : def.emitReadouts) {
                 // a reader of the distribution map: the whole map for entropy / expected, plus the row's OWN value for
                 // ownValueProb / surprisal — which is what decides their availability (an outcome field is a violation)
@@ -2672,12 +2674,12 @@ public final class FeaturePlanCompiler {
                 c.fitted = map.fitted;
                 addSelfInput(c, map.canonicalName);
                 if ("ownValueProb".equals(readout) || "surprisal".equals(readout)) {
-                    c.coordinates.put("field", canonicalOf(def.sequenceField));
+                    c.coordinates.put("field", fieldRef == null ? def.sequenceField : fieldRef.canonical());
                     addSelfInput(c, def.sequenceField);
                 }
                 finishRow(c, def);
             }
-            if (!def.emitReadouts.isEmpty() && fieldRef != null && isOutcomeLike(fieldRef)
+            if (fieldRef != null && isOutcomeLike(fieldRef)
                     && (def.emitReadouts.contains("ownValueProb") || def.emitReadouts.contains("surprisal")) && hintedBlocks.add("transitionStats.emit.own:" + def.name)) {
                 diagnostics.hint("transitionStats.emit.own", loc, "ownValueProb / surprisal read the row's own value of '" + def.sequenceField + "', an outcome: the columns are"
                         + " availability violations (usable as a label or an intermediate target, not as a feature); entropy / expected / toValueProb read the distribution only");

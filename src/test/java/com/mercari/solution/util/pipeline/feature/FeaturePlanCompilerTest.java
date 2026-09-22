@@ -2586,7 +2586,8 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        maxValues: 5000"))), "spectralEmbedding.maxValues"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: next"))), "spectralEmbedding.of"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "spectralEmbedding.fit.mode"));
-        for (final String foreign : List.of("order: 2", "emit: [distribution]", "blend: {priorWeight: 5}")) {
+        // an emit of readouts only is as foreign as one of values: it would otherwise be parsed and dropped in silence
+        for (final String foreign : List.of("order: 2", "emit: [distribution]", "emit: [entropy]", "emit: [{toValueProb: good}]", "blend: {priorWeight: 5}")) {
             Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("        rank: 3\n", "        rank: 3\n        " + foreign + "\n"))),
                     "spectralEmbedding.parameters"), foreign);
         }
