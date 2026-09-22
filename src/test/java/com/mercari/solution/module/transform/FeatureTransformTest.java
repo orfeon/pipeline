@@ -2159,6 +2159,70 @@ public class FeatureTransformTest {
     }
 
     /**
+     * A baseline over an outcome field (the settled price's share of its session) as the offset: the baseline is read
+     * from the past rows next to their outcome, so the block's history shifts by the outcome's lag (settlement +
+     * ingestion + the predictAt offset = 6 days 38 minutes) instead of the block being a violation — on Jan 3 the
+     * seller's Jan 1 row is not visible to the residual yet (null; the row count reads no baseline and sees it), on Feb 1
+     * all three earlier rows are, and the composed value is the
+     * mean residual against the settled share shrunk toward the leave-node-out global one.
+     */
+    @Test
+    public void testOffsetOverOutcomeBaseline() throws java.io.IOException {
+        final String marketLine = "        - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        Assertions.assertTrue(FEATURE_CONFIG.contains(marketLine));
+        final String config = FEATURE_CONFIG
+                .replace(marketLine, marketLine + "\n        - {name: settled, context: session, expr: \"share(final_price + 10)\"}")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {expr: \"sold >= 1\", stats: [mean]}\n          offset: settled\n          shrinkage: {priorWeight: 1}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        // the row count reads no baseline: no shift; the target level does (its hidden columns are not emitted)
+        Assertions.assertEquals("staticSafe", schema.getField("f_enc__seller_id__count").getOptions().get("feature.status"));
+        Assertions.assertTrue(schema.getField("f_enc__seller_id__e2__mean").getOptions().get("feature.derivedFrom").contains("outcome"));
+        // the settled shares: A = (160, 10) / 170, B = 1, C = (105, 82) / 187, D = 1
+        final double sA1 = 160.0 / 170, sA2 = 10.0 / 170, sB1 = 1.0, sC1 = 105.0 / 187, sC2 = 82.0 / 187;
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // Jan 3: the Jan 1 settlement is not known yet — no residual, though the row count (no baseline read) sees A
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            Assertions.assertEquals(1L, byKey.get("B/s1").getAsLong("f_enc__seller_id__count"));
+            Assertions.assertEquals(2L, byKey.get("C/s1").getAsLong("f_enc__seller_id__count"));
+            // Feb 1, s1: own rows A (1), B (0), C (1) minus their settled shares; global without s1 = s2's rows A (0), C (1)
+            final double own = ((1 - sA1) + (0 - sB1) + (1 - sC1)) / 3;
+            final double root = ((0 - sA2) + (1 - sC2)) / 2;
+            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * The outcome baseline of {@link #testOffsetOverOutcomeBaseline} on the logit scale: the hidden Σ baseline level
+     * ({@code __sumoff}) takes the same shift as the sums, so on Feb 1 the seller's term is logit(observed 2/3) minus
+     * logit(the mean settled share of A, B and C), shrunk toward the leave-node-out global term, and on Jan 3 nothing is
+     * visible yet.
+     */
+    @Test
+    public void testOffsetOverOutcomeBaselineOnLogitScale() throws java.io.IOException {
+        final String marketLine = "        - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        final String config = FEATURE_CONFIG
+                .replace(marketLine, marketLine + "\n        - {name: settled, context: session, expr: \"share(final_price + 10)\"}")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {expr: \"sold >= 1\", stats: [mean]}\n          offset: settled\n          shrinkage: {priorWeight: 1, scale: logit}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final double sA1 = 160.0 / 170, sA2 = 10.0 / 170, sB1 = 1.0, sC1 = 105.0 / 187, sC2 = 82.0 / 187;
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"), "Jan 3: the Jan 1 settlement is not known yet");
+            final double own = logit(2.0 / 3) - logit((sA1 + sB1 + sC1) / 3);
+            final double root = logit(0.5) - logit((sA2 + sC2) / 2);
+            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * The same declaration under {@code fit.mode: static}: the fit stage keeps Σ baseline per key next to (n, Σy, Σy²),
      * the artifact persists it, and a second run applies the loaded statistics (the fitted log-odds ratio is reproduced
      * from the artifact alone).

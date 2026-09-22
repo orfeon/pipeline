@@ -234,12 +234,26 @@ without `distribution` is an error (`encoding.target.values`).
 
 **Baseline offset (`offset: <baseline>`).** A block may subtract a named baseline from its target
 (`offset: market` with `baselines: [{name: market, ...}]`; the block then computes at `predictAt`,
-`encoding.offset.computeAt`). The offset is an additive term on the shrinkage scale:
+`encoding.offset.computeAt`). The baseline is read from the **past rows** next to their outcome, never from
+the current row (the value is the residual term alone), so its availability counts on the past side like the
+target's: a baseline over pre-event market fields costs nothing, while a baseline over an outcome field (a
+settled price) shifts the window near edge by that outcome's lag — `windowShift`, exactly as a target of
+that kind does — and delays the blocks a `fit.mode: forward` fit may read (a `fit.mode: static` / `fold`
+fit is unchanged: its statistics are an artifact of the fit boundary). A target-less level (the row counts
+behind `count` / `share`) reads no baseline and takes no shift from it. Such a baseline is a valid offset
+even though the current row cannot see its own value yet — so `baselines[].emit` of it stays an
+`availability.violation`, unless the emitted copy is the evaluation baseline (`output.roles.baseline`),
+which is post-event by declaration like a label: status `label`, never a feature, read by the evaluation
+after the fact. A baseline's `context` is one event: its rows share the event time, so the value a past
+row contributes is known at that row's own lag — a context whose rows spread over hours would read
+outcomes settled later than the row's lag says. The offset is an additive term on the
+shrinkage scale:
 
 - `scale: identity` (default) — every statistic is taken over `target − baseline`: `mean` / `rate` are the
   key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is
-  missing (or NaN) has no residual: it is left out of every statistic of the block, `count` included, in the
-  expanding replay and in the static / fold / forward fits alike.
+  missing (or NaN) has no residual: it is left out of every statistic of the target, the target's `count`
+  included, in the expanding replay and in the static / fold / forward fits alike (the target-less row count
+  and `share` count every row).
 - `scale: logit` / `log` — each level's own term is `t(observed) − t(mean baseline)` over the level's rows
   (the observed-over-expected **log-odds ratio** on logit, the Poisson-offset MLE `log(Σy / Σb)` on log),
   the leaf shrinks that term toward the parent's term, and the **composed value is the term itself** — a
@@ -1458,8 +1472,9 @@ output:
 - **roles** name what a consumer must not treat as a feature. Every role must resolve (an input field,
   a context / entity for `group` / `entity`, a baseline for `baseline`; `output.roles.unresolved`
   otherwise). An input field with a role is passed through whatever `passThrough` says. A `baseline`
-  role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): baselines
-  are intermediate columns today, so derive the value as a feature (`shareOfTotal`) and name that column.
+  role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): give it
+  `baselines[].emit` (a baseline over an outcome is then post-event by declaration — status `label`, never a
+  feature — like a label or the training weight).
 - **include** is the projection: only the listed columns (canonical or output names; a `<name>_isnull`
   entry keeps its base column) are emitted, plus the pass-through fields and the role columns. Names matching no column are a
   warning (`output.include.unknown`) — the list may come from another plan version. An empty list is an error

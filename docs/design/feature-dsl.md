@@ -425,9 +425,24 @@ Notes:
      reference `offset` / `baseline` change meaning.
   2. Validation hints when an encoding of an outcome target exists, a baseline is declared and no
      `offset` is given (never applied automatically).
-  3. A block referencing an offset has `availableAt = max(target, baseline)`. Because a past row's
-     baseline must be time-consistent or the offset itself leaks, the market fields a baseline reads
-     must be `evidence: measured` (or per-field `allowDeclared`, §2.3).
+  3. An offset is read where the target is read — from the past rows (an encoding's history, a fit's
+     training rows), each row's baseline next to its own outcome — never from the current row: the
+     composed value is the term δ alone (rule 5). So the baseline's availability joins the target's on the
+     **past side** of the availability check (§6.2): a baseline over pre-event market fields costs nothing,
+     a baseline over an outcome (a settled price) shifts the window near edge like an outcome target, and
+     delays the blocks a forward fit may read (a static / fold fit is unchanged: its statistics are an
+     artifact of the fit boundary, §6.1); the current row's own baseline value is never required
+     to be available. A target-less level (row counts, share denominators) reads no baseline and takes no
+     shift from it. Availability *is* required for everything that does read the baseline on the row —
+     `type: residual`, the `softmax` offset and `baselines[].emit` — which take the ordinary row verdict,
+     so emitting an outcome baseline stays an `availability.violation`; the one exception is the copy
+     `output.roles.baseline` names, which is post-event by declaration like a label (status `label`: never
+     a feature, read by the evaluation after the fact). A baseline's `context` is one event — its rows
+     share the event time — so the value a past row contributes is known at that row's own lag; a context
+     whose rows spread in time would read outcomes settled later than the row's lag (the same
+     contemporaneity a context target relies on). Because a past row's baseline must be time-consistent or
+     the offset itself leaks, the market fields a baseline reads must be `evidence: measured` (or
+     per-field `allowDeclared`, §2.3).
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,
@@ -438,7 +453,8 @@ Notes:
      toward its parent's, and the composed value **is δ** (the residual effect on the scale), not
      `t⁻¹(t(baseline) + δ)` — the consumer adds it to its own baseline term or feeds it to a model as the
      market-orthogonal component. A row without a baseline has no residual and is outside every statistic of
-     the block (its `count` too); a level whose mean baseline is outside the scale's domain (`Σb ≤ 0`, or
+     its target (the target's `count` too; the target-less row count and `share` count every row); a level
+     whose mean baseline is outside the scale's domain (`Σb ≤ 0`, or
      `Σb ≥ n` on logit) has no δ of its own and defers to its parent, like a level with no rows.
 - **computeAt**: a block may declare `computeAt` (default `predictAt`). "When the prediction runs" and
   "when this feature is computed" differ in general — columns computable in the morning coexist with
