@@ -31,9 +31,15 @@ public class Diagnostics implements Serializable {
     /**
      * Adds a message unless an identical one (level, code, location and text) was added before: an expansion that runs
      * once per keySet / window / column raises the same advice for each of them, and one line of it says as much as
-     * five (a message that differs in any word - a column name, a count - is kept).
+     * five (a message that differs in any word - a column name, a count - is kept). Errors are never merged: each one
+     * is a thing to fix, and an error that does not name its item (three malformed sources, one text) would otherwise
+     * surface one at a time, a fix-and-rerun cycle per item.
      */
     private void add(final Message message) {
+        if (message.level == Level.error) {
+            messages.add(message);
+            return;
+        }
         if (recorded.add(message)) messages.add(message);
     }
 

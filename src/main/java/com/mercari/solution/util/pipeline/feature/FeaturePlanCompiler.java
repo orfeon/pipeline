@@ -4485,13 +4485,27 @@ public final class FeaturePlanCompiler {
      * window for any row - the far edge is not shifted with it ({@code SequenceEvaluator.farEdge}) - and the clause says
      * so instead. Empty for a wall-time window.
      */
+    /** The shift of a calendar window in the clock's mean tick spacing, or NaN for a wall-time window / no shift. */
+    private static double shiftTicks(final OutputColumn c) {
+        final String clockName = c.coordinates.get("windowClock");
+        final Clock clock = clockName == null ? null : c.clocks.get(clockName);
+        if (clock == null || c.windowShift == null || !c.coordinates.containsKey("maxAgeTicks")) return Double.NaN;
+        return (double) c.windowShift.toMillis() / clock.meanSpacingMillis();
+    }
+
+    /** Whether the shift covers every tick of a calendar window (on average): such a window reads nothing. */
+    private static boolean hidesWholeWindow(final OutputColumn c) {
+        final double ticks = shiftTicks(c);
+        return !Double.isNaN(ticks) && ticks >= Long.parseLong(c.coordinates.get("maxAgeTicks"));
+    }
+
     private static String shiftInTicks(final OutputColumn c) {
         final String clockName = c.coordinates.get("windowClock");
         final Clock clock = clockName == null ? null : c.clocks.get(clockName);
         final String maxAgeTicks = c.coordinates.get("maxAgeTicks");
         if (clock == null || c.windowShift == null || maxAgeTicks == null) return "";
         final long spacing = clock.meanSpacingMillis();
-        final double ticks = (double) c.windowShift.toMillis() / spacing;
+        final double ticks = shiftTicks(c);
         final String effect = ticks >= Long.parseLong(maxAgeTicks) ? "the shift covers the whole window, which holds no row at all"
                 : ticks >= 1 ? "the newest ticks are never visible"
                 : "part of the newest tick is never visible";
@@ -4590,6 +4604,10 @@ public final class FeaturePlanCompiler {
             } else if (c.status == Status.windowShift && !c.intermediate) {
                 diagnostics.info("availability.windowShift", loc,
                         c.canonicalName + ": window near edge shifted by " + c.windowShift + " (past availability + ingestionLag)" + shiftInTicks(c));
+                if (hidesWholeWindow(c)) {
+                    diagnostics.warning("window.clock.hidden", loc, c.canonicalName + ": the shift of " + c.windowShift + " covers the window's " + c.coordinates.get("maxAgeTicks")
+                            + " tick(s) of the clock '" + c.coordinates.get("windowClock") + "' on average, so the window holds no row: widen maxAge beyond the shift in ticks, or read a wall-time window");
+                }
             }
             if (!c.intermediate && c.declaredEvidence) {
                 diagnostics.warning("evidence.declared", loc, c.canonicalName + " derives from a field whose pre-event availability is declared but not auditable");

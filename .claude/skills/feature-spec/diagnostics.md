@@ -176,6 +176,7 @@ not expand because another block failed).
 | `clock.fit` | error | a keySet window on a calendar under `fit.mode: forward` needs `fit.blocks` on the same clock (`{size: <ticks>, clock: <name>}`) |
 | `clock.direction` | error | a `direction: future` window measures its horizon on wall time (an ISO-8601 `maxAge`) |
 | `window.clock` / `fit.blocks.clock` | error | on a calendar, `maxAge` / `blocks.size` are whole numbers of ticks (`clock: events` is spelled `maxEvents`; blocks on a clock take no `bucket`) |
+| `window.clock.hidden` | warning | a window on a calendar clock whose wall-time shift (an outcome's settlement + ingestion lag) covers all its ticks on average: the window holds no row. Widen `maxAge` beyond the shift in ticks (the `availability.windowShift` info states it), or read a wall-time window |
 | `sources.clocks` / `.name` / `.type` / `.dates` / `.uri` | error | `clocks:` entries are `{name, type: calendar, dates: [yyyy-MM-dd, ...] \| uri}`; the name is not `time` / `events` |
 | `sequence.form` | error | a block has both `ops` and `lift` / `summarize`: split it into two blocks |
 | `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |

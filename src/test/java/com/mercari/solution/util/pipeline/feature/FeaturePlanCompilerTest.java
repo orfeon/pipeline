@@ -751,6 +751,11 @@ public class FeaturePlanCompilerTest {
         diagnostics.info("a.b", "y", "same");
         diagnostics.warning("a.b", "x", "same");
         Assertions.assertEquals(3, diagnostics.getMessages().size());
+        // errors are never merged: each is a thing to fix, whether or not its text names the item
+        diagnostics.error("a.c", "x", "malformed");
+        diagnostics.error("a.c", "x", "malformed");
+        Assertions.assertEquals(5, diagnostics.getMessages().size());
+        Assertions.assertEquals(2, diagnostics.getErrorMessages().size());
     }
 
     @Test
@@ -4018,6 +4023,13 @@ public class FeaturePlanCompilerTest {
         final Diagnostics.Message shift = plan.getDiagnostics().getMessages().stream()
                 .filter(m -> "availability.windowShift".equals(m.code()) && m.message().startsWith("days_3business_sold_count:")).findFirst().orElseThrow();
         Assertions.assertTrue(shift.message().contains("~6.0 of the window's 3 tick(s)"), shift::message);
+        // ... and a shift covering every tick of the window is a warning of its own (the window holds no row)
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "window.clock.hidden".equals(m.code())
+                && m.level() == Diagnostics.Level.warning && m.message().startsWith("days_3business_sold_count:")), plan::describe);
+        final FeaturePlan wide = compile(sources, spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 30, clock: business}]"));
+        Assertions.assertFalse(hasCode(wide, "window.clock.hidden"), wide::describe);
+        Assertions.assertTrue(wide.getDiagnostics().getMessages().stream().anyMatch(m -> "availability.windowShift".equals(m.code())
+                && m.message().contains("~6.0 of the window's 30 tick(s)") && m.message().contains("the newest ticks are never visible")), wide::describe);
         Assertions.assertTrue(shift.message().contains("business"), shift::message);
         Assertions.assertFalse(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "availability.windowShift".equals(m.code())
                 && m.message().startsWith("recent_n5_sold_count:") && m.message().contains("tick")), "a wall-time window says nothing about ticks");
