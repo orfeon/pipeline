@@ -437,7 +437,7 @@ public class SequenceEvaluator implements Serializable {
             if (other != null && plans.get(other.canonicalName).shiftMillis != plan.shiftMillis) {
                 throw new IllegalStateException("columns " + other.canonicalName + " and " + c.canonicalName + " share the running state '" + plan.stateKey
                         + "' but not its window shift (" + plans.get(other.canonicalName).shiftMillis + " ms vs " + plan.shiftMillis + " ms): the shorter one"
-                        + " would advance the state past the other's near edge — the columns of one state need one availability contract (the same self and past inputs)");
+                        + " would advance the state past the other's near edge - the columns of one state need one availability contract (the same self and past inputs)");
             }
         }
     }
@@ -459,7 +459,7 @@ public class SequenceEvaluator implements Serializable {
         }
         if (plan.maxEvents != null || plan.filterText != null || hasMaxAge(plan)) {
             throw new IllegalStateException("rating column " + c.canonicalName + " carries a window this evaluator cannot honour"
-                    + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window — admitting one means"
+                    + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window - admitting one means"
                     + " implementing the eviction the running state lacks (advanceRating) and keeping the contests of a truncated"
                     + " window whole (select / Rating.replay)");
         }

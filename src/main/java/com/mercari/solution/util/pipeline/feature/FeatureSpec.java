@@ -675,6 +675,12 @@ public class FeatureSpec implements Serializable {
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
     public AvailableAt predictAt;
+    /**
+     * The predictAt a missing / unparsable declaration falls back to, so the rest of the report is still produced
+     * (the error is already recorded). It is {@code event_time}, never {@code atEventTime}: that one is the far-past
+     * sentinel, and a window shift measured against it ({@code past - predictAt}) overflows a millisecond count.
+     */
+    private static final AvailableAt PREDICT_AT_FALLBACK = AvailableAt.eventRelative(Duration.ZERO);
     public List<EntityDef> entities = new ArrayList<>();
     public List<ContextDef> contexts = new ArrayList<>();
     public List<BaselineDef> baselines = new ArrayList<>();
@@ -698,7 +704,7 @@ public class FeatureSpec implements Serializable {
                 spec.lineage.add(new LineageEntry(fields, from, Json.string(o, "eventTime")));
             }
         } else {
-            diagnostics.error("lineage.missing", "lineage", "lineage is required (fields → source mapping)");
+            diagnostics.error("lineage.missing", "lineage", "lineage is required (fields -> source mapping)");
         }
 
         if (parameters.has("time") && parameters.get("time").isJsonObject()) {
@@ -713,16 +719,16 @@ public class FeatureSpec implements Serializable {
         spec.predictAtExpression = Json.string(parameters, "predictAt");
         if (spec.predictAtExpression == null) {
             diagnostics.error("predictAt.missing", "predictAt", "predictAt is required");
-            spec.predictAt = AvailableAt.atEventTime();
+            spec.predictAt = PREDICT_AT_FALLBACK;
         } else {
             try {
                 spec.predictAt = AvailableAt.parseTimeExpression(spec.predictAtExpression);
                 if (!spec.predictAt.isStatic()) {
-                    diagnostics.error("predictAt.invalid", "predictAt", "predictAt must be event_time ± duration");
+                    diagnostics.error("predictAt.invalid", "predictAt", "predictAt must be event_time +/- duration");
                 }
             } catch (final IllegalArgumentException e) {
                 diagnostics.error("predictAt.invalid", "predictAt", e.getMessage());
-                spec.predictAt = AvailableAt.atEventTime();
+                spec.predictAt = PREDICT_AT_FALLBACK;
             }
         }
 
@@ -1171,7 +1177,7 @@ public class FeatureSpec implements Serializable {
             final Window previous = named.putIfAbsent(w.as, w);
             if (previous != null && !previous.sameBounds(w)) {
                 diagnostics.error("window.as", loc, "two windows of this block are named '" + w.as + "' but select different rows"
-                        + " (maxAge / maxEvents / clock / filter): one name is one window — the statistics behind it are shared, so name them apart");
+                        + " (maxAge / maxEvents / clock / filter): one name is one window - the statistics behind it are shared, so name them apart");
             }
         }
     }
@@ -1214,7 +1220,7 @@ public class FeatureSpec implements Serializable {
             for (final String key : w.keySet()) {
                 if (!List.of("maxEvents", "maxAge", "filter", "clock", "as").contains(key)) {
                     diagnostics.error("window.nearEdge", loc,
-                            "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (§4.3)");
+                            "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (section 4.3)");
                 }
             }
             windows.add(window);

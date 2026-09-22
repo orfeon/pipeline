@@ -110,7 +110,7 @@ public final class FeaturePlanCompiler {
         for (final FeaturePlan.MinIntervalAudit a : minIntervalAudits.values()) {
             diagnostics.info("entity.minInterval", "entities." + a.entity(), "minInterval " + a.minInterval() + " is a declaration, not a check: it lets "
                     + a.columns().size() + " column(s) over entity " + a.entity() + " read an outcome without a shift of up to " + a.shift()
-                    + " (staticSafe). An event that follows the entity's previous one sooner than that may read an outcome not yet known — the plan's"
+                    + " (staticSafe). An event that follows the entity's previous one sooner than that may read an outcome not yet known - the plan's"
                     + " audit query counts such events in the input, and the run counts them as feature/minInterval_" + a.entity()
                     + "_below; declare the interval the data has");
         }
@@ -226,9 +226,9 @@ public final class FeaturePlanCompiler {
             if (otherBlocks.isEmpty()) continue;
             diagnostics.hint("encoding.globalKey", "features." + String.join(",", otherBlocks),
                     "stage #" + s.index() + " evaluates every row under one key (a single worker thread"
-                            + (spec.engine.parallelWaves ? " — the critical path once the waves run in parallel" : "")
+                            + (spec.engine.parallelWaves ? " - the critical path once the waves run in parallel" : "")
                             + "); a global / very coarse encoding can move its statistics to fit.mode forward"
-                            + " (complete earlier time blocks, leak-free), static (streaming-capable with an artifact) or fold (batch only) — the values change:"
+                            + " (complete earlier time blocks, leak-free), static (streaming-capable with an artifact) or fold (batch only) - the values change:"
                             + " see the feature docs, Performance and sizing");
         }
     }
@@ -584,7 +584,7 @@ public final class FeaturePlanCompiler {
         try {
             final AvailableAt computeAt = AvailableAt.parseTimeExpression(def.computeAtExpression);
             if (!computeAt.isStatic()) {
-                diagnostics.error("computeAt.invalid", def.location(), "computeAt must be event_time ± duration");
+                diagnostics.error("computeAt.invalid", def.location(), "computeAt must be event_time +/- duration");
                 return spec.predictAt;
             }
             if (!computeAt.isStaticallyAtOrBefore(spec.predictAt)) {
@@ -1100,7 +1100,7 @@ public final class FeaturePlanCompiler {
                 }
                 if (def.excludeSelf) diagnostics.warning("context.harville.excludeSelf", loc, "excludeSelf has no effect on harville (the row is part of its own field)");
                 if (hintedBlocks.add("context.op.groupSolver:" + def.name)) {
-                    diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker — quadratic in the group size for the 2nd place, cubic for the 3rd:"
+                    diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker - quadratic in the group size for the 2nd place, cubic for the 3rd:"
                             + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)");
                 }
                 if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
@@ -1274,7 +1274,7 @@ public final class FeaturePlanCompiler {
                 final boolean anyRating = def.ops.stream().anyMatch(o -> "rating".equals(o.type));
                 diagnostics.info("sequence.filter.reduced", loc,
                         "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")"
-                                + (anyRating ? "; a rating op of this block is partitioned by (" + reducedKey + ") alone — its pool is every entity sharing that value" : ""));
+                                + (anyRating ? "; a rating op of this block is partitioned by (" + reducedKey + ") alone - its pool is every entity sharing that value" : ""));
             }
             if (form != null) {
                 expandDynamics(def, entity, window, filterRefs, reducedKey, form, computeAt);
@@ -1418,7 +1418,7 @@ public final class FeaturePlanCompiler {
                                 if (!future && List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
                                     // once per block: the same hint for every window × field × func would drown the report
                                     diagnostics.hint("sequence.aggregate.encoding", loc,
-                                            "aggregate " + func + " over outcome field '" + field + "' (and other outcome means in this block) has no shrinkage; consider population encoding with a windowed keySet (§4.3 役割分担)");
+                                            "aggregate " + func + " over outcome field '" + field + "' (and other outcome means in this block) has no shrinkage; consider population encoding with a windowed keySet (spec section 4.3)");
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 // the declared func (a future window's first / last swap is the evaluator's: SequenceEvaluator.func)
@@ -1514,14 +1514,14 @@ public final class FeaturePlanCompiler {
         if (window.maxAge != null || window.maxEvents != null || window.onCalendar() || (window.filter != null && reducedKey == null)) {
             if (hintedBlocks.add("sequence.rating.window:" + def.name + ":" + window.token() + ":" + window.filter)) {
                 diagnostics.error("sequence.rating.window", loc, "rating reads every earlier contest of its pool (an update cannot be taken back): window " + window.token()
-                        + (window.filter == null ? "" : " with filter '" + window.filter + "'") + " is not supported — declare no maxAge / maxEvents, and only a filter"
+                        + (window.filter == null ? "" : " with filter '" + window.filter + "'") + " is not supported - declare no maxAge / maxEvents, and only a filter"
                         + " \"<field> = $self.<field>\" on a pre-event field (it splits the contests into independent pools); tau ages an old rating instead of a window");
             }
             return;
         }
         final ContextDef contest = op.context == null ? null : contexts.get(op.context);
         if (contest == null) {
-            diagnostics.error("sequence.rating.context", loc, "rating requires 'context' referencing contexts[].name — the contest whose rows are rated against each other: " + op.context);
+            diagnostics.error("sequence.rating.context", loc, "rating requires 'context' referencing contexts[].name - the contest whose rows are rated against each other: " + op.context);
             return;
         }
         final String methodName = op.method == null ? Rating.Method.plackettLuce.name() : op.method;
@@ -1569,8 +1569,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         } else if (op.tauPer != null && !elo && op.tau == null) {
             // the default tau (sigma / 100) is the drift of ONE CONTEST: spread over a period it would age nothing
-            diagnostics.error("sequence.rating.parameter", loc, "tauPer makes tau the drift per " + op.tauPer + " of absence (variance += tau² · Δt / tauPer): declare tau with it"
-                    + " — the default (sigma / 100) is sized for one contest");
+            diagnostics.error("sequence.rating.parameter", loc, "tauPer makes tau the drift per " + op.tauPer + " of absence (variance += tau^2 * delta_t / tauPer): declare tau with it"
+                    + " - the default (sigma / 100) is sized for one contest");
             valid = false;
         }
         if (op.mu != null && !Double.isFinite(op.mu)
@@ -1647,7 +1647,7 @@ public final class FeaturePlanCompiler {
         final String previous = ratingStates.putIfAbsent(stateKey, shared.toString());
         if (previous != null && !previous.equals(shared.toString())) {
             diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"
-                    + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state — name them apart with as:");
+                    + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state - name them apart with as:");
             return;
         }
         // the readouts: the rated player's (index 0, the names a rating of players has), then each member's under its
@@ -1692,7 +1692,7 @@ public final class FeaturePlanCompiler {
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
                     + " (a well-known member hardly moves, an uncertain one takes the update). The members' levels are identified up to a shift between the"
-                    + " entities — read a member relative to its contest (a context block over the column), or the team's sum (team: [mu, sigma])");
+                    + " entities - read a member relative to its contest (a context block over the column), or the team's sum (team: [mu, sigma])");
         }
     }
 
@@ -1738,7 +1738,7 @@ public final class FeaturePlanCompiler {
         for (final FeatureSpec.TeamMember m : op.with) {
             final EntityDef member = m.entity == null ? null : entities.get(m.entity);
             if (member == null) {
-                diagnostics.error("sequence.rating.with", loc, "with names entities[].name — the other entities of the row rated with " + entity.name() + ": " + m.entity
+                diagnostics.error("sequence.rating.with", loc, "with names entities[].name - the other entities of the row rated with " + entity.name() + ": " + m.entity
                         + " (available: " + entities.keySet() + ")");
                 valid = false;
                 continue;
@@ -1769,7 +1769,7 @@ public final class FeaturePlanCompiler {
         for (final String func : op.team) {
             if (!Rating.TEAM_FUNCS.contains(func)) {
                 diagnostics.error("sequence.rating.with", loc, "unknown team readout: " + func + " (available: " + String.join(" | ", Rating.TEAM_FUNCS)
-                        + " — mu is the sum of the members' ratings, sigma the uncertainty of that sum)");
+                        + " - mu is the sum of the members' ratings, sigma the uncertainty of that sum)");
                 valid = false;
             }
         }
@@ -1976,7 +1976,7 @@ public final class FeaturePlanCompiler {
         }
         if (columns > MAX_DYNAMICS_COLUMNS) {
             diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (" + (bilinear
-                    ? "windows × the Lyndon words of the channels up to depth " + depth : "windows × halflifes × channels × " + perChannel + " components")
+                    ? "windows x the Lyndon words of the channels up to depth " + depth : "windows x halflifes x channels x " + perChannel + " components")
                     + "), over " + MAX_DYNAMICS_COLUMNS + ": lower the " + (bilinear ? "depth" : "order") + " or split the channels over several blocks");
             valid = false;
         }
@@ -2064,7 +2064,7 @@ public final class FeaturePlanCompiler {
             for (int i = 0; i < form.channels().size(); i++) legend.add((char) ('a' + i) + "=" + form.channels().get(i).name());
             if (form.timeAugment()) legend.add((char) ('a' + fields.size()) + "=time (" + form.decayBy() + ")");
             diagnostics.info("sequence.dynamics.logsignature", def.location(), "log-signature columns are named by Lyndon words over the channels " + legend
-                    + " (e.g. _ab = the Lévy area of a and b); an unbounded window folds each event in, a bounded one re-reads its events");
+                    + " (e.g. _ab = the Levy area of a and b); an unbounded window folds each event in, a bounded one re-reads its events");
         }
         for (int w = 0; w < words.size(); w++) {
             final OutputColumn c = newColumn(def.name, Scope.sequence, "dynamics", stateKey + "_" + Signature.wordName(words.get(w)), Schema.FieldType.FLOAT64, computeAt);
@@ -2123,7 +2123,7 @@ public final class FeaturePlanCompiler {
      * expression, over a non-numeric operand.
      */
     private References weightReferences(final FeatureDef def, final Op op) {
-        return weightCache.computeIfAbsent(def.name + " " + op.type + " " + op.weightBy, k -> {
+        return weightCache.computeIfAbsent(def.name + "\u0000" + op.type + "\u0000" + op.weightBy, k -> {
             final String loc = def.location();
             if (!"aggregate".equals(op.type)) {
                 diagnostics.error("sequence.weightBy.op", loc, "weightBy is only defined on aggregate (op " + op.type + ")");
@@ -2141,7 +2141,7 @@ public final class FeaturePlanCompiler {
             }
             if (!valid) return Optional.empty();
             diagnostics.info("sequence.weightBy.scan", loc, "weightBy '" + op.weightBy + "' weighs every event against the current row, so no running state can serve it: "
-                    + "the aggregate scans its window per row — bound the window with maxAge or maxEvents");
+                    + "the aggregate scans its window per row - bound the window with maxAge or maxEvents");
             return Optional.of(refs);
         }).orElse(null);
     }
@@ -2397,7 +2397,7 @@ public final class FeaturePlanCompiler {
         }
         if (directionReported.add(def.name + ":future")) {
             diagnostics.info("sequence.direction.future", loc, "block " + def.name + " reads the strictly-future window (t, t + maxAge] of each row: its columns are labels"
-                    + " (status label, post-event by construction) — a feature referencing one is an availability violation");
+                    + " (status label, post-event by construction) - a feature referencing one is an availability violation");
         }
         return true;
     }
@@ -2802,7 +2802,7 @@ public final class FeaturePlanCompiler {
                     // the vocabulary cap must be decided before the counts are accumulated (the state is quadratic in
                     // the values), which is one thing a forward fit reads from the whole input rather than per block
                     + "; the " + maxValues + " values counted (maxValues, by co-occurrence mass) are chosen over the whole input, the counts themselves per block"
-                    + " — when the field has more values than that, which of them are embedded depends on the whole input (the one part of the fit that is not walk-forward)"
+                    + " - when the field has more values than that, which of them are embedded depends on the whole input (the one part of the fit that is not walk-forward)"
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input embedding is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
             // the pairs are counted from every row's OWN value of the field, whichever value `of` looks up: an
@@ -2812,7 +2812,7 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)"
                     + (outcome ? "; '" + def.sequenceField + "' is outcome-like, so each training row's own outcome is one of the pairs behind"
-                            + " the coordinates it reads — 'of' changes which value(s) are looked up, not what the fit counts (fit.mode forward does)" : ""));
+                            + " the coordinates it reads - 'of' changes which value(s) are looked up, not what the fit counts (fit.mode forward does)" : ""));
         }
         final List<String> references = new ArrayList<>(path);
         references.add(def.sequenceField);
@@ -2903,7 +2903,7 @@ public final class FeaturePlanCompiler {
         }
         if (valid && segments + degree > Smooth.MAX_BASIS) {
             diagnostics.error("smooth.segments", loc, "segments + degree = " + (segments + degree) + " basis functions exceed " + Smooth.MAX_BASIS
-                    + " (the fit state is (basis + 1)² numbers per time block; the penalty, not the knot count, sets the smoothness)");
+                    + " (the fit state is (basis + 1)^2 numbers per time block; the penalty, not the knot count, sets the smoothness)");
             valid = false;
         }
         if (valid && segments + degree <= order) {
@@ -2928,7 +2928,7 @@ public final class FeaturePlanCompiler {
                 && QuantileTransform.UNIFORM.equals(ref.column().coordinates.getOrDefault("distribution", QuantileTransform.UNIFORM))) {
             diagnostics.info("smooth.range", loc, "range defaults to [0, 1], the range of the uniform quantileTransform column '" + input + "' (knots at the input's quantiles)");
         } else if (def.range.size() != 2 || !(def.range.get(0) < def.range.get(1)) || def.range.get(0).isInfinite() || def.range.get(1).isInfinite()) {
-            diagnostics.error("smooth.range", loc, "smooth requires range: [lo, hi] with lo < hi — the knots are placed before the rows are read, and keys beyond the range are clamped to it"
+            diagnostics.error("smooth.range", loc, "smooth requires range: [lo, hi] with lo < hi - the knots are placed before the rows are read, and keys beyond the range are clamped to it"
                     + " (for knots at the data's quantiles, feed a uniform quantileTransform column: its range is [0, 1])" + (def.range.isEmpty() ? "" : ": " + def.range));
             valid = false;
         } else {
@@ -3024,7 +3024,7 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("quantileTransform.clip", loc, "clip must be a probability in (0, 0.5): " + def.clip);
             } else if (!QuantileTransform.NORMAL.equals(distribution)) {
                 diagnostics.warning("quantileTransform.clip", loc, "clip only applies to distribution: normal (the uniform position is not clamped): "
-                        + "it has no effect on the output but still changes the plan hash — remove it");
+                        + "it has no effect on the output but still changes the plan hash - remove it");
             } else {
                 clipCoordinate = Double.toString(def.clip);
             }
@@ -3132,7 +3132,7 @@ public final class FeaturePlanCompiler {
             if (ref != null && isOutcomeLike(ref)) outcome = true;
         }
         final String what = "svd fits " + rank + " component(s) of " + (dimension == null ? "the vector" : dimension + " inputs")
-                + " from (n, Σx, Σxxᵀ)" + (center ? "" : ", uncentred") + (def.standardize ? ", standardised" : "");
+                + " from (n, sum x, sum xx^T)" + (center ? "" : ", uncentred") + (def.standardize ? ", standardised" : "");
         if (forward) {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves them over the complete blocks"
@@ -3284,7 +3284,7 @@ public final class FeaturePlanCompiler {
             case Alignment.NONE -> "; the " + what + " of every block are oriented on their own (fit.align none): they flip and mix from block to block";
             case Alignment.SIGN -> "; the " + what + " of every block are sign-flipped towards those of the block before (fit.align sign): close eigenvalues still mix";
             case Alignment.PROCRUSTES -> "; the " + what + " of every block are rotated into those of the block before (fit.align procrustes, the default), so a column continues across"
-                    + " blocks — it is a stable coordinate of the fitted subspace rather than its k-th eigenvector (an svd's columns are then no longer uncorrelated,"
+                    + " blocks - it is a stable coordinate of the fitted subspace rather than its k-th eigenvector (an svd's columns are then no longer uncorrelated,"
                     + " and the first no longer carries the most variance)";
             // a mode added to Alignment.MODES without a clause here: name it rather than claim the default's meaning
             default -> "; the " + what + " of every block are brought into those of the block before (fit.align " + align + ")";
@@ -3299,7 +3299,7 @@ public final class FeaturePlanCompiler {
     private static String minRowsPhrase(final int minRows, final String defaultReason) {
         if (minRows <= 0) return "";
         return "; a fit over fewer than " + minRows + " row(s) is not solved and its rows read null (fit.minRows"
-                + (defaultReason == null ? "" : ", default: " + defaultReason + " — 0 = no floor") + ")";
+                + (defaultReason == null ? "" : ", default: " + defaultReason + " - 0 = no floor") + ")";
     }
 
     /**
@@ -3557,15 +3557,15 @@ public final class FeaturePlanCompiler {
                     + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
                     + "; training rows include their own outcome, so use expanding for leak-safe backfill and static for serving / offline analysis");
         } else if (mode == FitMode.fold && fitSpec.isTimeFold()) {
-            diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold — a row reads the"
+            diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold - a row reads the"
                     + " statistics of the whole input minus its own block"
                     + (fitSpec.purge == null ? ", for a target reading a label the label's horizon on both sides of it (the default purge)" : ", the purge " + fitSpec.purge + " on both sides of it")
                     + (fitSpec.embargo == null ? "" : " and the embargo " + fitSpec.embargo + " after the purge")
-                    + " (rounded up to whole blocks: 2·purge + embargo + 1 blocks are left out; the engine warns when that is more than half of the input's blocks);"
+                    + " (rounded up to whole blocks: 2*purge + embargo + 1 blocks are left out; the engine warns when that is more than half of the input's blocks);"
                     + (fitSpec.untilMillis == null
                             ? " the other blocks include rows AFTER it (cross-fit, not time-ordered)"
                             : " the cross-fit stays within the blocks up to " + java.time.Instant.ofEpochMilli(fitSpec.untilMillis) + " (fit.fold.until: the other blocks of the training period"
-                                    + " include rows AFTER it), and a row of a later block reads the blocks before its own whose targets were known at predictAt (forward, no cross-fit) — one batch"
+                                    + " include rows AFTER it), and a row of a later block reads the blocks before its own whose targets were known at predictAt (forward, no cross-fit) - one batch"
                                     + " yields the out-of-fold training values and the walk-forward evaluation values")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
@@ -3579,7 +3579,7 @@ public final class FeaturePlanCompiler {
         } else if (mode == FitMode.forward) {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
             diagnostics.info("fit.mode.forward", loc, "fit.mode forward reads, per row, the statistics of the complete time blocks (" + blocks.describe()
-                    + ") whose targets are known at predictAt — a stepwise expanding fit computed as a parallel Combine per (key, block); the row's own block is never included"
+                    + ") whose targets are known at predictAt - a stepwise expanding fit computed as a parallel Combine per (key, block); the row's own block is never included"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                     + (fitSpec.window == null ? "" : "; fit.window " + fitSpec.window + " bounds the blocks a row reads where a keySet declares no maxAge")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
@@ -4140,7 +4140,7 @@ public final class FeaturePlanCompiler {
         }
         if (shrinkage.family != null && family.isConjugate() && shrinkage.scale != Shrinkage.Scale.identity) {
             if (hintedBlocks.add(def.name + "#familyScale")) {
-                diagnostics.error("encoding.shrinkage.family.scale", loc, "family " + family + " (a conjugate closed form) requires scale identity; on logit / log declare family gaussian or leave it derived (Gaussian shrinkage of the transformed statistics, §5.5 rule 7)");
+                diagnostics.error("encoding.shrinkage.family.scale", loc, "family " + family + " (a conjugate closed form) requires scale identity; on logit / log declare family gaussian or leave it derived (Gaussian shrinkage of the transformed statistics, section 5.5 rule 7)");
             }
             return false;
         }
@@ -4194,7 +4194,7 @@ public final class FeaturePlanCompiler {
         if (previousSignature != null && !previousSignature.equals(signature)) {
             diagnostics.error("encoding.shrinkage.joint", loc, "two keySets of block '" + def.name + "' resolve to the same joint fit '" + id
                     + "' with different lattices or shrinkage (" + previousSignature + " vs " + signature + "): the joint fit is identified by the keys,"
-                    + " the window and the target — a keySet's as: renames its columns but not the fit they read, so the second would be filled from"
+                    + " the window and the target - a keySet's as: renames its columns but not the fit they read, so the second would be filled from"
                     + " the first's solve; declare them in separate blocks");
             return 0;
         }
@@ -4202,7 +4202,7 @@ public final class FeaturePlanCompiler {
             final List<String> tokens = new ArrayList<>();
             for (final JointFit.Level l : levels) tokens.add(l.token());
             diagnostics.info("encoding.shrinkage.joint", loc, "estimator joint fits the levels " + tokens + " of keySet " + ks.keys
-                    + " simultaneously (ridge / BLUP over the lattice cells, solved on one worker; λ per level "
+                    + " simultaneously (ridge / BLUP over the lattice cells, solved on one worker; lambda per level "
                     + ("varianceComponents".equals(shrinkage.weights) ? "by the moment estimator over the level's contexts" : "= priorWeight " + shrinkage.priorWeight)
                     + "; scale " + shrinkage.scale + ")");
         }
@@ -4477,6 +4477,43 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.coveringBlocks(embargo)));
     }
 
+    /**
+     * A calendar window ({@code maxAge: N, clock: X}) is bounded in ticks at its far edge but shifted on wall time at its
+     * near edge, so a shift longer than the clock's spacing hides the newest ticks whatever N is: the info says how
+     * many of the N ticks the shift covers on average (shift / mean tick spacing), so a window is not designed one or two
+     * ticks wider than it can ever read. A shift that reaches the far edge (N ticks or more) leaves nothing inside the
+     * window for any row - the far edge is not shifted with it ({@code SequenceEvaluator.farEdge}) - and the clause says
+     * so instead. Empty for a wall-time window.
+     */
+    /** The shift of a calendar window in the clock's mean tick spacing, or NaN for a wall-time window / no shift. */
+    private static double shiftTicks(final OutputColumn c) {
+        final String clockName = c.coordinates.get("windowClock");
+        final Clock clock = clockName == null ? null : c.clocks.get(clockName);
+        if (clock == null || c.windowShift == null || !c.coordinates.containsKey("maxAgeTicks")) return Double.NaN;
+        return (double) c.windowShift.toMillis() / clock.meanSpacingMillis();
+    }
+
+    /** Whether the shift covers every tick of a calendar window (on average): such a window reads nothing. */
+    private static boolean hidesWholeWindow(final OutputColumn c) {
+        final double ticks = shiftTicks(c);
+        return !Double.isNaN(ticks) && ticks >= Long.parseLong(c.coordinates.get("maxAgeTicks"));
+    }
+
+    private static String shiftInTicks(final OutputColumn c) {
+        final String clockName = c.coordinates.get("windowClock");
+        final Clock clock = clockName == null ? null : c.clocks.get(clockName);
+        final String maxAgeTicks = c.coordinates.get("maxAgeTicks");
+        if (clock == null || c.windowShift == null || maxAgeTicks == null) return "";
+        final long spacing = clock.meanSpacingMillis();
+        final double ticks = shiftTicks(c);
+        final String effect = ticks >= Long.parseLong(maxAgeTicks) ? "the shift covers the whole window, which holds no row at all"
+                : ticks >= 1 ? "the newest ticks are never visible"
+                : "part of the newest tick is never visible";
+        // Locale.ROOT: the report is text a consumer greps, not a localized number
+        return String.format(Locale.ROOT, "; on the clock '%s' that is ~%.1f of the window's %s tick(s) (mean spacing %s): %s",
+                clockName, ticks, maxAgeTicks, Duration.ofMillis(spacing), effect);
+    }
+
     /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */
     private Duration labelHorizon(final String canonical, final Set<String> visited) {
         if (canonical == null || !visited.add(canonical)) return null;
@@ -4563,10 +4600,14 @@ public final class FeaturePlanCompiler {
                 }
             } else if (c.status == Status.runtimeFilter && !c.intermediate) {
                 diagnostics.info("availability.runtimeFilter", loc,
-                        c.canonicalName + ": availability is not decidable statically (" + c.availableAt.getDynamicReasons() + "); the engine must filter contributions by effectiveAvailableAt ≤ computeAt");
+                        c.canonicalName + ": availability is not decidable statically (" + c.availableAt.getDynamicReasons() + "); the engine must filter contributions by effectiveAvailableAt <= computeAt");
             } else if (c.status == Status.windowShift && !c.intermediate) {
                 diagnostics.info("availability.windowShift", loc,
-                        c.canonicalName + ": window near edge shifted by " + c.windowShift + " (past availability + ingestionLag)");
+                        c.canonicalName + ": window near edge shifted by " + c.windowShift + " (past availability + ingestionLag)" + shiftInTicks(c));
+                if (hidesWholeWindow(c)) {
+                    diagnostics.warning("window.clock.hidden", loc, c.canonicalName + ": the shift of " + c.windowShift + " covers the window's " + c.coordinates.get("maxAgeTicks")
+                            + " tick(s) of the clock '" + c.coordinates.get("windowClock") + "' on average, so the window holds no row: widen maxAge beyond the shift in ticks, or read a wall-time window");
+                }
             }
             if (!c.intermediate && c.declaredEvidence) {
                 diagnostics.warning("evidence.declared", loc, c.canonicalName + " derives from a field whose pre-event availability is declared but not auditable");
