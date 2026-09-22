@@ -90,6 +90,7 @@ public final class FeaturePlanCompiler {
             expandAll();
             finalizeColumns();
             resolveRoles();
+            reportMinIntervalAudits();
         }
         final List<FeaturePlan.Stage> stages = buildStages();
         hintGlobalKeyStages(stages);
@@ -98,6 +99,21 @@ public final class FeaturePlanCompiler {
         final String outputHash = outputHash(hash);
         return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits,
                 new ArrayList<>(minIntervalAudits.values()));
+    }
+
+    /**
+     * One info per entity whose declared {@code minInterval} absorbed a window shift (DSL spec §6.2 tier 2). Raised
+     * after expansion, so it names the largest shift the declaration absorbed and every column resting on it — inside
+     * {@link #classifyPast} only the first column's shift is known.
+     */
+    private void reportMinIntervalAudits() {
+        for (final FeaturePlan.MinIntervalAudit a : minIntervalAudits.values()) {
+            diagnostics.info("entity.minInterval", "entities." + a.entity(), "minInterval " + a.minInterval() + " is a declaration, not a check: it lets "
+                    + a.columns().size() + " column(s) over entity " + a.entity() + " read an outcome without a shift of up to " + a.shift()
+                    + " (staticSafe). An event that follows the entity's previous one sooner than that may read an outcome not yet known — the plan's"
+                    + " audit query counts such events in the input, and the run counts them as feature/minInterval_" + a.entity()
+                    + "_below; declare the interval the data has");
+        }
     }
 
     /**
@@ -2429,17 +2445,12 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("minInterval", minInterval.toString());
             c.coordinates.put("minIntervalEntity", entity.name());
             // the declaration is trusted here and verified nowhere: recorded for the audit query and the run-time counter
+            // (the info is raised once per entity in reportMinIntervalAudits, where the largest shift absorbed is known)
             final FeaturePlan.MinIntervalAudit before = minIntervalAudits.get(entity.name());
-            final List<String> relying = new ArrayList<>(before == null ? List.of() : before.columns());
+            final List<String> relying = before == null ? new ArrayList<>() : before.columns();
             relying.add(c.canonicalName);
             minIntervalAudits.put(entity.name(), new FeaturePlan.MinIntervalAudit(entity.name(), entity.keys(), minInterval,
                     before == null || before.shift().compareTo(shift) < 0 ? shift : before.shift(), relying));
-            if (hintedBlocks.add("entity.minInterval:" + entity.name())) {
-                diagnostics.info("entity.minInterval", "entities." + entity.name(), "minInterval " + minInterval + " is a declaration, not a check: it lets windows"
-                        + " over entity " + entity.name() + " read an outcome without a shift of up to " + shift + " (staticSafe). An event that follows the"
-                        + " entity's previous one sooner than that may read an outcome not yet known — the plan's audit query counts such events in the"
-                        + " input, and the run counts them as feature/minInterval_" + entity.name() + "_below; declare the interval the data has");
-            }
         } else {
             c.status = Status.windowShift;
             c.windowShift = shift;

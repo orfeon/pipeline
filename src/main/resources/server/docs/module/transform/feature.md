@@ -1624,10 +1624,14 @@ So a declaration that absorbs a shift is reported, not assumed: the plan says wh
 the largest shift it absorbed (`-- minInterval audit`, the `entity.minInterval` info, `plan.minIntervalAudit`),
 the audit list gains a query over the input that counts the events contradicting it (BigQuery form: the gap
 to the entity's previous event by `LAG … OVER (PARTITION BY <keys> ORDER BY <time>)`, counted where it is
-positive and below the interval), and the keyed stage that replays the entity counts the same rows at run
+positive and below the interval), and the keyed stage that replays the entity counts the same events at run
 time as **`feature/minInterval_<entity>_below`** (a Beam counter, in the Dataflow UI with the other
-`feature/*` counters). Rows sharing a timestamp never see each other and are not counted. A declaration
-shorter than every shift absorbs nothing, changes nothing, and is not audited.
+`feature/*` counters). A gap of zero — rows sharing a timestamp, which never see each other — is not a
+violation; where several rows share the later timestamp of a short gap the query counts one of them and the
+counter counts each. One stage counts each entity, the one keyed by the entity itself where a column of it
+rests on the declaration (a window reduced by a filter field is replayed under a finer key, and the counter
+then sees the gaps of that sub-key). A declaration shorter than every shift absorbs nothing, changes
+nothing, and is not audited.
 
 Any count above zero means the declaration is wrong for this data: declare the interval the data has
 (the query's `min_gap_seconds` says what it is) and let the affected windows take their shift, or accept that

@@ -348,6 +348,8 @@ public final class FeatureStages {
         private final List<Logging> loggings;
         private final boolean failFast;
         private final List<PCollection<BadRecord>> failures;
+        /** Stage index → the entities whose {@code minInterval} that stage audits (millis): see {@link #assignMinIntervalAudits}. */
+        private final Map<Integer, Map<String, Long>> minIntervalAudits;
 
         Wiring(final FeaturePlan plan, final Map<String, OutputColumn> columns,
                final Coder<MElement> elementCoder, final KvCoder<String, MElement> kvCoder, final KvCoder<String, KV<Long, MElement>> sortKvCoder,
@@ -361,10 +363,49 @@ public final class FeatureStages {
             this.loggings = loggings;
             this.failFast = failFast;
             this.failures = failures;
+            this.minIntervalAudits = assignMinIntervalAudits(plan, columns);
         }
 
         static String label(final Stage stage) {
             return "Stage" + stage.index() + "_" + stage.kind();
+        }
+
+        /**
+         * Which stage counts each entity's {@code minInterval} violations ({@code feature/minInterval_<entity>_below}),
+         * by stage index. The keyed replay only ever sees the gaps of its own key, and every keyed stage replays the
+         * same rows, so an entity is audited
+         * <ul>
+         *   <li>in a stage keyed exactly by the entity's keys when one of them rests on the declaration — a window
+         *       reduced by a filter field is keyed finer ({@code entity.keys + reducedKey}) and would report the gaps
+         *       of that sub-key, not the entity's; such a stage is used only when no exact one relies on it;</li>
+         *   <li>in one stage only — two stages may share a key (a dependency forces the split) and a wave may branch
+         *       several keyed stages over the same rows, and counting in each would count a row several times.</li>
+         * </ul>
+         * Future stages replay in descending time and are never granted a {@code minInterval}, so they are skipped.
+         */
+        private static Map<Integer, Map<String, Long>> assignMinIntervalAudits(final FeaturePlan plan, final Map<String, OutputColumn> columns) {
+            final Map<String, List<String>> entityKeys = new HashMap<>();
+            for (final FeatureSpec.EntityDef e : plan.getSpec().entities) entityKeys.put(e.name(), e.keys());
+            final Map<String, Long> declared = new LinkedHashMap<>();
+            final Map<String, Stage> chosen = new LinkedHashMap<>();
+            for (final Stage stage : plan.getStages()) {
+                if (stage.kind() != StageKind.sequence && stage.kind() != StageKind.population) continue;
+                for (final String name : stage.columnNames()) {
+                    final OutputColumn c = columns.get(name);
+                    if (c == null) continue;
+                    final String entity = c.getCoordinates().get("minIntervalEntity"), interval = c.getCoordinates().get("minInterval");
+                    if (entity == null || interval == null) continue;
+                    declared.putIfAbsent(entity, Duration.parse(interval).toMillis());
+                    final List<String> keys = entityKeys.getOrDefault(entity, List.of());
+                    final Stage before = chosen.get(entity);
+                    if (before == null || (!before.keys().equals(keys) && stage.keys().equals(keys))) chosen.put(entity, stage);
+                }
+            }
+            final Map<Integer, Map<String, Long>> byStage = new HashMap<>();
+            for (final Map.Entry<String, Stage> e : chosen.entrySet()) {
+                byStage.computeIfAbsent(e.getValue().index(), i -> new LinkedHashMap<>()).put(e.getKey(), declared.get(e.getKey()));
+            }
+            return byStage;
         }
 
         // the anonymous tag subclasses keep their type argument for coder inference; created in static methods so
@@ -420,7 +461,8 @@ public final class FeatureStages {
                         .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys(), stage.kind() == StageKind.future))).setCoder(sortKvCoder)
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
-                                .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future))
+                                .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future,
+                                        minIntervalAudits.getOrDefault(stage.index(), Map.of())))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
@@ -2863,20 +2905,6 @@ public final class FeatureStages {
             bufferedFields.addAll(population.bufferedFields());
         }
 
-        /**
-         * The declared {@code minInterval} (millis) per entity that a column of this stage rests on for its
-         * {@code staticSafe} (the {@code minInterval} / {@code minIntervalEntity} coordinates): what the keyed replay
-         * audits against the gaps it sees. Empty for a stage that relies on none.
-         */
-        Map<String, Long> minIntervals() {
-            final Map<String, Long> floors = new LinkedHashMap<>();
-            for (final OutputColumn c : columns) {
-                final String entity = c.getCoordinates().get("minIntervalEntity"), declared = c.getCoordinates().get("minInterval");
-                if (entity != null && declared != null) floors.put(entity, java.time.Duration.parse(declared).toMillis());
-            }
-            return floors;
-        }
-
         static Scope kindOf(final OutputColumn c) {
             if ("isnull".equals(c.getOperator())) return Scope.row;
             if ("baseline".equals(c.getOperator())) return c.getScope() == Scope.context ? Scope.context : Scope.row;
@@ -3333,22 +3361,25 @@ public final class FeatureStages {
          */
         private final boolean mirrored;
         /**
-         * The declared {@code minInterval} per entity this stage's columns rest on ({@link StageEvaluator#minIntervals}),
-         * and the counter {@code feature/minInterval_<entity>_below} of the rows that follow the key's previous event
-         * by less: the compiler trusts the declaration for a {@code staticSafe} (DSL spec §6.2 tier 2), the replay is
-         * where the actual gaps are seen. Rows sharing a timestamp are invisible to each other and are not counted.
+         * The declared {@code minInterval} (millis) per entity this stage audits ({@link Wiring#assignMinIntervalAudits} —
+         * one stage per entity, keyed by the entity itself where possible), and the counter
+         * {@code feature/minInterval_<entity>_below} of the rows that follow the key's previous event by less: the
+         * compiler trusts the declaration for a {@code staticSafe} (DSL spec §6.2 tier 2), the replay is where the
+         * actual gaps are seen. A gap of zero — rows sharing a timestamp, which never see each other — is not a
+         * violation, but every row at the later timestamp of a short gap is counted.
          */
         private final Map<String, Long> minIntervals;
         private transient Map<String, Counter> belowMinInterval;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
-                         final KeyedSpillSorter sorter, final String label, final boolean mirrored) {
+                         final KeyedSpillSorter sorter, final String label, final boolean mirrored,
+                         final Map<String, Long> minIntervals) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.sorter = sorter;
             this.label = label;
             this.mirrored = mirrored;
-            this.minIntervals = mirrored ? Map.of() : evaluator.minIntervals();
+            this.minIntervals = mirrored ? Map.of() : minIntervals;
         }
 
         private void auditInterval(final long millis, final long previousMillis) {
@@ -3356,7 +3387,6 @@ public final class FeatureStages {
             final long gap = millis - previousMillis;
             for (final Map.Entry<String, Long> e : minIntervals.entrySet()) {
                 if (gap >= e.getValue()) continue;
-                if (belowMinInterval == null) belowMinInterval = new HashMap<>();
                 belowMinInterval.computeIfAbsent(e.getKey(), entity -> Metrics.counter("feature", "minInterval_" + entity + "_below")).inc();
             }
         }
@@ -3387,6 +3417,7 @@ public final class FeatureStages {
         @Override
         public void setup() {
             super.setup();
+            belowMinInterval = new HashMap<>();
             try {
                 sorter.setup();
             } catch (final IOException e) {

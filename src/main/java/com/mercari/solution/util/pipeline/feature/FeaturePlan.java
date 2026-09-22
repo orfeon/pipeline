@@ -432,9 +432,10 @@ public class FeaturePlan implements Serializable {
     }
 
     /**
-     * Hot-key audit queries: one per distinct key set of the keyed stages (context / sequence / population /
-     * groupBy), plus the row count for a global (single key) level. Keys that are not input fields are
-     * intermediate columns; their query must be run on the relation as it stands before that stage.
+     * Audit queries over the transform input: the hot keys — one per distinct key set of the keyed stages
+     * (context / sequence / population / groupBy), plus the row count for a global (single key) level — and one per
+     * entity whose declared {@code minInterval} the plan relies on. Keys that are not input fields are intermediate
+     * columns; their query must be run on the relation as it stands before that stage.
      */
     public List<AuditQuery> getAuditQueries() {
         final Map<List<String>, List<String>> byKeys = new java.util.LinkedHashMap<>();
@@ -468,16 +469,37 @@ public class FeaturePlan implements Serializable {
             final String keyList = String.join(", ", a.keys());
             final String notNull = a.keys().stream().map(k -> k + " IS NOT NULL").collect(java.util.stream.Collectors.joining(" AND "));
             final String time = spec.timeField;
+            final String previous = "LAG(" + time + ") OVER (PARTITION BY " + keyList + " ORDER BY " + time + ")";
+            // whole seconds, rounded up so no gap below the declaration escapes the comparison
+            final long limit = (a.minInterval().toMillis() + 999) / 1000;
             final String sql = "SELECT COUNT(1) AS rows_below_min_interval, MIN(gap_seconds) AS min_gap_seconds FROM ("
-                    + "SELECT TIMESTAMP_DIFF(" + time + ", LAG(" + time + ") OVER (PARTITION BY " + keyList + " ORDER BY " + time + "), SECOND) AS gap_seconds"
-                    + " FROM {input} WHERE " + notNull + ") WHERE gap_seconds IS NOT NULL AND gap_seconds > 0 AND gap_seconds < " + a.minInterval().toSeconds();
+                    + "SELECT " + gapSeconds(time, previous) + " AS gap_seconds"
+                    + " FROM {input} WHERE " + notNull + ") WHERE gap_seconds IS NOT NULL AND gap_seconds > 0 AND gap_seconds < " + limit;
+            final List<String> derived = a.keys().stream().filter(k -> !inputFields.containsKey(k)).toList();
             queries.add(new AuditQuery("audit" + (n++), a.keys(), List.of("entity " + a.entity()), sql,
                     "entities." + a.entity() + ".minInterval " + a.minInterval() + " is a declaration the plan relies on (it lets " + a.columns().size()
                             + " column(s) read an outcome without a window shift of up to " + a.shift() + "): every row counted here follows the entity's"
-                            + " previous event by less than it and may read an outcome that was not yet known — the run counts the same rows as"
-                            + " feature/minInterval_" + a.entity() + "_below (BigQuery form; rows sharing a timestamp never see each other and are not counted)"));
+                            + " previous event by less than it and may read an outcome that was not yet known — the run counts the same events as"
+                            + " feature/minInterval_" + a.entity() + "_below (BigQuery form; a gap of zero — rows sharing a timestamp, which never see"
+                            + " each other — is not a violation, and where several rows share the later timestamp this query counts one of them and the"
+                            + " counter counts each)"
+                            + (derived.isEmpty() ? "" : "; keys " + derived + " are intermediate columns: run on the relation that derives them")));
         }
         return queries;
+    }
+
+    /**
+     * The gap in seconds between two values of the time field, in the BigQuery function its declared type takes:
+     * {@code TIMESTAMP_DIFF} only accepts TIMESTAMPs, and {@code time.field} may be a date or a datetime.
+     */
+    private String gapSeconds(final String time, final String previous) {
+        final SourceContract.FieldContract contract = inputFields.get(time);
+        final Schema.FieldType type = contract == null ? null : contract.getType();
+        return switch (type == null ? Schema.Type.timestamp : type.getType()) {
+            case date -> "DATE_DIFF(" + time + ", " + previous + ", DAY) * 86400";
+            case datetime -> "DATETIME_DIFF(" + time + ", " + previous + ", SECOND)";
+            default -> "TIMESTAMP_DIFF(" + time + ", " + previous + ", SECOND)";
+        };
     }
 
     /** Human readable dry-run report ({@code validate --expand}). */
@@ -519,7 +541,7 @@ public class FeaturePlan implements Serializable {
         }
         final List<AuditQuery> audit = getAuditQueries();
         if (!audit.isEmpty()) {
-            sb.append("-- audit (hot keys; {input} = the transform input relation)\n");
+            sb.append("-- audit (hot keys and declared intervals; {input} = the transform input relation)\n");
             for (final AuditQuery q : audit) sb.append("  ").append(q.describe()).append('\n');
         }
         if (!diagnostics.getMessages().isEmpty()) {
