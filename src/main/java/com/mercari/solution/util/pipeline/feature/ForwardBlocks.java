@@ -170,10 +170,6 @@ public final class ForwardBlocks implements Serializable {
             this(blocks, n, sum, sumSq, new double[blocks.length], new double[blocks.length]);
         }
 
-        public Series(final long[] blocks, final double[] n, final double[] sum, final double[] sumSq, final double[] sumOff) {
-            this(blocks, n, sum, sumSq, sumOff, new double[blocks.length]);
-        }
-
         public Series(final long[] blocks, final double[] n, final double[] sum, final double[] sumSq, final double[] sumOff, final double[] sumInfo) {
             this.blocks = blocks;
             this.n = n;

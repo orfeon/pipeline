@@ -642,6 +642,7 @@ public final class JointFit implements Serializable {
         s.lambdas = new double[effectLevels.size()];
         s.effects = new ArrayList<>();
         for (int l = 0; l < effectLevels.size(); l++) s.effects.add(new HashMap<>());
+        boolean hasInfoPerRow = false;
         try (final DataFileReader<GenericRecord> reader = new DataFileReader<>(
                 new SeekableByteArrayInput(ResourceUtil.readBytes(path)), new GenericDatumReader<>(SCHEMA))) {
             while (reader.hasNext()) {
@@ -653,7 +654,7 @@ public final class JointFit implements Serializable {
                 switch (kind) {
                     case "mu" -> s.mu = value;
                     case "rows" -> s.rows = value;
-                    case "infoPerRow" -> s.infoPerRow = value;
+                    case "infoPerRow" -> { s.infoPerRow = value; hasInfoPerRow = true; }
                     case "lambda" -> { if (levelIndex.containsKey(level)) s.lambdas[levelIndex.get(level)] = value; }
                     case "effect" -> { if (levelIndex.containsKey(level)) s.effects.get(levelIndex.get(level)).put(key, value); }
                     case "leafN" -> s.leafN.put(key, value);
@@ -662,6 +663,12 @@ public final class JointFit implements Serializable {
             }
         } catch (final IOException e) {
             throw new RuntimeException("Failed to read joint fit artifact: " + path, e);
+        }
+        if (offset && scale != Shrinkage.Scale.identity && !hasInfoPerRow) {
+            // the effects of such an artifact were fitted as the transformed means t(ȳ_c) − t(b̄_c) (with the clamp the
+            // score-type estimator replaced), not as score terms: serving them as terms would silently mix estimators
+            throw new IllegalStateException("joint fit artifact " + path + " was written before the score-type offset estimator"
+                    + " (no infoPerRow): its effects are on the old transformed-mean scale; refit the block (fit.artifact.refit: true)");
         }
         LOG.info("loaded joint fit artifact {}", path);
         return new JointFit(levels, scale, offset, s, null, null, null);

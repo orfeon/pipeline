@@ -154,13 +154,7 @@ public final class FitArtifact {
 
     public static void write(final String artifactUri, final String planHash, final String block,
                              final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels) {
-        write(artifactUri, planHash, block, stats, levels, null);
-    }
-
-    /** @param extra additional manifest members (fit.mode forward: the per-block λ), or null */
-    public static void write(final String artifactUri, final String planHash, final String block,
-                             final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels, final JsonObject extra) {
-        write(artifactUri, planHash, block, stats, levels, extra, Map.of());
+        write(artifactUri, planHash, block, stats, levels, null, Map.of());
     }
 
     /**
@@ -211,10 +205,6 @@ public final class FitArtifact {
         } catch (final IOException e) {
             throw new RuntimeException("Failed to write fit artifact: " + path, e);
         }
-    }
-
-    public static Map<String, VarianceComponents.KeyStats> read(final String artifactUri, final String planHash, final String block) {
-        return read(artifactUri, planHash, block, false);
     }
 
     /**

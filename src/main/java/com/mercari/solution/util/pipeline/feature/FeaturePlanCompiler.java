@@ -4081,7 +4081,14 @@ public final class FeaturePlanCompiler {
                 default -> base + "__sumsq";
             };
             if (!"count".equals(stat) && targetReference == null) continue;
-            if (columnsByCanonical.containsKey(name)) continue;
+            final OutputColumn existing = columnsByCanonical.get(name);
+            if (existing != null) {
+                // the level's hidden columns are shared: an unshrunk statistic of the same keys (fit.mode static / fold /
+                // forward reads n / Σy / Σy² straight from the leaf) may have registered them before the lattice did, so
+                // the score scale is stamped on whatever is already there — the engine reads it from any of them
+                if (offsetSum) existing.coordinates.put("scoreScale", offsetScale.name());
+                continue;
+            }
             final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
                     "distribution".equals(stat) ? Schema.FieldType.map(Schema.FieldType.FLOAT64) : Schema.FieldType.FLOAT64, computeAt);
             c.intermediate = true;

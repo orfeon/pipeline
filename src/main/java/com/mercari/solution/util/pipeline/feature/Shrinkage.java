@@ -252,10 +252,6 @@ public final class Shrinkage implements Serializable {
             this(token, nColumn, sumColumn, null, null, mainEffects);
         }
 
-        public Level(final String token, final String nColumn, final String sumColumn, final String offColumn, final List<List<Level>> mainEffects) {
-            this(token, nColumn, sumColumn, offColumn, null, mainEffects);
-        }
-
         boolean isAdditive() {
             return mainEffects != null;
         }
@@ -356,7 +352,9 @@ public final class Shrinkage implements Serializable {
     /**
      * The information per row of the chain's root — the coarsest level, its whole totals — which converts a
      * pseudo-count in rows into the score scale ({@code λ′ = priorWeight · ī}): "priorWeight rows of average
-     * information", one constant for every key of the lattice. 1 without a score level, or when the root holds nothing.
+     * information". One constant for the whole lattice when the coarsest level is the global one (the usual case);
+     * a lattice that stops at a keyed level reads that level's own average instead, so λ′ then varies with the key.
+     * 1 without a score level, or when the root holds nothing.
      */
     private static double rootInfoPerRow(final Map<String, Object> row, final List<Level> levels) {
         final Level root = levels.get(levels.size() - 1);
@@ -411,12 +409,21 @@ public final class Shrinkage implements Serializable {
         return info > 0 ? sum / info : null;
     }
 
-    /** The Fisher information one row contributes at its baseline: {@code b(1 − b)} on logit, {@code b} on log, 1 otherwise. */
+    /**
+     * The Fisher information one row contributes at its baseline: {@code b(1 − b)} on logit, {@code b} on log, 1
+     * otherwise. The baseline is clamped to the scale's domain first ([0, 1] on logit, [0, ∞) on log): a declared
+     * baseline is an arbitrary expression, and an out-of-domain value would otherwise make a row's contribution
+     * <i>negative</i> — a sign flip (or a near-cancelling denominator) in {@link #ownScore}, where the transformed
+     * mean used to clamp. A baseline at the edge of the domain contributes no information, as before.
+     */
     public static double information(final Scale scale, final double baseline) {
         return switch (scale) {
             case identity -> 1d;
-            case logit -> baseline * (1 - baseline);
-            case log -> baseline;
+            case logit -> {
+                final double b = Math.min(1, Math.max(0, baseline));
+                yield b * (1 - b);
+            }
+            case log -> Math.max(0, baseline);
         };
     }
 
@@ -430,14 +437,13 @@ public final class Shrinkage implements Serializable {
     }
 
     /**
-     * The level's pseudo-count in rows: the estimated one (variance components, keyed by the level's {@code n} column)
-     * or {@link #priorWeight}. For a score level an estimated entry is {@code λ′ = 1 / τ²} on the score scale already
-     * ({@link #lambdaFromScore}) and is returned as is; the fallback is converted by the caller.
+     * The level's estimated pseudo-count (variance components, keyed by the level's {@code n} column), or null when
+     * there is none and {@link #priorWeight} applies. For a score level an estimated entry is {@code λ′ = 1 / τ²} on
+     * the score scale already ({@link #lambdaFromScore}) and is used as is; {@code priorWeight} is in rows and is
+     * converted by the caller.
      */
-    private double lambda(final Level level, final Map<String, Double> lambdas) {
-        if (lambdas == null) return priorWeight;
-        final Double l = lambdas.get(level.nColumn());
-        return l == null ? priorWeight : l;
+    private static Double estimatedLambda(final Level level, final Map<String, Double> lambdas) {
+        return lambdas == null ? null : lambdas.get(level.nColumn());
     }
 
     /**
@@ -494,9 +500,8 @@ public final class Shrinkage implements Serializable {
         // the shrinkage weight: rows against the pseudo-count in rows — or, on the score scale, the level's information
         // against the prior's (λ′ = 1 / τ²: the estimated one as is, a declared pseudo-count times the root's information
         // per row), so the effective sample size stays in rows either way
-        final double declared = lambda(level, lambdas);
-        final boolean estimated = lambdas != null && lambdas.containsKey(level.nColumn());
-        final double lambda = score && !estimated ? declared * rootInfoPerRow : declared;
+        final Double estimated = estimatedLambda(level, lambdas);
+        final double lambda = estimated != null ? estimated : score ? priorWeight * rootInfoPerRow : priorWeight;
         final double mass = score ? info : n;
         final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : mass / (mass + lambda);
         final double dev = w * (own - parent);
@@ -570,7 +575,8 @@ public final class Shrinkage implements Serializable {
             effectiveN[0] = n;
             return own;
         }
-        final double lambda = lambda(level, lambdas);
+        final Double estimated = estimatedLambda(level, lambdas);
+        final double lambda = estimated == null ? priorWeight : estimated;
         final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : n / (n + lambda);
         final Map<String, Double> composed = new java.util.TreeMap<>();
         for (final String category : union(own.keySet(), parent.keySet())) {
@@ -646,7 +652,8 @@ public final class Shrinkage implements Serializable {
                 sb.append(')');
             } else {
                 sb.append(l.token()).append(',').append(l.nColumn()).append(',').append(l.sumColumn());
-                if (l.offColumn() != null) sb.append(',').append(l.offColumn());
+                // positional: the information column is the fifth token, so an absent offset column still takes its slot
+                if (l.offColumn() != null || l.infoColumn() != null) sb.append(',').append(l.offColumn() == null ? "" : l.offColumn());
                 if (l.infoColumn() != null) sb.append(',').append(l.infoColumn());
             }
         }

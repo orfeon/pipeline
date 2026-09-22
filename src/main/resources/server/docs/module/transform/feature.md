@@ -247,8 +247,8 @@ without `distribution` is an error (`encoding.target.values`).
   grows with n toward `−1 / (1 − b̄)` instead of diverging (the transformed mean `logit(ȳ) − logit(b̄)` is
   undefined there and a clamp would leak its constant into the value). The leaf shrinks that term toward
   the parent's term **by information**, `V / (V + λ′)`, so a key of rare events is trusted less than a key
-  of the same row count at even odds; `λ′` is `priorWeight` rows of the global level's average information
-  (a declared `priorWeight` keeps its meaning of "rows of average information"), or under
+  of the same row count at even odds; `λ′` is `priorWeight` rows of the average information of the lattice's
+  coarsest (root) level (a declared `priorWeight` keeps its meaning of "rows of average information"), or under
   `weights: varianceComponents` `1 / τ²` with the between-key variance τ² estimated on the score scale. The
   **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
   `deviations` on the same scale and `effectiveN` in rows (info `encoding.offset.additive`). The levels

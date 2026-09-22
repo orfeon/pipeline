@@ -48,10 +48,6 @@ public final class VarianceComponents {
         public LevelSpec(final String id, final List<String> keys, final String field, final String offsetColumn) {
             this(id, keys, field, offsetColumn, null, 0, null);
         }
-
-        public LevelSpec(final String id, final List<String> keys, final String field, final String offsetColumn, final List<String> foldKeys, final int folds) {
-            this(id, keys, field, offsetColumn, foldKeys, folds, null);
-        }
     }
 
     /**
