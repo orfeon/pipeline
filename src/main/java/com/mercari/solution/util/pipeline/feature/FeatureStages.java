@@ -666,12 +666,10 @@ public final class FeatureStages {
      * The per-block geometry of a time fold ({@code fit.mode fold} with {@code fit.fold.by: time}; from the column
      * coordinates, see FeaturePlanCompiler.timeFoldCoordinates): a row reads every block but its own, the
      * {@code purgeBlocks} on both sides of it and the {@code embargoBlocks} beyond the purge after it. It shares the
-     * per-(key, block) series with forward levels but none of their row-relative geometry (usable block, lag, window).
-     */
-    /**
-     * The per-block geometry of a {@code fit.fold.by: time} level: the blocks a row leaves out around its own and,
-     * under {@code fit.fold.until}, the last block of the training period ({@code untilBlock}, null without) with the
-     * availability lag a later row's forward read applies ({@code lagMillis}).
+     * per-(key, block) series with forward levels, and without {@code fit.fold.until} none of their row-relative
+     * geometry. Under {@code fit.fold.until} it also carries the last block of the training period
+     * ({@code untilBlock}, null without) and the availability lag a later row's forward read applies
+     * ({@code lagMillis}).
      */
     record TimeFold(ForwardBlocks blocks, String blockField, String blockFieldType, int purgeBlocks, int embargoBlocks,
                     Long untilBlock, long lagMillis) implements Serializable {
@@ -807,10 +805,13 @@ public final class FeatureStages {
             seriesView = allSeries.apply(label + "_ForwardView", View.asList());
             sideInputs.add(seriesView);
             if (!timeFolds.isEmpty() && (needsLambdas || !writeTimeFoldBlocks.isEmpty())) {
-                final PCollection<KV<String, VarianceComponents.KeyStats>> totals = seriesTotals(allSeries, levelIds(timeFolds), Map.of(), label + "_TimeFoldTotals");
+                // fit.fold.until: λ over the training period only (the artifact keeps the whole-input totals), so the
+                // whole-input pass runs only when an artifact needs it or no level clips its series
+                final Map<String, Long> untilBlocks = untilBlocks(timeFolds);
+                final PCollection<KV<String, VarianceComponents.KeyStats>> totals =
+                        !writeTimeFoldBlocks.isEmpty() || untilBlocks.isEmpty()
+                                ? seriesTotals(allSeries, levelIds(timeFolds), label + "_TimeFoldTotals") : null;
                 if (needsLambdas) {
-                    // fit.fold.until: λ over the training period only (the artifact keeps the whole-input totals)
-                    final Map<String, Long> untilBlocks = untilBlocks(timeFolds);
                     final PCollection<KV<String, VarianceComponents.KeyStats>> training = untilBlocks.isEmpty() ? totals
                             : seriesTotals(allSeries, levelIds(timeFolds), untilBlocks, label + "_TimeFoldTrainingTotals");
                     timeFoldLambdasView = VarianceComponents.lambdasFromKeyStats(training, label + "_TimeFoldVc");
@@ -909,7 +910,6 @@ public final class FeatureStages {
                 .setCoder(series.getCoder());
     }
 
-    /** The totals of the given levels' series: what an artifact holds, and what a whole-input λ is estimated from. */
     /** The last training block of every time-fold level under {@code fit.fold.until} (level id → block); empty without. */
     private static Map<String, Long> untilBlocks(final List<FitLevel> timeFolds) {
         final Map<String, Long> until = new HashMap<>();
@@ -917,6 +917,7 @@ public final class FeatureStages {
         return until;
     }
 
+    /** The totals of the given levels' series: what an artifact holds, and what a whole-input λ is estimated from. */
     private static PCollection<KV<String, VarianceComponents.KeyStats>> seriesTotals(final PCollection<KV<String, ForwardBlocks.Series>> series,
                                                                                     final Set<String> levelIds, final String label) {
         return seriesTotals(series, levelIds, Map.of(), label);
@@ -2781,9 +2782,9 @@ public final class FeatureStages {
             counters.computeIfAbsent(level.id(), id -> Metrics.counter("feature", "timeFold_" + id + "_excludedOverHalf")).inc();
             if (warnedLevels.add(level.id())) {
                 final TimeFold f = level.timeFold();
-                LOG.warn("feature fit: time fold of level {} leaves out {} of the input's {} blocks around a row (purge {} on both sides, embargo {}): "
-                        + "its out-of-fold statistics read less than half of the input; use smaller blocks or a shorter purge / embargo",
-                        level.id(), 2L * f.purgeBlocks() + f.embargoBlocks() + 1, total, f.purgeBlocks(), f.embargoBlocks());
+                LOG.warn("feature fit: time fold of level {} leaves out {} of the {} blocks of the {} around a row (purge {} on both sides, embargo {}): "
+                        + "its out-of-fold statistics read less than half of them; use smaller blocks or a shorter purge / embargo",
+                        level.id(), excluded, total, until == null ? "input" : "training period (fit.fold.until)", f.purgeBlocks(), f.embargoBlocks());
             }
         }
 

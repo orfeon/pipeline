@@ -54,9 +54,10 @@ not expand because another block failed).
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
-| `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo}` |
+| `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo, until}` |
 | `fit.fold.negative` | error | `fold.purge` / `fold.embargo` must be non-negative durations |
-| `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` without `by: time` — ignored |
+| `fit.fold.until` | error | `fold.until` must be an ISO-8601 instant or date, UTC (`2025-06-30T00:00:00Z` / `2025-06-30`) |
+| `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` / `until` without `by: time` — ignored |
 | `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
 | `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential (one error per block) |
 | `fit.minRows` | error / info | error: must be ≥ 0 (0 = no floor). info (top level): it is the fewest rows a `smooth` / `svd` / `quantileTransform` / `spectralEmbedding` fit is solved from; encodings shrink a thin level instead and ignore it |

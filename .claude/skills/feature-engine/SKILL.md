@@ -260,12 +260,18 @@ reads what the compile layer wrote into each column's `coordinates`.
   `blockField` / `blockFieldType` written by `FeaturePlanCompiler.forwardCoordinates`; the engine side is
   `FitLevel.forward` + `FitApplyDoFn.forwardStats`, which also swaps the row's per-block λ into the evaluator).
   A time fold (`fit.mode: fold` + `fold.by: time`) rides the same series but has its own record: `TimeFold.of` reads
-  the coordinates `foldBy` / `purgeBlocks` / `embargoBlocks` (`FeaturePlanCompiler.timeFoldCoordinates`, purge
-  defaulting to the target label's horizon via `labelHorizon`) into `FitLevel.timeFold` (`isTimeFold()`; `Forward` /
+  the coordinates `foldBy` / `purgeBlocks` / `embargoBlocks` — and, under `fit.fold.until`, `untilBlock` /
+  `forwardLagMillis` (`FeaturePlanCompiler.timeFoldCoordinates`, purge
+  defaulting to the target label's horizon via `labelHorizon`, the lag from the shared `availabilityLag` helper) into
+  `FitLevel.timeFold` (`isTimeFold()`; `Forward` /
   `isForward()` are forward-only), and `FitApplyDoFn.timeFoldStats` reads totals minus the blocks
   `[b − purge, b + purge + embargo]` (two-sided purge) with the whole-input λ (`_TimeFoldTotals` → `_TimeFoldVc`, not
   the per-block `_ForwardVc`; `_ForwardOnly` splits the series when both kinds share a stage); `auditTimeFold` counts rows leaving
   out more than half of the input's blocks (`feature/timeFold_<level>_excludedOverHalf`, run-time only).
+  Under `fit.fold.until` the totals and the excluded range are clipped to `untilBlock`, a row of a later block
+  (`TimeFold.isEvaluation`) reads the prefix up to `ForwardBlocks.usableBlock` instead (walk-forward, no window and no
+  `minBlocks`), λ comes from the training period (`_TimeFoldTrainingTotals` → `_TimeFoldVc`; the artifact keeps the
+  whole-input `_TimeFoldTotals`), and `auditTimeFold` counts against the training span.
 
 ### Beam engine (`FeatureStages`)
 

@@ -4273,10 +4273,7 @@ public final class FeaturePlanCompiler {
      */
     private void forwardCoordinates(final OutputColumn c, final Window window, final String targetReference, final String offsetColumn,
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
-        final List<String> references = new ArrayList<>();
-        if (targetReference != null) references.add(targetReference);
-        if (offsetColumn != null) references.add(offsetColumn);
-        forwardCoordinates(c, window, references, def, fitSpec);
+        forwardCoordinates(c, window, fitReferences(targetReference, offsetColumn), def, fitSpec);
     }
 
     /**
@@ -4291,7 +4288,7 @@ public final class FeaturePlanCompiler {
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
         blockCoordinates(c, blocks);
         c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
-        c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(references, def)));
+        c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(references, def, "fit.mode forward")));
         // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
         if (window != null && window.onCalendar()) {
             if (blocks.clock() == null || !blocks.clock().name().equals(window.clock)) {
@@ -4368,12 +4365,22 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
     }
 
+    /** The fields a lookup fit reads from a past row: the target and the offset baseline, in that order. */
+    private static List<String> fitReferences(final String targetReference, final String offsetColumn) {
+        final List<String> references = new ArrayList<>();
+        if (targetReference != null) references.add(targetReference);
+        if (offsetColumn != null) references.add(offsetColumn);
+        return references;
+    }
+
     /**
      * The availability lag of a forward-read block: the largest static post-event availability offset among the
      * references (target, offset, inputs) — the block must be complete AND its targets known at predictAt; a
      * pre-event / attribute-only reference has none. A dynamic availability is an error, reported once per reference.
+     *
+     * @param setting what asks for the forward read, named in the error ({@code fit.mode forward}, {@code fit.fold.until})
      */
-    private long availabilityLag(final List<String> references, final FeatureDef def) {
+    private long availabilityLag(final List<String> references, final FeatureDef def, final String setting) {
         long lag = 0;
         for (final String reference : references) {
             if (reference == null) continue;
@@ -4383,7 +4390,7 @@ public final class FeaturePlanCompiler {
             if (at == null || at.isPreEvent()) continue;
             if (!at.isStatic()) {
                 // once per block and reference: this runs per column, and a block has rank (x embedded values) of them
-                if (hintedBlocks.add("fit.mode.forward.dynamic:" + def.name + ":" + reference)) diagnostics.error("fit.mode.forward.dynamic", def.location(), "fit.mode forward needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
+                if (hintedBlocks.add("fit.mode.forward.dynamic:" + def.name + ":" + reference)) diagnostics.error("fit.mode.forward.dynamic", def.location(), setting + " needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
                 continue;
             }
             lag = Math.max(lag, at.getOffset().toMillis());
@@ -4406,10 +4413,8 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("foldBy", "time");
         if (fitSpec.untilMillis != null) {
             c.coordinates.put("untilBlock", Long.toString(blocks.indexOf(fitSpec.untilMillis)));
-            final List<String> references = new ArrayList<>();
-            if (targetReference != null) references.add(targetReference);
-            if (offsetColumn != null) references.add(offsetColumn);
-            c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(references, def)));
+            c.coordinates.put("forwardLagMillis", Long.toString(availabilityLag(fitReferences(targetReference, offsetColumn), def,
+                    "fit.fold.until (the rows after the training period read forward)")));
         }
         Duration purge = fitSpec.purge;
         if (purge == null && targetReference != null) {

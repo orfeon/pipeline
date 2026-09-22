@@ -1177,9 +1177,10 @@ invertible, so the range is differenced. Under `fit.fold.until` (`TimeFold.until
 one `fit.mode forward` applies) the totals and the range are clipped to the until block, and a row of a later block
 (`TimeFold.isEvaluation`) reads the prefix up to its usable block (`ForwardBlocks.usableBlock`, no window, no floor):
 walk-forward values for the evaluation rows out of the same series, never a cross-fit. λ is the whole input's, as for
-a hash fold — the training period's under `until` (`_TimeFoldTrainingTotals`, the series clipped per level; the artifact
-keeps the whole-input totals): `lambdasFromKeyStats` over the
-time-fold levels' totals (`_TimeFoldTotals` → `_TimeFoldVc`, a map side input merged into the evaluator's λ with the
+a hash fold — the training period's under `until` (the series clipped per level; the artifact keeps the whole-input
+totals, and the whole-input pass runs only when an artifact needs it): `lambdasFromKeyStats` over the
+time-fold levels' totals (`_TimeFoldTotals` → `_TimeFoldVc`, or `_TimeFoldTrainingTotals` → `_TimeFoldVc` under
+`until`; a map side input merged into the evaluator's λ with the
 static ones), never the per-block step function of `lambdasByBlockView`, which only the forward levels enter
 (`_ForwardOnly` splits the series when both kinds share a fit stage). Its value is the last step of that function
 (`VarianceComponentsTest.testWholeInputLambdaIsLastStep`). A time-fold artifact is written like a hash fold's: the
