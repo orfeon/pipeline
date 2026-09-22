@@ -237,10 +237,12 @@ without `distribution` is an error (`encoding.target.values`).
 `encoding.offset.computeAt`). The baseline is read from the **past rows** next to their outcome, never from
 the current row (the value is the residual term alone), so its availability counts on the past side like the
 target's: a baseline over pre-event market fields costs nothing, while a baseline over an outcome field (a
-settled price or final odds) shifts the window near edge by that outcome's lag — `windowShift`, exactly as a
-target of that kind does — and delays the blocks a `fit.mode: forward` fit may read. Such a baseline is a
-valid offset even though the current row cannot see its own value yet (`emit` of it stays a violation). The
-offset is an additive term on the shrinkage scale:
+settled price) shifts the window near edge by that outcome's lag — `windowShift`, exactly as a target of
+that kind does — and delays the blocks a `fit.mode: forward` fit may read (a `fit.mode: static` / `fold`
+fit is unchanged: its statistics are an artifact of the fit boundary). Such a baseline is a valid offset
+even though the current row cannot see its own value yet — so `baselines[].emit` of it, and an
+`output.roles.baseline` naming it, stay `availability.violation`. The offset is an additive term on the
+shrinkage scale:
 
 - `scale: identity` (default) — every statistic is taken over `target − baseline`: `mean` / `rate` are the
   key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is

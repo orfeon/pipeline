@@ -695,8 +695,8 @@ public final class FeaturePlanCompiler {
             e.validFor = c.validFor;
             // the row's own baseline value: available when its inputs are (a baseline over an outcome is a valid
             // offset — read from past rows — but emitting it puts the outcome on the row, a violation like any other)
-            e.status = e.availableAt.isStaticallyAtOrBefore(e.computeAt) ? Status.staticSafe
-                    : e.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+            if (e.availableAt == null) e.availableAt = AvailableAt.atEventTime();
+            e.status = rowStatus(e.availableAt, e.computeAt);
             register(e);
             baselineEmits.put(baseline.name(), e.canonicalName);
         }
@@ -954,11 +954,19 @@ public final class FeaturePlanCompiler {
         return null;
     }
 
+    /**
+     * §6.2 verdict of a row-side availability against the column's computeAt: at or before it is safe, statically
+     * after it is a violation, and an availability that is not decidable statically is filtered per row.
+     */
+    private static Status rowStatus(final AvailableAt availableAt, final AvailableAt computeAt) {
+        return availableAt.isStaticallyAtOrBefore(computeAt) ? Status.staticSafe
+                : availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+    }
+
     private void finishRow(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         c.validFor = def.validFor;
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         register(c);
     }
 
@@ -1187,8 +1195,7 @@ public final class FeaturePlanCompiler {
         for (final String key : context.keys()) addSelfInput(c, key);
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         if (def.validFor != null || c.validFor == null) c.validFor = def.validFor; // an op may have inherited one (softmax offset)
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
             // group-constant only within its own context: parent placement requires the grouping context
             c.placement = Placement.parent;
@@ -3368,8 +3375,7 @@ public final class FeaturePlanCompiler {
     private void finishStaticFitted(final OutputColumn c, final FeatureDef def) {
         final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
         c.availableAt = AvailableAt.max(selfSide, c.computeAt);
-        c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(selfSide, c.computeAt);
         c.validFor = def.validFor;
     }
 
@@ -4023,8 +4029,7 @@ public final class FeaturePlanCompiler {
     private void finishComposed(final OutputColumn c, final FeatureDef def) {
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         // the hidden statistics are available at computeAt by construction; the composed value inherits that
-        c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
+        c.status = rowStatus(c.availableAt, c.computeAt);
         c.validFor = def.validFor;
         register(c);
     }

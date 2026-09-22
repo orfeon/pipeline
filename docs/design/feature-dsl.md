@@ -430,9 +430,14 @@ Notes:
      composed value is the term δ alone (rule 5). So the baseline's availability joins the target's on the
      **past side** of the availability check (§6.2): a baseline over pre-event market fields costs nothing,
      a baseline over an outcome (a settled price) shifts the window near edge like an outcome target, and
-     delays the blocks a forward fit may read; the current row's own baseline value is never required
-     to be available. Because a past row's baseline must be time-consistent or the offset itself leaks,
-     the market fields a baseline reads must be `evidence: measured` (or per-field `allowDeclared`, §2.3).
+     delays the blocks a forward fit may read (a static / fold fit is unchanged: its statistics are an
+     artifact of the fit boundary, §6.1); the current row's own baseline value is never required
+     to be available. It is required for everything that *does* read the baseline on the row — `type:
+     residual`, the `softmax` offset and `baselines[].emit` (with the `output.roles.baseline` copy it
+     names) — which take the ordinary row verdict, so emitting an outcome baseline stays an
+     `availability.violation`. Because a past row's baseline must be time-consistent or the offset itself
+     leaks, the market fields a baseline reads must be `evidence: measured` (or per-field
+     `allowDeclared`, §2.3).
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,
