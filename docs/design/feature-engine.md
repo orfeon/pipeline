@@ -360,8 +360,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
 - **The general form** (`lift` + `summarize.dynamics`, family `lti`): each (channel, halflife) of a block is one
   `Dynamics` state — a vector, one entry per component — shared by the component columns through the `stateKey`
   coordinate (`ColumnPlan.stateKey` keys the `KeyState`, so the second component column finds its state already
-  advanced). The contribution of an event is `Dynamics.Event(millis, value)` — a missing value is still an event
-  (it advances the events clock); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
+  advanced). The contribution of an event is `Dynamics.Event(millis, value)` — none for a missing value, which is
+  no event of the channel (§9.6.6 read position); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
   time (fourier / legendre; exponential reads at the newest event — §9.6.6 read position). Measures (§9.6.6): `exponential` (Laguerre basis under `e^(−θ·age)`, `ewma` = order 0 — the `ewma` op is
   sugar: its columns carry `measure: exponential, order: 0` and run on the same state, so it is no longer an
   unbounded scan), `fourier` (rotation per harmonic, optionally damped) — both groups — and `legendre` (power
@@ -1322,9 +1322,19 @@ component is a weighted mean:
   Exponential reads at the newest event on the time clock too: moved by `T(θΔ)`, the weighted mean of `L_j` over
   events all at least Δ old grows like `(θΔ)^j / j!` with the entity's inactivity (order 16 reaches ~1e20 after
   half a year at a 7-day halflife), so the gap is left to its own feature (`sinceEvent`); order 0 — `ewma` — is
-  independent of the read position either way.
+  independent of the read position either way. **The newest event is the newest row with a value for the channel**
+  (`Dynamics.event` returns null for a missing value, so the evaluator folds nothing): a missing row moves neither
+  the state's position nor the events clock. Before that rule a missing row advanced `newest` without adding mass,
+  and a cancelled entry after a long gap put the read position Δ past the last value — exactly the growth above,
+  found in a consumer run as components of 4 000 on a series of 30–80. Each channel's state has its own position:
+  a channel with a value on a row moves while one without stays — and `timeAugment`'s constant channel
+  (`Dynamics.value` with a null field is always 1) has a value on every row, so it alone still counts them all: its
+  ordinals and its read position are its own, not the value channels'. The three summaries count their `events` clock
+  over their own events — `lti`: the channel's valued rows; the log-signature's time channel: the ordinal among
+  the complete points (every channel present); `trend`: the present values among its last `k` rows (the tail stays
+  `k` rows: the retained history is bounded by rows, not by present values) — and the docs say so.
 - **The time channel** (`timeAugment`) reads no field, so on its own its window would never be shifted. It
-  describes the events the value channels see, so the compiler classifies it with the latest availability among
+  describes the rows of the window the value channels see, so the compiler classifies it with the latest availability among
   the block's channels (`classifyPast`'s `alignWith`: aligned, not a past input — no lineage, no projection).
 - **Channel names.** A `lift.exprs` entry `{expr, as}` names its channel segment; an unnamed one keeps the
   anonymous `{block}__e{n}` (a spec-wide counter — `sequence.lift.anonymous`), and two channels of one block with

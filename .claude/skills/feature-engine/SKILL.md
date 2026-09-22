@@ -212,7 +212,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   (`lift` + `summarize.dynamics`, `lti`: exponential = Laguerre, fourier, legendre) and of `ewma` (order-0
   exponential sugar): parameterised per column from the coordinates (`Dynamics.spec`), a vector state shared by a
   channel's component columns through the `stateKey` coordinate (= `ColumnPlan.stateKey`, the `KeyState` key), a
-  contribution `Event(millis, value)` that is never null (a missing value advances the events clock), read with
+  contribution `Event(millis, value)` that is **null when the row has no value for the channel** (engine doc §9.6.6:
+  a missing value is no event — it neither counts on the events clock nor moves the read position; `timeAugment`'s
+  constant channel has a value on every row, so it alone still counts them all), read with
   `Summary.readAt(state, readout, now)` (the only position-dependent read), and `project` as the direct
   projection the scan path and the tests use. exponential / fourier are groups, legendre a monoid (it rescales
   with its span: re-read under `maxAge`). `Signature` is the `bilinear` family (coordinate `family: bilinear`):
