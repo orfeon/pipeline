@@ -2469,6 +2469,41 @@ public class FeaturePlanCompilerTest {
         }
     }
 
+    /**
+     * The readouts of the distribution: {@code ownValueProb} / {@code surprisal} read the row's own value too — as
+     * available as that value is — while {@code entropy} / {@code expected} read the map alone; {@code expected}
+     * needs an integer code; every readout is one column, counted against {@code maxFeatures}.
+     */
+    @Test
+    public void testTransitionStatsReadouts() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [ownValueProb, surprisal, entropy, ownValueProb]")));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (final String readout : List.of("ownValueProb", "surprisal", "entropy")) {
+            final OutputColumn c = column(plan, "grade_next_" + readout);
+            Assertions.assertEquals("mapReadout", c.getOperator());
+            Assertions.assertEquals(readout, c.getCoordinates().get("readout"));
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus(), readout);
+            Assertions.assertTrue(c.getInputs().contains("grade_next_to"), readout);
+            Assertions.assertEquals(!"entropy".equals(readout), c.getInputs().contains("condition_grade"), readout);
+        }
+        Assertions.assertTrue(column(plan, "grade_next_to").isIntermediate());
+        Assertions.assertNull(plan.getColumn("grade_next_to_good"));
+        Assertions.assertFalse(hasCode(plan, "transitionStats.emit.own"), "an attribute field: the own value is available");
+        // an outcome field: the own value is the row's outcome, so the two readouts that read it are violations (a hint says so)
+        final FeaturePlan outcome = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("field: condition_grade", "field: sold").replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [ownValueProb, entropy]")));
+        Assertions.assertEquals(OutputColumn.Status.violation, column(outcome, "grade_next_ownValueProb").getStatus(), outcome::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(outcome, "grade_next_entropy").getStatus(), outcome::describe);
+        Assertions.assertTrue(hasCode(outcome, "transitionStats.emit.own"), outcome::describe);
+        // expected: the probability-weighted mean of an integer code — refused on a string field
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [expected]"))), "transitionStats.emit"));
+        final FeaturePlan expected = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("field: condition_grade", "field: quantity").replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [expected, {toValueProb: 1}]")));
+        Assertions.assertFalse(expected.getDiagnostics().hasErrors(), expected::describe);
+        Assertions.assertEquals("mapReadout", column(expected, "grade_next_expected").getOperator());
+        Assertions.assertNotNull(expected.getColumn("grade_next_to_1"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [ownValueProb, entropy]\n        maxFeatures: 1"))), "transitionStats.maxFeatures"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("{toValueProb: fair}", "perplexity"))), "transitionStats.parameters"));
+    }
+
     private static final String SPECTRAL_BLOCK = """
                   - name: grade_embed
                     scope: population

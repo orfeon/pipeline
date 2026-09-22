@@ -170,19 +170,63 @@ public class RowEvaluator implements Serializable {
                 // one category's share of a distribution map (targets[].values); keys may be CharSequence after a coder round trip
                 final Object m = row.get(inputs.get(0));
                 if (!(m instanceof Map<?, ?> map)) yield null;
-                final String value = c.coordinates.get("value");
-                Object v = map.get(value);
-                if (v == null) {
-                    for (final Map.Entry<?, ?> e : map.entrySet()) {
-                        if (e.getKey() != null && value.equals(e.getKey().toString())) { v = e.getValue(); break; }
+                yield shareOf(map, c.coordinates.get("value"));
+            }
+            case "mapReadout" -> {
+                // a readout of a distribution map (transitionStats emit): the row's own value's share, its surprisal,
+                // the map's entropy, or its probability-weighted mean over integer codes
+                final Object m = row.get(inputs.get(0));
+                if (!(m instanceof Map<?, ?> map) || map.isEmpty()) yield null;
+                switch (c.coordinates.get("readout")) {
+                    case "ownValueProb", "surprisal" -> {
+                        final Object own = row.get(c.coordinates.get("field"));
+                        if (own == null) yield null;
+                        final double p = shareOf(map, ContextEvaluator.valueKey(own));
+                        yield "surprisal".equals(c.coordinates.get("readout")) ? (p > 0 ? Double.valueOf(-Math.log(p)) : null) : Double.valueOf(p);
                     }
+                    case "entropy" -> {
+                        double h = 0;
+                        for (final Object v : map.values()) {
+                            final Double p = FeatureValues.toDouble(v);
+                            if (p != null && p > 0) h -= p * Math.log(p);
+                        }
+                        yield h;
+                    }
+                    case "expected" -> {
+                        double e = 0;
+                        for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                            final Double p = FeatureValues.toDouble(entry.getValue());
+                            if (p == null || entry.getKey() == null) continue;
+                            try {
+                                e += Double.parseDouble(entry.getKey().toString()) * p;
+                            } catch (final NumberFormatException notNumeric) {
+                                yield null;
+                            }
+                        }
+                        yield e;
+                    }
+                    default -> throw new IllegalStateException("unsupported map readout: " + c.coordinates.get("readout"));
                 }
-                yield v == null ? Double.valueOf(0d) : FeatureValues.toDouble(v);
             }
             case "deviation" -> composition(c, row).deviations()[Integer.parseInt(c.coordinates.get("level"))];
             case "effectiveN" -> composition(c, row).effectiveN();
             default -> throw new IllegalStateException("unsupported row operator: " + c.operator);
         };
+    }
+
+    /** One category's share of a distribution map, 0 when it has none; keys may be CharSequence after a coder round trip. */
+    private static double shareOf(final Map<?, ?> map, final String value) {
+        Object v = map.get(value);
+        if (v == null) {
+            for (final Map.Entry<?, ?> e : map.entrySet()) {
+                if (e.getKey() != null && value.equals(e.getKey().toString())) {
+                    v = e.getValue();
+                    break;
+                }
+            }
+        }
+        final Double d = v == null ? null : FeatureValues.toDouble(v);
+        return d == null ? 0d : d;
     }
 
     /** A Dirichlet-Multinomial column composes a category distribution instead of a scalar. */

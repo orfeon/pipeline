@@ -2595,12 +2595,12 @@ public final class FeaturePlanCompiler {
             diagnostics.error("transitionStats.order", loc, "order must be within 1..4 (the number of previous values that make the state): " + order);
             return;
         }
-        if (def.emitValues.isEmpty() && !def.emitDistribution && def.sequenceUnknown.isEmpty()) {
-            diagnostics.error("transitionStats.emit", loc, "transitionStats requires emit: [distribution | {toValueProb: <value>}, ...]");
+        if (def.emitValues.isEmpty() && !def.emitDistribution && def.emitReadouts.isEmpty() && def.sequenceUnknown.isEmpty()) {
+            diagnostics.error("transitionStats.emit", loc, "transitionStats requires emit: [distribution | {toValueProb: <value>} | ownValueProb | surprisal | entropy | expected, ...]");
             return;
         }
-        // the emitted columns: one per toValueProb, plus the distribution map (svd / spectralEmbedding cap theirs too)
-        final int produced = def.emitValues.size() + (def.emitDistribution ? 1 : 0);
+        // the emitted columns: one per toValueProb and per readout, plus the distribution map (svd / spectralEmbedding cap theirs too)
+        final int produced = def.emitValues.size() + def.emitReadouts.size() + (def.emitDistribution ? 1 : 0);
         if (def.maxFeatures != null && produced > def.maxFeatures) {
             diagnostics.error("transitionStats.maxFeatures", loc, "emit produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
             return;
@@ -2609,6 +2609,12 @@ public final class FeaturePlanCompiler {
         final double priorWeight = def.blendPriorWeight == null ? 20 : def.blendPriorWeight;
         if (!(priorWeight > 0) || Double.isInfinite(priorWeight)) {
             diagnostics.error("transitionStats.blend", loc, "blend.priorWeight must be a positive number: " + def.blendPriorWeight);
+            return;
+        }
+        final Ref fieldRef = resolve(def.sequenceField);
+        if (def.emitReadouts.contains("expected") && (fieldRef == null || !OperatorCatalog.isNumeric(fieldRef.type()))) {
+            diagnostics.error("transitionStats.emit", loc, "emit expected is the probability-weighted mean of the next value, so the field must be an integer code"
+                    + " (a bin index, an ordered band); '" + def.sequenceField + "' is " + (fieldRef == null ? "unknown" : fieldRef.type().getType()));
             return;
         }
         final List<String> path = sequencePath(def, order, computeAt);
@@ -2655,7 +2661,28 @@ public final class FeaturePlanCompiler {
         expandEncoding(encoding, computeAt);
         // emit: [distribution, {toValueProb: …}] keeps the map next to its per-value columns
         final OutputColumn map = columnsByCanonical.get(def.name + "_to");
-        if (map != null && def.emitDistribution) map.intermediate = false;
+        // the map is a column of its own only when asked for: the per-value columns and the readouts read it
+        if (map != null) map.intermediate = !def.emitDistribution;
+        if (map != null) {
+            for (final String readout : def.emitReadouts) {
+                // a reader of the distribution map: the whole map for entropy / expected, plus the row's OWN value for
+                // ownValueProb / surprisal — which is what decides their availability (an outcome field is a violation)
+                final OutputColumn c = newColumn(def.name, Scope.row, "mapReadout", def.name + "_" + readout, Schema.FieldType.FLOAT64, computeAt);
+                c.coordinates.put("readout", readout);
+                c.fitted = map.fitted;
+                addSelfInput(c, map.canonicalName);
+                if ("ownValueProb".equals(readout) || "surprisal".equals(readout)) {
+                    c.coordinates.put("field", canonicalOf(def.sequenceField));
+                    addSelfInput(c, def.sequenceField);
+                }
+                finishRow(c, def);
+            }
+            if (!def.emitReadouts.isEmpty() && fieldRef != null && isOutcomeLike(fieldRef)
+                    && (def.emitReadouts.contains("ownValueProb") || def.emitReadouts.contains("surprisal")) && hintedBlocks.add("transitionStats.emit.own:" + def.name)) {
+                diagnostics.hint("transitionStats.emit.own", loc, "ownValueProb / surprisal read the row's own value of '" + def.sequenceField + "', an outcome: the columns are"
+                        + " availability violations (usable as a label or an intermediate target, not as a feature); entropy / expected / toValueProb read the distribution only");
+            }
+        }
         final List<String> chain = new ArrayList<>();
         chain.add(leaf.toString());
         for (final List<String> level : coarser) chain.add(level.toString());

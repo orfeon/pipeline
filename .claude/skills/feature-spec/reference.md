@@ -321,8 +321,11 @@ and a row `expr` summing the curves is its prediction.
 
 `sequenceOf: {entity, field}` (an `entities[].name` and a categorical field: string, boolean or an integer code —
 the INT64 column of a `type: bin` / `discretize` block qualifies), `order` (previous values that make
-the state, 1..4, default 1), `emit: [{toValueProb: <value>}, distribution]` (required; the value as the field holds
-it, `{toValueProb: 0}` for an integer code), `blend: {perEntity: true,
+the state, 1..4, default 1), `emit: [{toValueProb: <value>}, distribution, ownValueProb, surprisal, entropy, expected]`
+(required, any subset; the value as the field holds it, `{toValueProb: 0}` for an integer code; the four readouts are
+one float64 column `<name>_<readout>` each — `ownValueProb` = P(the row's own value | state), `surprisal` = −ln of
+it, `entropy` of the map, `expected` = Σ v·p over an integer code; the first two read the row's own value and are
+violations on an outcome field), `blend: {perEntity: true,
 priorWeight: 20}` (optional; absent or `perEntity: false` = transitions pooled over entities). Output float64
 `<name>_to_<value>` = P(next value = value | the entity's previous value(s)), and the map `<name>_to` for
 `distribution`. Sugar for a `lag` of the entity plus an expanding `encoding` with `stats: [distribution]` keyed on

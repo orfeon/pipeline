@@ -380,9 +380,13 @@ public class FeatureSpec implements Serializable {
         public Integer maxValues;
         /** transitionStats: how many previous values make the state (null = 1). */
         public Integer order;
+        /** The {@code emit} readouts of a transitionStats distribution, each one column {@code <name>_<readout>}. */
+        public static final List<String> TRANSITION_READOUTS = List.of("ownValueProb", "surprisal", "entropy", "expected");
         /** transitionStats {@code emit}: the {@code toValueProb} values, and whether the whole {@code distribution} map is emitted. */
         public List<String> emitValues = new ArrayList<>();
         public boolean emitDistribution;
+        /** transitionStats {@code emit}: the readouts of the distribution — {@code ownValueProb}, {@code surprisal}, {@code entropy}, {@code expected}. */
+        public List<String> emitReadouts = new ArrayList<>();
         /** transitionStats {@code blend}: null when the block is absent. */
         public Boolean blendPerEntity;
         public Double blendPriorWeight;
@@ -1050,6 +1054,8 @@ public class FeatureSpec implements Serializable {
             for (final JsonElement e : arrayOf(o.get("emit"))) {
                 if (e.isJsonPrimitive() && "distribution".equals(e.getAsString())) {
                     def.emitDistribution = true;
+                } else if (e.isJsonPrimitive() && FeatureDef.TRANSITION_READOUTS.contains(e.getAsString())) {
+                    if (!def.emitReadouts.contains(e.getAsString())) def.emitReadouts.add(e.getAsString());
                 } else if (e.isJsonObject() && e.getAsJsonObject().size() == 1 && e.getAsJsonObject().has("toValueProb")) {
                     for (final JsonElement value : arrayOf(e.getAsJsonObject().get("toValueProb"))) {
                         if (value.isJsonPrimitive()) def.emitValues.add(value.getAsString());
