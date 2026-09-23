@@ -63,8 +63,9 @@ public final class SketchAccumulator implements Serializable {
     public double[] edges(final int bins) {
         final double[] edges = new double[bins - 1];
         // getQuantile lazily builds and caches the sketch's sorted view, so a sketch shared through a side input
-        // must not be read from two bundles at once (the concurrent build corrupts the sort).
-        synchronized (sketch) {
+        // must not be read from two bundles at once (the concurrent build corrupts the sort). The lock is the
+        // accumulator: merge may replace the sketch field.
+        synchronized (this) {
             for (int i = 1; i < bins; i++) edges[i - 1] = sketch.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
         }
         return edges;
@@ -125,11 +126,16 @@ public final class SketchAccumulator implements Serializable {
             return accumulator.merge(input);
         }
 
+        /** Builds on the first non-empty accumulator (the contract lets a merge modify and return an argument): no copy, and its k. */
         @Override
         public SketchAccumulator mergeAccumulators(final Iterable<SketchAccumulator> accumulators) {
-            final SketchAccumulator merged = new SketchAccumulator();
-            for (final SketchAccumulator a : accumulators) merged.merge(a);
-            return merged;
+            SketchAccumulator merged = null;
+            for (final SketchAccumulator a : accumulators) {
+                if (a.isEmpty()) continue;
+                if (merged == null) merged = a;
+                else merged.merge(a);
+            }
+            return merged == null ? new SketchAccumulator() : merged;
         }
 
         @Override

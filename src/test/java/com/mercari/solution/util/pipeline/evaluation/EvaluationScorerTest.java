@@ -208,6 +208,14 @@ public class EvaluationScorerTest {
         final SketchAccumulator merged = new SketchAccumulator.Fn().mergeAccumulators(List.of(new SketchAccumulator(), fine));
         Assertions.assertEquals(4000, merged.k());
         Assertions.assertEquals(500d, merged.edges(2)[0], 1.0);
+        final SketchAccumulator added = new SketchAccumulator.Fn().addInput(new SketchAccumulator.Fn().createAccumulator(), fine);
+        Assertions.assertEquals(4000, added.k());
+        Assertions.assertNotSame(fine, added, "an input is copied, never adopted by reference");
+        Assertions.assertEquals(500d, added.edges(2)[0], 1.0);
+        // a quantile sketch may repeat a boundary: the count of edges below the value either way
+        Assertions.assertEquals(1, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, false));
+        Assertions.assertEquals(3, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, true));
+        Assertions.assertEquals(0, EvaluationReport.bin(1, new double[0], true));
         // Wilson: 30 of 100 → [0.2189, 0.3985]
         final double[] ci = EvaluationReport.wilson(30, 100);
         Assertions.assertEquals(0.2189, ci[0], 5e-4);
@@ -228,7 +236,7 @@ public class EvaluationScorerTest {
         final Map<String, double[]> bins = new HashMap<>();
         for (int i = 0; i < 3; i++) {
             final AlignedRow r = aligned.get(i);
-            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges)), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
+            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges, spec.tables.get(0).binsClosedLeft())), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
             if (r.predictions[0] > 1.0 * r.baseline) EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 1, 0), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
         }
         Assertions.assertArrayEquals(new double[]{1, 1, 0.6, 0.5, 3.0, 1}, bins.get(EvaluationReport.binKey("test", 1, 0, 2)), 1e-12);
