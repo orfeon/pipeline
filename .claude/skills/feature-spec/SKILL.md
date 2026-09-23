@@ -389,6 +389,10 @@ not alter values).
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
   relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
   member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+- **A rating as a probability**: a context `{type: ratingProb, field: <rating>_mu, sigma: <rating>_sigma, beta: <the
+  rating's beta>}` reads the Plackett–Luce win probability the rating model gives each row of its group —
+  on the scale of a market share, so `ln(p_rating / p_market)` is the rating's disagreement with the market,
+  the natural feature for a model whose initial score is the market's log share.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

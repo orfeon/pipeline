@@ -153,6 +153,8 @@ not expand because another block failed).
 | `context.softmax.temperature` / `.offsetScale` / `.scoreNull` | error | temperature must be a number > 0; offsetScale probability / log; scoreNull zero / null |
 | `context.softmax.temperatureFrom.unresolved` | error | `temperatureFrom` must be a URI (resolved before compile); a document that is neither a number nor JSON with `temperature` / `T` fails at resolve |
 | `context.softmax.excludeSelf` | warning | `excludeSelf` has no effect on softmax |
+| `context.ratingProb.sigma` / `.beta` | error | `sigma` names a numeric column (the row's rating uncertainty, e.g. `<rating>_team_sigma`; not a number), `beta` (required, > 0) is the performance noise of the rating the field comes from (its `beta`: `sigma / 2` of the prior by default, 25 / 6 for the default prior) |
+| `context.ratingProb.excludeSelf` | warning | `excludeSelf` has no effect on ratingProb (the row is part of its own contest) |
 | `context.residualize.against` | error | `residualize` needs `against` — one numeric field / column or a list of distinct ones, none of them the field itself (the key is `against`; a bare `on` is a YAML boolean). A regressor produced by the same block must be declared **before** the `residualize` op; one declared later is not yet a column |
 | `context.harville.top` / `.discount` / `context.op.maxGroupSize` | error | `top` lists distinct integer places in 1..3; `discount` at most two positive exponents (2nd, 3rd place); `maxGroupSize` ≥ 2 |
 | `context.op.maxGroupSize` | warning | `maxGroupSize` on `residualize`: the key is read by `harville` only and is ignored |

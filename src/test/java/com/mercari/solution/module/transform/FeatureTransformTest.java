@@ -3937,8 +3937,46 @@ public class FeatureTransformTest {
                   scope: context
                   context: session
                   inputs: [skill_all_duo_team_mu]
-                  ops: [gapToBest]
+                  ops:
+                    - gapToBest
+                    - {type: ratingProb, field: skill_all_duo_team_mu, sigma: skill_all_duo_team_sigma, beta: 4.1666667, as: pWin}
             """.replaceAll("(?m)^", "    ");
+
+    /**
+     * ratingProb over the team's strength: within a session the probabilities are the Plackett-Luce contest of the
+     * rows' (mu, sigma) — exp(mu / c) normalised, c² = Σ (sigma² + beta²) — computed here from the same output row.
+     */
+    @Test
+    public void testRatingProbOverTeams() throws java.io.IOException {
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + teamConfig(FEATURE_CONFIG))).get("features");
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_field_pWin_ratingProb").getFieldType().getType());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, List<MElement>> sessions = new HashMap<>();
+            for (final MElement row : rows) sessions.computeIfAbsent(row.getAsString("session_id"), k -> new ArrayList<>()).add(row);
+            Assertions.assertEquals(4, sessions.size());
+            for (final Map.Entry<String, List<MElement>> session : sessions.entrySet()) {
+                double c2 = 0, sum = 0;
+                for (final MElement row : session.getValue()) c2 += Math.pow(row.getAsDouble("f_skill_all_duo_team_sigma"), 2) + Math.pow(4.1666667, 2);
+                final double c = Math.sqrt(c2);
+                for (final MElement row : session.getValue()) sum += Math.exp(row.getAsDouble("f_skill_all_duo_team_mu") / c);
+                double total = 0;
+                for (final MElement row : session.getValue()) {
+                    final double expected = Math.exp(row.getAsDouble("f_skill_all_duo_team_mu") / c) / sum;
+                    Assertions.assertEquals(expected, row.getAsDouble("f_field_pWin_ratingProb"), 1e-12, session.getKey());
+                    total += row.getAsDouble("f_field_pWin_ratingProb");
+                }
+                Assertions.assertEquals(1d, total, 1e-12, session.getKey());
+                // session C: s1 won A, so its team is the favourite
+                if (session.getKey().equals("C")) {
+                    for (final MElement row : session.getValue()) {
+                        if (row.getAsString("seller_id").equals("s1")) Assertions.assertTrue(row.getAsDouble("f_field_pWin_ratingProb") > 0.5, row::toString);
+                    }
+                }
+            }
+            return null;
+        });
+        pipeline.run();
+    }
 
     /** The feature config with a second entity — the listing's category — and the team rating blocks. */
     private static String teamConfig(final String config) {

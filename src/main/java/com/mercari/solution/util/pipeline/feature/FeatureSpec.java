@@ -147,6 +147,8 @@ public class FeatureSpec implements Serializable {
         /** rating: the prior ({@code mu}, {@code sigma}), the performance noise {@code beta}, the per-contest drift {@code tau}; elo's {@code kFactor} / {@code scale}. */
         public Double mu;
         public Double sigma;
+        /** ratingProb: {@code sigma} given as a column name (the row's uncertainty) rather than a number. */
+        public String sigmaField;
         public Double beta;
         public Double tau;
         public Double kFactor;
@@ -1344,7 +1346,12 @@ public class FeatureSpec implements Serializable {
         op.context = Json.string(o, "context");
         op.order = Json.string(o, "order");
         op.mu = doubleOf(o, "mu", diagnostics, loc);
-        op.sigma = doubleOf(o, "sigma", diagnostics, loc);
+        // sigma is a number (a rating's prior) or, for ratingProb, the name of the column holding each row's uncertainty
+        if (o.has("sigma") && o.get("sigma").isJsonPrimitive() && o.get("sigma").getAsJsonPrimitive().isString() && !isNumber(o.get("sigma").getAsString())) {
+            op.sigmaField = o.get("sigma").getAsString();
+        } else {
+            op.sigma = doubleOf(o, "sigma", diagnostics, loc);
+        }
         op.beta = doubleOf(o, "beta", diagnostics, loc);
         op.tau = doubleOf(o, "tau", diagnostics, loc);
         op.kFactor = doubleOf(o, "kFactor", diagnostics, loc);
@@ -1421,6 +1428,15 @@ public class FeatureSpec implements Serializable {
     }
 
     /** A numeric parameter as a Double: null when absent or not a number (reported as {@code <key>.invalid}, like {@link #longOf}). */
+    private static boolean isNumber(final String text) {
+        try {
+            Double.parseDouble(text.trim());
+            return true;
+        } catch (final NumberFormatException e) {
+            return false;
+        }
+    }
+
     private static Double doubleOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
         if (!o.has(key) || o.get(key).isJsonNull()) return null;
         final JsonElement e = o.get(key);

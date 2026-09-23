@@ -54,6 +54,10 @@ public class ContextEvaluator implements Serializable {
             softmax(c.canonicalName, plan.field(), plan.softmax(), rows);
             return;
         }
+        if (plan.ratingProb() != null) {
+            ratingProb(c.canonicalName, plan.field(), plan.ratingProb(), rows);
+            return;
+        }
         if (plan.shuffle() != null) {
             shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
             return;
@@ -100,23 +104,25 @@ public class ContextEvaluator implements Serializable {
      * plain row expression); the parameterised ops carry their own record and are dispatched on it.
      */
     private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression,
-                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle) {
+                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb) {
 
         /** The ops whose reading is the same for every row of the group, so the group is read once. */
         private static final Set<String> GROUP_CONSTANT = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
 
         static Plan of(final String op, final String field, final boolean excludeSelf, final String value,
                        final ExpressionUtil.Expression expression) {
-            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null);
+            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null);
         }
 
-        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null); }
+        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null); }
 
-        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null); }
+        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null); }
 
-        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null); }
+        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null); }
 
-        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p); }
+        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null); }
+
+        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r); }
 
         boolean groupConstant() {
             return !excludeSelf && (value != null || GROUP_CONSTANT.contains(op));
@@ -124,6 +130,9 @@ public class ContextEvaluator implements Serializable {
     }
 
     private record Softmax(String offset, double temperature, boolean logScale, boolean scoreNullIsNull) {}
+
+    /** {@code sigma} the column of the row's uncertainty (null = none), {@code beta} the rating's performance noise. */
+    private record RatingProb(String sigma, double beta) {}
 
     private record Residualize(String[] against) {}
 
@@ -155,6 +164,7 @@ public class ContextEvaluator implements Serializable {
         return switch (c.operator) {
             case "softmax" -> plan.with(new Softmax(at.get("offset"), Double.parseDouble(at.getOrDefault("temperature", "1")),
                     "log".equals(at.get("offsetScale")), "null".equals(at.get("scoreNull"))));
+            case "ratingProb" -> plan.with(new RatingProb(at.get("sigma"), Double.parseDouble(at.get("beta"))));
             case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
             case "harville" -> {
                 final String discount = at.get("discount");
@@ -251,6 +261,43 @@ public class ContextEvaluator implements Serializable {
             } else {
                 row.put(name, weights[i] == 0 ? 0d : weights[i] * Math.exp(scores[i] - max) / denominator);
             }
+        }
+    }
+
+    /**
+     * The probability a rating model gives each row of the group — the Plackett-Luce contest a {@code plackettLuce}
+     * rating is updated with, read forward: p_i = exp(mu_i / c) / Σ_j exp(mu_j / c) with c² = Σ_j (sigma_j² + beta²)
+     * over the rows taking part (a softmax whose temperature is the contest's own scale, so the same gap in
+     * {@code mu} means less in a large or uncertain field). A row without a finite {@code mu} (or {@code sigma}, when
+     * a column is named) is null and out of the contest; without a {@code sigma} column the uncertainty is 0. A
+     * contest of one row reads 1. Strengths are shifted by the group maximum for stability.
+     */
+    static void ratingProb(final String name, final String field, final RatingProb plan, final List<Map<String, Object>> rows) {
+        final int n = rows.size();
+        final double[] mus = new double[n];
+        final boolean[] active = new boolean[n];
+        double c2 = 0d, max = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) {
+            final Map<String, Object> row = rows.get(i);
+            final Double mu = FeatureValues.toDouble(row.get(field));
+            if (mu == null || Double.isNaN(mu) || Double.isInfinite(mu)) continue;
+            double sigma = 0d;
+            if (plan.sigma() != null) {
+                final Double s = FeatureValues.toDouble(row.get(plan.sigma()));
+                if (s == null || Double.isNaN(s) || Double.isInfinite(s) || s < 0) continue;
+                sigma = s;
+            }
+            mus[i] = mu;
+            active[i] = true;
+            c2 += sigma * sigma + plan.beta() * plan.beta();
+            max = Math.max(max, mu);
+        }
+        final double c = Math.sqrt(c2);
+        double denominator = 0d;
+        for (int i = 0; i < n; i++) if (active[i]) denominator += Math.exp((mus[i] - max) / c);
+        for (int i = 0; i < n; i++) {
+            final Map<String, Object> row = rows.get(i);
+            row.put(name, !active[i] || !(denominator > 0) ? null : Math.exp((mus[i] - max) / c) / denominator);
         }
     }
 
