@@ -140,11 +140,19 @@ public final class Rating implements Serializable {
      * only, and only when the rating counts teams — {@link #withTeam(String, List, boolean)}: one entry per distinct
      * team is a cost a spec that reads no {@code team: [count]} does not pay), per member pool the moments of
      * {@code mu} over its rated players ({@code pools}, keyed by the pool name, {@code ""} for a rating without a team).
+     * {@code foldedUntilMillis} is the event time of the last run of contests folded in ({@code Long.MIN_VALUE}: none) — a state
+     * loaded from a snapshot ({@link RatingSnapshot}) skips the runs up to it, so a replay continues where the snapshot stopped;
+     * {@code rowsBeforeSnapshot} counts the rows served after such a load whose window near edge lies before it (they read a
+     * state that already holds contests they should not see: the run's input starts too early).
      */
     public static final class State implements Serializable {
         public final Map<String, Player> players = new HashMap<>();
         public final Map<String, Long> teams = new HashMap<>();
         public final Map<String, Pool> pools = new HashMap<>();
+        public long foldedUntilMillis = Long.MIN_VALUE;
+        public long rowsBeforeSnapshot;
+        /** The row last counted into {@code rowsBeforeSnapshot} (every readout column of a row advances the state once more). */
+        transient Object countedRow;
     }
 
     /**

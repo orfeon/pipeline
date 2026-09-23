@@ -1340,6 +1340,19 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.ops", loc, "sequence feature requires 'ops' or the general form 'lift' + 'summarize'");
             return;
         }
+        if (def.fitJson != null) {
+            // a sequence block fits nothing: its one fit setting is the artifact a rating op snapshots its state to
+            final JsonObject fit = parseJsonObject(def.fitJson);
+            for (final String key : fit.keySet()) {
+                if ("artifact".equals(key)) continue;
+                diagnostics.error("sequence.fit", loc, "a sequence block takes fit.artifact only (the state snapshot of a rating op): '" + key
+                        + "' is a fit setting of the population blocks");
+                return;
+            }
+            if (def.ops.stream().noneMatch(o -> "rating".equals(o.type))) {
+                diagnostics.warning("sequence.fit.ignored", loc, "fit.artifact on a sequence block without a rating op has no state to snapshot and is ignored");
+            }
+        }
         // an unknown direction was reported by FeatureSpec (sequence.direction): the block expands nothing
         if (def.direction != null && !FeatureSpec.DIRECTIONS.contains(def.direction)) return;
         if (general && isFuture(def)) {
@@ -1707,6 +1720,17 @@ public final class FeaturePlanCompiler {
             if (method == Rating.Method.bradleyTerry && op.pairs != null) shared.put("pairs", op.pairs);
         }
         shared.put("context", contest.name());
+        // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a
+        // snapshot is an explicit choice of the block (a spec whose encodings persist artifacts would otherwise start
+        // snapshotting its ratings unasked); outside the plan hash
+        final FeatureSpec.FitSpec blockFit = new FeatureSpec.FitSpec();
+        FeatureSpec.FitSpec.parseArtifact(parseJsonObject(def.fitJson), blockFit);
+        final String artifactUri = blockFit.artifactUri;
+        if (artifactUri != null) {
+            shared.put("artifact", artifactUri);
+            if (blockFit.refit) shared.put("artifactRefit", "true");
+            if (blockFit.artifactRequired) shared.put("artifactRequired", "true");
+        }
         // what a past row brings to its contest: the outcome, the player and the contest it belongs to
         shared.put("field", canonicalOf(field));
         final List<String> playerKeys = new ArrayList<>(), contestKeys = new ArrayList<>();
@@ -1740,6 +1764,15 @@ public final class FeaturePlanCompiler {
         // the readout columns of one op share the running state under `stateKey`; two ops that resolve to the same
         // segment with different parameters would silently share one replay whenever their funcs do not collide
         final String previous = ratingStates.putIfAbsent(stateKey, shared.toString());
+        if (previous == null && artifactUri != null) {
+            diagnostics.info("sequence.rating.artifact", loc, "rating '" + segment + "' snapshots the state of every pool to " + artifactUri + "/"
+                    + (spec.fit.artifactId != null ? spec.fit.artifactId : "<planHash>") + "/" + def.name
+                    + ".rating/ after the replay; a run whose input starts after a pool's last folded contest continues from its snapshot (the serving"
+                    + " form: the input holds the rows to serve and every contest after that time), a run whose input reaches back to it replays"
+                    + " the pool from scratch and rewrites it" + (shared.containsKey("artifactRefit") ? "; refit: true - this run replays every pool from scratch"
+                    : "") + (shared.containsKey("artifactRequired") ? "; require: true - a pool without a snapshot fails instead of replaying from the prior"
+                    : "; a serving run over a short input without a snapshot would replay from the prior and write that as the snapshot: set require: true"));
+        }
         if (previous != null && !previous.equals(shared.toString())) {
             diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"
                     + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state - name them apart with as:");

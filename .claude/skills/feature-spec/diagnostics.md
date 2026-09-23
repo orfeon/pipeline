@@ -218,6 +218,9 @@ not expand because another block failed).
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
+| `sequence.fit` | error | a sequence block takes `fit: {artifact: ...}` only (a rating's state snapshot); `mode` and the other fit settings belong to population blocks |
+| `sequence.fit.ignored` | warning | `fit.artifact` on a sequence block without a rating op: nothing to snapshot |
+| `sequence.rating.artifact` | info | the block's `fit.artifact` (not inherited from the top level) snapshots every pool's state to `<uri>/<planHash>/<block>.rating/` after the replay; a run whose input starts after a pool's last folded contest continues from its snapshot (serving: the input = the rows to serve + every contest since), a run whose input reaches back to it replays from scratch and rewrites it (a backfill advances it; a retry never reads its own write); `refit: true` replays from scratch whatever the input; `require: true` fails a pool without a snapshot instead of replaying from the prior (set it on the serving config). Run-time counter `feature/ratingSnapshot_<state>_rowsBefore` = rows of a continued pool whose near edge lies before its snapshot (they read too much) |
 
 ## Population
 

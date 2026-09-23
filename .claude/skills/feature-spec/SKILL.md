@@ -407,6 +407,14 @@ not alter values).
   rating's beta>}` reads the Plackett–Luce win probability the rating model gives each row of its group —
   on the scale of a market share, so `ln(p_rating / p_market)` is the rating's disagreement with the market,
   the natural feature for a model whose initial score is the market's log share.
+- **Serving a `rating`**: put `fit: {artifact: {uri: ..., require: true}}` on the block (the top-level artifact
+  is not inherited). The backfill writes every pool's state after its replay; a run whose input starts after the
+  snapshot's last contest continues from it and folds only the contests since — so the serving input is the rows
+  to serve plus the contests since, not the whole history. A run whose input reaches back to the snapshot (the
+  next full backfill) replays from scratch and rewrites it, which is how the snapshot advances. `require: true`
+  on the serving config makes a missing snapshot fail the pool instead of silently replaying its short input
+  from the prior. The counter `feature/ratingSnapshot_<state>_rowsBefore` > 0 means a continued pool's input
+  started before its snapshot time.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

@@ -589,7 +589,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.incremental && state != null) {
             // a rating's running state is a Rating.State the fold pointer advances, not a summary
             if (plan.rating != null) {
-                return readRating(plan, advanceRating(plan, state, nowMillis, history), row, nowMillis);
+                return readRating(plan, advanceRating(plan, state, nowMillis, history, row), row, nowMillis);
             }
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
@@ -632,15 +632,26 @@ public class SequenceEvaluator implements Serializable {
      * contests held then (they joined the history together), and a contest updates all its players at once. The
      * readout columns of one op share the state ({@code stateKey}): the first one read advances it.
      */
-    private Rating.State advanceRating(final ColumnPlan plan, final KeyState state, final long nowMillis, final List<Past> history) {
+    private Rating.State advanceRating(final ColumnPlan plan, final KeyState state, final long nowMillis, final List<Past> history,
+                                       final Map<String, Object> row) {
         final ColumnState cs = state.column(plan.stateKey);
         final Rating.State ratings = (Rating.State) cs.bySubkey.computeIfAbsent("", k -> new Rating.State());
         final long nearEdge = nowMillis - plan.shiftMillis;
+        // a state loaded from a snapshot already holds every contest up to foldedUntilMillis: a row whose near edge
+        // lies before that reads more than it should (counted once per row, never repaired), and the runs up to it
+        // are skipped
+        if (ratings.foldedUntilMillis != Long.MIN_VALUE && nearEdge < ratings.foldedUntilMillis && ratings.countedRow != row) {
+            ratings.countedRow = row;
+            ratings.rowsBeforeSnapshot++;
+        }
         while (cs.foldIndex < history.size() && history.get(cs.foldIndex).millis() <= nearEdge) {
             final long millis = history.get(cs.foldIndex).millis();
             int end = cs.foldIndex + 1;
             while (end < history.size() && history.get(end).millis() == millis) end++;
-            plan.rating.fold(ratings, history.subList(cs.foldIndex, end));
+            if (millis > ratings.foldedUntilMillis) {
+                plan.rating.fold(ratings, history.subList(cs.foldIndex, end));
+                ratings.foldedUntilMillis = millis;
+            }
             cs.foldIndex = end;
         }
         return ratings;

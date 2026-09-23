@@ -588,6 +588,52 @@ public class RatingTest {
         }
     }
 
+    /** A state round-trips through its snapshot file: players, the fold position; the served-too-early count is reset. */
+    @Test
+    public void testSnapshotRoundTrip() {
+        final Rating rating = duo(Rating.Method.plackettLuce, 0d, null, 25d, PRIOR_SIGMA);
+        final Rating.State state = new Rating.State();
+        rating.update(state, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), 1_000L);
+        rating.update(state, List.of(team("s1", "a1", 2), team("s3", "a2", 1)), 2_000L);
+        state.foldedUntilMillis = 2_000L;
+        state.rowsBeforeSnapshot = 3;
+        final RatingSnapshot.Spec spec = new RatingSnapshot.Spec("skill_all_duo", "skill", "target/feature-artifacts/" + java.util.UUID.randomUUID(), "abc123", false, false);
+        Assertions.assertFalse(RatingSnapshot.exists(spec, "<global>"));
+        Assertions.assertNull(RatingSnapshot.read(spec, "<global>"), "no snapshot yet");
+        RatingSnapshot.write(spec, "<global>", state);
+        Assertions.assertTrue(RatingSnapshot.exists(spec, "<global>"));
+        Assertions.assertTrue(RatingSnapshot.path(spec, "<global>").startsWith(spec.uri() + "/abc123/skill.rating/skill_all_duo."), RatingSnapshot.path(spec, "<global>"));
+        Assertions.assertNotEquals(RatingSnapshot.path(spec, "a"), RatingSnapshot.path(spec, "b"), "one file per pool");
+        final Rating.State loaded = RatingSnapshot.read(spec, "<global>");
+        Assertions.assertNotNull(loaded);
+        Assertions.assertEquals(state.players.keySet(), loaded.players.keySet());
+        // the team counters and the pools' moments ride along
+        Assertions.assertEquals(state.teams, loaded.teams);
+        Assertions.assertEquals(state.pools.keySet(), loaded.pools.keySet());
+        for (final Map.Entry<String, Rating.Pool> e : state.pools.entrySet()) {
+            Assertions.assertEquals(e.getValue().players, loaded.pools.get(e.getKey()).players, e.getKey());
+            Assertions.assertEquals(e.getValue().mean(), loaded.pools.get(e.getKey()).mean(), 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().sd(), loaded.pools.get(e.getKey()).sd(), 0d, e.getKey());
+        }
+        // a rewrite overwrites (the second write wins)
+        state.foldedUntilMillis = 3_000L;
+        RatingSnapshot.write(spec, "<global>", state);
+        Assertions.assertEquals(3_000L, RatingSnapshot.read(spec, "<global>").foldedUntilMillis);
+        state.foldedUntilMillis = 2_000L;
+        for (final Map.Entry<String, Rating.Player> e : state.players.entrySet()) {
+            final Rating.Player p = loaded.players.get(e.getKey());
+            Assertions.assertEquals(e.getValue().mu, p.mu, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().sigma, p.sigma, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().count, p.count, e.getKey());
+            Assertions.assertEquals(e.getValue().delta, p.delta, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().lastMillis, p.lastMillis, e.getKey());
+        }
+        Assertions.assertEquals(2_000L, loaded.foldedUntilMillis);
+        Assertions.assertEquals(0L, loaded.rowsBeforeSnapshot, "a loaded state starts counting afresh");
+        // the loaded state reads what the snapshotted one reads
+        Assertions.assertEquals((Double) rating.read(state, 0, "seller\u0001s1", "mu", 0L), (Double) rating.read(loaded, 0, "seller\u0001s1", "mu", 0L), 0d);
+    }
+
     /**
      * The readouts beside the ratings: {@code deviation} (mu net of the prior), {@code z} (mu standardised within the
      * member's pool of rated players — null until two are rated), the team's {@code count} (the contests this very

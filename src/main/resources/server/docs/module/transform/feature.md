@@ -373,6 +373,27 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   rated reads the prior (`count` 0, `deviation` 0, `z` at the prior's place), a row without the entity key reads null.
   Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
+- **Serving from a snapshot (`fit.artifact` on the block).** A rating is a replay of every contest of its pool,
+  so serving it from scratch means replaying the whole history for a handful of rows. With
+  `fit: {artifact: {uri: gs://bucket/feature}}` on the block — the block's own setting: the top-level `fit.artifact`
+  is not inherited, a snapshot is an explicit choice — the replay writes the state of every pool after it is
+  done, `<uri>/<planHash>/<block>.rating/<state>.<pool>.json`, one file per rating op and pool. What a later run
+  does with a pool's snapshot depends on where its input starts: an input that starts **after** the snapshot's
+  last folded contest **continues from it** and folds only the contests after that time — the serving form: the
+  input holds the rows to serve plus every contest since, and reads the same ratings the full replay would give;
+  an input that **reaches back** to or before that time (a full-history backfill, an overlapping range, a retried
+  attempt of the pool that wrote the file) **replays from scratch and rewrites** the snapshot, so a backfill
+  advances it by itself and a retry cannot read what its first attempt wrote. `refit: true` replays from scratch
+  whatever the input. The training config and the serving config share the directory (the plan hash ignores
+  `fit.artifact`, as it does for every fit). A serving run over a short input **without** a snapshot would replay
+  from the prior and write that as the pool's snapshot: `require: true` fails such a pool instead (its rows go to
+  the failure output, or the job fails under `failFast`) — set it on the serving config. A row whose window near
+  edge lies before a continued snapshot's last contest reads a state that already holds contests it should not
+  see: such rows are counted (`feature/ratingSnapshot_<state>_rowsBefore`, a warning per pool in the log) and
+  never repaired. The info `sequence.rating.artifact` describes the arrangement; a sequence block accepts no other
+  `fit` setting (`sequence.fit`). A snapshot is one file per pool, so the input must stay in the global window (no
+  windowing `strategy`): a windowed input is rejected when the pipeline is built. The file is streamed (no copy of
+  the whole pool on the heap), one line per player.
 - **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
   window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
   its outcome is available at the row's `computeAt`. The entity's `minInterval` does not absorb that shift —

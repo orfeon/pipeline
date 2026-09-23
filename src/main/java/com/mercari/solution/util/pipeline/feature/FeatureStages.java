@@ -336,6 +336,10 @@ public final class FeatureStages {
         for (final StaticFitBlock<?> block : staticFitBlocks(plan.getColumns())) {
             if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
         }
+        // a rating's state snapshots: one directory per block (a file per rating state and pool inside it)
+        for (final RatingSnapshot.Spec spec : RatingSnapshot.specsOf(plan.getColumns(), version)) {
+            paths.putIfAbsent(spec.block(), RatingSnapshot.directory(spec.uri(), version, spec.block()));
+        }
         return paths;
     }
 
@@ -476,6 +480,15 @@ public final class FeatureStages {
             final PCollectionView<Map<String, Double>> lambdas = specs.isEmpty() ? null
                     : VarianceComponents.estimate(estimateInput, specs, label + "_Vc");
             final List<PCollectionView<?>> sideInputs = lambdas == null ? List.of() : List.of(lambdas);
+            // a rating's state snapshot is one file per pool: the keyed replay runs once per window, so under any other
+            // window every window of a pool would read / write that one file (a window starting from another one's state)
+            final List<RatingSnapshot.Spec> snapshots = RatingSnapshot.specsOf(stageColumns, plan.getArtifactVersion());
+            if (!snapshots.isEmpty() && !(current.getWindowingStrategy().getWindowFn() instanceof GlobalWindows)) {
+                throw new IllegalStateException("the rating snapshot (fit.artifact) of " + snapshots.stream().map(RatingSnapshot.Spec::stateKey).toList()
+                        + " requires the global window, but the input is windowed by " + current.getWindowingStrategy().getWindowFn()
+                        + ": the replay of a pool runs once per window and every window would share its one snapshot file - drop the module's"
+                        + " windowing strategy or the rating's fit.artifact");
+            }
             final PCollectionTuple outputs = switch (stage.kind()) {
                 case row -> current.apply(label, ParDo
                         .of(new RowStageDoFn(evaluator, lambdas, loggings, failFast, failureTag))
@@ -499,7 +512,7 @@ public final class FeatureStages {
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future,
-                                        minIntervalAudits.getOrDefault(stage.index(), Map.of())))
+                                        minIntervalAudits.getOrDefault(stage.index(), Map.of()), snapshots))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
@@ -3521,16 +3534,73 @@ public final class FeatureStages {
          */
         private final Map<String, Long> minIntervals;
         private transient Map<String, Counter> belowMinInterval;
+        /** The rating states of this stage that are snapshotted ({@link RatingSnapshot}): loaded before a key's replay, written after it. */
+        private final List<RatingSnapshot.Spec> snapshots;
+        private transient Map<String, Counter> rowsBeforeSnapshot;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
                          final KeyedSpillSorter sorter, final String label, final boolean mirrored,
-                         final Map<String, Long> minIntervals) {
+                         final Map<String, Long> minIntervals, final List<RatingSnapshot.Spec> snapshots) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.sorter = sorter;
             this.label = label;
             this.mirrored = mirrored;
             this.minIntervals = mirrored ? Map.of() : minIntervals;
+            this.snapshots = snapshots;
+        }
+
+        /** A pool whose snapshot is required ({@code fit.artifact.require}) but missing: the key is failed, never replayed from the prior. */
+        static final class MissingSnapshotException extends RuntimeException {
+            MissingSnapshotException(final String message) {
+                super(message);
+            }
+        }
+
+        /**
+         * Starts the key's rating states from their snapshots, given the event time of the key's first row: a snapshot
+         * is continued from only when the input starts after its last folded contest — an input that reaches back to or
+         * before that time (a full-history backfill, a retried attempt of the key that wrote the file) is replayed from
+         * scratch and rewrites it, since the file already holds contests the rows are about to see. Returns the specs
+         * continued from.
+         */
+        private Set<RatingSnapshot.Spec> loadSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final long firstMillis) {
+            final Set<RatingSnapshot.Spec> loaded = new HashSet<>();
+            for (final RatingSnapshot.Spec spec : snapshots) {
+                if (spec.refit()) continue;
+                final Rating.State state = RatingSnapshot.read(spec, key);
+                if (state == null) {
+                    if (spec.required()) {
+                        throw new MissingSnapshotException("no rating snapshot for " + spec.stateKey() + " (" + spillContext(label, key) + ") at "
+                                + RatingSnapshot.path(spec, key) + ": fit.artifact.require is set, so the pool is not replayed from the prior over this input -"
+                                + " run the full history first (it writes the snapshot), or drop require");
+                    }
+                    continue;
+                }
+                if (state.foldedUntilMillis != Long.MIN_VALUE && firstMillis <= state.foldedUntilMillis) {
+                    LOG.info("rating snapshot of {} ({}) folded until {} but the input starts at {}: replaying from scratch and rewriting it",
+                            spec.stateKey(), spillContext(label, key), state.foldedUntilMillis, firstMillis);
+                    continue;
+                }
+                sequenceState.column(spec.stateKey()).bySubkey.put("", state);
+                loaded.add(spec);
+            }
+            return loaded;
+        }
+
+        /** Writes the key's rating states that were replayed from scratch; reports the rows a loaded state served too early. */
+        private void writeSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final Set<RatingSnapshot.Spec> loaded) {
+            for (final RatingSnapshot.Spec spec : snapshots) {
+                final SequenceEvaluator.ColumnState cs = sequenceState.columns.get(spec.stateKey());
+                if (cs == null || !(cs.bySubkey.get("") instanceof Rating.State state)) continue;
+                if (state.rowsBeforeSnapshot > 0) {
+                    if (rowsBeforeSnapshot == null) rowsBeforeSnapshot = new HashMap<>();
+                    rowsBeforeSnapshot.computeIfAbsent(spec.stateKey(), k -> Metrics.counter("feature", "ratingSnapshot_" + k + "_rowsBefore")).inc(state.rowsBeforeSnapshot);
+                    LOG.warn("rating snapshot of {} ({}): {} row(s) lie before the snapshot's last contest ({}) and read a state that already holds contests"
+                            + " after them - start the input after the snapshot, or refit", spec.stateKey(), spillContext(label, key), state.rowsBeforeSnapshot, state.foldedUntilMillis);
+                }
+                if (!loaded.contains(spec)) RatingSnapshot.write(spec, key, state);
+            }
         }
 
         private void auditInterval(final long millis, final long previousMillis) {
@@ -3601,6 +3671,8 @@ public final class FeatureStages {
             }
             try (sorted) {
                 replay(c, sorted, kv.getKey());
+            } catch (final MissingSnapshotException e) {
+                failKey(c, kv.getValue(), "Missing rating snapshot", e);
             } catch (final UncheckedIOException e) {
                 // a chunk could not be read back mid-merge: the rows already emitted stand, the key is failed
                 // row by row like every other failure path (the grouped iterable is re-iterable)
@@ -3619,6 +3691,9 @@ public final class FeatureStages {
             final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
+            // the snapshots are loaded at the first row: whether a pool continues from its snapshot depends on where the input starts
+            Set<RatingSnapshot.Spec> loaded = Set.of();
+            boolean first = true;
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
@@ -3626,6 +3701,10 @@ public final class FeatureStages {
             for (final KV<Long, MElement> row : rows) {
                 final MElement input = row.getValue();
                 final long millis = clock(input.getTimestamp().getMillis());
+                if (first) {
+                    if (!snapshots.isEmpty()) loaded = loadSnapshots(sequenceState, key, input.getTimestamp().getMillis());
+                    first = false;
+                }
                 if (millis != pendingMillis) {
                     history.addAll(pending);
                     pending.clear();
@@ -3643,6 +3722,7 @@ public final class FeatureStages {
                     LOG.info("rating state of {} after the replay: {}", spillContext(label, key), summary);
                 }
             }
+            if (!snapshots.isEmpty() && !first) writeSnapshots(sequenceState, key, loaded);
         }
 
         private void evaluate(final ProcessContext c, final MElement input, final SequenceEvaluator.History history,
