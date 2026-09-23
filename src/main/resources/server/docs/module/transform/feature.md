@@ -1314,7 +1314,7 @@ feature for a model whose initial score is the market's log share):
 | key | value |
 |---|---|
 | `field` | the strength: a rating's `mu` (a player's, or a team's `team_mu`) — any numeric column |
-| `sigma` | the column of each row's uncertainty (the matching `sigma` readout); optional — without it every row's uncertainty is 0 and `c² = n · beta²` |
+| `sigma` | the column of each row's uncertainty (the matching `sigma` readout); optional — without it every row's uncertainty is 0 and `c² = n · beta²`. It belongs to one strength: an op that names a `sigma` takes one `field` (an op over several fields would read every field's contest with the same uncertainty — declare one op per field) |
 | `beta` | required, > 0: the performance noise of the rating the field comes from (its `beta`, by default half the prior's `sigma`: `25 / 6` for the default prior) |
 
 `c` is the contest's own scale — `sqrt(Σ (sigma² + beta²))` over the rows taking part — so it is a

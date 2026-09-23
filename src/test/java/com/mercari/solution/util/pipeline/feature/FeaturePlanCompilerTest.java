@@ -3617,6 +3617,13 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: nope"))), "reference.unresolved"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: category"))), "context.ratingProb.sigma"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace(", beta: 4.2", ""))), "context.ratingProb.beta"));
+        // a sigma belongs to one strength: an op over several fields with one sigma is rejected (one op per field)
+        final FeaturePlan twoFields = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma:",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit], sigma:")));
+        Assertions.assertTrue(twoFields.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("context.ratingProb.sigma") && m.message().contains("one field")), twoFields::describe);
+        Assertions.assertFalse(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma,",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit],"))), "context.ratingProb.sigma"), "without a sigma several fields are fine");
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 0"))), "context.ratingProb.beta"));
         // nullPolicy indicator: a row out of the contest is flagged like a softmax row
         final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));

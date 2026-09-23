@@ -1169,6 +1169,14 @@ public final class FeaturePlanCompiler {
                 // the field is the strength (a rating's mu, a team's), sigma the column of its uncertainty (optional: 0
                 // without it), beta the rating's performance noise: c^2 = sum over the group of (sigma^2 + beta^2)
                 if (op.sigmaField != null) {
+                    // an op fans out over its fields with ONE set of coordinates: a sigma belongs to one strength, so an
+                    // op over several fields would read every field's contest with the same uncertainty
+                    final int fieldCount = !op.fields.isEmpty() ? op.fields.size() : def.inputs.size();
+                    if (fieldCount > 1) {
+                        diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma '" + op.sigmaField + "' is the uncertainty of one strength: an op that names it takes one field"
+                                + " (this op covers " + fieldCount + ") - declare one ratingProb op per field, each with its own sigma");
+                        return null;
+                    }
                     final Ref ref = resolve(op.sigmaField);
                     if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
                         diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma must name a numeric column (the row's rating uncertainty): " + op.sigmaField
