@@ -71,7 +71,8 @@ public final class EvaluationSpec implements Serializable {
     public static final String DISCOVERY_OUTPUT_PASSED = "passed";
     public static final String DISCOVERY_OUTPUT_ALL = "all";
     public static final List<String> DISCOVERY_OUTPUTS = List.of(DISCOVERY_OUTPUT_PASSED, DISCOVERY_OUTPUT_ALL);
-    public static final List<String> DISCOVERY_METRICS = List.of("excessLogScore", "logScore", "hitAt1", "brier");
+    public static final List<String> DISCOVERY_METRICS = List.of("excessLogScore", "logScore", "hitAt1", "brier", "utility");
+    public static final String METRIC_UTILITY = "utility";
 
     /** A prediction set: a column in a baseline form, or a grouped softmax of a score with an optional offset. */
     public static final class Prediction implements Serializable {
@@ -945,6 +946,15 @@ public final class EvaluationSpec implements Serializable {
             }
             if (!isGrouped() && "hitAt1".equals(discovery.metric)) {
                 errors.add("sliceDiscovery.metric hitAt1 needs family " + Family.GROUPED_MULTINOMIAL.id() + " (a binomial unit has no top-1 pick); use logScore or brier");
+            }
+            if (METRIC_UTILITY.equals(discovery.metric)) {
+                if (utilityField == null) {
+                    errors.add("sliceDiscovery.metric utility needs utility.field (the realised value of a positive row)");
+                } else if (discovery.sets.size() > 1) {
+                    // the utility describes the outcomes, not a set: one discovery, reported under the first compared set
+                    discovery.sets = new ArrayList<>(discovery.sets.subList(0, 1));
+                    notes.add("sliceDiscovery.metric utility does not depend on the prediction set: the discovery runs once, reported under " + names.get(1 + discovery.sets.get(0)));
+                }
             }
             final Set<String> seen = new HashSet<>();
             for (int i = 0; i < discovery.dimensions.size(); i++) {

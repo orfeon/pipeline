@@ -21,7 +21,9 @@ public final class EvaluationReport {
     private EvaluationReport() {}
 
     private static final String SEP = MetricAccumulator.SEP;
-    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
+    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier", "utility");
+    /** the metrics that describe the outcomes, not a prediction set: the same under every set, no pair difference */
+    public static final List<String> SET_INDEPENDENT = List.of("utility");
     static final double Z95 = 1.959963984540054;
 
     /** Result of {@link #build}: the metrics records, the slice discovery records and the summary, as output-schema maps. */
@@ -44,6 +46,7 @@ public final class EvaluationReport {
             case "excessLogScore" -> sums[MetricAccumulator.LOG] / w - baselineLogScore(spec, sums);
             case "hitAt1" -> sums[MetricAccumulator.HIT] / w;
             case "brier" -> sums[MetricAccumulator.BRIER] / w;
+            case "utility" -> spec.hasUtility() ? sums[MetricAccumulator.UTILITY] / w : Double.NaN;
             default -> throw new IllegalArgumentException("unknown metric " + name);
         };
     }
@@ -167,6 +170,12 @@ public final class EvaluationReport {
                     r.put("value", sliceValue);
                     putCounts(r, byPrediction.get(a));
                     for (final String m : METRICS) {
+                        if (SET_INDEPENDENT.contains(m)) {
+                            r.put(m, null);
+                            r.put(m + "_lo", null);
+                            r.put(m + "_hi", null);
+                            continue;
+                        }
                         final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
                         final double[] diff = new double[va.length];
                         for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
@@ -635,6 +644,7 @@ public final class EvaluationReport {
                 .withField("excessLogScore", Schema.FieldType.FLOAT64)
                 .withField("hitAt1", Schema.FieldType.FLOAT64)
                 .withField("brier", Schema.FieldType.FLOAT64)
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.element(slice)))
                 .build();
     }

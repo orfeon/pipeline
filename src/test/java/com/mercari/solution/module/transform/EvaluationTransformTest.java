@@ -190,6 +190,10 @@ public class EvaluationTransformTest {
             Assertions.assertTrue(truth.getAsDouble("excessLogScore_lo") > 0, "excess lo of truth: " + truth.getAsDouble("excessLogScore_lo"));
             Assertions.assertTrue(truth.getAsDouble("excessLogScore_hi") > truth.getAsDouble("excessLogScore"));
             Assertions.assertEquals(-truth.getAsDouble("logScore"), truth.getAsDouble("logloss"), 1e-12);
+            // the utility (payoff = 1 / p_model on the sold listing) is a property of the outcomes: the same under every set, null in pairs
+            Assertions.assertEquals(baseline.getAsDouble("utility"), truth.getAsDouble("utility"), 1e-12);
+            Assertions.assertTrue(truth.getAsDouble("utility_lo") <= truth.getAsDouble("utility") && truth.getAsDouble("utility") <= truth.getAsDouble("utility_hi"));
+            Assertions.assertNull(records.get("test/truth/copy/null/null").getPrimitiveValue("utility"));
             Assertions.assertTrue(truth.getAsDouble("hitAt1") > 0.3);
             Assertions.assertTrue(truth.getAsDouble("brier") < baseline.getAsDouble("brier"));
             // the copy of the baseline has exactly zero excess, with a degenerate interval

@@ -16,7 +16,7 @@ live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen 
 | `AlignedRow` | one row of a scored unit as the calibration tables read it (split, ỹ, p, every q, the table fields, the utility) | coder only |
 | `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `fitInputs` / `derive` (the fit inputs f, o of a set; the derived sets' means from the fitted parameters), `temperatureLogLikelihoods` / `blendEvaluate` (the fit passes' contributions: the grid log scores; the Newton evaluation via `GlmFit` at the uniform share), `score` (log score, hit@1, Brier per set, the baseline at index 0, derived sets last), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `dimensionValues` / `accumulateDiscovery` (the unit's discovery dimension values — a numeric one binned by the sketch edges — and its `[n, Σd, Σd²]` into every candidate cell of up to `maxDepth` dimensions, discovery and confirmation splits only), `aligned`, `unitRecords`, `standardErrors` | no |
 | `FitResults` | the fits' outcome as a singleton side input: derived set name → parameters, and the fit records of the summary / `output.calibration` | Serializable |
-| `MetricAccumulator` | 8 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier) plus 6 × samples replicate slots; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
+| `MetricAccumulator` | 9 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier, Σw·utility) plus 7 × samples replicate slots; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
 | `SketchAccumulator` | a KLL doubles sketch (k = 400) of one table's value stream; bytes coder + `Fn` | coder + CombineFn |
 | `EvaluationReport` | `metric` (a weighted mean, the excess as a difference of means, the binomial prior reference from Σwỹ / Σw), `replicate` / `interval` (the 2.5 / 97.5 percentiles), `build` (records + pair records + slice discovery + summary), `discoveryZ` / `discoveryThreshold` / `discovery` (the random-subset z, the max-of-K threshold, the candidate records with their confirmation), `calibration` (bins with bounds, Wilson), the table value / bin functions, the output schemas, `describe` | no |
 | `EvaluationStages` | the graph (§2–§3) and its DoFns | yes |
@@ -128,7 +128,7 @@ are why the transform needs the global window.
 - Every random draw is `seededRandom(seed, bootKey + "bootstrap")` → `samples` Poisson(1) draws by Knuth's
   method: a pure function of the seed and the key, so bundle boundaries, worker counts and runners do not
   change an interval. Unit rows are sorted by (time, identity) before any per-row computation.
-- Accumulator width: (2 + 4) × samples doubles per key (48 KB at 1000 samples); keys = splits × (1 + k) ×
+- Accumulator width: (2 + 5) × samples doubles per key (56 KB at 1000 samples); keys = splits × (1 + k) ×
   (1 + slice values). A bundle-local map of a few hundred keys is a few tens of MB.
 - Poisson draws: samples × units per unit scored (10 M draws for 10 k units at 1000 samples), a few seconds.
 

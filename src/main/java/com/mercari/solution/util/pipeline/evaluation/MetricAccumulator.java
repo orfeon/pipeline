@@ -22,10 +22,10 @@ import java.io.Serializable;
  */
 public final class MetricAccumulator implements Serializable {
 
-    public static final int SLOTS = 8;
-    public static final int N_UNITS = 0, N_ROWS = 1, W = 2, WY = 3, LOG = 4, LOG_BASE = 5, HIT = 6, BRIER = 7;
-    /** replicate layout: the six weighted sums W .. BRIER */
-    public static final int BOOT_SLOTS = 6;
+    public static final int SLOTS = 9;
+    public static final int N_UNITS = 0, N_ROWS = 1, W = 2, WY = 3, LOG = 4, LOG_BASE = 5, HIT = 6, BRIER = 7, UTILITY = 8;
+    /** replicate layout: the seven weighted sums W .. UTILITY */
+    public static final int BOOT_SLOTS = 7;
     public static final int BOOT_FIRST = W;
 
     /** separator inside composite keys; a key starting with it is a bookkeeping key, never a metrics cell */
