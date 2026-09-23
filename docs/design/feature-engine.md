@@ -856,8 +856,8 @@ unsorted data file, `deleteOnExit`. The `beam-sdks-java-extensions-sorter` depen
 **Budget (P4)**: `engine.spill.memoryMB` > `--featureSpillMemoryMB` (pipeline option) > the default
 `clamp(maxHeap / (cores × 4), 16 MB, 256 MB)` computed on the worker (batch runners process one bundle
 per core, so concurrent sorts = cores). `engine.spill.directory` and `engine.spill.compress` (default
-false) complete the block. The spill configuration is part of `FeaturePlan.toJson()` / `describe()`,
-and the audit-query note says that the top row count is the spill bound.
+false) complete the block. The spill configuration is an `engine` setting — outside the plan hash and not
+part of `FeaturePlan.toJson()` / `describe()`; the audit-query note says that the top row count is the spill bound.
 
 **Edges**: `NULL_KEY` rows bypass the sorter; an empty iterable returns empty; an `IOException` fails
 the key (row by row, `failFast`) and the files are deleted in `finally`.
@@ -938,8 +938,10 @@ input ─┬─ Stage1 (entity A)      ─┐   ┌─ Stage5 (entity C)    ─�
   evaluated on the base by `applyRows`. This was the bug found by the first production run: the linear
   chain carries a row column placed in one branch's stage, but the other branches read the wave input and
   saw null (43 of 107 columns). A DAG rule "row columns are transparent" must be matched by the engine
-  actually recomputing them. Row columns reading keyed columns (compose, isnull) stay in their stage and
-  travel in partial rows. Variance-components lambdas of prelude columns are wired as a side input.
+  actually recomputing them. Row columns reading keyed columns that a consumer in the stage needs stay in
+  their stage and travel in partial rows; those nobody reads (compose rows, isnull flags, residuals) are
+  *deferred* and evaluated on the first wave input that carries their inputs, `Final_Rows` after the last
+  wave (§9.4.7). Variance-components lambdas of prelude columns are wired as a side input.
 - **Merge, three paths** (`getFoldTarget` / `keysAvailable` in `FeaturePlan`, shared with the estimate):
   (a) the next wave is a **single context stage** whose keys are on the base row (input fields, earlier
   waves, prelude columns) → base + partials are flattened into **that stage's GroupByKey** and
@@ -1047,6 +1049,53 @@ inside changes from GBK + replay (batch) to a stateful DoFn + event-time timers 
 Implementation shape: keyed stage = {batch: GBK + replay, streaming: stateful}, merge = {batch:
 row-id GBK, streaming: stateful merge with timer hold}, switched by mode; the wave loop of
 `FeatureStages.apply` and the compile-layer wave computation are shared.
+
+#### 9.4.7 What a shuffle carries: liveness projection and deferred row columns
+
+**Problem.** Every stage DoFn copied the whole element, added its columns and emitted everything; the
+key DoFns shuffled — and `KeyedSpillSorter` spilled — the whole row. Only the *history* was projected
+(`pastInputs`). A hidden intermediate therefore rode every later keyed stage until the Finalizer dropped
+it. A consumer run made the cost visible: a `transitionStats` chain over a 700-value field produces one
+distribution map per lattice level, read by the composed map, read by four scalar readouts — yet those
+readouts are output-only row columns, which the scheduler placed in the **last** stage, so three maps of
+up to 700 entries per row rode a later single-key global stage, whose sort of 916 k rows exhausted the
+worker disk (`MapCoder.encode → KeyedSpillSorter.writeChunk`, `No space left on device`).
+
+**Deferred row columns.** A row column nobody reads (`OutputColumn.deferred`, set by `StageScheduler.build`
+for the columns its final loop places — except readers of a lookup fit, whose lambdas / artifact live in
+their fit stage) keeps its host for the linear chain (the last stage) but is **no edge of the stage DAG**
+(`dependsOn` skips it) and **no branch evaluates it**: the wave engine evaluates it on the first wave
+input that carries its inputs — `FeaturePlan.preludes()` computes every wave's prelude at once, index
+`w` = before the fan-out of wave `w`, index `waves` = after the last wave (`Final_Rows`). Two effects: a
+lattice whose compose rows nobody reads is now one wave (the category stage no longer waits for the
+seller and global levels), and a consumed map dies right after the prelude that reads it. A fold target
+(§9.4.3) evaluates its own wave's prelude itself (`getFoldColumns`): its input is the merge, so there is
+no wave input to run it on; the groupBy finalize does the same for the final prelude when the last wave
+folds into it (`foldsIntoGroupBy` requires that prelude to need no variance-components estimate, which
+the finalize has no side input for).
+
+**Liveness.** `FeaturePlan` computes what each shuffle must carry, over computed columns only — input
+fields always ride, so nothing an evaluator reads by name through a coordinate can be lost by accident,
+and the projection is over the plan's own columns: `getStageReads(stage)` = keys + the self / past inputs
+of its columns + the fields of its variance-components estimate + every column a coordinate value names
+(`mentioned`: tokens of the value, `__baseline_<token>` for `offset` — conservative); `getOutputReads()`
+= emitted columns + groupBy keys + parent fields; `getLiveBefore(k)` (linear chain: stages ≥ k and the
+output) and `getLiveAfterWave(w)` (wave engine: the branches and preludes of later waves and the output);
+`getWaveKeep(stage)` = what its branch reads (`getBranchColumns`: the stage's columns minus the deferred
+and the prelude-evaluated ones), plus what lives on after the wave when the stage is its wave's only one.
+The engine drops the complement (`Wiring.dropExcept`) in `KeyDoFn` / `SortKeyDoFn` before the GroupByKey,
+in `RowIdKeyDoFn` for every merge piece, and in `Finalize_Key`; `PartialDoFn` keeps only the branch
+columns that live on. `FeatureStages.project` is the one projection (a map copy per row per keyed stage,
+skipped when nothing is dropped). The report's `-- carry` section and the stage JSON (`carry`,
+`carryLinear`, `carryMaps`) print what rides each keyed stage's GroupByKey in either mode, and the
+`engine.rowWidth` hint names a keyed stage whose grouped rows still carry a map (read later, or emitted);
+`KeyedSpillSorter` logs the sampled encoded row width once per stage and on every spill line.
+
+**What it does not do.** The linear chain (`engine.parallelWaves: false`, streaming) still hosts the
+deferred columns in the last stage, so a map read only by them rides every keyed stage before it
+(projection removes only what nothing later reads). Option B of §9.3.2 (sort projected fields and re-join
+by row id) stays rejected: with the wave engine the branch sorts only what the branch reads, which is
+that option without the extra shuffle.
 
 ### 9.5 Slow coarse-key stages on the DirectRunner — root cause
 

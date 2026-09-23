@@ -305,6 +305,23 @@ public class SequenceEvaluator implements Serializable {
         };
     }
 
+    /**
+     * One line per rating state of the key after its replay ({@link Rating#describe}): the pools' players, contest
+     * counts and spread of mu — the warm-up of a pool, for the run log. Empty without a rating column.
+     */
+    public List<String> ratingSummaries(final KeyState state) {
+        final List<String> lines = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (final OutputColumn c : columns) {
+            final ColumnPlan plan = plans.get(c.canonicalName);
+            if (plan == null || plan.rating == null || !seen.add(plan.stateKey)) continue;
+            final ColumnState cs = state.columns.get(plan.stateKey);
+            final Serializable ratings = cs == null ? null : cs.bySubkey.get("");
+            if (ratings instanceof Rating.State r) lines.add(plan.stateKey + ": " + plan.rating.describe(r));
+        }
+        return lines;
+    }
+
     /** Columns that read the whole history (scan path, no maxAge, no bounded tail): their past inputs are kept for every row of the key. */
     public List<String> unboundedColumns() {
         final List<String> names = new ArrayList<>();

@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.Deflater;
@@ -116,11 +117,14 @@ public final class KeyedSpillSorter implements Serializable {
         final List<KV<Long, MElement>> buffer = new ArrayList<>();
         final List<Path> chunks = new ArrayList<>();
         long rowLimit = Long.MAX_VALUE; // decided after the sample
+        long rowBytes = 0;
         try {
             for (final KV<Long, MElement> row : rows) {
                 buffer.add(row);
                 if (buffer.size() == SAMPLE_ROWS && rowLimit == Long.MAX_VALUE) {
-                    rowLimit = rowLimit(buffer);
+                    rowBytes = sampleRowBytes(buffer);
+                    rowLimit = rowLimit(rowBytes);
+                    logRowWidth(context, rowBytes, rowLimit);
                 }
                 if (buffer.size() >= rowLimit) {
                     if (chunks.size() >= MAX_CHUNKS) {
@@ -152,23 +156,40 @@ public final class KeyedSpillSorter implements Serializable {
         sources.add(new MemorySource(buffer));
         final long live = LIVE_BYTES.addAndGet(bytes);
         final long peak = PEAK_BYTES.accumulateAndGet(live, Math::max);
-        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory; live spill on this worker {} MB (peak {} MB)",
-                context, chunks.size(), bytes >> 20, buffer.size(), live >> 20, peak >> 20);
+        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory (~{} bytes per encoded row); live spill on this worker {} MB (peak {} MB)",
+                context, chunks.size(), bytes >> 20, buffer.size(), rowBytes, live >> 20, peak >> 20);
         return new Sorted(null, sources, chunks, bytes);
+    }
+
+    /** The stage labels whose row width was logged by this JVM (one line per stage: the sample of one key stands for the rows the stage sorts). */
+    private static final Set<String> WIDTH_LOGGED = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Once per stage and JVM: the encoded width of the sorted rows, which with the row count decides the spill of a
+     * hot key — a wide row (a map column over many categories) spills on a key whose row count alone looks harmless.
+     */
+    private static void logRowWidth(final String context, final long rowBytes, final long rowLimit) {
+        final int at = context.indexOf(" key=");
+        final String label = at < 0 ? context : context.substring(0, at);
+        if (!WIDTH_LOGGED.add(label)) return;
+        LOG.info("keyed spill sorter {}: ~{} bytes per encoded row in a sample of {} rows, {} rows per chunk within the budget", label, rowBytes, SAMPLE_ROWS, rowLimit);
     }
 
     private static void sortBuffer(final List<KV<Long, MElement>> buffer) {
         buffer.sort(Comparator.comparingLong(KV::getKey)); // List.sort is stable: equal keys keep arrival order
     }
 
-    /** Rows that fit the budget, from the encoded size of the sample times the heap factor. */
-    private long rowLimit(final List<KV<Long, MElement>> sample) throws IOException {
-        long bytes = 0;
+    /** The mean encoded size of the sample's rows. */
+    private long sampleRowBytes(final List<KV<Long, MElement>> sample) throws IOException {
         try (CountingOutputStream counting = new CountingOutputStream()) {
             for (final KV<Long, MElement> row : sample) coder.encode(row.getValue(), counting);
-            bytes = counting.count;
+            return Math.max(1, counting.count / sample.size());
         }
-        final long perRow = Math.max(1, bytes / sample.size()) * HEAP_FACTOR + 16; // + list slot / KV
+    }
+
+    /** Rows that fit the budget, from the encoded size of a row times the heap factor. */
+    private long rowLimit(final long rowBytes) {
+        final long perRow = rowBytes * HEAP_FACTOR + 16; // + list slot / KV
         return Math.max(1, budgetBytes / perRow);
     }
 

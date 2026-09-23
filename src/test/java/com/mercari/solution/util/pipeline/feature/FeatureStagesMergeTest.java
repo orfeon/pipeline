@@ -93,6 +93,27 @@ public class FeatureStagesMergeTest {
     }
 
     @Test
+    public void testProjectionDropsOnlyTheNamedColumns() {
+        final Map<String, Object> map = new HashMap<>();
+        map.put("session_id", "A");
+        map.put("enc__global__dist", Map.of("good", 0.5));
+        map.put("enc__seller__n", 3d);
+        map.put("kept", null);
+        final MElement element = MElement.of(map, Instant.ofEpochMilli(1000));
+        // nothing to drop: the element itself (no copy)
+        Assertions.assertSame(element, FeatureStages.project(element, java.util.Set.of()));
+        Assertions.assertSame(element, FeatureStages.project(element, java.util.Set.of("absent")));
+        // the named computed columns leave, everything else stays (a null-valued key included), the timestamp too
+        final MElement projected = FeatureStages.project(element, java.util.Set.of("enc__global__dist", "enc__seller__n", "absent"));
+        Assertions.assertNotSame(element, projected);
+        final Map<String, Object> values = projected.asPrimitiveMap();
+        Assertions.assertEquals(java.util.Set.of("session_id", "kept"), values.keySet());
+        Assertions.assertEquals(element.getTimestamp(), projected.getTimestamp());
+        // the source element is untouched
+        Assertions.assertTrue(element.asPrimitiveMap().containsKey("enc__global__dist"));
+    }
+
+    @Test
     public void testKeyWithNullTokensIsDeterministicAndCollisionFree() {
         final Map<String, Object> nullRow = new HashMap<>();
         nullRow.put("a", "x");

@@ -584,7 +584,7 @@ public class RatingTest {
             final Rating.State single = new Rating.State();
             one.update(single, List.of(entry("t1", 1), entry("t2", 2)));
             Assertions.assertEquals((Double) one.read(single, "t1", "delta"), sellerMove + agentMove, 1e-12, method.name());
-            Assertions.assertEquals((Double) one.read(single, "t1", "mu"), rating.readTeam(settled, List.of("seller\u0001s1", "agent\u0001a1"), "mu", Long.MIN_VALUE), 1e-12);
+            Assertions.assertEquals((Double) one.read(single, "t1", "mu"), (Double) rating.readTeam(settled, List.of("seller\u0001s1", "agent\u0001a1"), "mu", Long.MIN_VALUE), 1e-12);
         }
     }
 
@@ -621,6 +621,99 @@ public class RatingTest {
         Assertions.assertEquals(0L, loaded.rowsBeforeSnapshot, "a loaded state starts counting afresh");
         // the loaded state reads what the snapshotted one reads
         Assertions.assertEquals((Double) rating.read(state, 0, "seller\u0001s1", "mu", 0L), (Double) rating.read(loaded, 0, "seller\u0001s1", "mu", 0L), 0d);
+    }
+
+    /**
+     * The readouts beside the ratings: {@code deviation} (mu net of the prior), {@code z} (mu standardised within the
+     * member's pool of rated players — null until two are rated), the team's {@code count} (the contests this very
+     * team ran, whatever the number of its rows) and {@code deviation}, and the pool summary of the run log.
+     */
+    @Test
+    public void testPoolAndTeamReadouts() {
+        final Rating rating = duo(Rating.Method.plackettLuce, 0d, null, 25d, PRIOR_SIGMA);
+        final Rating.State state = new Rating.State();
+        final List<String> s1a1 = List.of("seller\u0001s1", "agent\u0001a1"), s2a2 = List.of("seller\u0001s2", "agent\u0001a2");
+        // nothing rated: deviation 0, no scale for z, no contest for the team
+        Assertions.assertEquals(0d, rating.read(state, 0, s1a1.get(0), "deviation", 0L));
+        Assertions.assertNull(rating.read(state, 0, s1a1.get(0), "z", 0L));
+        Assertions.assertEquals(0L, rating.readTeam(state, s1a1, "count", 0L));
+        Assertions.assertEquals(0d, rating.readTeam(state, s1a1, "deviation", 0L));
+
+        rating.update(state, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), 1_000L);
+        final double s1 = state.players.get(s1a1.get(0)).mu, a1 = state.players.get(s1a1.get(1)).mu;
+        Assertions.assertEquals(s1 - 25d, (Double) rating.read(state, 0, s1a1.get(0), "deviation", 0L), 1e-12);
+        Assertions.assertEquals(a1 - 25d, (Double) rating.read(state, 1, s1a1.get(1), "deviation", 0L), 1e-12);
+        Assertions.assertEquals((s1 - 25d) + (a1 - 25d), (Double) rating.readTeam(state, s1a1, "deviation", 0L), 1e-12);
+        // two rated players per pool, moved symmetrically: z = +1 / -1; an unrated player reads its prior's place (0)
+        Assertions.assertEquals(1d, (Double) rating.read(state, 0, s1a1.get(0), "z", 0L), 1e-9);
+        Assertions.assertEquals(-1d, (Double) rating.read(state, 0, s2a2.get(0), "z", 0L), 1e-9);
+        Assertions.assertEquals(1d, (Double) rating.read(state, 1, s1a1.get(1), "z", 0L), 1e-9);
+        Assertions.assertEquals(0d, (Double) rating.read(state, 0, "seller\u0001s9", "z", 0L), 1e-9);
+        Assertions.assertEquals(1L, rating.readTeam(state, s1a1, "count", 0L));
+        Assertions.assertEquals(0L, rating.readTeam(state, List.of("seller\u0001s1", "agent\u0001a2"), "count", 0L), "a new pairing");
+
+        // a team of two rows in one contest counts once; the pools' moments follow the players
+        rating.update(state, List.of(team("s1", "a1", 1), team("s1", "a1", 3), team("s2", "a2", 2)), 2_000L);
+        Assertions.assertEquals(2L, rating.readTeam(state, s1a1, "count", 0L));
+        for (final String pool : List.of("seller", "agent")) {
+            double sum = 0, sumSq = 0;
+            int n = 0;
+            for (final Map.Entry<String, Rating.Player> e : state.players.entrySet()) {
+                if (!e.getKey().startsWith(pool + "\u0001")) continue;
+                sum += e.getValue().mu;
+                sumSq += e.getValue().mu * e.getValue().mu;
+                n++;
+            }
+            final Rating.Pool p = state.pools.get(pool);
+            Assertions.assertEquals(n, p.players);
+            Assertions.assertEquals(sum / n, p.mean(), 1e-9);
+            Assertions.assertEquals(Math.sqrt(sumSq / n - sum * sum / n / n), p.sd(), 1e-9);
+        }
+        final String summary = rating.describe(state);
+        Assertions.assertTrue(summary.contains("pool agent: players=2 contests/player median=2 max=2 mu mean="), summary);
+        Assertions.assertTrue(summary.contains("pool seller: players=2"), summary);
+
+        // a rating that reads no team count keeps none (one entry per distinct team for the whole replay); the
+        // ratings themselves are the same
+        final Rating uncounted = Rating.of(Rating.Method.plackettLuce, true, null, null, null, 0d, null, null, null, null, List.of("seller_id"), List.of("c"), "y")
+                .withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 25d, PRIOR_SIGMA, 0d)), false);
+        final Rating.State bare = new Rating.State();
+        uncounted.update(bare, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), 1_000L);
+        Assertions.assertTrue(bare.teams.isEmpty(), bare.teams::toString);
+        Assertions.assertEquals(s1, bare.players.get(s1a1.get(0)).mu, 0d);
+        Assertions.assertThrows(IllegalStateException.class, () -> uncounted.readTeam(bare, s1a1, "count", 0L));
+
+        // a rating without a team: one pool, the players themselves
+        final Rating solo = Rating.of(Rating.Method.bradleyTerry, true, null, null, null, 0d, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State single = new Rating.State();
+        Assertions.assertEquals("no player rated", solo.describe(single));
+        solo.update(single, List.of(entry("t1", 1), entry("t2", 2)), 0L);
+        Assertions.assertEquals(1d, (Double) solo.read(single, "t1", "z"), 1e-9);
+        Assertions.assertEquals(2, single.pools.get("").players);
+        Assertions.assertTrue(single.teams.isEmpty(), "a player is no team");
+        Assertions.assertTrue(solo.describe(single).startsWith("pool <players>: players=2"), solo.describe(single));
+    }
+
+    /** The pool's moments are taken from the prior: a large prior next to a small spread still gives a z, ties give none. */
+    @Test
+    public void testPoolMomentsKeepPrecisionUnderALargePrior() {
+        final Rating rating = Rating.of(Rating.Method.plackettLuce, true, 1e9, 1e-3, 5e-4, 0d, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State state = new Rating.State();
+        rating.update(state, List.of(entry("w", 1), entry("l", 2)));
+        final Rating.Pool pool = state.pools.get("");
+        Assertions.assertEquals(1e9, pool.shift, 0d);
+        Assertions.assertEquals(2, pool.players);
+        // the two moved symmetrically by a few 1e-4: the spread is well below the prior's rounding (1e9 · 1e-16 ~ 1e-7)
+        final double w = state.players.get("w").mu, l = state.players.get("l").mu;
+        Assertions.assertTrue(w > 1e9 && l < 1e9 && w - l > 1e-4, w + " / " + l);
+        Assertions.assertEquals((w - l) / 2, pool.sd(), 1e-12);
+        Assertions.assertEquals(1d, (Double) rating.read(state, "w", "z"), 1e-6);
+        Assertions.assertEquals(-1d, (Double) rating.read(state, "l", "z"), 1e-6);
+        // a tie between equals: no spread at all, so no z (the floor reads the rounding as zero)
+        final Rating.State tie = new Rating.State();
+        rating.update(tie, List.of(entry("a", 1), entry("b", 1)));
+        Assertions.assertEquals(0d, tie.pools.get("").sd(), 0d);
+        Assertions.assertNull(rating.read(tie, "a", "z"));
     }
 
     /**
@@ -680,9 +773,9 @@ public class RatingTest {
         state.players.put("agent\u0001a1", player(25, 2, now - 300 * DAY));
         state.players.put("agent\u0001a2", player(25, 2, now - DAY));
         final List<String> rested = List.of("seller\u0001s1", "agent\u0001a1");
-        Assertions.assertEquals(Math.sqrt((4 + 4d / 30) + (4 + 4d * 10)), rating.readTeam(state, rested, "sigma", now), 1e-12);
-        Assertions.assertEquals(Math.sqrt(8d), rating.readTeam(state, rested, "sigma", Long.MIN_VALUE), 1e-12, "without a time: the state itself");
-        Assertions.assertEquals(50d, rating.readTeam(state, rested, "mu", now), 0d);
+        Assertions.assertEquals(Math.sqrt((4 + 4d / 30) + (4 + 4d * 10)), (Double) rating.readTeam(state, rested, "sigma", now), 1e-12);
+        Assertions.assertEquals(Math.sqrt(8d), (Double) rating.readTeam(state, rested, "sigma", Long.MIN_VALUE), 1e-12, "without a time: the state itself");
+        Assertions.assertEquals(50d, (Double) rating.readTeam(state, rested, "mu", now), 0d);
         rating.update(state, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), now);
         final double seller = state.players.get("seller\u0001s1").delta, agent = state.players.get("agent\u0001a1").delta;
         Assertions.assertEquals((4 + 4d * 10) / (4 + 4d / 30), agent / seller, 1e-9, "the shares are the drifted variances");
@@ -725,9 +818,9 @@ public class RatingTest {
         Assertions.assertNull(rating.read(state, 1, rating.memberKey(incomplete, 1), "mu", 2_000L));
         // a team of members never seen reads the priors: 25 + 0, sqrt(sigma² + 3²)
         final Map<String, Object> unseen = row.apply(new String[]{"c2", "new", "new", "1"}).values();
-        Assertions.assertEquals(25d, rating.readTeam(state, rating.teamOf(unseen), "mu", 2_000L), 0d);
-        Assertions.assertEquals(Math.sqrt(PRIOR_SIGMA * PRIOR_SIGMA + 9), rating.readTeam(state, rating.teamOf(unseen), "sigma", 2_000L), 1e-12);
-        Assertions.assertEquals(25d, rating.readTeam(null, rating.teamOf(unseen), "mu", 2_000L), 0d, "nothing folded yet");
+        Assertions.assertEquals(25d, (Double) rating.readTeam(state, rating.teamOf(unseen), "mu", 2_000L), 0d);
+        Assertions.assertEquals(Math.sqrt(PRIOR_SIGMA * PRIOR_SIGMA + 9), (Double) rating.readTeam(state, rating.teamOf(unseen), "sigma", 2_000L), 1e-12);
+        Assertions.assertEquals(25d, (Double) rating.readTeam(null, rating.teamOf(unseen), "mu", 2_000L), 0d, "nothing folded yet");
 
         // what a team cannot be
         final Rating solo = rating(Rating.Method.plackettLuce, true, 0d);
@@ -742,7 +835,7 @@ public class RatingTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> solo.withTeam("sel\u0001ler", agent), "a separator inside a pool would let two pools meet on one state key");
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.withTeam("seller", agent), "the whole team is declared at once");
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.update(new Rating.State(), List.of(entry("a", 1), entry("b", 2))), "a player in a rating of teams");
-        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), "count", 0L));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), "median", 0L));
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, rating.teamOf(unseen), null, 0L), "no readout named");
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating.readTeam(state, List.of(sellerX), "mu", 0L), "a team of one in a rating of teams of two");
     }
@@ -910,6 +1003,14 @@ public class RatingTest {
         for (final OutputColumn c : List.of(seller, agent, team)) Assertions.assertTrue(c.getInputs().containsAll(List.of("seller_id", "agent_id")), c.getInputs().toString());
         final Rating.Member member = Rating.of(team.getCoordinates()).members().get(1);
         Assertions.assertEquals(new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.5), member);
+        // the contests per team are kept only for an op that reads them (team: [count]) — on every column of the op
+        Assertions.assertNull(team.getCoordinates().get("teamCounts"));
+        final FeaturePlan counted = compileTeam(DUO.replace("team: [mu, sigma]", "team: [mu, count]"));
+        Assertions.assertFalse(counted.getDiagnostics().hasErrors(), counted::describe);
+        for (final String name : List.of("skill_all_duo_mu", "skill_all_duo_agent_sigma", "skill_all_duo_team_count")) {
+            Assertions.assertEquals("true", counted.getColumn(name).getCoordinates().get("teamCounts"), name);
+        }
+        Assertions.assertEquals(com.mercari.solution.module.Schema.Type.int64, counted.getColumn("skill_all_duo_team_count").getFieldType().getType());
 
         // a bare entity name: the op's prior and drift
         final FeaturePlan bare = compileTeam(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [agent]"));
@@ -938,7 +1039,7 @@ public class RatingTest {
         cases.put(DUO.replace("as: duo, tau: 0.5,", "as: duo, method: elo,"), "elo keeps no variance to share by");
         cases.put(DUO.replace("as: duo, ", ""), "a team needs a name");
         cases.put(DUO.replace(" with: [{entity: agent, mu: 0, sigma: 4}],", ""), "team readouts without a team");
-        cases.put(DUO.replace("team: [mu, sigma]", "team: [mu, count]"), "count is no team readout");
+        cases.put(DUO.replace("team: [mu, sigma]", "team: [mu, median]"), "median is no team readout");
         cases.put(DUO.replace("sigma: 4", "sigma: 0"), "a member's sigma");
         cases.put(DUO.replace("sigma: 4", "sigma: 4, beta: 2"), "beta is the team's, not a member's");
         cases.put(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [3]"), "neither a name nor a member");

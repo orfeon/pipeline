@@ -1170,32 +1170,41 @@ public class FeaturePlanCompilerTest {
     @Test
     public void testStageDependenciesAndWaves() {
         // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
-        // sequence block), the global level and the context stage form one wave; the category stage hosts the
-        // compose rows over all three levels, so it depends on them (the row expression the levels share is
-        // followed through to its input field: placing it in the seller stage is not a data dependency)
+        // sequence block), the global level, the context stage and the category stage form ONE wave. The category
+        // stage hosts the compose rows over all three levels for the linear chain, but nobody reads them: they are
+        // deferred — evaluated on the merged rows after the wave, never inside the stage — so they are no edge (the
+        // row expression the levels share is followed through to its input field: no dependency either)
         final FeaturePlan plan = compile(SOURCES, withEncoding(LATTICE_ENC));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         final List<FeaturePlan.Stage> stages = plan.getStages();
         Assertions.assertEquals(4, stages.size(), plan::describe);
-        Assertions.assertEquals(List.of(), stages.get(0).dependsOn(), plan::describe);
-        Assertions.assertEquals(List.of(), stages.get(1).dependsOn(), plan::describe);
-        Assertions.assertEquals(List.of(), stages.get(2).dependsOn(), plan::describe);
-        Assertions.assertEquals(List.of(0, 1, 2), stages.get(3).dependsOn(), plan::describe);
-        Assertions.assertEquals(List.of(List.of(0, 1, 2), List.of(3)), plan.getWaves(), plan::describe);
+        for (final FeaturePlan.Stage s : stages) Assertions.assertEquals(List.of(), s.dependsOn(), plan::describe);
+        Assertions.assertEquals(List.of(List.of(0, 1, 2, 3)), plan.getWaves(), plan::describe);
         Assertions.assertEquals(1, plan.getWave(2));
-        Assertions.assertEquals(2, plan.getWave(3));
-        // linear chain: 4 shuffles; wave DAG: wave 1 = one shuffle for its three keyed branches + row-id merge
-        // + Reshuffle pinning the ids, wave 2 = one shuffle
+        Assertions.assertEquals(1, plan.getWave(3));
+        Assertions.assertTrue(stages.get(3).columnNames().contains("enc__seller_id__e1__mean"), plan::describe);
+        final List<String> deferred = plan.getDeferredColumns().stream().map(OutputColumn::getCanonicalName).toList();
+        Assertions.assertTrue(deferred.contains("enc__seller_id__e1__mean"), deferred::toString);
+        Assertions.assertFalse(plan.getBranchColumns(stages.get(3), 0).contains("enc__seller_id__e1__mean"), plan::describe);
+        // the final prelude (after the last wave) evaluates the compose rows; nothing of the lattice is prelude before it
+        Assertions.assertTrue(plan.getPreludeColumns(1).stream().map(OutputColumn::getCanonicalName).toList().contains("enc__seller_id__e1__mean"), plan::describe);
+        Assertions.assertFalse(plan.getPreludeColumns(0).stream().map(OutputColumn::getCanonicalName).toList().contains("enc__seller_id__e1__mean"), plan::describe);
+        // linear chain: 4 shuffles; wave DAG: one shuffle for the four keyed branches + row-id merge + Reshuffle pinning the ids
         Assertions.assertEquals(4, plan.getShuffleCount());
-        Assertions.assertEquals(4, plan.getDagShuffleEstimate());
-        Assertions.assertTrue(plan.describe().contains("waves=2 (dag shuffles~4)"), plan::describe);
-        Assertions.assertTrue(plan.describe().contains("deps=[0, 1, 2] wave=2"), plan::describe);
+        Assertions.assertEquals(3, plan.getDagShuffleEstimate());
+        Assertions.assertTrue(plan.describe().contains("waves=1 (dag shuffles~3)"), plan::describe);
+        Assertions.assertTrue(plan.describe().contains("deps=[] wave=1"), plan::describe);
         final com.google.gson.JsonObject json = plan.toJson();
-        Assertions.assertEquals(2, json.get("waves").getAsInt());
-        Assertions.assertEquals(4, json.get("dagShuffles").getAsInt());
+        Assertions.assertEquals(1, json.get("waves").getAsInt());
+        Assertions.assertEquals(3, json.get("dagShuffles").getAsInt());
         final com.google.gson.JsonObject last = json.getAsJsonArray("stages").get(3).getAsJsonObject();
-        Assertions.assertEquals(2, last.get("wave").getAsInt());
-        Assertions.assertEquals(3, last.getAsJsonArray("dependsOn").size());
+        Assertions.assertEquals(1, last.get("wave").getAsInt());
+        Assertions.assertEquals(0, last.getAsJsonArray("dependsOn").size());
+        // what the branches carry: the global level's branch reads nothing computed (its key is none, its target an
+        // input field), while the linear chain carries the earlier stages' columns into it
+        Assertions.assertEquals(1, last.get("carry").getAsInt(), plan::describe);
+        final com.google.gson.JsonObject global = json.getAsJsonArray("stages").get(2).getAsJsonObject();
+        Assertions.assertTrue(global.get("carry").getAsInt() < global.get("carryLinear").getAsInt(), plan::describe);
 
         // output.groupBy: the finalize stage depends on every stage; the merge of the wave before it folds
         // into its GroupByKey (no extra shuffle)
@@ -1204,9 +1213,12 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan.Stage groupBy = grouped.getStages().get(grouped.getStages().size() - 1);
         Assertions.assertEquals(FeaturePlan.StageKind.groupBy, groupBy.kind());
         Assertions.assertEquals(List.of(0, 1, 2, 3), groupBy.dependsOn(), grouped::describe);
-        Assertions.assertEquals(3, grouped.getWaves().size(), grouped::describe);
+        Assertions.assertEquals(2, grouped.getWaves().size(), grouped::describe);
         Assertions.assertEquals(5, grouped.getShuffleCount());
-        Assertions.assertEquals(5, grouped.getDagShuffleEstimate());
+        // pin + the four keyed branches + the finalize GroupByKey, which the merge rides (the final prelude — the
+        // deferred columns the wave completes — is evaluated by the grouped finalize on the merged rows)
+        Assertions.assertTrue(grouped.foldsIntoGroupBy(0), grouped::describe);
+        Assertions.assertEquals(3, grouped.getDagShuffleEstimate());
     }
 
     @Test
@@ -2674,6 +2686,49 @@ public class FeaturePlanCompilerTest {
             """;
 
     /**
+     * Liveness (engine doc §9.4.7): a keyed stage's shuffle carries only what it and its successors read. The
+     * distribution maps of a transitionStats chain are read by the composed map, which its readouts read — all
+     * deferred row columns — so in the wave engine no map rides another stage's GroupByKey, while the linear chain
+     * (which hosts the readouts in the last stage) carries them into every later keyed stage.
+     */
+    @Test
+    public void testLivenessProjectionAndCarry() {
+        final String transition = TRANSITION_BLOCK.replaceAll("(?m)^    ", "").replace("  - name: enc\n", "");
+        // declared before enc: the linear chain runs enc's global level (the share denominator) after the chain's levels
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("  - name: enc\n", transition + "  - name: enc\n"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final FeaturePlan.Stage global = plan.getStages().stream().filter(FeaturePlan.Stage::runsUnderSingleKey).findFirst().orElseThrow();
+        final List<String> linear = plan.getCarriedColumnsLinear(global);
+        Assertions.assertFalse(plan.mapColumns(linear).isEmpty(), () -> "the linear chain carries the level maps: " + linear);
+        Assertions.assertTrue(plan.mapColumns(plan.getCarriedColumns(global)).isEmpty(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "engine.rowWidth"), plan::describe);
+        // the readouts and the composed map are deferred: read by nobody, evaluated after the wave that completes the levels
+        final List<String> deferred = plan.getDeferredColumns().stream().map(OutputColumn::getCanonicalName).toList();
+        Assertions.assertTrue(deferred.containsAll(List.of("grade_next_to", "grade_next_to_good", "grade_next_to_fair")), deferred::toString);
+        // the level maps are live after the wave of the levels (the final prelude reads them) and dead after the finalize
+        final int levels = plan.getWave(plan.getStages().stream().filter(s -> s.blocks().contains("grade_next") && s.isKeyed()).mapToInt(FeaturePlan.Stage::index).max().orElseThrow()) - 1;
+        Assertions.assertTrue(plan.getLiveAfterWave(levels).stream().anyMatch(n -> n.endsWith("__dist")), plan::describe);
+        Assertions.assertTrue(plan.getOutputReads().stream().noneMatch(n -> n.endsWith("__dist")), plan::describe);
+        // what a stage reads: its keys, its columns' inputs and past inputs
+        final FeaturePlan.Stage seller = plan.getStages().stream().filter(s -> s.keys().equals(List.of("seller_id"))).findFirst().orElseThrow();
+        Assertions.assertTrue(plan.getStageReads(seller).contains("recent__e1"), plan::describe);
+        Assertions.assertFalse(plan.getLiveAfterWave(plan.getWave(seller.index()) - 1).contains("recent__e1"), "consumed inside its stage");
+        Assertions.assertTrue(plan.describe().contains("-- carry ("), plan::describe);
+        Assertions.assertTrue(plan.toJson().getAsJsonArray("stages").get(seller.index()).getAsJsonObject().has("carryLinear"));
+
+        // an emitted distribution lives to the output: a later single-stage wave (a context over a readout, which
+        // depends on every level) carries the map, and the hint names it
+        final String emitted = SPEC.replace("  - name: enc\n", transition.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [{toValueProb: good}, distribution]")
+                + "  - name: ctx\n    scope: context\n    context: session\n    inputs: [grade_next_to_good]\n    ops: [rank]\n  - name: enc\n");
+        final FeaturePlan wide = compile(SOURCES, emitted);
+        Assertions.assertFalse(wide.getDiagnostics().hasErrors(), wide::describe);
+        final FeaturePlan.Stage ctx = wide.getStages().stream().filter(s -> s.blocks().contains("ctx")).findFirst().orElseThrow();
+        Assertions.assertTrue(wide.getCarriedColumns(ctx).contains("grade_next_to"), wide::describe);
+        Assertions.assertTrue(wide.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("engine.rowWidth") && m.message().contains("grade_next_to") && m.message().contains("#" + ctx.index())), wide::describe);
+    }
+
+    /**
      * transitionStats is a desugaring: the previous value is a lag column of the entity, the statistic the expanding,
      * shrunk {@code distribution} of the field keyed on (entity, previous value) → (previous value) → global.
      */
@@ -3564,6 +3619,63 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("fit: {artifact: {uri: \"gs://bucket/feature\", refit: true}}", "fit: {mode: static}"))), "sequence.fit"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("- {type: rating, field: final_price, context: session, order: descending, as: pl, funcs: [mu, sigma]}",
                 "- {type: lag, fields: [final_price], k: 1}"))), "sequence.fit.ignored"));
+
+    private static final String RATING_PROB_BLOCK = """
+      - name: strength
+        scope: sequence
+        entity: seller
+        ops:
+          - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma]}
+      - name: contest
+        scope: context
+        context: session
+        ops:
+          - {type: ratingProb, field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma, beta: 4.2, as: pWin}
+    """;
+
+    /** ratingProb: the field is the strength, sigma the column of its uncertainty (a name, not a number), beta required. */
+    @Test
+    public void testRatingProbExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withBlocks(RATING_PROB_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn p = column(plan, "contest_pWin_ratingProb");
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), p.getFieldType().getType());
+        Assertions.assertEquals("strength_all_final_price_rating_mu", p.getCoordinates().get("field"));
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", p.getCoordinates().get("sigma"));
+        Assertions.assertEquals("4.2", p.getCoordinates().get("beta"));
+        Assertions.assertTrue(p.getInputs().containsAll(List.of("strength_all_final_price_rating_mu", "strength_all_final_price_rating_sigma", "session_id")), p::describe);
+        // as available as the rating it reads (the outcome's window shift), never more
+        Assertions.assertEquals(column(plan, "strength_all_final_price_rating_mu").getAvailableAt().describe(), p.getAvailableAt().describe(), p::describe);
+        // without sigma: the uncertainty is 0 (no coordinate); sigma as a number, an unknown or a non-numeric column, and a missing / non-positive beta are errors
+        final FeaturePlan plain = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma, ", "")));
+        Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
+        Assertions.assertNull(column(plain, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: 4"))), "context.ratingProb.sigma"));
+        // an unknown column is an unresolved reference of the block, like any op's field
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: nope"))), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: category"))), "context.ratingProb.sigma"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace(", beta: 4.2", ""))), "context.ratingProb.beta"));
+        // a sigma belongs to one strength: an op over several fields with one sigma is rejected (one op per field)
+        final FeaturePlan twoFields = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma:",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit], sigma:")));
+        Assertions.assertTrue(twoFields.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("context.ratingProb.sigma") && m.message().contains("one field")), twoFields::describe);
+        Assertions.assertFalse(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma,",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit],"))), "context.ratingProb.sigma"), "without a sigma several fields are fine");
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 0"))), "context.ratingProb.beta"));
+        // nullPolicy indicator: a row out of the contest is flagged like a softmax row
+        final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
+        Assertions.assertNotNull(indicator.getColumn("contest_pWin_ratingProb_isnull"), indicator::describe);
+        // block order does not matter: the sigma column of a block declared later is waited for, even when the field
+        // itself (an input) does not make the block wait
+        final String contest = RATING_PROB_BLOCK.substring(RATING_PROB_BLOCK.indexOf("  - name: contest"))
+                .replace("field: strength_all_final_price_rating_mu", "field: start_price");
+        final String strength = RATING_PROB_BLOCK.substring(0, RATING_PROB_BLOCK.indexOf("  - name: contest"));
+        final FeaturePlan reordered = compile(SOURCES, withBlocks(contest + strength));
+        Assertions.assertFalse(reordered.getDiagnostics().hasErrors(), reordered::describe);
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", column(reordered, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
+        // a column name as sigma belongs to ratingProb only: a rating's prior must still be a number
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("funcs: [mu, sigma]}", "funcs: [mu, sigma], sigma: wide}"))), "sigma.invalid"));
     }
 
     @Test

@@ -732,7 +732,7 @@ may be left unbounded:
 | `aggregate` moments / shape, same-event `regression`, `ewma` and the `exponential` / `fourier` dynamics | incrementally (evicting under `maxAge`) | none beyond the state |
 | `legendre` dynamics | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
-| `rating` (the entity rated from its contests: `context` = the contest, `field` = the outcome) | incrementally, one contest — the rows of a context group at one event time — at a time, over a **pool** of entities: the stage key is the global key, or the field of a reduced `$self` equality filter; no other window exists | one rating per player of the pool — per **member** when the op rates teams (`with: [<entity>, ...]`: the row is the block's entity plus other entities of the same row, its strength their sum, a contest's change shared among them by their part of the team's variance; readouts per member and for the team) —; the rows the window shift still holds back |
+| `rating` (the entity rated from its contests: `context` = the contest, `field` = the outcome) | incrementally, one contest — the rows of a context group at one event time — at a time, over a **pool** of entities: the stage key is the global key, or the field of a reduced `$self` equality filter; no other window exists | one rating per player of the pool — per **member** when the op rates teams (`with: [<entity>, ...]`: the row is the block's entity plus other entities of the same row, its strength their sum, a contest's change shared among them by their part of the team's variance; readouts per member — `mu` / `sigma` / `count` / `delta` / `deviation` (net of the prior) / `z` (standardised within the member's pool of rated players, whose moments the state keeps) — and for the team: `mu` / `sigma` / `count` (the contests this very team ran) / `deviation`) —; the rows the window shift still holds back |
 | `lag`, `delta`, `trend`, `fracdiff` without a `filter` | by re-reading a fixed tail | k (k + 1) events |
 | any op under `maxEvents`, without a `filter` | by re-reading | `maxEvents` events |
 | series readouts, `first / last`, lagged `regression`, `weightBy`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
@@ -878,7 +878,8 @@ under its own name (intermediate columns, most recent first) and then:
 
 - `transitionStats` is a **desugaring** into an expanding `encoding`: `stats: [distribution]` of the field keyed on
   the state — the lag path, `order` steps long — and shrunk along `(entity, state) → (state) → shorter states →
-  marginal` (the entity level only with `blend.perEntity`; `blend.priorWeight` is λ). `emit` is `{toValueProb: v}`
+  marginal` (the entity level only with `blend.perEntity`; `blend.priorWeight` is λ; back-off is the chain rule of
+  §5.3.1 — the effective leaf is the deepest level with rows, and leave-node-out starts from it). `emit` is `{toValueProb: v}`
   (a column `<name>_to_<v>`), `distribution` (the map `<name>_to`), or a readout of the map — `ownValueProb` /
   `surprisal` (the row's own value's share and its −ln: they read the row's value, so on an outcome field they
   are violations), `entropy`, `expected` (Σ v·p over an integer code) — each a row column over the map. The n-gram readout once planned for the
