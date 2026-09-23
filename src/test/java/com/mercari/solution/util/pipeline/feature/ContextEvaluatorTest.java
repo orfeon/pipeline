@@ -56,6 +56,16 @@ public class ContextEvaluatorTest {
         final java.util.List<java.util.Map<String, Object>> one = new java.util.ArrayList<>(java.util.List.of(row(30d, null)));
         plainEvaluator.evaluateColumn(plain, one);
         Assertions.assertEquals(1d, (Double) one.get(0).get("q"), 0d);
+        // a pure function of the group: the same rows in another arrival order read the same bits
+        final java.util.List<java.util.Map<String, Object>> forward = new java.util.ArrayList<>();
+        for (int i = 0; i < 12; i++) forward.add(row(0.1 * i * i + 1d / (i + 3), 0.37 * (i % 5) + 0.01 * i));
+        final java.util.List<java.util.Map<String, Object>> backward = new java.util.ArrayList<>();
+        for (final java.util.Map<String, Object> r : forward) backward.add(0, new java.util.HashMap<>(r));
+        evaluator.evaluateColumn(c, forward);
+        evaluator.evaluateColumn(c, backward);
+        for (int i = 0; i < forward.size(); i++) {
+            Assertions.assertEquals(forward.get(i).get("p"), backward.get(forward.size() - 1 - i).get("p"), "row " + i);
+        }
     }
 
     @Test

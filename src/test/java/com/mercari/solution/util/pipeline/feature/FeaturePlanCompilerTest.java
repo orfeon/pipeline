@@ -3558,13 +3558,24 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
         Assertions.assertNull(column(plain, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: 4"))), "context.ratingProb.sigma"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: nope"))), "context.ratingProb.sigma"));
+        // an unknown column is an unresolved reference of the block, like any op's field
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: nope"))), "reference.unresolved"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: category"))), "context.ratingProb.sigma"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace(", beta: 4.2", ""))), "context.ratingProb.beta"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 0"))), "context.ratingProb.beta"));
         // nullPolicy indicator: a row out of the contest is flagged like a softmax row
         final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
         Assertions.assertNotNull(indicator.getColumn("contest_pWin_ratingProb_isnull"), indicator::describe);
+        // block order does not matter: the sigma column of a block declared later is waited for, even when the field
+        // itself (an input) does not make the block wait
+        final String contest = RATING_PROB_BLOCK.substring(RATING_PROB_BLOCK.indexOf("  - name: contest"))
+                .replace("field: strength_all_final_price_rating_mu", "field: start_price");
+        final String strength = RATING_PROB_BLOCK.substring(0, RATING_PROB_BLOCK.indexOf("  - name: contest"));
+        final FeaturePlan reordered = compile(SOURCES, withBlocks(contest + strength));
+        Assertions.assertFalse(reordered.getDiagnostics().hasErrors(), reordered::describe);
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", column(reordered, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
+        // a column name as sigma belongs to ratingProb only: a rating's prior must still be a number
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("funcs: [mu, sigma]}", "funcs: [mu, sigma], sigma: wide}"))), "sigma.invalid"));
     }
 
     @Test

@@ -25,7 +25,7 @@ public final class OperatorCatalog {
     /**
      * @param baselineCallable the op may be called as a function from a {@code baselines[].expr}
      *                         ({@code share(1 / bid)}): it reads one value per row of the group and returns one
-     *                         number per row. An op that needs coordinates of its own (softmax, shuffle and the
+     *                         number per row. An op that needs coordinates of its own (softmax, ratingProb, shuffle and the
      *                         group solvers) is not callable that way — {@link ContextEvaluator} has no place to
      *                         take them from, so the compiler rejects the call instead (baselines.expr.op).
      */

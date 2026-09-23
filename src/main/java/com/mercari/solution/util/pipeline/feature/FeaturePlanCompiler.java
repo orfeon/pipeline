@@ -508,6 +508,8 @@ public final class FeaturePlanCompiler {
             }
             // the explanatory fields of a context residualize (a sequence regression's single series is op.against)
             refs.addAll(op.regressors);
+            // the uncertainty column of a ratingProb: it may come from a block declared after this one
+            if (op.sigmaField != null) refs.add(op.sigmaField);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {

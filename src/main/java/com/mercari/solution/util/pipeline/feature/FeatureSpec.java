@@ -1346,8 +1346,10 @@ public class FeatureSpec implements Serializable {
         op.context = Json.string(o, "context");
         op.order = Json.string(o, "order");
         op.mu = doubleOf(o, "mu", diagnostics, loc);
-        // sigma is a number (a rating's prior) or, for ratingProb, the name of the column holding each row's uncertainty
-        if (o.has("sigma") && o.get("sigma").isJsonPrimitive() && o.get("sigma").getAsJsonPrimitive().isString() && !isNumber(o.get("sigma").getAsString())) {
+        // sigma is a number (a rating's prior) or, for ratingProb only, the name of the column holding each row's
+        // uncertainty: any other op keeps the number check, so a rating's mistyped prior is reported, not defaulted
+        if ("ratingProb".equals(op.type) && o.has("sigma") && o.get("sigma").isJsonPrimitive()
+                && o.get("sigma").getAsJsonPrimitive().isString() && !isNumber(o.get("sigma").getAsString())) {
             op.sigmaField = o.get("sigma").getAsString();
         } else {
             op.sigma = doubleOf(o, "sigma", diagnostics, loc);
@@ -1427,7 +1429,7 @@ public class FeatureSpec implements Serializable {
         return op;
     }
 
-    /** A numeric parameter as a Double: null when absent or not a number (reported as {@code <key>.invalid}, like {@link #longOf}). */
+    /** Whether a text parameter reads as a number (the way {@link #doubleOf} would parse it). */
     private static boolean isNumber(final String text) {
         try {
             Double.parseDouble(text.trim());
@@ -1437,6 +1439,7 @@ public class FeatureSpec implements Serializable {
         }
     }
 
+    /** A numeric parameter as a Double: null when absent or not a number (reported as {@code <key>.invalid}, like {@link #longOf}). */
     private static Double doubleOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
         if (!o.has(key) || o.get(key).isJsonNull()) return null;
         final JsonElement e = o.get(key);

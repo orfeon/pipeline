@@ -47,7 +47,7 @@ not expand because another block failed).
 | `contexts.invalid` / `contexts.duplicate` | error | same for contexts |
 | `baselines.invalid` | error | each baseline needs `name` and `expr` |
 | `baselines.context` | error | the baseline's `context` is unknown |
-| `baselines.expr.op` | error | the baseline expression calls a context op that cannot be called that way (`softmax`, `residualize`, `harville`, `shuffle` take parameters of their own — declare them as ops of a context block), or calls one without naming the `context` it is computed over |
+| `baselines.expr.op` | error | the baseline expression calls a context op that cannot be called that way (`softmax`, `ratingProb`, `residualize`, `harville`, `shuffle` take parameters of their own — declare them as ops of a context block), or calls one without naming the `context` it is computed over |
 | `baselines.declaredMarket` | error | a baseline reads a `market` field with `evidence: declared`; baselines must be time-consistent (`measured`, or `allowDeclared`) |
 | `fit.mode` | error | `expanding`, `static`, `fold` or `forward` |
 | `fit.blocks` / `fit.blocks.bucket` / `fit.blocks.size` / `fit.blocks.field` / `fit.minBlocks` | error | forward blocks: `{bucket: year \| quarter \| month \| week \| day}` or `{size: <positive duration>}` (not both); `field` must be `time.field`; `minBlocks` ≥ 1 |

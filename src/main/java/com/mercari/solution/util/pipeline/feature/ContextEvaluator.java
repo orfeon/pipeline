@@ -270,35 +270,47 @@ public class ContextEvaluator implements Serializable {
      * over the rows taking part (a softmax whose temperature is the contest's own scale, so the same gap in
      * {@code mu} means less in a large or uncertain field). A row without a finite {@code mu} (or {@code sigma}, when
      * a column is named) is null and out of the contest; without a {@code sigma} column the uncertainty is 0. A
-     * contest of one row reads 1. Strengths are shifted by the group maximum for stability.
+     * contest of one row reads 1. Strengths are shifted by the group maximum for stability, and both sums are taken
+     * in the order of their terms (like {@link GroupOps}), so the result does not depend on how the group arrives.
      */
     static void ratingProb(final String name, final String field, final RatingProb plan, final List<Map<String, Object>> rows) {
         final int n = rows.size();
         final double[] mus = new double[n];
         final boolean[] active = new boolean[n];
-        double c2 = 0d, max = Double.NEGATIVE_INFINITY;
+        final double[] variances = new double[n];
+        final double beta2 = plan.beta() * plan.beta();
+        int m = 0;
+        double max = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
             final Double mu = FeatureValues.toDouble(row.get(field));
-            if (mu == null || Double.isNaN(mu) || Double.isInfinite(mu)) continue;
+            if (mu == null || !Double.isFinite(mu)) continue;
             double sigma = 0d;
             if (plan.sigma() != null) {
                 final Double s = FeatureValues.toDouble(row.get(plan.sigma()));
-                if (s == null || Double.isNaN(s) || Double.isInfinite(s) || s < 0) continue;
+                if (s == null || !Double.isFinite(s) || s < 0) continue;
                 sigma = s;
             }
             mus[i] = mu;
             active[i] = true;
-            c2 += sigma * sigma + plan.beta() * plan.beta();
+            variances[m++] = sigma * sigma + beta2;
             max = Math.max(max, mu);
         }
-        final double c = Math.sqrt(c2);
-        double denominator = 0d;
-        for (int i = 0; i < n; i++) if (active[i]) denominator += Math.exp((mus[i] - max) / c);
+        final double c = Math.sqrt(sortedSum(variances, m));
+        final double[] strengths = new double[n], terms = new double[m];
+        for (int i = 0, k = 0; i < n; i++) if (active[i]) terms[k++] = strengths[i] = Math.exp((mus[i] - max) / c);
+        final double denominator = sortedSum(terms, m);
         for (int i = 0; i < n; i++) {
-            final Map<String, Object> row = rows.get(i);
-            row.put(name, !active[i] || !(denominator > 0) ? null : Math.exp((mus[i] - max) / c) / denominator);
+            rows.get(i).put(name, !active[i] || !(denominator > 0) ? null : strengths[i] / denominator);
         }
+    }
+
+    /** The sum of the first {@code m} values, taken in ascending order (the array is sorted in place). */
+    private static double sortedSum(final double[] values, final int m) {
+        Arrays.sort(values, 0, m);
+        double sum = 0d;
+        for (int i = 0; i < m; i++) sum += values[i];
+        return sum;
     }
 
     /**
