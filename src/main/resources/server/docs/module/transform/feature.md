@@ -506,7 +506,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     need as a row `expr` over the member columns (the `sigma` of a subset is the root of the sum of the squares);
     the identifiability note above holds between components too — `seller` and `sellerCategory` can shift against
     each other by category — so read them in sums or relative to the contest. The `count` of a pairing member
-    (`sellerAgent`) is how many contests that pairing has run.
+    (`sellerAgent`) is how many contests that pairing has run. A component's keys are a member's keys: a row
+    with a null `category` joins no contest at all (see above), so the seller's overall level and the agent no
+    longer learn from it either — add a component only where its keys are always present.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
   twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
@@ -973,9 +975,11 @@ is strictly past, leak-checked and windowless like any expanding encoding, and a
 `lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
 entities: `(state) → … → marginal`. The chain backs off the way every chain lattice does (*Shrinkage* below):
 a row reads from the **deepest level of its chain that has rows** — its effective leaf — and leave-node-out
-(always on here) takes *that* level's rows out of the coarser levels before they are blended in. An entity's first
-transition out of a state has an empty `(entity, state)` level, so it reads the pooled `(state)` level, shrunk toward
-the marginal net of that state's rows; a state never seen at all reads the marginal. Recompute it with the declared
+(always on here) takes *that* level's rows out of the coarser levels before they are blended in. With
+`blend.perEntity`, an entity's first transition out of a state has an empty `(entity, state)` level, so it reads the
+pooled `(state)` level, shrunk toward its coarser levels net of that state's rows; a state never seen before reads the
+deepest coarser level that has rows — a shorter state when `order` > 1, the marginal at the end; an entity's first
+event has no previous value, so its state levels are empty and it reads the marginal. Recompute it with the declared
 leaf and the backed-off rows come out a few percent off — the effective leaf is the reference.
 `{toValueProb: v}` emits the probability of one next value (0 when the value is absent from the map, null when nothing
 is known yet) — `v` is written as the field holds it, a number for an integer code
@@ -989,11 +993,13 @@ available as the field: on an **outcome** field they are availability violations
 target or a label, not as a feature (`transitionStats.emit.own` hint) — while `entropy`, `expected` and
 `toValueProb` read the distribution only. **What the map holds.** Its categories are the values counted at any
 level of the row's chain before the row (strictly past, leave-node-out applied) — it is built per row, not from the
-whole input, and it never holds a zero entry (the blend weight is strictly between 0 and 1). So `ownValueProb` is
-**0 when the row's own value is absent** from the map — a value the chain had never seen up to that row, an
-entity's first appearance in the field — and `surprisal` is then null (no `−ln 0`); both, like the other readouts, are
-**null when nothing is known yet** (the map is empty: the entity's first event has no previous value and no transition
-was counted anywhere). It is
+whole input, and it never holds a zero entry (the blend weight is strictly between 0 and 1). The marginal counts
+every earlier row's value, an entity's first event included, so the map holds every value the field took before the
+row. So `ownValueProb` is **0 when the row's own value is absent** from the map — the value's first appearance in the
+field (no row of any entity held it before) — and `surprisal` is then null (no `−ln 0`); both are null when the row's
+own value is null, and they, like the other readouts, are **null when nothing is known yet** (the map is empty: no
+earlier row held a value of the field at all — an entity's first event after other rows reads the marginal, not
+null). It is
 always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
 outcome the usual window shift applies to the lag and to the counted transitions alike.
 

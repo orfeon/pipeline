@@ -337,10 +337,13 @@ priorWeight: 20}` (optional; absent or `perEntity: false` = transitions pooled o
 the state and shrunk along `(entity, state) → (state) → shorter states → marginal` with `priorWeight` as the
 pseudo-count — same values, same leak checks (`transitionStats.expansion` info shows the expansion). Back-off reads
 the deepest level of the chain that has rows (the effective leaf; leave-node-out takes that level's rows out of the
-coarser ones): an entity's first transition out of a state reads the pooled state level, a first event the marginal.
-The map is built per row from the values counted before it and holds no zero entry, so `ownValueProb` /
-`toValueProb` = 0 means the value is absent (never seen up to that row — an entity's first appearance in the field;
-`surprisal` is then null), and every readout is null when nothing is known yet (the map is empty). Intermediate columns
+coarser ones): with `perEntity`, an entity's first transition out of a state reads the pooled state level; an unseen
+state reads a shorter state (`order` > 1) or the marginal; a first event reads the marginal. The map is built per row
+from the values counted before it (the marginal counts every earlier row, first events included) and holds no zero
+entry, so `ownValueProb` / `toValueProb` = 0 means the value is absent (no row of any entity held it before — the
+value's first appearance in the field; `surprisal` is then null), `ownValueProb` / `surprisal` are null when the row's
+own value is null, and every readout is null when nothing is known yet (the map is empty: no earlier row held a value
+at all). Intermediate columns
 `<name>_all_prev_lag<i>` hold the state.
 
 ### `type: spectralEmbedding` (static, or forward per time block)
