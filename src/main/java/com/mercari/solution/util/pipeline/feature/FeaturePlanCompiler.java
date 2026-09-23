@@ -97,8 +97,40 @@ public final class FeaturePlanCompiler {
         final Schema outputSchema = buildSchema();
         final String hash = hash(sourcesDocument, parameters);
         final String outputHash = outputHash(hash);
-        return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits,
+        final FeaturePlan plan = new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits,
                 new ArrayList<>(minIntervalAudits.values()));
+        hintWideRows(plan);
+        return plan;
+    }
+
+    /**
+     * One hint per keyed stage whose grouped rows carry a map column in the wave engine (engine doc §9.4.7): the
+     * audit's row_count bounds a hot key's spill only per row, and a map over many categories is a wide row. The
+     * engine drops a column once its last reader has run (a readout is evaluated as early as its inputs allow), so
+     * what is listed is read by this or a later stage, or emitted.
+     */
+    private void hintWideRows(final FeaturePlan plan) {
+        for (final FeaturePlan.Stage s : plan.getStages()) {
+            if (!s.isKeyed() || s.kind() == FeaturePlan.StageKind.groupBy) continue;
+            // the carry of the engine that runs: the wave engine's branches, or the linear chain (parallelWaves off, or no
+            // wave to branch) - the chain hosts the deferred readouts in the last stage, so a consumed map rides every
+            // keyed stage before it
+            final boolean waves = plan.branchesWaves();
+            final List<String> maps = plan.mapColumns(waves ? plan.getCarriedColumns(s) : plan.getCarriedColumnsLinear(s));
+            if (maps.isEmpty()) continue;
+            final List<String> blocks = new ArrayList<>();
+            for (final String name : maps) {
+                final String block = columnsByCanonical.get(name).block;
+                if (!blocks.contains(block)) blocks.add(block);
+            }
+            diagnostics.hint("engine.rowWidth", "features." + String.join(",", blocks),
+                    "stage #" + s.index() + " groups rows that carry the map column(s) " + maps + " (read by it or a later stage, or emitted"
+                            + (waves ? "" : "; the linear chain evaluates the readouts in the last stage, so a consumed map rides every keyed stage before it")
+                            + "): a map over many categories makes a wide row, and a hot key's spill grows with the row width times its row count"
+                            + " (the audit's row_count bounds the count only); " + (waves ? "a map that only its readouts read is dropped before this stage"
+                            + " - emit the readouts rather than the distribution, or place the block so that its map is consumed before the widest key"
+                            : "with engine.parallelWaves the wave engine evaluates the readouts as soon as the levels are merged and drops the map"));
+        }
     }
 
     /**
@@ -1690,6 +1722,8 @@ public final class FeaturePlanCompiler {
             }
             shared.put("teamPool", entity.name());
             shared.put("teamMembers", Rating.encodeMembers(members));
+            // the contests per team are one entry per distinct team for the whole replay: kept only when read
+            if (op.team.contains("count")) shared.put("teamCounts", "true");
         }
 
         // `as` names the field segment; without it the op is part of the name (the outcome field may feed other ops)
@@ -1745,7 +1779,8 @@ public final class FeaturePlanCompiler {
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
                     + " (a well-known member hardly moves, an uncertain one takes the update). The members' levels are identified up to a shift between the"
-                    + " entities - read a member relative to its contest (a context block over the column), or the team's sum (team: [mu, sigma])");
+                    + " entities - read a member relative to its contest (a context block over the column) or to its pool (func z), or the team's sum"
+                    + " (team: [mu, sigma, count, deviation])");
         }
     }
 
@@ -1822,7 +1857,8 @@ public final class FeaturePlanCompiler {
         for (final String func : op.team) {
             if (!Rating.TEAM_FUNCS.contains(func)) {
                 diagnostics.error("sequence.rating.with", loc, "unknown team readout: " + func + " (available: " + String.join(" | ", Rating.TEAM_FUNCS)
-                        + " - mu is the sum of the members' ratings, sigma the uncertainty of that sum)");
+                        + " - mu is the sum of the members' ratings, sigma the uncertainty of that sum, count the contests this very team ran,"
+                        + " deviation the sum net of the members' priors)");
                 valid = false;
             }
         }
@@ -2828,7 +2864,8 @@ public final class FeaturePlanCompiler {
         diagnostics.info("transitionStats.expansion", loc, "transitionStats is the expanding distribution of " + def.sequenceField + " keyed on "
                 + leaf + " (the previous " + (order == 1 ? "value" : order + " values") + " of entity " + def.sequenceEntity + (perEntity ? ", per entity" : ", pooled over entities")
                 + "), shrunk along " + String.join(" -> ", chain) + " with pseudo-count " + priorWeight
-                + " (Dirichlet-Multinomial); an event without a previous value reads the coarser levels");
+                + " (Dirichlet-Multinomial); a row reads from the deepest level of the chain that has rows (the effective leaf), leave-node-out from that level;"
+                + " an event without a previous value reads the coarser levels");
     }
 
     /**
@@ -5116,14 +5153,34 @@ public final class FeaturePlanCompiler {
         }
 
         List<FeaturePlan.Stage> build() {
-            // row columns nobody else reads: the last stage (no shuffle either way)
+            // row columns nobody else reads: the last stage (no shuffle either way) for the linear chain — and
+            // DEFERRED for the wave engine, which evaluates them on the first wave input that carries their inputs
+            // (FeaturePlan.getPreludeColumns) instead of inside the hosting stage: they are no edge of the DAG
+            // (hosting them would chain the last stage after every stage they read) and no branch evaluates them.
+            // A reader of a lookup fit is not deferred: its lambdas / artifact live in the fit stage it is placed in.
             if (slots.isEmpty() && !rowEarliest.isEmpty()) slots.add(new Slot(FeaturePlan.StageKind.row, List.of()));
+            final Set<String> placed = new HashSet<>(stageOf.keySet());
             for (final OutputColumn c : columns) {
                 if (rowEarliest.containsKey(c.canonicalName) && !stageOf.containsKey(c.canonicalName)) placeRow(c.canonicalName, slots.size() - 1);
             }
+            final Set<String> deferred = new HashSet<>();
+            for (final String name : stageOf.keySet()) {
+                final OutputColumn c = columnsByCanonical.get(name);
+                if (placed.contains(name) || readsLookupFit(c)) continue;
+                c.deferred = true;
+                deferred.add(name);
+            }
             final List<FeaturePlan.Stage> stages = new ArrayList<>();
-            for (final Slot slot : slots) stages.add(slot.build(stages.size(), dependsOn(slot, stages.size())));
+            for (final Slot slot : slots) stages.add(slot.build(stages.size(), dependsOn(slot, stages.size(), deferred)));
             return stages;
+        }
+
+        private boolean readsLookupFit(final OutputColumn r) {
+            for (final String dep : r.inputs) {
+                final OutputColumn d = columnsByCanonical.get(dep);
+                if (d != null && FitMode.isLookupToken(d.coordinates.get("fit"))) return true;
+            }
+            return false;
         }
 
         /**
@@ -5131,12 +5188,13 @@ public final class FeaturePlanCompiler {
          * DAG). A row column is not a node: it is followed through to its own dependencies, because the linear chain
          * places it in its first consumer's stage and carries the value forward, while a branch evaluating the same
          * columns from the stage input would simply recompute it. Input fields have no stage; a dependency inside
-         * the same stage is not an edge.
+         * the same stage is not an edge. A deferred row column (output-only, evaluated on the wave inputs) is no
+         * edge either: nothing in the stage reads it.
          */
-        private List<Integer> dependsOn(final Slot slot, final int index) {
+        private List<Integer> dependsOn(final Slot slot, final int index, final Set<String> deferred) {
             final TreeSet<Integer> deps = new TreeSet<>();
             final Set<String> visited = new HashSet<>();
-            for (final String name : slot.names) collectDeps(name, index, deps, visited);
+            for (final String name : slot.names) if (!deferred.contains(name)) collectDeps(name, index, deps, visited);
             return List.copyOf(deps);
         }
 

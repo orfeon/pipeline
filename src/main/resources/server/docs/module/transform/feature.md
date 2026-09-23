@@ -364,9 +364,14 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
   that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
   constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` only; the period is wall time.
-- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
-  (the rating's change in its last contest, null before the first). An entity never rated reads the prior
-  (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
+- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far), `delta`
+  (the rating's change in its last contest, null before the first), `deviation` (`mu` net of the prior: what the
+  contests added, 0 before the first) and `z` (`mu` standardised against the mean and sd of `mu` over the
+  **pool's rated players** — the entity's players rated so far, one pool per `$self` filter value and, in a team,
+  per member entity; null until two players with different ratings are known). `z` reads a level free of the
+  pool's own scale and shift, which is what makes a member of a team comparable in itself (below). An entity never
+  rated reads the prior (`count` 0, `deviation` 0, `z` at the prior's place), a row without the entity key reads null.
+  Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
 - **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
   window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
@@ -422,7 +427,15 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   stretch out of the training window, or read the rating relative to its contest with a **scale-free** context
   op over it (`zscore`, `rank`): a `gapToBest` is in `mu` units, so it drifts with the spread exactly like `mu`
   itself, and a contest whose players are all still at the prior has no spread at all (`zscore` reads null
-  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
+  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool. The `z` func
+  is the pool-wide form of that reading: `mu` standardised over the pool's rated players, so the warm-up's
+  growing spread cancels out of it (null until two players with different ratings are rated). At the end of a
+  pool's replay the run log prints, per rating op, `rating state of Stage<N>_sequence key=<pool> after the
+  replay: <block>_<window>_<segment>: pool <entity>: players=<n> contests/player median=<m> max=<k> mu
+  mean=<..> sd=<..>` — one entry per member entity of a team, joined by `; ` (`pool <players>` for a rating
+  without a team) — which says how warm each pool got over the input (the state as the pool's last row read
+  it: the contests the window shift still held back are not in it): a median of a few contests per player
+  means the pool is still near its prior, and a team's member pools warm up at different speeds.
 - **Teams (`with`).** A rating gives the whole result of a row to the one entity it rates, so an entity that
   always appears in company — an agent selling for sellers, a driver in a car — is rated for the company it
   keeps: its rating is mostly theirs. `with` rates the row as a **team** instead, the block's entity together
@@ -444,10 +457,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
           as: duo                                     # required with a team
           with: [{entity: agent, mu: 0, sigma: 4}]    # or just [agent]: the op's prior and drift
           funcs: [mu, sigma, count]                   # read for every member
-          team: [mu, sigma]                           # the row's whole strength (optional)
+          team: [mu, sigma, count]                    # the row's whole strength (optional); count = this pairing's contests
   # skill_all_duo_mu / _sigma / _count              the seller — the names of a rating without a team
   # skill_all_duo_agent_mu / _sigma / _count        the agent
-  # skill_all_duo_team_mu / _sigma                  seller + agent
+  # skill_all_duo_team_mu / _sigma / _count         seller + agent
   ```
 
   The team's strength is the sum of its members' (`mu = Σ mu_j`, `sigma² = Σ sigma_j²`, the noise `beta` once per
@@ -460,17 +473,59 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     that is an *effect on top of* the rated player, declare `mu: 0` and a `sigma` the size of that effect: `sigma`
     is what decides the shares (above: the seller takes `8.33² / (8.33² + 4²)` = 81% of every change while both
     are new).
-  - **Read a member relative to its contest, or read the team.** Only the sum is identified — every seller up
-    and every agent down by the same amount changes no expectation — so the members' levels can shift against
-    each other over a long replay. `team: [mu, sigma]` is what the contests pin down ("this seller with this
-    agent"); a member's `mu` is comparable among the members of its entity at one time: feed it to a context
-    block (`zscore`, `gapToBest`).
+  - **Read a member relative to its contest or to its pool, or read the team.** Only the sum is identified —
+    every seller up and every agent down by the same amount changes no expectation — so the members' levels can
+    shift against each other over a long replay. `team: [mu, sigma]` is what the contests pin down ("this seller
+    with this agent"), `team: [deviation]` the same net of the priors, and `team: [count]` how many contests this
+    exact team has run (a pairing's experience); a member's `mu` is comparable among the members of its entity
+    at one time: feed it to a context block (`zscore`, `gapToBest`), or read `z` — `mu` standardised within the
+    member's pool of rated players, which is that comparison without the contest (a pool's shift and scale
+    cancel out of it) — and `deviation`, what the contests added to the member's prior.
   - A row without one of the members' keys joins no contest and reads null for that member and for the team;
     its other members still read. A member never rated reads its prior, so a known seller with a new agent
     reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its
     shares. The rows of one and the same team are not compared with each other.
   - `plackettLuce` / `bradleyTerry` only: `elo` keeps no variance to share by. The state, the stage key (global,
-    or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member.
+    or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member — and,
+    only when `team: [count]` is read, one counter per distinct team (every pairing the pool has seen).
+  - **Components of one entity.** A member is any `entities[].name`, and an entity may take a composite key —
+    so the members of a team can be *parts of the rated entity itself*: its level in this category, its pairing
+    with this agent. The contest then estimates an overall level plus condition-specific offsets in one model,
+    the random-effects decomposition of a mixed model:
+
+    ```yaml
+    entities:
+      - {name: seller,         keys: [seller_id]}
+      - {name: sellerCategory, keys: [seller_id, category]}     # the seller in this category
+      - {name: sellerAgent,    keys: [seller_id, agent_id]}     # this seller with this agent
+      - {name: agent,          keys: [agent_id]}
+    features:
+      - name: skill
+        scope: sequence
+        entity: seller
+        ops:
+          - type: rating
+            field: final_price
+            context: session
+            order: descending
+            as: parts
+            with: [{entity: agent, mu: 0, sigma: 4}, {entity: sellerCategory, mu: 0, sigma: 2},
+                   {entity: sellerAgent, mu: 0, sigma: 1.5}]
+            funcs: [mu, sigma, count]
+            team: [mu, sigma]
+      - name: skill_here                                          # the seller as it stands in this category
+        scope: row
+        expr: "skill_all_parts_mu + skill_all_parts_sellerCategory_mu"
+    ```
+
+    A component's prior `sigma` is the size you expect that effect to be; it fixes the component's share of every
+    change, so a component given too wide a prior absorbs what the others should explain. Sum the components you
+    need as a row `expr` over the member columns (the `sigma` of a subset is the root of the sum of the squares);
+    the identifiability note above holds between components too — `seller` and `sellerCategory` can shift against
+    each other by category — so read them in sums or relative to the contest. The `count` of a pairing member
+    (`sellerAgent`) is how many contests that pairing has run. A component's keys are a member's keys: a row
+    with a null `category` joins no contest at all (see above), so the seller's overall level and the agent no
+    longer learn from it either — add a component only where its keys are always present.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
   twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
@@ -935,18 +990,33 @@ state and shrunk along the chain `(entity, state) → (state) → shorter states
 case of *Shrinkage*, `p(level) = (counts + λ · p(parent)) / (n + λ)` with `λ = blend.priorWeight` (default 20) — so it
 is strictly past, leak-checked and windowless like any expanding encoding, and a row reads exactly what the explicit
 `lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
-entities: `(state) → … → marginal`. `{toValueProb: v}` emits the probability of one next value (0 when it has no
-mass, null when nothing is known yet) — `v` is written as the field holds it, a number for an integer code
+entities: `(state) → … → marginal`. The chain backs off the way every chain lattice does (*Shrinkage* below):
+a row reads from the **deepest level of its chain that has rows** — its effective leaf — and leave-node-out
+(always on here) takes *that* level's rows out of the coarser levels before they are blended in. With
+`blend.perEntity`, an entity's first transition out of a state has an empty `(entity, state)` level, so it reads the
+pooled `(state)` level, shrunk toward its coarser levels net of that state's rows; a state never seen before reads the
+deepest coarser level that has rows — a shorter state when `order` > 1, the marginal at the end; an entity's first
+event has no previous value, so its state levels are empty and it reads the marginal. Recompute it with the declared
+leaf and the backed-off rows come out a few percent off — the effective leaf is the reference.
+`{toValueProb: v}` emits the probability of one next value (0 when the value is absent from the map, null when nothing
+is known yet) — `v` is written as the field holds it, a number for an integer code
 (`{toValueProb: 0}` → `<name>_to_0`); `distribution` emits the whole map. Four **readouts** of the distribution
 take one column each, `<name>_<readout>`: `ownValueProb` is the probability the state gave to *the row's own
-value* — how usual this step was for the entity, without listing every value — and `surprisal` its `−ln`
-(null when the value has no mass); `entropy` is `−Σ p ln p` of the map (how undecided the state is); `expected`
-is `Σ v · p`, the probability-weighted mean of an integer code (an ordered band, a bin index: the field must be
-numeric, `transitionStats.emit`). `ownValueProb` and `surprisal` read the row's own value, so they are as
+value* — how usual this step was for the entity, without listing every value — and `surprisal` its `−ln`;
+`entropy` is `−Σ p ln p` of the map (how undecided the state is); `expected`
+is `Σ v · p`, the probability-weighted mean of an integer code (an ordered band, a bin index: the field must be an
+integer type — a string field, even one holding digits, is a `transitionStats.emit` error). `ownValueProb` and `surprisal` read the row's own value, so they are as
 available as the field: on an **outcome** field they are availability violations — usable as an intermediate
 target or a label, not as a feature (`transitionStats.emit.own` hint) — while `entropy`, `expected` and
-`toValueProb` read the distribution only. All are null when nothing is known yet. An entity's first event has no previous
-value, so its state levels are empty and it reads the marginal; a state never seen before reads its parent. It is
+`toValueProb` read the distribution only. **What the map holds.** Its categories are the values counted at any
+level of the row's chain before the row (strictly past, leave-node-out applied) — it is built per row, not from the
+whole input, and it never holds a zero entry (the blend weight is strictly between 0 and 1). The marginal counts
+every earlier row's value, an entity's first event included, so the map holds every value the field took before the
+row. So `ownValueProb` is **0 when the row's own value is absent** from the map — the value's first appearance in the
+field (no row of any entity held it before) — and `surprisal` is then null (no `−ln 0`); both are null when the row's
+own value is null, and they, like the other readouts, are **null when nothing is known yet** (the map is empty: no
+earlier row held a value of the field at all — an entity's first event after other rows reads the marginal, not
+null). It is
 always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
 outcome the usual window shift applies to the lag and to the counted transitions alike.
 
@@ -1848,9 +1918,24 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   concurrent bundle owns one), which is why the default divides the heap by the core count. The hot-key
   audit queries in the validate / dry-run report (above) give the per-key row counts to size that against.
   Every spilled key logs `keyed spill sorter Stage<N>_<kind> key=<key>: <chunks> chunk(s) / <MB> MB on disk +
-  <rows> rows in memory; live spill on this worker <MB> MB (peak <MB> MB)` — the peak over a job is the
-  worker disk the keyed stages need. Columns that read the whole history of a key are reported at compile
+  <rows> rows in memory (~<KB> KB per encoded row); live spill on this worker <MB> MB (peak <MB> MB)` — the peak
+  over a job is the worker disk the keyed stages need — and each stage logs once the encoded width of its rows
+  from a sample. Columns that read the whole history of a key are reported at compile
   time by the `sequence.window.unbounded` hint (with the fields they keep).
+- **What a stage's rows carry.** A key's spill is its row count times the row width, and the rows a keyed
+  stage groups carry only the computed columns that stage or a later one still reads (or the output emits):
+  a column is dropped from the rows once its last reader has run, and a row column nobody reads (a readout
+  of a distribution map, a residual, an `_isnull` flag) is evaluated as soon as the rows carry its inputs,
+  never inside a keyed stage. So a `transitionStats` chain that emits only its readouts leaves its
+  per-level maps behind right after the wave that completes them; an emitted `distribution` rides to the
+  output. The plan report's `-- carry` section lists, per keyed stage, the columns its rows carry in the wave
+  engine and in the linear chain (`engine.parallelWaves: false` hosts those row columns in the last stage,
+  so a consumed map rides every keyed stage before it), naming the map columns; the `engine.rowWidth` hint
+  points at a keyed stage whose rows still carry a map in the engine that will run (the waves, or the chain
+  when `parallelWaves` is off or no wave has two stages) — a map over many categories makes a wide row, which
+  the audit's row counts do not show. Input fields always ride (`output.passThrough` decides only what is
+  emitted). When the last wave folds into the `output.groupBy` finalize, the grouped rows also keep the inputs of
+  the row columns that finalize still evaluates.
 
 ## Limitations (current engine)
 

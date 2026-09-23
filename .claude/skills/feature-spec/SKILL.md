@@ -387,8 +387,22 @@ not alter values).
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
-  relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
-  member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+  relative to its contest (a context `zscore` / `gapToBest`) or to its pool (`funcs: [z]`: standardised over
+  the agents rated so far), or the row's whole strength `team: [mu]`; `team: [count]` is how many contests
+  this exact pairing ran. The
+  member's `sigma` is a modelling choice: it decides how much of every change that member takes. The run log
+  prints one `rating state of ... after the replay: <block>_<window>_<as>: pool <entity>: players=n
+  contests/player median=m ... mu mean= sd=` line per rating op and key, one `pool` entry per member entity —
+  the warm-up cue (a pool of few contests per player is still near its prior).
+- **`rating` split into components** (a seller's overall level, its level in this category, its pairing with
+  this agent): members are any other `entities[].name`, and entities take composite keys, so
+  `with: [{entity: sellerCategory, mu: 0, sigma: 2}, {entity: sellerAgent, mu: 0, sigma: 1.5}, ...]` with
+  `entities: [{name: sellerCategory, keys: [seller_id, category]}, ...]` rates the row as the sum of those components (a random-effects
+  decomposition in one contest model). Sum the components you need as a row `expr` over the member columns
+  (`sigma` of a subset = the root of the sum of squares); the `count` of a pairing member is how many contests
+  that pairing has run. Only sums are identified, so read components in sums or relative to the contest. A row
+  with a null key in any component (no `category`) joins no contest at all — not even for the seller's overall
+  level — so add a component only where its keys are always present.
 - **A rating as a probability**: a context `{type: ratingProb, field: <rating>_mu, sigma: <rating>_sigma, beta: <the
   rating's beta>}` reads the Plackett–Luce win probability the rating model gives each row of its group —
   on the scale of a market share, so `ln(p_rating / p_market)` is the rating's disagreement with the market,

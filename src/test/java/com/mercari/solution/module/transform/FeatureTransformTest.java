@@ -1257,20 +1257,82 @@ public class FeatureTransformTest {
 
     @Test
     public void testParallelWavesRowIdMerge() throws java.io.IOException {
-        // shrinkage lattice: the seller / global levels and the session context branch; the category stage
-        // (a keyed stage hosting the compose rows) follows, so the merge is a row-id GroupByKey
+        // shrinkage lattice: the seller / global / category levels and the session context are one wave; the compose
+        // rows the category stage hosts are deferred (nobody reads them), so the merge is a row-id GroupByKey and
+        // the compose rows are evaluated on the merged rows (Final_Rows) - the level statistics they read leave the
+        // rows only after that (engine doc §9.4.7)
         final String lattice = FEATURE_CONFIG
                 .replace("- {expr: \"sold >= 1\", stats: [mean]}",
                         "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
                 .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]");
-        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge"), List.of("Wave1_FanIn"));
+        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge", "Final_Rows"), List.of("Wave1_FanIn", "Wave2"));
+    }
+
+    @Test
+    public void testParallelWavesProjectDistributionMaps() throws java.io.IOException {
+        // transitionStats chains (per entity and pooled) next to the fold-into-context wave: the level maps are read
+        // by the composed maps only (deferred, with their readouts), so no branch's GroupByKey carries them and the
+        // merged rows drop them once the readouts ran; an emitted distribution (qty_next_to) rides to the output
+        final String blocks = """
+                    - name: grade_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      emit: [{toValueProb: good}, ownValueProb, surprisal, entropy]
+                      blend: {priorWeight: 2}
+                    - name: qty_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: quantity}
+                      emit: [distribution, expected, entropy]
+                      blend: {perEntity: false, priorWeight: 2}
+                """;
+        // (the chains' level stages join the second wave, so both waves merge by row id and the readouts run last)
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n"), 6,
+                List.of("_Partial", "Wave1_Merge", "Wave2_Merge", "Final_Rows"), List.of("Wave1_FanIn"));
+    }
+
+    @Test
+    public void testParallelWavesRowIdMergeFoldIntoGroupBy() throws java.io.IOException {
+        // the lattice of testParallelWavesRowIdMerge under output.groupBy: the one wave folds into the grouped finalize,
+        // which evaluates the deferred compose / deviation rows on the merged rows - so Finalize_Key must keep their
+        // inputs (the level statistics), not only what the output reads (they came out null before the fix)
+        final String lattice = FEATURE_CONFIG
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
+                .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]")
+                .replace("      output:\n        prefix: f_\n", "      output:\n        prefix: f_\n        groupBy: session\n");
+        Assertions.assertNotEquals(FEATURE_CONFIG, lattice);
+        final Config config = Config.load(SOURCE_CONFIG + lattice);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "Wave1_FanIn"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "Wave1_Merge"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "Final_Rows"), names::toString);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int sessions = 0, children = 0, composed = 0;
+            for (final MElement row : rows) {
+                sessions++;
+                for (final Object child : (List<?>) row.getPrimitiveValue("rows")) {
+                    children++;
+                    final Map<?, ?> values = child instanceof MElement e ? e.asPrimitiveMap() : (Map<?, ?>) child;
+                    if (values.get("f_enc__seller_id__e2__mean") != null) composed++;
+                }
+            }
+            Assertions.assertEquals(4, sessions);
+            Assertions.assertEquals(6, children);
+            // C and D read the earlier sessions' statistics; A and B read nothing but the prior (null before any row)
+            Assertions.assertEquals(3, composed, "the deferred compose rows are evaluated on the merged rows");
+            return null;
+        });
+        pipeline.run();
     }
 
     @Test
     public void testParallelWavesFoldIntoGroupedFinalize() throws java.io.IOException {
         // two independent keyed blocks and output.groupBy: the last wave merges inside the finalize GroupByKey
-        // (vs_market is dropped: a row column over the context stage is placed in the last keyed stage and
-        // makes it depend on the context stage, i.e. a wave of its own)
+        // (vs_market is dropped for the fixture's shape: it once pulled the last keyed stage into a wave of its own;
+        // as a deferred column it no longer would - see testParallelWavesRowIdMergeFoldIntoGroupBy)
         final String grouped = FEATURE_CONFIG
                 .replace("        - name: vs_market\n          scope: row\n          type: residual\n          input: relative_start_price_shareOfTotal\n          baseline: market\n", "")
                 .replace("            - {type: aggregate, field: start_price, funcs: [count, mean]}\n",
@@ -3931,7 +3993,7 @@ public class FeatureTransformTest {
                   scope: sequence
                   entity: seller
                   ops:
-                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: duo, with: [{entity: cat, mu: 0, sigma: 4}], funcs: [mu, sigma, count], team: [mu, sigma]}
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: duo, with: [{entity: cat, mu: 0, sigma: 4}], funcs: [mu, sigma, count, z], team: [mu, sigma, count]}
                     - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: solo, funcs: [mu]}
                 - name: field
                   scope: context
@@ -3997,6 +4059,8 @@ public class FeatureTransformTest {
     public void testSequenceRatingTeam() throws java.io.IOException {
         final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + teamConfig(FEATURE_CONFIG))).get("features");
         Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_duo_cat_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_duo_team_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_skill_all_duo_cat_z").getFieldType().getType());
         Assertions.assertEquals("member", output.getSchema().getField("f_skill_all_duo_cat_mu").getOptions().get("feature.coord.readout"));
         PAssert.that(output.getCollection()).satisfies(rows -> {
             final Rating rating = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of(), "y")
@@ -4022,14 +4086,23 @@ public class FeatureTransformTest {
                     default -> throw new AssertionError("unexpected row " + id);
                 };
                 final Map<String, Object> keys = id.endsWith("s1") ? s1 : s2;
+                // z is null until the pool holds two rated players (before session A's outcome is known); the seller's
+                // and the category's pools are independent, so each member is compared on its own
+                for (final String func : List.of("mu", "sigma", "count", "z")) {
+                    for (final int member : new int[]{0, 1}) {
+                        final Object expected = rating.read(known, member, rating.memberKey(keys, member), func, Long.MIN_VALUE);
+                        final Object actual = row.getPrimitiveValue("f_skill_all_duo_" + (member == 0 ? "" : "cat_") + func);
+                        final String what = id + (member == 0 ? " seller " : " category ") + func;
+                        if (expected == null) Assertions.assertNull(actual, what);
+                        else Assertions.assertEquals(((Number) expected).doubleValue(), ((Number) actual).doubleValue(), 1e-9, what);
+                    }
+                }
                 for (final String func : List.of("mu", "sigma", "count")) {
-                    final Object seller = rating.read(known, 0, rating.memberKey(keys, 0), func, Long.MIN_VALUE), category = rating.read(known, 1, rating.memberKey(keys, 1), func, Long.MIN_VALUE);
-                    Assertions.assertEquals(((Number) seller).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_" + func)).doubleValue(), 1e-9, id + " seller " + func);
-                    Assertions.assertEquals(((Number) category).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_cat_" + func)).doubleValue(), 1e-9, id + " category " + func);
+                    final Object team = rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE);
+                    Assertions.assertEquals(((Number) team).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_team_" + func)).doubleValue(), 1e-9, id + " team " + func);
                 }
-                for (final String func : List.of("mu", "sigma")) {
-                    Assertions.assertEquals(rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE), row.getAsDouble("f_skill_all_duo_team_" + func), 1e-9, id + " team " + func);
-                }
+                // the pairing's contests: s1 / electronics ran A (known at C) and C (known at D)
+                Assertions.assertEquals(known == null ? 0L : known == afterA ? 1L : 2L, row.getPrimitiveValue("f_skill_all_duo_team_count"), id);
                 // nothing known: the priors — 25 and 0, and the sum's sigma
                 if (known == null) {
                     Assertions.assertEquals(25d, row.getAsDouble("f_skill_all_duo_team_mu"), 0d, id);

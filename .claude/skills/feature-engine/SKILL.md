@@ -139,7 +139,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   the rows of ONE event time and splits them into contests by the context keys; `SequenceEvaluator.advanceRating`
   feeds it run by run from the fold pointer, `replay` is the scan reference. With `tauPer` the drift runs on the time since the
   player last competed (`Player.lastMillis` = the run event time) and `read(state, player, func, nowMillis)` adds the drift up to
-  the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `Pairs` (`all` / `adjacent` /
+  the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. Readouts beside the ratings:
+  `deviation` (mu − prior) and `z` (mu standardised within the member's pool: `State.pools` keeps (players, Σmu, Σmu²) per pool,
+  moved in `update` beside the players — their arithmetic untouched), team `count` (`State.teams`: contests per team id, teams of
+  ≥ 2 members only, once per contest — kept only under the op coordinate `teamCounts`, written when `team:` reads `count`,
+  since it holds one entry per distinct team for the whole replay; `readTeam(count)` without it throws) and team `deviation`; `Rating.describe(state)` is the per-pool warm-up line the keyed DoFn
+  logs after a key's replay (`SequenceEvaluator.ratingSummaries`). `Pairs` (`all` / `adjacent` /
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in
   `validateRatingTeam` under the one code `sequence.rating.with`; `SequenceEvaluator.readRating` picks member / team. INVARIANT: the
@@ -331,12 +336,24 @@ reads what the compile layer wrote into each column's `coordinates`.
      input produced by the same stage (would read null), and a fit without artifact in streaming.
 3. Wave fan-out (batch only): `RowId_Pin` (`Reshuffle`) before the first fan-out when ids are
    random and no GBK pinned them yet; `Wave{n}_Rows` (`applyRows` — the wave's row columns that
-   are computable from the wave input are evaluated on the base **before** branching); each
-   branch = `applyStage` + `PartialDoFn` (`__rowId`, `__partial`, own columns, carry keys); merge =
+   are computable from the wave input, and the **deferred** columns it completes, are evaluated on the
+   base **before** branching; `Final_Rows` after the last wave); each
+   branch = `applyStage` over `getBranchColumns` (the stage's columns minus deferred / prelude-evaluated ones) +
+   `PartialDoFn` (`__rowId`, `__partial`, own columns that live on, carry keys); merge =
    (a) fold into the next wave's single context stage (`getFoldTarget`; Vc estimated over the wave
-   input), (b) fold into the `output.groupBy` finalize, else (c) `Wave{n}_Merge` (row-id GBK +
+   input; the fold target evaluates its wave's prelude itself, `getFoldColumns`), (b) fold into the `output.groupBy`
+   finalize (`foldsIntoGroupBy`; the grouped finalize evaluates the final prelude), else (c) `Wave{n}_Merge` (row-id GBK +
    `MergeDoFn`). `coalesce` requires partials == branches (a branch failure drops the row, like the
    linear chain), rejects duplicate row ids as a whole group, `rejectionRecords` → `BadRecord`.
+   **Liveness projection** (engine doc §9.4.7): every key DoFn (`KeyDoFn` / `SortKeyDoFn` / `RowIdKeyDoFn` /
+   `Finalize_Key`) drops the computed columns nothing after it reads — `FeatureStages.project` with
+   `Wiring.dropExcept(plan.getWaveKeep(stage) | getLiveBefore(k) | getLiveAfterWave(w) | getOutputReads() |
+   getFinalizeKeep())` — `getFinalizeKeep` = the output's reads plus the inputs of the final prelude, which the grouped
+   finalize evaluates when the last wave folds into it (dropping them made every deferred column null: PR #182 review);
+   input fields always ride. `plan.branchesWaves()` (parallelWaves and a wave of ≥ 2 stages) is the one decision the
+   engine (plus `!streaming`), the report and the `engine.rowWidth` hint share; `getFoldTarget` checks the VC fields of the
+   fold columns (the wave's prelude included), not only the stage's own. The plan's `-- carry` section / stage JSON `carry` / `carryLinear` / `carryMaps` and
+   the `engine.rowWidth` hint report what rides; `KeyedSpillSorter` logs the sampled row width per stage.
 4. `Finalize` / `Finalize_Key` + `Finalize_Group` + `GroupedFinalize` (`output.groupBy`: parent
    record + child array `output.childName`, `parentFields`, `passThrough`, `nullPolicy`,
    `Finalizer` builds the output map; `__rowId` / `__partial` are dropped here).
@@ -380,7 +397,12 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    a reader of estimated pseudo-counts (`weights: varianceComponents` + `levels`) must stay IN its levels' fit
    stage — another stage would estimate its own λ over its input, silently — and `placeRow` throws otherwise;
    a static-fit block = exactly one fit stage; sequence + population under one key fuse (reported
-   as `population`). A column reading a later stage is a scheduler bug and throws.
+   as `population`). A column reading a later stage is a scheduler bug and throws. A row column nobody
+   reads is **deferred** (`OutputColumn.deferred`, `FeaturePlan.getDeferredColumns`): hosted in the last stage
+   for the linear chain, but no DAG edge and never evaluated in a branch — the wave engine evaluates it on
+   the first wave input carrying its inputs (`getPreludeColumns(w)`, index `waves` = `Final_Rows`), so a
+   lattice whose compose rows are output-only is ONE wave and a consumed map dies right after. Readers of a
+   lookup fit are never deferred (their lambdas / artifact live in the fit stage).
 5. **Keyed evaluation is O(n) per key and history is trimmed per field.** New sequence /
    population logic must either be incremental (`contribute` / `readStatistic` with eviction) or
    declare a bounded tail (`tailSize`); anything else is *unbounded* and must surface through
