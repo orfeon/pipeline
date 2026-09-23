@@ -50,6 +50,13 @@ gathers for the hottest key:
   on the worker's local disk, merged on read and deleted when the key is done. Disk holds at most the
   keys being processed concurrently (≈ cores per worker), each up to its encoded size — size
   `diskSizeGb` for that, plus the branches of a wave spilling at the same time.
+- A key's encoded size is its row count **times the row width**. The rows a keyed stage groups carry
+  only the computed columns that stage or a later one still reads (a consumed intermediate is dropped;
+  readouts of a distribution map run as soon as their inputs exist, never inside a keyed stage), so the
+  plan's `-- carry` section (`#k <kind> key=[...]: <wave engine> / <linear chain> columns; maps: [...]`)
+  and the `engine.rowWidth` hint tell whether a wide map column still rides a hot key — a
+  `transitionStats` over a field of hundreds of values emitting `distribution` is such a map; emit the
+  readouts instead. Each stage logs `~<bytes> bytes per encoded row` from a sample at run time.
 - What stays in memory per key during the replay is the running statistics plus the **projected
   history** behind the longest window: only the fields the windows read, only as far back as the
   longest `maxAge` / bounded tail. Columns flagged `sequence.window.unbounded` keep every past row

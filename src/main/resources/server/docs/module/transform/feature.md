@@ -1809,9 +1809,22 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   concurrent bundle owns one), which is why the default divides the heap by the core count. The hot-key
   audit queries in the validate / dry-run report (above) give the per-key row counts to size that against.
   Every spilled key logs `keyed spill sorter Stage<N>_<kind> key=<key>: <chunks> chunk(s) / <MB> MB on disk +
-  <rows> rows in memory; live spill on this worker <MB> MB (peak <MB> MB)` — the peak over a job is the
-  worker disk the keyed stages need. Columns that read the whole history of a key are reported at compile
+  <rows> rows in memory (~<KB> KB per encoded row); live spill on this worker <MB> MB (peak <MB> MB)` — the peak
+  over a job is the worker disk the keyed stages need — and each stage logs once the encoded width of its rows
+  from a sample. Columns that read the whole history of a key are reported at compile
   time by the `sequence.window.unbounded` hint (with the fields they keep).
+- **What a stage's rows carry.** A key's spill is its row count times the row width, and the rows a keyed
+  stage groups carry only the computed columns that stage or a later one still reads (or the output emits):
+  a column is dropped from the rows once its last reader has run, and a row column nobody reads (a readout
+  of a distribution map, a residual, an `_isnull` flag) is evaluated as soon as the rows carry its inputs,
+  never inside a keyed stage. So a `transitionStats` chain that emits only its readouts leaves its
+  per-level maps behind right after the wave that completes them; an emitted `distribution` rides to the
+  output. The plan report's `-- carry` section lists, per keyed stage, the columns its rows carry in the wave
+  engine and in the linear chain (`engine.parallelWaves: false` hosts those row columns in the last stage,
+  so a consumed map rides every keyed stage before it), naming the map columns; the `engine.rowWidth` hint
+  points at a keyed stage whose rows still carry a map — a map over many categories makes a wide row, which
+  the audit's row counts do not show. Input fields always ride (`output.passThrough` decides only what is
+  emitted).
 
 ## Limitations (current engine)
 

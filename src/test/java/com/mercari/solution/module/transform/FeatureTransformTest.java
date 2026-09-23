@@ -1257,13 +1257,39 @@ public class FeatureTransformTest {
 
     @Test
     public void testParallelWavesRowIdMerge() throws java.io.IOException {
-        // shrinkage lattice: the seller / global levels and the session context branch; the category stage
-        // (a keyed stage hosting the compose rows) follows, so the merge is a row-id GroupByKey
+        // shrinkage lattice: the seller / global / category levels and the session context are one wave; the compose
+        // rows the category stage hosts are deferred (nobody reads them), so the merge is a row-id GroupByKey and
+        // the compose rows are evaluated on the merged rows (Final_Rows) - the level statistics they read leave the
+        // rows only after that (engine doc §9.4.7)
         final String lattice = FEATURE_CONFIG
                 .replace("- {expr: \"sold >= 1\", stats: [mean]}",
                         "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
                 .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]");
-        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge"), List.of("Wave1_FanIn"));
+        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge", "Final_Rows"), List.of("Wave1_FanIn", "Wave2"));
+    }
+
+    @Test
+    public void testParallelWavesProjectDistributionMaps() throws java.io.IOException {
+        // transitionStats chains (per entity and pooled) next to the fold-into-context wave: the level maps are read
+        // by the composed maps only (deferred, with their readouts), so no branch's GroupByKey carries them and the
+        // merged rows drop them once the readouts ran; an emitted distribution (qty_next_to) rides to the output
+        final String blocks = """
+                    - name: grade_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      emit: [{toValueProb: good}, ownValueProb, surprisal, entropy]
+                      blend: {priorWeight: 2}
+                    - name: qty_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: quantity}
+                      emit: [distribution, expected, entropy]
+                      blend: {perEntity: false, priorWeight: 2}
+                """;
+        // (the chains' level stages join the second wave, so both waves merge by row id and the readouts run last)
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n"), 6,
+                List.of("_Partial", "Wave1_Merge", "Wave2_Merge", "Final_Rows"), List.of("Wave1_FanIn"));
     }
 
     @Test

@@ -150,10 +150,16 @@ public final class FeatureStages {
         } else {
             for (int w = 0; w < waves.size(); w++) {
                 final List<Stage> wave = waves.get(w);
+                // the row columns the wave's stages host are placed in their first consumer's stage by the scheduler
+                // and carried on by the linear chain; the other branches read the wave input, so every row column
+                // computable from it (input fields, earlier waves, such row columns) is evaluated on it first — and
+                // so are the deferred columns (output-only) the wave input completes (engine doc §9.4.7)
                 if (wave.size() == 1) {
-                    current = wiring.applyStage(current, wave.get(0));
+                    final Stage stage = wave.get(0);
+                    current = wiring.applyRows(current, "Wave" + (w + 1) + "_Rows", w);
+                    current = wiring.applyStage(current, stage, current, 0, plan.getBranchColumns(stage, w), wiring.dropExcept(plan.getWaveKeep(stage)));
                     // a keyed stage's GroupByKey materialises the row ids like the pin Reshuffle would
-                    if (wave.get(0).kind() != StageKind.row && wave.get(0).kind() != StageKind.fit) pinned = true;
+                    if (stage.kind() != StageKind.row && stage.kind() != StageKind.fit) pinned = true;
                     continue;
                 }
                 if (!pinned) {
@@ -162,34 +168,45 @@ public final class FeatureStages {
                     current = current.apply("RowId_Pin", Reshuffle.viaRandomKey());
                     pinned = true;
                 }
-                // the row columns the wave's stages host are placed in their first consumer's stage by the scheduler
-                // and carried on by the linear chain; the other branches read the wave input, so every row column
-                // computable from it (input fields, earlier waves, such row columns) is evaluated on it first
                 current = wiring.applyRows(current, "Wave" + (w + 1) + "_Rows", w);
-                // fan-out: every branch reads the wave input and emits only its own columns (+ row id + merge key)
+                // fan-out: every branch reads the wave input — projected to what the branch reads — and emits only its
+                // own columns that live on after the wave (+ row id + merge key)
                 final Stage foldInto = w + 1 < waves.size() && waves.get(w + 1).size() == 1 ? plan.getFoldTarget(waves.get(w + 1).get(0), w) : null;
-                final boolean foldGroupBy = foldInto == null && w + 1 == waves.size() && groupBy != null && plan.keysAvailable(groupBy.keys(), w);
+                final boolean foldGroupBy = foldInto == null && plan.foldsIntoGroupBy(w);
                 final List<String> carry = foldInto != null ? foldInto.keys() : foldGroupBy ? groupBy.keys() : List.of();
+                final Set<String> liveAfter = plan.getLiveAfterWave(w);
                 final List<PCollection<MElement>> pieces = new ArrayList<>();
                 pieces.add(current);
                 for (final Stage stage : wave) {
-                    final PCollection<MElement> out = wiring.applyStage(current, stage);
-                    pieces.add(out.apply(Wiring.label(stage) + "_Partial", ParDo.of(new PartialDoFn(stage.columnNames(), carry))).setCoder(elementCoder));
+                    final List<String> branchColumns = plan.getBranchColumns(stage, w);
+                    if (branchColumns.isEmpty()) {
+                        throw new IllegalStateException("feature engine: stage " + stage.describe() + " has nothing left to evaluate in wave " + (w + 1));
+                    }
+                    final Set<String> keep = new HashSet<>(plan.getWaveKeep(stage));
+                    keep.addAll(carry);
+                    final PCollection<MElement> out = wiring.applyStage(current, stage, current, 0, branchColumns, wiring.dropExcept(keep));
+                    final List<String> partial = new ArrayList<>();
+                    for (final String name : branchColumns) if (liveAfter.contains(name)) partial.add(name);
+                    pieces.add(out.apply(Wiring.label(stage) + "_Partial", ParDo.of(new PartialDoFn(partial, carry))).setCoder(elementCoder));
                 }
                 final String name = "Wave" + (w + 1);
                 if (foldInto != null) {
                     // the merge rides the next stage's GroupByKey: the pieces are keyed by that stage's key and the
-                    // rows are reassembled by row id inside each group (ContextStageDoFn)
+                    // rows are reassembled by row id inside each group (ContextStageDoFn), which then also evaluates
+                    // that wave's prelude (its input is the merge: no wave input to run it on first)
                     // (a variance-components estimate of that stage reads the wave input, not the flattened pieces)
-                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto, current, wave.size());
+                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto, current, wave.size(),
+                            plan.getFoldColumns(foldInto, w + 1), wiring.dropExcept(plan.getWaveKeep(foldInto)));
                     w++;
                 } else if (foldGroupBy) {
                     pending = PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections());
                     pendingBranches = wave.size();
                 } else {
-                    current = wiring.merge(name + "_Merge", pieces, wave.size());
+                    current = wiring.merge(name + "_Merge", pieces, wave.size(), wiring.dropExcept(liveAfter));
                 }
             }
+            // the deferred columns the last wave completes (nothing reads them but the output)
+            if (pending == null) current = wiring.applyRows(current, "Final_Rows", waves.size());
         }
 
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
@@ -202,11 +219,14 @@ public final class FeatureStages {
                     .withOutputTags(outputTag, TupleTagList.of(failureTag).and(countTag)));
         } else {
             finalized = (pending != null ? pending : current)
-                    .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys()))).setCoder(kvCoder)
+                    .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys(), wiring.dropExcept(plan.getOutputReads())))).setCoder(kvCoder)
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
                             .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy,
-                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, pendingBranches, loggings, failFast, failureTag, runManifest ? countTag : null))
+                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, pendingBranches,
+                                    // a folded last wave leaves its final prelude (deferred columns) to the merged rows
+                                    pending != null ? plan.getPreludeColumns(waves.size()) : List.of(),
+                                    loggings, failFast, failureTag, runManifest ? countTag : null))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag).and(countTag)));
         }
         failures.add(finalized.get(failureTag));
@@ -428,8 +448,26 @@ public final class FeatureStages {
          * the wave riding this stage's GroupByKey; 0 means the input carries plain rows (no reassembly).
          */
         PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage, final PCollection<MElement> estimateInput, final int fanInBranches) {
+            // the linear chain evaluates every hosted column and its shuffles carry what the later stages and the output read
+            return applyStage(current, stage, estimateInput, fanInBranches, stage.columnNames(),
+                    stage.isKeyed() ? dropExcept(plan.getLiveBefore(stage.index())) : Set.of());
+        }
+
+        /** The computed columns to drop from grouped rows so that only {@code keep} rides the shuffle (input fields always ride). */
+        Set<String> dropExcept(final Set<String> keep) {
+            final Set<String> drop = new HashSet<>(columns.keySet());
+            drop.removeAll(keep);
+            return drop;
+        }
+
+        /**
+         * @param columnNames the stage's columns this evaluation computes (a branch leaves out what a prelude evaluated)
+         * @param drop the computed columns a keyed stage's key DoFn removes from the rows before the GroupByKey
+         */
+        PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage, final PCollection<MElement> estimateInput, final int fanInBranches,
+                                         final List<String> columnNames, final Set<String> drop) {
             final List<OutputColumn> stageColumns = new ArrayList<>();
-            for (final String name : stage.columnNames()) stageColumns.add(columns.get(name));
+            for (final String name : columnNames) stageColumns.add(columns.get(name));
             final StageEvaluator evaluator = new StageEvaluator(stageColumns);
             final TupleTag<MElement> outputTag = outputTag();
             final TupleTag<BadRecord> failureTag = failureTag();
@@ -445,7 +483,7 @@ public final class FeatureStages {
                         .withSideInputs(sideInputs)
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case context -> current
-                        .apply(label + "_Key", ParDo.of(new KeyDoFn(stage.keys()))).setCoder(kvCoder)
+                        .apply(label + "_Key", ParDo.of(new KeyDoFn(stage.keys(), drop))).setCoder(kvCoder)
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
                                 .of(new ContextStageDoFn(evaluator, lambdas, fanInBranches, loggings, failFast, failureTag))
@@ -458,7 +496,7 @@ public final class FeatureStages {
                 // streams the sorted rows and trims its history
                 // a future stage is the same replay in descending time on a mirrored clock (strictly-future windows)
                 case sequence, population, future -> current
-                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys(), stage.kind() == StageKind.future))).setCoder(sortKvCoder)
+                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys(), stage.kind() == StageKind.future, drop))).setCoder(sortKvCoder)
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future,
@@ -473,7 +511,10 @@ public final class FeatureStages {
             return outputs.get(outputTag).setCoder(elementCoder);
         }
 
-        /** Evaluates {@link FeaturePlan#getPreludeColumns} on the wave input before its fan-out (no-op when there are none). */
+        /**
+         * Evaluates {@link FeaturePlan#getPreludeColumns} on the wave input before its fan-out — or, for {@code w} = the
+         * wave count, on the merged rows after the last wave ({@code Final_Rows}) — a no-op when there are none.
+         */
         PCollection<MElement> applyRows(final PCollection<MElement> current, final String name, final int w) {
             final List<OutputColumn> prelude = plan.getPreludeColumns(w);
             if (prelude.isEmpty()) return current;
@@ -493,11 +534,14 @@ public final class FeatureStages {
             return outputs.get(outputTag).setCoder(elementCoder);
         }
 
-        /** Row-id merge of a wave: the base rows and every branch's partial rows, grouped by row id and reassembled. */
-        PCollection<MElement> merge(final String name, final List<PCollection<MElement>> pieces, final int branches) {
+        /**
+         * Row-id merge of a wave: the base rows and every branch's partial rows, grouped by row id and reassembled;
+         * {@code drop} = the computed columns nothing after the wave reads, left out of every piece.
+         */
+        PCollection<MElement> merge(final String name, final List<PCollection<MElement>> pieces, final int branches, final Set<String> drop) {
             final List<PCollection<KV<String, MElement>>> keyed = new ArrayList<>();
             for (int i = 0; i < pieces.size(); i++) {
-                keyed.add(pieces.get(i).apply(name + "_Key" + i, ParDo.of(new RowIdKeyDoFn())).setCoder(kvCoder));
+                keyed.add(pieces.get(i).apply(name + "_Key" + i, ParDo.of(new RowIdKeyDoFn(drop))).setCoder(kvCoder));
             }
             final TupleTag<MElement> outputTag = outputTag();
             final TupleTag<BadRecord> failureTag = failureTag();
@@ -3179,14 +3223,32 @@ public final class FeatureStages {
         }
     }
 
-    /** Keys a merge piece by its row id. */
+    /**
+     * The element without the computed columns in {@code drop} — what a shuffle need not carry because nothing after
+     * it reads them (engine doc §9.4.7); the element itself when it holds none of them. Input fields are never in
+     * {@code drop}: the projection is over the plan's columns only.
+     */
+    static MElement project(final MElement element, final Set<String> drop) {
+        if (drop.isEmpty()) return element;
+        final Map<String, Object> values = element.asPrimitiveMap();
+        if (!values.keySet().removeAll(drop)) return element;
+        return MElement.of(values, element.getTimestamp());
+    }
+
+    /** Keys a merge piece by its row id, without the columns nothing after the merge reads. */
     static class RowIdKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
+        private final Set<String> drop;
+
+        RowIdKeyDoFn(final Set<String> drop) {
+            this.drop = drop;
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final MElement element = c.element();
             if (element == null) return;
             final Object id = element.getPrimitiveValue(ROW_ID_FIELD);
-            c.output(KV.of(id == null ? NULL_KEY : id.toString(), element));
+            c.output(KV.of(id == null ? NULL_KEY : id.toString(), project(element, drop)));
         }
     }
 
@@ -3245,17 +3307,21 @@ public final class FeatureStages {
         }
     }
 
+    /** Keys a row for a context stage's GroupByKey, without the computed columns the stage and its successors do not read ({@link #project}). */
     static class KeyDoFn extends DoFn<MElement, KV<String, MElement>> {
         private final List<String> keys;
+        private final Set<String> drop;
 
-        KeyDoFn(final List<String> keys) {
+        KeyDoFn(final List<String> keys, final Set<String> drop) {
             this.keys = keys;
+            this.drop = drop;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if (element == null) return;
+            final MElement input = c.element();
+            if (input == null) return;
+            final MElement element = project(input, drop);
             final StringBuilder sb = new StringBuilder();
             for (final String k : keys) {
                 final Object v = element.getPrimitiveValue(k);
@@ -3274,10 +3340,12 @@ public final class FeatureStages {
         private final List<String> keys;
         /** Sort the key's rows latest first (a future stage). */
         private final boolean descending;
+        private final Set<String> drop;
 
-        SortKeyDoFn(final List<String> keys, final boolean descending) {
+        SortKeyDoFn(final List<String> keys, final boolean descending, final Set<String> drop) {
             this.keys = keys;
             this.descending = descending;
+            this.drop = drop;
         }
 
         /** The sort key: the epoch millis themselves (compared as a signed long by {@link KeyedSpillSorter}). */
@@ -3292,8 +3360,9 @@ public final class FeatureStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if (element == null) return;
+            final MElement input = c.element();
+            if (input == null) return;
+            final MElement element = project(input, drop);
             final long millis = element.getEpochMillis();
             final KV<Long, MElement> value = KV.of(descending ? sortableDescending(millis) : sortable(millis), element);
             final StringBuilder sb = new StringBuilder();
@@ -3698,6 +3767,8 @@ public final class FeatureStages {
         private final String childName;
         /** Branch count of a fan-out wave folded into the finalize GroupByKey; 0 = the input carries plain rows. */
         private final int fanInBranches;
+        /** The final prelude of a folded last wave (deferred row columns), evaluated on the merged rows; null when there is none. */
+        private final StageEvaluator finalRows;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
@@ -3705,6 +3776,7 @@ public final class FeatureStages {
 
         GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                             final List<String> keys, final List<String> parentFields, final String childName, final int fanInBranches,
+                            final List<OutputColumn> finalRows,
                             final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag, final TupleTag<KV<String, Double>> countTag) {
             this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, childName));
             this.outputSchema = outputSchema;
@@ -3712,6 +3784,7 @@ public final class FeatureStages {
             this.parentFields = parentFields;
             this.childName = childName;
             this.fanInBranches = fanInBranches;
+            this.finalRows = finalRows.isEmpty() ? null : new StageEvaluator(finalRows);
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
@@ -3721,6 +3794,7 @@ public final class FeatureStages {
         @Setup
         public void setup() {
             outputSchema.setup();
+            if (finalRows != null) finalRows.setup();
         }
 
         @Override
@@ -3734,11 +3808,12 @@ public final class FeatureStages {
             if (kv == null) return;
             // a folded fan-out merge delivers base and partial rows: reassemble them by row id first
             // (a plain grouped finalize skips the reassembly — and its per-element probes — entirely)
-            final List<MElement> elements;
+            List<MElement> elements;
             if (fanInBranches > 0) {
                 final List<Rejection> rejected = new ArrayList<>();
                 elements = coalesce(kv.getValue(), fanInBranches, rejected);
                 for (final BadRecord record : rejectionRecords(rejected, failFast)) c.output(failureTag, record);
+                if (finalRows != null) elements = evaluateFinalRows(c, elements);
             } else {
                 elements = new ArrayList<>();
                 kv.getValue().forEach(elements::add);
@@ -3752,6 +3827,21 @@ public final class FeatureStages {
                 return;
             }
             emit(c, elements);
+        }
+
+        /** The final prelude on the merged rows (what {@code Final_Rows} does when the last wave is not folded): a row that fails it is a failure record, like anywhere else. */
+        private List<MElement> evaluateFinalRows(final ProcessContext c, final List<MElement> elements) {
+            final List<MElement> evaluated = new ArrayList<>(elements.size());
+            for (final MElement e : elements) {
+                try {
+                    final Map<String, Object> values = e.asPrimitiveMap();
+                    finalRows.evaluateRow(values);
+                    evaluated.add(MElement.of(values, e.getTimestamp()));
+                } catch (final Throwable t) {
+                    c.output(failureTag, Module.processError("Failed to evaluate row features", e, t, failFast));
+                }
+            }
+            return evaluated;
         }
 
         private void emit(final ProcessContext c, final List<MElement> elements) {

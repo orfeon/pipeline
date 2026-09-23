@@ -54,6 +54,12 @@ public class OutputColumn implements Serializable {
     boolean intermediate;
     boolean anonymous;
     boolean fitted;
+    /**
+     * A row column nobody else reads: the linear chain evaluates it in the stage that hosts it (the last one), the
+     * wave engine on the first wave input that carries its inputs — it is no edge of the stage DAG and no branch
+     * evaluates it ({@code FeaturePlan.getDeferredColumns}).
+     */
+    boolean deferred;
     Placement placement = Placement.child;
     /** The {@code output.roles} entry that names this column (data contract, never a feature), null for a feature column. */
     String role;
@@ -73,6 +79,7 @@ public class OutputColumn implements Serializable {
     public Map<String, String> getCoordinates() { return coordinates; }
     public Set<String> getInputs() { return inputs; }
     public Set<String> getPastInputs() { return pastInputs; }
+    public boolean isDeferred() { return deferred; }
     public AvailableAt getAvailableAt() { return availableAt; }
     public AvailableAt getComputeAt() { return computeAt; }
     public Status getStatus() { return status; }

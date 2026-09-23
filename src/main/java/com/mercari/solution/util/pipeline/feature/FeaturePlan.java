@@ -6,9 +6,11 @@ import com.mercari.solution.module.Schema;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -255,8 +257,9 @@ public class FeaturePlan implements Serializable {
      * Waves of the stage DAG (engine doc §9.4): stage {@code i} is in wave {@code 1 + max(wave of its
      * dependencies)}, so the stages of one wave are mutually independent and are evaluated in parallel from
      * the same input (unless {@code engine.parallelWaves} is off or the pipeline streams); the wave count is
-     * the depth of the DAG's critical path — the barrier count the wave execution leaves. Conservative: the row columns
-     * a stage hosts count too (the engine recomputes the evaluable ones on the wave input, {@link #getPreludeColumns}).
+     * the depth of the DAG's critical path — the barrier count the wave execution leaves. The row columns a stage
+     * hosts for a consumer count too (the engine recomputes the evaluable ones on the wave input,
+     * {@link #getPreludeColumns}); the deferred ones — output-only, {@link #getDeferredColumns} — do not.
      */
     public List<List<Integer>> getWaves() {
         final int[] depth = new int[stages.size()];
@@ -289,7 +292,6 @@ public class FeaturePlan implements Serializable {
     private transient List<List<Stage>> engineWaves;
     private transient Map<String, Integer> engineWaveOfColumn;
     private transient Map<String, OutputColumn> columnsByName;
-    private transient Map<Integer, List<OutputColumn>> preludeByWave;
 
     /** Execution waves of the parallel engine: {@link #getWaves()} without the groupBy finalize stage. */
     public List<List<Stage>> getEngineWaves() {
@@ -326,34 +328,99 @@ public class FeaturePlan implements Serializable {
         return columnsByName;
     }
 
-    /** Fields the base rows of engine wave {@code w} carry before its prelude: input fields and earlier waves' columns. */
+    /**
+     * Fields the base rows of engine wave {@code w} carry before its prelude: input fields, the columns of earlier
+     * waves (a deferred column only once a prelude evaluated it) and the earlier preludes.
+     */
     private Set<String> availableBefore(final int w) {
         final Set<String> fields = new HashSet<>(inputFields.keySet());
-        for (final Map.Entry<String, Integer> e : engineWaveOfColumn().entrySet()) if (e.getValue() < w) fields.add(e.getKey());
+        for (final Map.Entry<String, Integer> e : engineWaveOfColumn().entrySet()) {
+            if (e.getValue() < w && !columnsByName().get(e.getKey()).deferred) fields.add(e.getKey());
+        }
+        final List<List<OutputColumn>> preludes = preludes();
+        for (int i = 0; i < w && i < preludes.size(); i++) for (final OutputColumn c : preludes.get(i)) fields.add(c.getCanonicalName());
         return fields;
     }
 
     /**
-     * The row columns hosted by the stages of engine wave {@code w} that the wave input can evaluate (their
-     * inputs — and the fields of their variance-components estimate, if any — are input fields, columns of
-     * earlier waves or such row columns), in expansion order (dependencies first). The engine evaluates them
-     * on the wave input before the fan-out so every branch sees them ({@code Wave&lt;n&gt;_Rows}).
+     * The row columns nobody else reads (engine doc §9.4.7): the linear chain evaluates them in the stage hosting
+     * them (the last one), the wave engine on the first wave input that carries their inputs — after the wave that
+     * completes those inputs, so the branches of one wave stay independent and a consumed intermediate (a
+     * distribution map read by its readouts) can leave the rows right after. A reader of a lookup fit is never
+     * deferred: its lambdas and artifact live in its fit stage.
+     */
+    public List<OutputColumn> getDeferredColumns() {
+        final List<OutputColumn> deferred = new ArrayList<>();
+        for (final OutputColumn c : columns) if (c.deferred) deferred.add(c);
+        return deferred;
+    }
+
+    private transient List<List<OutputColumn>> preludes;
+
+    /**
+     * The row columns evaluated on the wave inputs, per engine wave: index {@code w} = on the input of wave
+     * {@code w} before its fan-out, index {@code waves} = after the last wave, before the finalize. A row column
+     * hosted by a stage of wave {@code w} is evaluated on the wave input when that input carries its inputs (and the
+     * fields of its variance-components estimate, if any) — a branch would only recompute it —; a deferred column
+     * on the first wave input that does. Expansion order (dependencies first): a prelude column is an input of the
+     * next. Computed for every wave at once, because each wave's input includes the earlier preludes.
+     */
+    private List<List<OutputColumn>> preludes() {
+        if (preludes == null) {
+            final int n = getEngineWaves().size();
+            final Map<String, Integer> waveOf = engineWaveOfColumn();
+            final List<List<OutputColumn>> all = new ArrayList<>();
+            final Set<String> available = new HashSet<>(inputFields.keySet());
+            final Set<String> evaluated = new HashSet<>();
+            for (int w = 0; w <= n; w++) {
+                for (final Map.Entry<String, Integer> e : waveOf.entrySet()) {
+                    if (e.getValue() == w - 1 && !columnsByName().get(e.getKey()).deferred) available.add(e.getKey());
+                }
+                final List<OutputColumn> prelude = new ArrayList<>();
+                for (final OutputColumn c : columns) {
+                    if (!FeaturePlanCompiler.isRowColumn(c) || evaluated.contains(c.canonicalName)) continue;
+                    final Integer at = waveOf.get(c.canonicalName);
+                    if (at == null || (!c.deferred && at != w)) continue;
+                    if (available.containsAll(c.inputs) && vcFieldsAvailable(List.of(c), available)) {
+                        prelude.add(c);
+                        available.add(c.canonicalName);
+                        evaluated.add(c.canonicalName);
+                    }
+                }
+                all.add(prelude);
+            }
+            preludes = all;
+        }
+        return preludes;
+    }
+
+    /**
+     * The row columns the engine evaluates on the input of engine wave {@code w} before its fan-out
+     * ({@code Wave&lt;n&gt;_Rows}) — or, for {@code w} = the wave count, after the last wave ({@code Final_Rows}):
+     * the hosted row columns the wave input can evaluate and the deferred columns it completes, in expansion
+     * order (dependencies first). See {@link #preludes()}.
      */
     public List<OutputColumn> getPreludeColumns(final int w) {
-        if (preludeByWave == null) preludeByWave = new HashMap<>();
-        return preludeByWave.computeIfAbsent(w, wave -> {
-            final Set<String> available = availableBefore(wave);
-            final List<OutputColumn> prelude = new ArrayList<>();
-            for (final OutputColumn c : columns) {
-                final Integer at = engineWaveOfColumn().get(c.getCanonicalName());
-                if (at == null || at != wave || !FeaturePlanCompiler.isRowColumn(c)) continue;
-                if (available.containsAll(c.getInputs()) && vcFieldsAvailable(List.of(c), available)) {
-                    prelude.add(c);
-                    available.add(c.getCanonicalName());
-                }
-            }
-            return prelude;
-        });
+        final List<List<OutputColumn>> preludes = preludes();
+        return w < preludes.size() ? preludes.get(w) : List.of();
+    }
+
+    /**
+     * The columns a branch of engine wave {@code w} evaluates for stage {@code s}: the stage's columns without the
+     * deferred ones and without those a prelude up to wave {@code w} evaluated (they are on the wave input; a
+     * branch reads only what it evaluates, so their inputs need not ride its shuffle).
+     */
+    public List<String> getBranchColumns(final Stage s, final int w) {
+        final Set<String> done = new HashSet<>();
+        final List<List<OutputColumn>> preludes = preludes();
+        for (int i = 0; i <= w && i < preludes.size(); i++) for (final OutputColumn c : preludes.get(i)) done.add(c.getCanonicalName());
+        final List<String> names = new ArrayList<>();
+        for (final String name : s.columnNames) {
+            final OutputColumn c = columnsByName().get(name);
+            if (c == null || c.deferred || done.contains(name)) continue;
+            names.add(name);
+        }
+        return names;
     }
 
     /** The fields every branch of engine wave {@code w} reads from its input: base fields plus the prelude. */
@@ -361,6 +428,177 @@ public class FeaturePlan implements Serializable {
         final Set<String> fields = availableBefore(w);
         for (final OutputColumn c : getPreludeColumns(w)) fields.add(c.getCanonicalName());
         return fields;
+    }
+
+    // ---- liveness (engine doc §9.4.7) ----------------------------------------------------------------------
+    // What a keyed stage's GroupByKey must carry. The engine projects the rows it groups to these sets (input fields
+    // always ride; only computed columns are dropped), so the report's carry counts are what the shuffles move.
+
+    private transient Map<Integer, Set<String>> stageReads;
+
+    /** Computed columns read from the input rows when {@code names} are evaluated under {@code keys}. */
+    private Set<String> readsOf(final List<String> keys, final Collection<String> names) {
+        final Set<String> reads = new LinkedHashSet<>();
+        for (final String k : keys) if (columnsByName().containsKey(k)) reads.add(k);
+        final List<OutputColumn> cols = new ArrayList<>();
+        for (final String name : names) {
+            final OutputColumn c = columnsByName().get(name);
+            if (c != null) cols.add(c);
+        }
+        for (final OutputColumn c : cols) {
+            for (final String in : c.inputs) if (columnsByName().containsKey(in)) reads.add(in);
+            for (final String in : c.pastInputs) if (columnsByName().containsKey(in)) reads.add(in);
+            for (final Map.Entry<String, String> e : c.coordinates.entrySet()) mentioned(e.getKey(), e.getValue(), reads);
+        }
+        // the variance-components estimate of the stage reads the levels' keys / target / offset / fold keys
+        for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(cols, columnsByName())) {
+            for (final String k : spec.keys()) if (columnsByName().containsKey(k)) reads.add(k);
+            if (spec.field() != null && columnsByName().containsKey(spec.field())) reads.add(spec.field());
+            if (spec.offsetColumn() != null && columnsByName().containsKey(spec.offsetColumn())) reads.add(spec.offsetColumn());
+            if (spec.foldKeys() != null) for (final String k : spec.foldKeys()) if (columnsByName().containsKey(k)) reads.add(k);
+        }
+        return reads;
+    }
+
+    /**
+     * A coordinate that names a column keeps it (a fold key, a block field, a regressor, an offset's baseline —
+     * whatever an evaluator reads by name rather than through the column's inputs): every token of the value that
+     * is a column, and {@code __baseline_<token>} for {@code offset}. Conservative by construction: a token that
+     * happens to spell a column name keeps one more column.
+     */
+    private void mentioned(final String key, final String value, final Set<String> reads) {
+        if (value == null || value.isEmpty()) return;
+        for (final String token : value.split("[,;|\\s\u0000]+")) {
+            if (token.isEmpty()) continue;
+            if (columnsByName().containsKey(token)) reads.add(token);
+            if ("offset".equals(key) && columnsByName().containsKey("__baseline_" + token)) reads.add("__baseline_" + token);
+        }
+    }
+
+    /**
+     * Computed columns stage {@code s} reads from its input rows as the linear chain evaluates it (every hosted
+     * column): its keys, its columns' self and past inputs, the fields of its variance-components estimate and any
+     * column a coordinate names.
+     */
+    public Set<String> getStageReads(final Stage s) {
+        if (stageReads == null) stageReads = new HashMap<>();
+        return stageReads.computeIfAbsent(s.index, i -> Collections.unmodifiableSet(readsOf(s.keys, s.columnNames)));
+    }
+
+    /** Computed columns the finalize reads: the emitted columns, the {@code output.groupBy} keys and the parent fields. */
+    public Set<String> getOutputReads() {
+        final Set<String> reads = new LinkedHashSet<>();
+        for (final OutputColumn c : getEmittedColumns()) reads.add(c.canonicalName);
+        for (final FeatureSpec.ContextDef ctx : spec.contexts) {
+            if (!ctx.name().equals(spec.output.groupBy)) continue;
+            for (final String k : ctx.keys()) if (columnsByName().containsKey(k)) reads.add(k);
+        }
+        for (final String f : spec.output.parentFields) if (columnsByName().containsKey(f)) reads.add(f);
+        return reads;
+    }
+
+    /** Computed columns the linear chain needs on the rows entering stage {@code k}: what stages {@code k} and later read, and the output. */
+    public Set<String> getLiveBefore(final int k) {
+        final Set<String> live = new LinkedHashSet<>(getOutputReads());
+        for (final Stage s : stages) if (s.index >= k) live.addAll(getStageReads(s));
+        return live;
+    }
+
+    /** Computed columns the wave engine needs after engine wave {@code w}: what the branches and preludes of later waves read, and the output. */
+    public Set<String> getLiveAfterWave(final int w) {
+        final Set<String> live = new LinkedHashSet<>(getOutputReads());
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int i = w + 1; i < waves.size(); i++) for (final Stage s : waves.get(i)) live.addAll(readsOf(s.keys, getBranchColumns(s, i)));
+        final List<List<OutputColumn>> preludes = preludes();
+        for (int i = w + 1; i < preludes.size(); i++) live.addAll(readsOf(List.of(), preludes.get(i).stream().map(OutputColumn::getCanonicalName).toList()));
+        return live;
+    }
+
+    /**
+     * Computed columns the wave engine keeps on the rows entering the GroupByKey of keyed stage {@code s}: what its
+     * branch reads — plus what lives on after the wave when the stage is its wave's only one (the rows go on from
+     * it: a single-stage wave, a fold target); the groupBy finalize keeps what the output reads.
+     */
+    public Set<String> getWaveKeep(final Stage s) {
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int w = 0; w < waves.size(); w++) {
+            if (!waves.get(w).contains(s)) continue;
+            final Set<String> keep = new LinkedHashSet<>(readsOf(s.keys, isFoldTarget(s) ? getFoldColumns(s, w) : getBranchColumns(s, w)));
+            if (waves.get(w).size() == 1) keep.addAll(getLiveAfterWave(w));
+            return keep;
+        }
+        return getOutputReads();
+    }
+
+    /**
+     * The computed columns that ride the GroupByKey of keyed stage {@code s} in the wave engine: what it keeps
+     * ({@link #getWaveKeep}) among the columns its input rows carry (earlier waves and preludes) — the report's
+     * carry count; the engine's drop set is the complement of the keep set, so both agree on every column that exists.
+     */
+    public List<String> getCarriedColumns(final Stage s) {
+        final List<List<Stage>> waves = getEngineWaves();
+        Set<String> input = null;
+        for (int w = 0; w < waves.size() && input == null; w++) if (waves.get(w).contains(s)) input = getWaveInputFields(w);
+        if (input == null) input = getWaveInputFields(waves.size()); // the groupBy finalize: every column is on the rows
+        final List<String> carried = new ArrayList<>();
+        for (final String name : getWaveKeep(s)) if (input.contains(name)) carried.add(name);
+        return carried;
+    }
+
+    /** The computed columns that ride the GroupByKey of keyed stage {@code s} in the linear chain: what stages {@code s} and later read among the columns of the earlier stages. */
+    public List<String> getCarriedColumnsLinear(final Stage s) {
+        final Set<String> produced = new HashSet<>();
+        for (final Stage earlier : stages) if (earlier.index < s.index) produced.addAll(earlier.columnNames);
+        final List<String> carried = new ArrayList<>();
+        for (final String name : getLiveBefore(s.index)) if (produced.contains(name)) carried.add(name);
+        return carried;
+    }
+
+    /** The map-typed columns among {@code names} (a wide row: the spill of a hot key grows with the row width). */
+    public List<String> mapColumns(final Collection<String> names) {
+        final List<String> maps = new ArrayList<>();
+        for (final String name : names) {
+            final OutputColumn c = columnsByName().get(name);
+            if (c != null && c.fieldType != null && c.fieldType.getType() == Schema.Type.map) maps.add(name);
+        }
+        return maps;
+    }
+
+    /** Whether stage {@code s} is the single stage of a wave whose predecessor's merge rides its GroupByKey ({@link #getFoldTarget}). */
+    public boolean isFoldTarget(final Stage s) {
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int w = 1; w < waves.size(); w++) {
+            if (waves.get(w).size() == 1 && waves.get(w).get(0).equals(s)) return waves.get(w - 1).size() >= 2 && s.equals(getFoldTarget(s, w - 1));
+        }
+        return false;
+    }
+
+    /**
+     * The columns a fold target of engine wave {@code w} evaluates: its branch columns plus the wave's prelude —
+     * its input is the merge itself (the base rows and the partials of the wave before), so the prelude cannot run
+     * on a wave input first; the deferred columns of that prelude come last (nothing in the stage reads them).
+     */
+    public List<String> getFoldColumns(final Stage s, final int w) {
+        final List<String> names = new ArrayList<>(getBranchColumns(s, w - 1));
+        final List<String> deferred = new ArrayList<>();
+        for (final OutputColumn c : getPreludeColumns(w)) {
+            if (names.contains(c.canonicalName)) continue;
+            (c.deferred ? deferred : names).add(c.canonicalName);
+        }
+        names.addAll(deferred);
+        return names;
+    }
+
+    /**
+     * Whether the merge of the last engine wave {@code w} rides the groupBy finalize's GroupByKey: the base rows
+     * carry the groupBy keys, and the final prelude (the deferred columns that wave completes) needs no
+     * variance-components estimate — the grouped finalize evaluates it on the merged rows, without side inputs.
+     */
+    public boolean foldsIntoGroupBy(final int w) {
+        final List<List<Stage>> waves = getEngineWaves();
+        final Stage groupBy = stages.stream().filter(s -> s.kind == StageKind.groupBy).findFirst().orElse(null);
+        return groupBy != null && w + 1 == waves.size() && keysAvailable(groupBy.keys, w)
+                && VarianceComponents.specsOf(getPreludeColumns(waves.size()), columnsByName()).isEmpty();
     }
 
     /** Every key is on the wave input (input field, earlier wave, prelude row column): the base rows carry it. */
@@ -425,7 +663,7 @@ public class FeaturePlan implements Serializable {
                 w++;
                 continue;
             }
-            if (w + 1 == waves.size() && groupBy != null && keysAvailable(groupBy.keys, w)) continue; // rides the finalize
+            if (foldsIntoGroupBy(w)) continue; // rides the finalize
             count++; // the wave's row-id merge
         }
         return count;
@@ -517,6 +755,20 @@ public class FeaturePlan implements Serializable {
         for (int w = 0; w < waves.size(); w++) {
             for (final int i : waves.get(w)) sb.append("  ").append(stages.get(i).describe()).append(" wave=").append(w + 1).append('\n');
         }
+        final List<OutputColumn> deferred = getDeferredColumns();
+        if (getShuffleCount() > 0) {
+            sb.append("-- carry (computed columns on the rows a keyed stage groups: wave engine / linear chain; maps named")
+                    .append(deferred.isEmpty() ? "" : "; " + deferred.size() + " deferred row column(s) evaluated on the wave inputs").append(")\n");
+            for (final Stage s : stages) {
+                if (!s.isKeyed()) continue;
+                final List<String> carried = getCarriedColumns(s);
+                sb.append("  #").append(s.index).append(' ').append(s.kind).append(s.keys.isEmpty() ? "" : " key=" + s.keys)
+                        .append(": ").append(carried.size()).append(" / ").append(getCarriedColumnsLinear(s).size()).append(" columns");
+                final List<String> maps = mapColumns(carried);
+                if (!maps.isEmpty()) sb.append("; maps: ").append(maps);
+                sb.append('\n');
+            }
+        }
         sb.append("-- columns\n");
         for (final OutputColumn c : columns) sb.append("  ").append(c.describe()).append('\n');
         if (!spec.output.roles.isEmpty() || spec.output.include != null) {
@@ -576,6 +828,18 @@ public class FeaturePlan implements Serializable {
             s.blocks.forEach(blocks::add);
             o.add("blocks", blocks);
             o.addProperty("columns", s.columns());
+            if (s.isKeyed()) {
+                // what the GroupByKey carries (engine doc §9.4.7): computed columns kept on the grouped rows
+                final List<String> carried = getCarriedColumns(s);
+                o.addProperty("carry", carried.size());
+                o.addProperty("carryLinear", getCarriedColumnsLinear(s).size());
+                final List<String> maps = mapColumns(carried);
+                if (!maps.isEmpty()) {
+                    final JsonArray array = new JsonArray();
+                    maps.forEach(array::add);
+                    o.add("carryMaps", array);
+                }
+            }
             stageArray.add(o);
         }
         json.add("stages", stageArray);

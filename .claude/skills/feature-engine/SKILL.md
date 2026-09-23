@@ -330,12 +330,20 @@ reads what the compile layer wrote into each column's `coordinates`.
      input produced by the same stage (would read null), and a fit without artifact in streaming.
 3. Wave fan-out (batch only): `RowId_Pin` (`Reshuffle`) before the first fan-out when ids are
    random and no GBK pinned them yet; `Wave{n}_Rows` (`applyRows` — the wave's row columns that
-   are computable from the wave input are evaluated on the base **before** branching); each
-   branch = `applyStage` + `PartialDoFn` (`__rowId`, `__partial`, own columns, carry keys); merge =
+   are computable from the wave input, and the **deferred** columns it completes, are evaluated on the
+   base **before** branching; `Final_Rows` after the last wave); each
+   branch = `applyStage` over `getBranchColumns` (the stage's columns minus deferred / prelude-evaluated ones) +
+   `PartialDoFn` (`__rowId`, `__partial`, own columns that live on, carry keys); merge =
    (a) fold into the next wave's single context stage (`getFoldTarget`; Vc estimated over the wave
-   input), (b) fold into the `output.groupBy` finalize, else (c) `Wave{n}_Merge` (row-id GBK +
+   input; the fold target evaluates its wave's prelude itself, `getFoldColumns`), (b) fold into the `output.groupBy`
+   finalize (`foldsIntoGroupBy`; the grouped finalize evaluates the final prelude), else (c) `Wave{n}_Merge` (row-id GBK +
    `MergeDoFn`). `coalesce` requires partials == branches (a branch failure drops the row, like the
    linear chain), rejects duplicate row ids as a whole group, `rejectionRecords` → `BadRecord`.
+   **Liveness projection** (engine doc §9.4.7): every key DoFn (`KeyDoFn` / `SortKeyDoFn` / `RowIdKeyDoFn` /
+   `Finalize_Key`) drops the computed columns nothing after it reads — `FeatureStages.project` with
+   `Wiring.dropExcept(plan.getWaveKeep(stage) | getLiveBefore(k) | getLiveAfterWave(w) | getOutputReads())`;
+   input fields always ride. The plan's `-- carry` section / stage JSON `carry` / `carryLinear` / `carryMaps` and
+   the `engine.rowWidth` hint report what rides; `KeyedSpillSorter` logs the sampled row width per stage.
 4. `Finalize` / `Finalize_Key` + `Finalize_Group` + `GroupedFinalize` (`output.groupBy`: parent
    record + child array `output.childName`, `parentFields`, `passThrough`, `nullPolicy`,
    `Finalizer` builds the output map; `__rowId` / `__partial` are dropped here).
@@ -379,7 +387,12 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    a reader of estimated pseudo-counts (`weights: varianceComponents` + `levels`) must stay IN its levels' fit
    stage — another stage would estimate its own λ over its input, silently — and `placeRow` throws otherwise;
    a static-fit block = exactly one fit stage; sequence + population under one key fuse (reported
-   as `population`). A column reading a later stage is a scheduler bug and throws.
+   as `population`). A column reading a later stage is a scheduler bug and throws. A row column nobody
+   reads is **deferred** (`OutputColumn.deferred`, `FeaturePlan.getDeferredColumns`): hosted in the last stage
+   for the linear chain, but no DAG edge and never evaluated in a branch — the wave engine evaluates it on
+   the first wave input carrying its inputs (`getPreludeColumns(w)`, index `waves` = `Final_Rows`), so a
+   lattice whose compose rows are output-only is ONE wave and a consumed map dies right after. Readers of a
+   lookup fit are never deferred (their lambdas / artifact live in the fit stage).
 5. **Keyed evaluation is O(n) per key and history is trimmed per field.** New sequence /
    population logic must either be incremental (`contribute` / `readStatistic` with eviction) or
    declare a bounded tail (`tailSize`); anything else is *unbounded* and must surface through
