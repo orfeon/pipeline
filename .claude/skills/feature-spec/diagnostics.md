@@ -67,6 +67,7 @@ not expand because another block failed).
 | `fit.minHistory` | info | the minimum history of a `fit.mode: forward` block, rounded up to whole blocks (`minBlocks` wins); ignored by the other modes |
 | `engine.rowId` | error | every `rowId` field must be an input field |
 | `engine.spill.memoryMB` | error | integer ≥ 1 |
+| `engine.rowWidth` | hint | a keyed stage groups rows that still carry a map column (a `distribution` map read by a later stage or emitted): a map over many categories makes a wide row, and a hot key's spill grows with row width × row count — the audit's `row_count` bounds the count only. The hint reads the engine that runs: with parallel waves a map that only its readouts read is dropped as soon as the levels are merged (emit the readouts — `ownValueProb` / `entropy` / `expected` — rather than `distribution`, or keep the map-reading block away from the widest key); in the linear chain (`engine.parallelWaves: false`, or no wave with two stages) the readouts run in the last stage, so a consumed map rides every keyed stage before it — switch the waves on. The plan's `-- carry` section lists per keyed stage what its rows carry in either engine |
 | `input.reserved` | error | an input field is named `__rowId` or `__partial`; rename it upstream |
 | `output.groupBy` | error | must name a context |
 | `output.nullPolicy` / `output.passThrough` | error | `keep \| fillZero \| indicator` / `all \| keys \| none` |
