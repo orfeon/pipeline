@@ -159,7 +159,7 @@ public class FeatureSpec implements Serializable {
          * reopens the uncertainty.
          */
         public Duration tauPer;
-        /** rating (bradleyTerry / gaussian): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
+        /** rating (bradleyTerry): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
         public String pairs;
         /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is

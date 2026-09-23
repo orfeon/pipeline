@@ -380,8 +380,8 @@ not alter values).
 - **`rating` in large fields** (more than about eight players per contest): `bradleyTerry` adds up every
   pair, so a player's first contest moves `mu` by several prior standard deviations and collapses `sigma`
   for good — the first result decides the rating, and the column screens as noise. A larger `beta` softens
-  the collapse without curing it. Use `pairs: mean` (or `adjacent`), `plackettLuce` or `elo` there —
-  `gaussian` adds up every pair too (`pairs: mean` for it as well).
+  the collapse without curing it. Use `pairs: mean` (or `adjacent`), `plackettLuce` or `elo` there
+  (`gaussian` conditions on the whole contest at once and has no such collapse).
   `plackettLuce`'s `sigma` hardly shrinks in a large field (about a percent per contest for the last players
   of a field of 16, next to nothing for the leaders, whatever `beta`): it is a function of the contest count,
   so use `count` for "how well known".
@@ -396,9 +396,10 @@ not alter values).
   contests/player median=m ... mu mean= sd=` line per rating op and key, one `pool` entry per member entity —
   the warm-up cue (a pool of few contests per player is still near its prior).
 - **`rating` from margins**: when the outcome is a continuous score (a time, a standardised margin) rather than a
-  rank, `method: gaussian` observes each pair's margin and moves the ratings by the residual against the expected
-  margin — a rout moves more than a close finish. Declare `mu` / `sigma` / `beta` in the outcome's units
-  (`mu: 0, sigma: 1, beta: 0.5` for a standardised margin); `pairs: mean` keeps a large field from over-moving.
+  rank, `method: gaussian` conditions every strength of the contest at once on the outcomes (one observation per
+  entry, whatever the field) and moves each by its residual against the contest's mean — a rout moves more than
+  a close finish. `sigma` and `beta` are required, in the outcome's units (`sigma: 1, beta: 0.5` for a
+  standardised margin; `mu` defaults to 0); `pairs` does not apply.
 - **`rating` split into components** (a seller's overall level, its level in this category, its pairing with
   this agent): members are any other `entities[].name`, and entities take composite keys, so
   `with: [{entity: sellerCategory, mu: 0, sigma: 2}, {entity: sellerAgent, mu: 0, sigma: 1.5}, ...]` with

@@ -50,10 +50,9 @@ import java.util.TreeMap;
 public final class Rating implements Serializable {
 
     /**
-     * {@code gaussian}: the margin-of-victory update — the outcome is a continuous score and the difference of two
-     * entries' outcomes is observed as {@code d ~ N(mu_i − mu_q, v_i + v_q + 2 beta²)}, so a pair's update is the exact
-     * Gaussian conditioning: {@code mu_i += v_i / c² · (d − (mu_i − mu_q))}, {@code v_i *= 1 − v_i / c²}. The prior and
-     * {@code beta} are then in the outcome's units, and {@link Pairs} applies as it does to {@code bradleyTerry}.
+     * {@code gaussian}: the margin-of-victory update — the outcome is a continuous score and every strength of the
+     * contest is conditioned at once on the outcomes up to a common shift (exact Gaussian conditioning, see
+     * {@link #gaussian}). The prior and {@code beta} are in the outcome's units; no pairing applies.
      */
     public enum Method { elo, bradleyTerry, plackettLuce, gaussian }
 
@@ -234,7 +233,11 @@ public final class Rating implements Serializable {
 
     /** The prior rating of a method when the spec declares none. */
     public static double defaultMu(final Method method) {
-        return method == Method.elo ? 1500d : 25d;
+        return switch (method) {
+            case elo -> 1500d;
+            case gaussian -> 0d; // a margin's origin: the prior mu is a typical outcome, 0 for a standardised one
+            default -> 25d;
+        };
     }
 
     /** The defaults that derive from the prior: {@code sigma = |mu| / 3}, {@code beta = sigma / 2}, {@code tau = sigma / 100}. */
@@ -262,13 +265,15 @@ public final class Rating implements Serializable {
 
     /**
      * @param tauPerMillis the time {@code tau} is the drift of (null / 0: {@code tau} is the drift of one contest)
-     * @param pairs        the bradleyTerry / gaussian pairing (null: all)
+     * @param pairs        the bradleyTerry pairing (null: all)
      */
     public static Rating of(final Method method, final boolean ascending, final Double mu, final Double sigma, final Double beta,
                             final Double tau, final Double kFactor, final Double scale, final Long tauPerMillis, final Pairs pairs,
                             final List<String> playerKeys, final List<String> contestKeys, final String field) {
         final double m = mu != null ? mu : defaultMu(method);
-        final double s = sigma != null ? sigma : defaultSigma(m);
+        // a margin model has no scale of its own (the compiler requires sigma and beta): the class-level default is a standardised
+        // margin, mu 0 / sigma 1 / beta 0.5, rather than |mu| / 3 of a prior at 0
+        final double s = sigma != null ? sigma : method == Method.gaussian ? 1d : defaultSigma(m);
         // a rating without a team: one member under no pool, its state keyed by the bare keys as it always was
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
@@ -523,7 +528,7 @@ public final class Rating implements Serializable {
             case elo -> elo(entries, ids, m, dMu);
             case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
             case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
-            case gaussian -> gaussian(entries, ids, m, v, dMu, deltas);
+            case gaussian -> gaussian(entries, m, v, dMu, deltas);
         }
 
         // a team's change is shared among its members by their part of its variance (1 for a player). The entries are
@@ -656,48 +661,36 @@ public final class Rating implements Serializable {
         }
     }
 
-    /** The signed margin of {@code self} over {@code other}: positive when self did better, whatever the order. */
-    private double margin(final Entry self, final Entry other) {
-        return ascending ? other.outcome() - self.outcome() : self.outcome() - other.outcome();
-    }
-
     /**
-     * The margin-of-victory update ({@link Method#gaussian}): per pair the residual of the observed margin against
-     * the expected one, scaled by the entry's share of the pair's variance {@code c² = v_i + v_q + 2 beta²}; the
-     * variance keeps {@code 1 − v_i / c²} per pair (exact Gaussian conditioning — a tie between equals moves nobody
-     * and still narrows both). Over several opponents the moves add up and the kept fractions multiply (each pair
-     * conditions what the last one left: a sum, as in bradleyTerry, would exceed 1 in a field of a few equals and
-     * collapse every variance to κ); {@code mean} divides the move by the opponents and takes the geometric mean of
-     * the kept fractions. The pairing follows {@code bradleyTerry}'s: every opponent, the rank neighbours, or the mean.
-     *
-     * <p>The pairs are combined as if they were independent observations, which they are not — every margin of an
-     * entry carries that entry's own noise — so over {@code k − 1} opponents ({@code pairs: all}) both the move and
-     * the narrowing exceed the joint conditioning on the whole contest, increasingly with the field (fresh equals with
-     * {@code beta = sigma / 2} keep {@code 0.6^(k − 1)} of their variance). {@code pairs: mean} is the pairing for a
-     * field of more than a few entries.
+     * The margin-of-victory update ({@link Method#gaussian}): the outcomes of a contest are {@code y_i = s_i + e_i} with
+     * the strengths {@code s_i ~ N(m_i, v_i)} and independent performance noise {@code e_i ~ N(0, beta²)}, and what the
+     * contest reveals is the outcomes up to a common shift (their differences). Conditioning every strength on all of
+     * them at once has a closed form because the prior is diagonal: with {@code w_i = 1 / (v_i + beta²)},
+     * {@code W = Σ w}, the residuals {@code r_i = y_i − m_i} (signed by the order) and their weighted mean
+     * {@code r̄ = Σ w_i r_i / W}, the mean moves by {@code v_i · w_i · (r_i − r̄)} and the variance keeps
+     * {@code 1 − v_i · w_i · (1 − w_i / W)}. For two entries this is the pairwise update on the margin with
+     * {@code c² = v_i + v_q + 2 beta²}; over a field it is one observation per entry, not {@code k − 1} independent
+     * ones (the pairs of an entry share its own noise: summing them, as {@code bradleyTerry} does, moves and narrows
+     * too far — sixteen fresh equals would keep 2% of their sigma instead of 50%). Ties between equals move nobody and
+     * still narrow everyone; a contest of equals whose outcomes are all equal is uninformative about the differences
+     * and still narrows, since the noise is what is bounded. No pairing applies.
      */
-    private void gaussian(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
+    private void gaussian(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
-        final double[] adjacent = new double[2];
+        final double beta2 = beta * beta;
+        final double[] w = new double[n];
+        double total = 0, weighted = 0;
         for (int i = 0; i < n; i++) {
-            final Entry self = entries.get(i);
-            if (pairs == Pairs.adjacent) neighbours(entries, ids, i, adjacent);
-            double omega = 0, kept = 1;
-            int opponents = 0;
-            for (int q = 0; q < n; q++) {
-                if (!paired(entries, ids, i, q, adjacent)) continue;
-                final Entry other = entries.get(q);
-                final double c2 = v[i] + v[q] + 2 * beta * beta;
-                omega += v[i] / c2 * (margin(self, other) - (m[i] - m[q]));
-                kept *= 1 - v[i] / c2;
-                opponents++;
-            }
-            if (pairs == Pairs.mean && opponents > 0) {
-                omega /= opponents;
-                kept = Math.pow(kept, 1d / opponents);
-            }
-            dMu[i] = omega;
-            deltas[i] = 1 - kept;
+            w[i] = 1d / (v[i] + beta2);
+            final double residual = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
+            total += w[i];
+            weighted += w[i] * residual;
+        }
+        final double mean = weighted / total;
+        for (int i = 0; i < n; i++) {
+            final double residual = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
+            dMu[i] = v[i] * w[i] * (residual - mean);
+            deltas[i] = v[i] * w[i] * (1 - w[i] / total);
         }
     }
 

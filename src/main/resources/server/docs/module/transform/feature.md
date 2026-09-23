@@ -346,19 +346,22 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
 - **`method`**: `plackettLuce` (default) and `bradleyTerry` are the closed-form Bayesian updates of Weng & Lin
   (2011) over a Gaussian strength `(mu, sigma)` — the ranking likelihood, and all pairs of the contest;
   `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty);
-  `gaussian` is the **margin-of-victory** update: the outcome is read as a continuous score and the difference of
-  two entries' outcomes is observed as `d ~ N(mu_i − mu_q, sigma_i² + sigma_q² + 2 beta²)`, so a pair's update is
-  the exact Gaussian conditioning — `mu_i += sigma_i² / c² · (d − (mu_i − mu_q))`, `sigma_i² *= 1 − sigma_i² / c²`
-  — the TrueSkill "score" extension, the counterpart of a margin-of-victory Elo. A close finish moves the ratings
-  little and a rout a lot, which the ordinal methods cannot tell apart; a tie between equals moves nobody and
-  still narrows both. Over the opponents of a contest the moves add up and the kept variance fractions multiply
-  (`pairs: mean`: the mean move and the geometric mean of the fractions). `pairs` applies as to `bradleyTerry`. The prior `mu` / `sigma` and `beta` are then in the
-  **outcome's units** (a margin in seconds, a standardised time: `mu: 0, sigma: 1, beta: 0.5`), not the rating
-  units of the defaults — `sequence.rating.gaussian.units` warns when they are left to default.
+  `gaussian` is the **margin-of-victory** update: the outcome is read as a continuous score `y_i = s_i + e_i`
+  (the strength plus a performance noise of sd `beta`), and every strength of the contest is conditioned at
+  once on the outcomes up to a common shift — exact Gaussian conditioning, in closed form: with
+  `w_i = 1 / (sigma_i² + beta²)` and the residuals `r_i = y_i − mu_i`, `mu_i += sigma_i² · w_i · (r_i − r̄)` where
+  `r̄` is the `w`-weighted mean residual of the contest, and `sigma_i² *= 1 − sigma_i² · w_i · (1 − w_i / Σw)`.
+  For two entries that is the pairwise update on their margin (`c² = sigma_i² + sigma_q² + 2 beta²`); for a
+  field it is one observation per entry, not `k − 1` independent pairs — the TrueSkill "score" extension, the
+  counterpart of a margin-of-victory Elo. A close finish moves the ratings little and a rout a lot, which the
+  ordinal methods cannot tell apart; the moves of a contest sum to zero; a tie between equals moves nobody and
+  still narrows everyone. No `pairs` applies. The prior `mu` / `sigma` and `beta` are in the
+  **outcome's units** (a margin in seconds, a standardised time: `mu: 0, sigma: 1, beta: 0.5`), so `sigma` and
+  `beta` must be declared (`sequence.rating.gaussian.units`) and `mu` defaults to 0.
   Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
   default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
   default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
-  time*), `pairs` (`bradleyTerry` / `gaussian`: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
+  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
   (32), `scale` (400).
 - **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
   months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
@@ -451,11 +454,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (the smaller the `beta` the more it shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays
   only as slowly as `sigma` does, but **`sigma` is little more than a function of the contest count**: read
   `count` for "how well do we know this player", and treat `sigma` as a feature in small contests only.
-  `gaussian` adds up the `k − 1` pairs as `bradleyTerry` does, and multiplies their kept variance fractions —
-  the pairs are combined as if independent, though every margin of a player carries its own noise, so a large
-  field over-counts the contest: fresh equals with `beta = sigma / 2` keep `0.6^(k − 1)` of their variance
-  (`sigma` × 0.46 at `k = 4`, × 0.02 at `k = 16`) and the moves grow with `k` alike. Use `pairs: mean` above a
-  few entries (every `sigma` × 0.77, a two-player contest's, whatever the field).
+  `gaussian` conditions on the whole contest at once, so a field is one observation per entry: fresh equals keep
+  `1 − w · (1 − 1/k)` of their variance (`w = sigma² / (sigma² + beta²)`, 0.8 with `beta = sigma / 2`: `sigma` × 0.5
+  at `k = 16`, × 0.63 at `k = 4`) and the winner's move is `w · (y − ȳ)` — the contest's spread, not the field
+  size, sets it.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
@@ -566,9 +568,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
-  `bradleyTerry` / `gaussian` or unknown, a `tauPer` that is not positive or comes without `tau`),
-  `sequence.rating.gaussian.units` (warning: `gaussian` with `sigma` or `beta` left to its default, which derives
-  from the prior `mu` rather than from the outcome's spread),
+  `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`),
+  `sequence.rating.gaussian.units` (error: `gaussian` without `sigma` or `beta` — a margin model has no scale of its
+  own; declare them in the outcome's units),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
   segment with different parameters — they would share one running state; name them apart with `as`).
 
