@@ -28,8 +28,8 @@ import java.util.List;
  * a selection / report role and reports the excess log score over the baseline (with a Poisson bootstrap CI,
  * paired between prediction sets), logloss, hit@1 and Brier, per declared slice, plus calibration tables, calibration
  * fits as derived prediction sets and slice discovery. Outputs the metrics (default), {@code calibration},
- * {@code units} (the per-unit loss decomposition), {@code slices} (the discovered slices) and one {@code summary}
- * record. Batch only.
+ * {@code units} (the per-unit loss decomposition), {@code slices} (the discovered slices), one {@code summary}
+ * record and, when {@code rows} is declared, the scored rows with every set's probability. Batch only.
  */
 @Transform.Module(name = "evaluation")
 public class EvaluationTransform extends Transform {
@@ -82,6 +82,7 @@ public class EvaluationTransform extends Transform {
                 .and("calibration", outputs.calibration(), EvaluationReport.calibrationSchema())
                 .and("units", outputs.units(), EvaluationReport.unitsSchema())
                 .and("slices", outputs.slices(), EvaluationReport.slicesSchema())
-                .and("summary", outputs.summary(), EvaluationReport.summarySchema());
+                .and("summary", outputs.summary(), EvaluationReport.summarySchema())
+                .and("rows", outputs.rows(), EvaluationReport.rowsSchema());
     }
 }

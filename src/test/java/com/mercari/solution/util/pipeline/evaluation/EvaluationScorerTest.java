@@ -587,4 +587,39 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(1.25, (Double) result.records().get(1).get("utility"), 1e-12);
         Assertions.assertTrue(((List<?>) result.summary().get("notes")).toString().contains("runs once"));
     }
+
+    @Test
+    public void testRowRecordsCarryEveryCompareSetsMean() {
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, rowId: [g, region], predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: u, bootstrap: false, rows: true, calibration: [{type: temperature, fitOn: valid, of: [A], grid: [0.5, 2, 4]}]}");
+        Assertions.assertEquals(List.of("valid"), spec.rowSplits);
+        Assertions.assertTrue(spec.outputsRows("valid"));
+        Assertions.assertFalse(spec.outputsRows("test"));
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(
+                new EvaluationRow("valid", "g1", "r1", 1_700_000_000_000L, null, 1, 0.5, 1d, new String[0], new String[0], new double[]{0.6, 3.0}, new String[]{"g1", "east"}),
+                new EvaluationRow("valid", "g1", "r2", 1_700_000_000_000L, null, 0, 0.5, 1d, new String[0], new String[0], new double[]{0.4, Double.NaN}, new String[]{"g1", "west"})), "g1");
+        final FitResults fits = new FitResults();
+        fits.parameters.put("A@T", new double[]{2.0});   // q ∝ q^(1/2): 0.6^0.5 / (0.6^0.5 + 0.4^0.5)
+        scorer.derive(unit, fits);
+        final List<Map<String, Object>> rows = scorer.rowRecords(unit);
+        Assertions.assertEquals(2, rows.size());
+        final Map<String, Object> first = rows.get(0);
+        Assertions.assertEquals("valid", first.get("split"));
+        Assertions.assertEquals("g1", first.get("unit"));
+        Assertions.assertEquals(List.of(Map.of("field", "g", "value", "g1"), Map.of("field", "region", "value", "east")), first.get("rowId"));
+        Assertions.assertEquals(1_700_000_000_000_000L, first.get("time"));
+        Assertions.assertEquals(1d, first.get("label"));
+        Assertions.assertEquals(1d, first.get("labelShare"));
+        Assertions.assertEquals(0.5, first.get("baseline"));
+        Assertions.assertEquals(3.0, first.get("utility"));
+        final List<?> predictions = (List<?>) first.get("predictions");
+        Assertions.assertEquals(2, predictions.size());
+        Assertions.assertEquals(Map.of("prediction", "A", "p", 0.6), predictions.get(0));
+        final Map<?, ?> tempered = (Map<?, ?>) predictions.get(1);
+        Assertions.assertEquals("A@T", tempered.get("prediction"));
+        Assertions.assertEquals(Math.sqrt(0.6) / (Math.sqrt(0.6) + Math.sqrt(0.4)), (Double) tempered.get("p"), 1e-12);
+        Assertions.assertNull(rows.get(1).get("utility"));
+        Assertions.assertEquals(0d, rows.get(1).get("label"));
+    }
 }

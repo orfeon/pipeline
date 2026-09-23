@@ -673,6 +673,46 @@ public final class EvaluationScorer implements Serializable {
         return out;
     }
 
+    /**
+     * The unit's rows as the rows output carries them (design §8.6): one record per row with its identity
+     * (the rowId values), the label as declared and its share, the baseline mean, every compared set's mean
+     * (declared and derived, so the calibrated probabilities of `@T` / `@blend` are here) and the utility.
+     */
+    public List<Map<String, Object>> rowRecords(final Unit unit) {
+        final int n = unit.size();
+        final List<Map<String, Object>> records = new ArrayList<>(n);
+        final List<String> names = spec.predictionNames();
+        for (int i = 0; i < n; i++) {
+            final EvaluationRow row = unit.rows.get(i);
+            final Map<String, Object> r = new LinkedHashMap<>();
+            r.put("split", unit.split);
+            r.put("unit", unit.key);
+            final List<Map<String, Object>> ids = new ArrayList<>(spec.rowId.size());
+            for (int f = 0; f < spec.rowId.size(); f++) {
+                final Map<String, Object> id = new LinkedHashMap<>();
+                id.put("field", spec.rowId.get(f));
+                id.put("value", f < row.ids.length ? row.ids[f] : null);
+                ids.add(id);
+            }
+            r.put("rowId", ids);
+            r.put("time", row.time == EvaluationRow.NO_TIME ? null : row.time * 1000L);
+            r.put("label", row.label);
+            r.put("labelShare", unit.y[i]);
+            r.put("baseline", EvaluationReport.finiteOrNull(unit.means[0][i]));
+            final List<Map<String, Object>> predictions = new ArrayList<>(sets);
+            for (int j = 0; j < sets; j++) {
+                final Map<String, Object> p = new LinkedHashMap<>();
+                p.put("prediction", names.get(1 + j));
+                p.put("p", EvaluationReport.finiteOrNull(unit.means[1 + j][i]));
+                predictions.add(p);
+            }
+            r.put("predictions", predictions);
+            r.put("utility", spec.hasUtility() ? EvaluationReport.finiteOrNull(row.x[spec.utilityIndex]) : null);
+            records.add(r);
+        }
+        return records;
+    }
+
     /** The unit's output records (design §8.4): one per set, the baseline first. */
     public List<Map<String, Object>> unitRecords(final Unit unit, final Metrics m) {
         final List<Map<String, Object>> records = new ArrayList<>(1 + sets);

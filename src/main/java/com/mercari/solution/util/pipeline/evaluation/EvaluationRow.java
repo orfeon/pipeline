@@ -37,6 +37,8 @@ public final class EvaluationRow implements Serializable {
     final String[] slices;
     final String[] dims;
     final double[] x;
+    /** the rowId fields' values as text (the rows output; empty unless a rows output is declared) */
+    final String[] ids;
 
     public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,
                          final double label, final double baseline, final double weight, final String[] slices, final double[] x) {
@@ -45,6 +47,12 @@ public final class EvaluationRow implements Serializable {
 
     public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,
                          final double label, final double baseline, final double weight, final String[] slices, final String[] dims, final double[] x) {
+        this(split, group, identity, time, bootKey, label, baseline, weight, slices, dims, x, new String[0]);
+    }
+
+    public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,
+                         final double label, final double baseline, final double weight, final String[] slices, final String[] dims, final double[] x, final String[] ids) {
+        this.ids = ids;
         this.split = split;
         this.group = group;
         this.identity = identity;
@@ -91,6 +99,8 @@ public final class EvaluationRow implements Serializable {
             for (final String s : value.dims) NULLABLE_STRING.encode(s, out);
             INT.encode(value.x.length, out);
             for (final double v : value.x) DOUBLE.encode(v, out);
+            INT.encode(value.ids.length, out);
+            for (final String s : value.ids) NULLABLE_STRING.encode(s, out);
         }
 
         @Override
@@ -112,7 +122,10 @@ public final class EvaluationRow implements Serializable {
             final int n = INT.decode(in);
             final double[] x = new double[n];
             for (int i = 0; i < n; i++) x[i] = DOUBLE.decode(in);
-            return new EvaluationRow(split, group, identity, time, bootKey, label, baseline, weight, slices, dims, x);
+            final int ni = INT.decode(in);
+            final String[] ids = new String[ni];
+            for (int i = 0; i < ni; i++) ids[i] = NULLABLE_STRING.decode(in);
+            return new EvaluationRow(split, group, identity, time, bootKey, label, baseline, weight, slices, dims, x, ids);
         }
     }
 }

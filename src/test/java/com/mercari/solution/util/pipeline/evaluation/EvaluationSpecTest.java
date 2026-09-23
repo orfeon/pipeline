@@ -109,6 +109,15 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], k: 500}]}")).contains("k applies to quantile"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: divergence, k: 4}]}")).contains("k must be in"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge}]}")).contains("thresholds is required"));
+        // rows output: needs rowId; true = the selection splits; named splits must exist
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rows: true}")).contains("needs rowId"));
+        Assertions.assertEquals(List.of("valid"), parse(OK.replace("}}}", "}}, rowId: [g], rows: true}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertEquals(List.of("test"), parse(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [test]}}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertNull(parse(OK.replace("}}}", "}}, rowId: [g], rows: false}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [later]}}")).contains("not a declared split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: [valid]}")).contains("rows must be true"));
+        // the rows output does not change the parameters hash (an output selection, like output.calibration)
+        Assertions.assertEquals(parse(OK.replace("}}}", "}}, rowId: [g]}")).parametersHash, parse(OK.replace("}}}", "}}, rowId: [g], rows: true}")).parametersHash);
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: region, bucket: decade}]}")).contains("bucket 'decade'"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: u, bucket: month}]}")).contains("needs a timestamp"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: y, bucket: month}]}")).contains("needs a timestamp"));   // int64 would read as micros

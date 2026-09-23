@@ -256,6 +256,7 @@ the time partition.
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}` (`l2` default 0). |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`, `utility` — the last needs `utility.field` and runs once, under the first compared set), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
+| rows | optional | Boolean or Object | `true` (the scored rows of the `selection` splits) or `{splits: [...]}` (the named splits) fills the `<name>.rows` output; needs `rowId`. Off by default (the output stays empty). |
 | slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`). Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
@@ -268,6 +269,7 @@ the time partition.
 | `<name>.units` | the per-unit loss decomposition: one record per unit × prediction set (the baseline included) |
 | `<name>.slices` | the discovered slices: one record per candidate × set (`output: passed` keeps the passed ones) |
 | `<name>.summary` | one record per run |
+| `<name>.rows` | with `rows`: one record per scored row of the selected splits — the identity, the label, the baseline and every prediction set's probability, derived sets included |
 
 ### Metrics record
 
@@ -306,6 +308,20 @@ split's), `z_discover`, `threshold`, `passed`, `n_confirm`, `mean_confirm`, `del
 `logScoreBaseline` (null in binomial prior mode), `excessLogScore`, `hitAt1`, `brier`, `utility` (the unit's
 flat return, null without `utility.field`), `slices` (ARRAY<STRUCT<field STRING, value STRING\>\>). Re-aggregate it in a warehouse, or feed it to the
 [`attribution`](attribution.md) transform to ask which slices Δ's total comes from.
+
+### Rows record
+
+`split`, `unit` (the group key, or the row identity), `rowId` (ARRAY<STRUCT<field STRING, value STRING\>\>:
+the declared `rowId` fields' values, the join key back to the input), `time`, `label` (as declared),
+`labelShare` (ỹ), `baseline` (the baseline's mean for the row, null in prior mode), `predictions`
+(ARRAY<STRUCT<prediction STRING, p FLOAT64\>\>: every compared set's mean for the row — the declared sets and
+the derived `<name>@T` / `<name>@blend`, i.e. the calibrated probabilities the fits imply), `utility`. Only
+the units that were scored appear (a skipped unit's rows do not).
+
+This closes the loop from evaluation back to selection: the calibrated row probabilities of a derived set are
+the input of a `screen` or `query` that looks for what the current model plus its calibration leaves on the
+table, without re-implementing the fit from the calibration JSON. By default only the `selection` splits are
+output — the report split's rows are for reporting, not for building the next rule on.
 
 ### Summary record
 
