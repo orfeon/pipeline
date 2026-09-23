@@ -142,7 +142,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. Readouts beside the ratings:
   `deviation` (mu − prior) and `z` (mu standardised within the member's pool: `State.pools` keeps (players, Σmu, Σmu²) per pool,
   moved in `update` beside the players — their arithmetic untouched), team `count` (`State.teams`: contests per team id, teams of
-  ≥ 2 members only, once per contest) and team `deviation`; `Rating.describe(state)` is the per-pool warm-up line the keyed DoFn
+  ≥ 2 members only, once per contest — kept only under the op coordinate `teamCounts`, written when `team:` reads `count`,
+  since it holds one entry per distinct team for the whole replay; `readTeam(count)` without it throws) and team `deviation`; `Rating.describe(state)` is the per-pool warm-up line the keyed DoFn
   logs after a key's replay (`SequenceEvaluator.ratingSummaries`). `Pairs` (`all` / `adjacent` /
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in

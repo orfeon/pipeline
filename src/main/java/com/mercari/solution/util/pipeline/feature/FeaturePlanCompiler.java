@@ -1662,6 +1662,8 @@ public final class FeaturePlanCompiler {
             }
             shared.put("teamPool", entity.name());
             shared.put("teamMembers", Rating.encodeMembers(members));
+            // the contests per team are one entry per distinct team for the whole replay: kept only when read
+            if (op.team.contains("count")) shared.put("teamCounts", "true");
         }
 
         // `as` names the field segment; without it the op is part of the name (the outcome field may feed other ops)
@@ -1795,7 +1797,8 @@ public final class FeaturePlanCompiler {
         for (final String func : op.team) {
             if (!Rating.TEAM_FUNCS.contains(func)) {
                 diagnostics.error("sequence.rating.with", loc, "unknown team readout: " + func + " (available: " + String.join(" | ", Rating.TEAM_FUNCS)
-                        + " - mu is the sum of the members' ratings, sigma the uncertainty of that sum)");
+                        + " - mu is the sum of the members' ratings, sigma the uncertainty of that sum, count the contests this very team ran,"
+                        + " deviation the sum net of the members' priors)");
                 valid = false;
             }
         }

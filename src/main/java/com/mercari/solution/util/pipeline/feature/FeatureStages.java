@@ -3556,9 +3556,12 @@ public final class FeatureStages {
                 auditInterval(millis, previousMillis);
                 evaluate(c, input, history, sequenceState, populationState, pending, false);
             }
-            // a rating pool's warm-up, for the run log: one line per rating state of the key (a pool is one key)
-            for (final String summary : evaluator.ratingSummaries(sequenceState)) {
-                LOG.info("rating state of {} after the replay: {}", spillContext(label, key), summary);
+            // a rating pool's warm-up, for the run log: one line per rating state of the key (a pool is one key) —
+            // the state as the key's last row read it (a summary sorts every player's count: skipped when not logged)
+            if (LOG.isInfoEnabled()) {
+                for (final String summary : evaluator.ratingSummaries(sequenceState)) {
+                    LOG.info("rating state of {} after the replay: {}", spillContext(label, key), summary);
+                }
             }
         }
 

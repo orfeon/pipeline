@@ -638,6 +638,16 @@ public class RatingTest {
         Assertions.assertTrue(summary.contains("pool agent: players=2 contests/player median=2 max=2 mu mean="), summary);
         Assertions.assertTrue(summary.contains("pool seller: players=2"), summary);
 
+        // a rating that reads no team count keeps none (one entry per distinct team for the whole replay); the
+        // ratings themselves are the same
+        final Rating uncounted = Rating.of(Rating.Method.plackettLuce, true, null, null, null, 0d, null, null, null, null, List.of("seller_id"), List.of("c"), "y")
+                .withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 25d, PRIOR_SIGMA, 0d)), false);
+        final Rating.State bare = new Rating.State();
+        uncounted.update(bare, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), 1_000L);
+        Assertions.assertTrue(bare.teams.isEmpty(), bare.teams::toString);
+        Assertions.assertEquals(s1, bare.players.get(s1a1.get(0)).mu, 0d);
+        Assertions.assertThrows(IllegalStateException.class, () -> uncounted.readTeam(bare, s1a1, "count", 0L));
+
         // a rating without a team: one pool, the players themselves
         final Rating solo = Rating.of(Rating.Method.bradleyTerry, true, null, null, null, 0d, null, null, List.of("p"), List.of("c"), "y");
         final Rating.State single = new Rating.State();
@@ -936,6 +946,14 @@ public class RatingTest {
         for (final OutputColumn c : List.of(seller, agent, team)) Assertions.assertTrue(c.getInputs().containsAll(List.of("seller_id", "agent_id")), c.getInputs().toString());
         final Rating.Member member = Rating.of(team.getCoordinates()).members().get(1);
         Assertions.assertEquals(new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.5), member);
+        // the contests per team are kept only for an op that reads them (team: [count]) — on every column of the op
+        Assertions.assertNull(team.getCoordinates().get("teamCounts"));
+        final FeaturePlan counted = compileTeam(DUO.replace("team: [mu, sigma]", "team: [mu, count]"));
+        Assertions.assertFalse(counted.getDiagnostics().hasErrors(), counted::describe);
+        for (final String name : List.of("skill_all_duo_mu", "skill_all_duo_agent_sigma", "skill_all_duo_team_count")) {
+            Assertions.assertEquals("true", counted.getColumn(name).getCoordinates().get("teamCounts"), name);
+        }
+        Assertions.assertEquals(com.mercari.solution.module.Schema.Type.int64, counted.getColumn("skill_all_duo_team_count").getFieldType().getType());
 
         // a bare entity name: the op's prior and drift
         final FeaturePlan bare = compileTeam(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [agent]"));

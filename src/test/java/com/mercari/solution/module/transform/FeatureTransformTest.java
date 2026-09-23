@@ -3986,16 +3986,16 @@ public class FeatureTransformTest {
                     default -> throw new AssertionError("unexpected row " + id);
                 };
                 final Map<String, Object> keys = id.endsWith("s1") ? s1 : s2;
-                // z is null until the pool holds two rated players (before session A's outcome is known)
+                // z is null until the pool holds two rated players (before session A's outcome is known); the seller's
+                // and the category's pools are independent, so each member is compared on its own
                 for (final String func : List.of("mu", "sigma", "count", "z")) {
-                    final Object seller = rating.read(known, 0, rating.memberKey(keys, 0), func, Long.MIN_VALUE), category = rating.read(known, 1, rating.memberKey(keys, 1), func, Long.MIN_VALUE);
-                    if (seller == null) {
-                        Assertions.assertNull(row.getPrimitiveValue("f_skill_all_duo_" + func), id + " seller " + func);
-                        Assertions.assertNull(row.getPrimitiveValue("f_skill_all_duo_cat_" + func), id + " category " + func);
-                        continue;
+                    for (final int member : new int[]{0, 1}) {
+                        final Object expected = rating.read(known, member, rating.memberKey(keys, member), func, Long.MIN_VALUE);
+                        final Object actual = row.getPrimitiveValue("f_skill_all_duo_" + (member == 0 ? "" : "cat_") + func);
+                        final String what = id + (member == 0 ? " seller " : " category ") + func;
+                        if (expected == null) Assertions.assertNull(actual, what);
+                        else Assertions.assertEquals(((Number) expected).doubleValue(), ((Number) actual).doubleValue(), 1e-9, what);
                     }
-                    Assertions.assertEquals(((Number) seller).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_" + func)).doubleValue(), 1e-9, id + " seller " + func);
-                    Assertions.assertEquals(((Number) category).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_cat_" + func)).doubleValue(), 1e-9, id + " category " + func);
                 }
                 for (final String func : List.of("mu", "sigma", "count")) {
                     final Object team = rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE);

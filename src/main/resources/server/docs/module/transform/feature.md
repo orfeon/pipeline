@@ -430,10 +430,12 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool. The `z` func
   is the pool-wide form of that reading: `mu` standardised over the pool's rated players, so the warm-up's
   growing spread cancels out of it (null until two players with different ratings are rated). At the end of a
-  pool's replay the run log prints `rating state of Stage<N>_sequence key=<pool> after the replay: pool
-  <entity>: players=<n> contests/player median=<m> max=<k> mu mean=<..> sd=<..>` — one entry per member entity
-  of a team — which says how warm each pool got over the input: a median of a few contests per player means
-  the pool is still near its prior, and a team's member pools warm up at different speeds.
+  pool's replay the run log prints, per rating op, `rating state of Stage<N>_sequence key=<pool> after the
+  replay: <block>_<window>_<segment>: pool <entity>: players=<n> contests/player median=<m> max=<k> mu
+  mean=<..> sd=<..>` — one entry per member entity of a team, joined by `; ` (`pool <players>` for a rating
+  without a team) — which says how warm each pool got over the input (the state as the pool's last row read
+  it: the contests the window shift still held back are not in it): a median of a few contests per player
+  means the pool is still near its prior, and a team's member pools warm up at different speeds.
 - **Teams (`with`).** A rating gives the whole result of a row to the one entity it rates, so an entity that
   always appears in company — an agent selling for sellers, a driver in a car — is rated for the company it
   keeps: its rating is mostly theirs. `with` rates the row as a **team** instead, the block's entity together
@@ -484,7 +486,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its
     shares. The rows of one and the same team are not compared with each other.
   - `plackettLuce` / `bradleyTerry` only: `elo` keeps no variance to share by. The state, the stage key (global,
-    or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member.
+    or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member — and,
+    only when `team: [count]` is read, one counter per distinct team (every pairing the pool has seen).
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
   twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
