@@ -300,12 +300,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   trimmed entry and a readout may walk it from its own start (`Rating.replay` does) rather than only touching a
   bounded tail — and the base never passes a column's own watermark, so the entries it can still need are held.
 - **Ratings** (`rating`, `Rating`): the block's entity is the rated player, `context` the contest (the rows of one
-  group at one event time), `field` its outcome; `elo` and the Weng–Lin closed-form updates (`bradleyTerry`,
-  `plackettLuce`) over (mu, sigma) with a drift `tau` — per contest, or with `tauPer` in proportion to the time since
+  group at one event time), `field` its outcome; `elo`, the Weng–Lin closed-form updates (`bradleyTerry`,
+  `plackettLuce`) and the margin-of-victory `gaussian` (exact Gaussian conditioning per pair on the signed margin, prior
+  and `beta` in the outcome's units) over (mu, sigma) with a drift `tau` — per contest, or with `tauPer` in proportion to the time since
   the player's previous contest: the state then keeps each player's last contest time (`Player.lastMillis`, the
   event time of the run `Rating.fold` was handed), a first contest drifts nothing, and a **read** adds the drift up to
   the row (`Rating.read(state, player, func, nowMillis)`) — the one readout of the op that depends on the row's time,
-  served alike by the fold pointer and the scan reference. `bradleyTerry` takes a pairing (`Rating.Pairs`: `all` |
+  served alike by the fold pointer and the scan reference. `bradleyTerry` and `gaussian` take a pairing (`Rating.Pairs`: `all` |
   `adjacent` | `mean`); `adjacent` is defined on the outcomes (the opponents at the player's own, the nearest better
   and the nearest worse outcome), never on the position of an entry, so ties cannot make it order-dependent. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters

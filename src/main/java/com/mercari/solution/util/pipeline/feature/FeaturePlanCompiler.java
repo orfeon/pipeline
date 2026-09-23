@@ -1572,7 +1572,7 @@ public final class FeaturePlanCompiler {
             if (op.scale != null) foreign.add("scale");
         }
         if (!foreign.isEmpty()) {
-            diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce: elo takes mu, kFactor, scale"
+            diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce / gaussian: elo takes mu, kFactor, scale"
                     : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau, tauPer"));
             valid = false;
         }
@@ -1610,7 +1610,7 @@ public final class FeaturePlanCompiler {
         final List<String> funcs = op.funcs.isEmpty() ? (elo ? List.of("mu") : List.of("mu", "sigma")) : op.funcs;
         for (final String func : funcs) {
             if (!Rating.FUNCS.contains(func) || (elo && "sigma".equals(func))) {
-                diagnostics.error("sequence.rating.func", loc, (Rating.FUNCS.contains(func) ? "elo keeps no uncertainty: sigma is a readout of bradleyTerry / plackettLuce"
+                diagnostics.error("sequence.rating.func", loc, (Rating.FUNCS.contains(func) ? "elo keeps no uncertainty: sigma is a readout of bradleyTerry / plackettLuce / gaussian"
                         : "unknown rating func: " + func) + " (available: " + String.join(" | ", Rating.FUNCS) + ")");
                 valid = false;
             }
@@ -1639,10 +1639,18 @@ public final class FeaturePlanCompiler {
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
         }
-        if (method == Rating.Method.gaussian && (op.sigma == null || op.beta == null) && hintedBlocks.add("sequence.rating.gaussian.units:" + def.name + ":" + field)) {
-            // the defaults are rating units (25 / 8.33 / 4.17): a margin in seconds or standard deviations is on another scale
-            diagnostics.warning("sequence.rating.gaussian.units", loc, "gaussian reads the outcome '" + field + "' as a margin, so its prior mu / sigma and beta are in the"
-                    + " outcome's units: " + (op.sigma == null ? "sigma" : "beta") + " is defaulted (mu " + mu + ", sigma " + sigma + ", beta "
+        // one warning per op (its `as` tells two ops of one field apart, in the key and in the text - Diagnostics merges
+        // identical warnings), not per window of the op
+        if (method == Rating.Method.gaussian && (op.sigma == null || op.beta == null)
+                && hintedBlocks.add("sequence.rating.gaussian.units:" + def.name + ":" + field + ":" + op.as)) {
+            // the defaults derive from the prior mu (sigma = |mu| / 3, beta = sigma / 2; 25 / 8.33 / 4.17 when mu is
+            // defaulted too): a scale tied to a rating's level, not to how a margin in seconds or standard deviations spreads
+            final List<String> defaulted = new ArrayList<>();
+            if (op.sigma == null) defaulted.add("sigma = |mu| / 3");
+            if (op.beta == null) defaulted.add("beta = sigma / 2");
+            diagnostics.warning("sequence.rating.gaussian.units", loc, "gaussian" + (op.as == null ? "" : " '" + op.as + "'")
+                    + " reads the outcome '" + field + "' as a margin, so its prior mu / sigma and beta are in the"
+                    + " outcome's units: " + String.join(" and ", defaulted) + (defaulted.size() == 1 ? " is" : " are") + " defaulted (mu " + mu + ", sigma " + sigma + ", beta "
                     + (op.beta != null ? op.beta : Rating.defaultBeta(sigma)) + ") - declare mu (a typical outcome), sigma (how far strengths spread) and beta (the noise of one outcome)");
         }
         shared.put("context", contest.name());
@@ -1756,7 +1764,7 @@ public final class FeaturePlanCompiler {
             return valid;
         }
         if (elo) {
-            diagnostics.error("sequence.rating.with", loc, "a team's change is shared among its members by their variance, which elo does not keep: rate a team with plackettLuce or bradleyTerry");
+            diagnostics.error("sequence.rating.with", loc, "a team's change is shared among its members by their variance, which elo does not keep: rate a team with plackettLuce, bradleyTerry or gaussian");
             valid = false;
         }
         if (op.as == null || !singleField) {

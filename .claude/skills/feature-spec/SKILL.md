@@ -380,7 +380,8 @@ not alter values).
 - **`rating` in large fields** (more than about eight players per contest): `bradleyTerry` adds up every
   pair, so a player's first contest moves `mu` by several prior standard deviations and collapses `sigma`
   for good — the first result decides the rating, and the column screens as noise. A larger `beta` softens
-  the collapse without curing it. Use `pairs: mean` (or `adjacent`), `plackettLuce` or `elo` there.
+  the collapse without curing it. Use `pairs: mean` (or `adjacent`), `plackettLuce` or `elo` there —
+  `gaussian` adds up every pair too (`pairs: mean` for it as well).
   `plackettLuce`'s `sigma` hardly shrinks in a large field (about a percent per contest for the last players
   of a field of 16, next to nothing for the leaders, whatever `beta`): it is a function of the contest count,
   so use `count` for "how well known".

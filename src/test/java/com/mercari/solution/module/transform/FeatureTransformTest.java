@@ -3852,6 +3852,11 @@ public class FeatureTransformTest {
             rest.update(resting, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)), timeA + 19 * day);
             final double restD = (Double) rest.read(resting, "s1", "sigma", timeA + 31 * day);
             Assertions.assertTrue(restD > (Double) rest.read(resting, "s1", "sigma"), "the 12 days since contest C are in the read");
+            // gaussian: the ratings after contest A (read at C) and after contests A and C (read at D)
+            final Rating gs = Rating.of(Rating.Method.gaussian, false, 50d, 40d, 20d, 0d, null, null, List.of(), List.of(), "y");
+            final Rating.State gsA = new Rating.State(), gsC = new Rating.State();
+            for (final Rating.State s : List.of(gsA, gsC)) gs.update(s, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)));
+            gs.update(gsC, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)));
             int count = 0;
             for (final MElement row : rows) {
                 count++;
@@ -3873,10 +3878,6 @@ public class FeatureTransformTest {
                 };
                 Assertions.assertEquals(restSigma, row.getAsDouble("f_skill_all_rest_sigma"), 1e-9, id);
                 // gaussian: the margins 150 and 23 move the ratings by their residual against the expected margin
-                final Rating gs = Rating.of(Rating.Method.gaussian, false, 50d, 40d, 20d, 0d, null, null, List.of(), List.of(), "y");
-                final Rating.State gsA = new Rating.State(), gsC = new Rating.State();
-                for (final Rating.State s : List.of(gsA, gsC)) gs.update(s, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)));
-                gs.update(gsC, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)));
                 final Rating.State gsKnown = switch (id) {
                     case "C/s1", "C/s2" -> gsA;
                     case "D/s1" -> gsC;

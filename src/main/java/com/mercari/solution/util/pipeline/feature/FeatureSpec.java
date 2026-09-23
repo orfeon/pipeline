@@ -137,7 +137,7 @@ public class FeatureSpec implements Serializable {
          */
         public String weightBy;
         /**
-         * rating: the update rule ({@code elo | bradleyTerry | plackettLuce}), the contexts[].name whose groups are the
+         * rating: the update rule ({@code elo | bradleyTerry | plackettLuce | gaussian}), the contexts[].name whose groups are the
          * contests, and whether a smaller outcome ({@code ascending}, the default: a rank) or a larger one
          * ({@code descending}: a score) is the better.
          */
@@ -157,7 +157,7 @@ public class FeatureSpec implements Serializable {
          * reopens the uncertainty.
          */
         public Duration tauPer;
-        /** rating (bradleyTerry): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
+        /** rating (bradleyTerry / gaussian): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
         public String pairs;
         /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is

@@ -245,12 +245,6 @@ public class RatingTest {
         }
     }
 
-    /**
-     * bradleyTerry's pairings on a field of sixteen fresh players: {@code mean} weighs the contest like one game — the
-     * winner's move and everyone's sigma are those of a two-player contest — {@code adjacent} pairs the rank
-     * neighbours (the ends have one, the others a better and a worse one: no move between equals, twice the
-     * shrinkage), and ties are neighbours of each other and of both sides, whatever the order of the entries.
-     */
     /** The margin-of-victory update by hand: the residual against the expected margin, the variance kept, ties, order, pairs and teams. */
     @Test
     public void testGaussianMargin() {
@@ -295,8 +289,46 @@ public class RatingTest {
         Assertions.assertEquals(move * 1 / 5, teams.players.get("seller\u0001s1").mu, 1e-12);
         Assertions.assertEquals(move * 4 / 5, teams.players.get("agent\u0001a1").mu, 1e-12);
         Assertions.assertEquals(move, (Double) duo.readTeam(teams, List.of("seller\u0001s1", "agent\u0001a1"), "mu", 0L), 1e-12);
+        // and each member's variance is conditioned exactly: v_j · (1 − v_j / c²)
+        Assertions.assertEquals(Math.sqrt(1 * (1 - 1 / c2)), teams.players.get("seller\u0001s1").sigma, 1e-12);
+        Assertions.assertEquals(Math.sqrt(4 * (1 - 4 / c2)), teams.players.get("agent\u0001a1").sigma, 1e-12);
     }
 
+    /**
+     * gaussian at compile time: {@code pairs} is accepted and reaches the coordinates, and a prior whose {@code sigma}
+     * or {@code beta} is left to the defaults (which derive from {@code mu}, not from the outcome's spread) is warned
+     * about once per op.
+     */
+    @Test
+    public void testGaussianCompile() {
+        final String op = "      - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma, count, delta]}";
+        Assertions.assertTrue(SPEC.contains(op));
+        final String gaussian = "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, ";
+        final FeaturePlan declared = compile(SPEC.replace(op, gaussian + "mu: 0, sigma: 40, beta: 20, pairs: adjacent, as: gs}"));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertFalse(hasCode(declared, "sequence.rating.gaussian.units"), declared::describe);
+        Assertions.assertEquals("gaussian", declared.getColumn("skill_all_gs_mu").getCoordinates().get("method"));
+        Assertions.assertEquals("adjacent", declared.getColumn("skill_all_gs_mu").getCoordinates().get("pairs"));
+        final java.util.function.Function<FeaturePlan, Long> warnings = plan -> plan.getDiagnostics().getMessages().stream()
+                .filter(m -> m.code().equals("sequence.rating.gaussian.units")).count();
+        // mu alone moves no margin (the update reads differences only): sigma and beta are what the warning asks for
+        for (final String params : List.of("as: gs}", "mu: 0, sigma: 40, as: gs}", "sigma: 40, beta: 20, as: gs}")) {
+            final FeaturePlan plan = compile(SPEC.replace(op, gaussian + params));
+            Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+            Assertions.assertEquals(params.contains("beta") ? 0L : 1L, warnings.apply(plan), () -> params + "\n" + plan.describe());
+        }
+        // two gaussian ops of one field, told apart by as: each is warned about
+        final FeaturePlan two = compile(SPEC.replace(op, gaussian + "as: g1}\n" + gaussian + "pairs: mean, as: g2}"));
+        Assertions.assertFalse(two.getDiagnostics().hasErrors(), two::describe);
+        Assertions.assertEquals(2L, warnings.apply(two), two::describe);
+    }
+
+    /**
+     * bradleyTerry's pairings on a field of sixteen fresh players: {@code mean} weighs the contest like one game — the
+     * winner's move and everyone's sigma are those of a two-player contest — {@code adjacent} pairs the rank
+     * neighbours (the ends have one, the others a better and a worse one: no move between equals, twice the
+     * shrinkage), and ties are neighbours of each other and of both sides, whatever the order of the entries.
+     */
     @Test
     public void testBradleyTerryPairs() {
         final java.util.function.Function<Rating.Pairs, Rating> bt = pairs ->

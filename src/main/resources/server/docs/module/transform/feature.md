@@ -342,7 +342,7 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (default: a rank or finishing position, smaller is better) or `descending` (a score, larger is better).
   Equal outcomes are ties. A row without a contest key, an entity key or a finite outcome takes no part, and a
   contest needs two distinct players. A player with several rows in one contest takes part once per row and
-  receives the sum of their changes (its own rows are not compared with each other in `elo` / `bradleyTerry`).
+  receives the sum of their changes (its own rows are not compared with each other in `elo` / `bradleyTerry` / `gaussian`).
 - **`method`**: `plackettLuce` (default) and `bradleyTerry` are the closed-form Bayesian updates of Weng & Lin
   (2011) over a Gaussian strength `(mu, sigma)` — the ranking likelihood, and all pairs of the contest;
   `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty);
@@ -372,7 +372,7 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   Size `tauPer` well above the outcome's availability lag (`settlementLag` + `ingestionLag` + the `predictAt`
   offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
   that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
-  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` only; the period is wall time.
+  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` / `gaussian` only; the period is wall time.
 - **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
   (the rating's change in its last contest, null before the first). An entity never rated reads the prior
   (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
@@ -425,6 +425,11 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (the smaller the `beta` the more it shrinks: 8.22 as `beta` → 0). `mu` is a sound rating and its step decays
   only as slowly as `sigma` does, but **`sigma` is little more than a function of the contest count**: read
   `count` for "how well do we know this player", and treat `sigma` as a feature in small contests only.
+  `gaussian` adds up the `k − 1` pairs as `bradleyTerry` does, and multiplies their kept variance fractions —
+  the pairs are combined as if independent, though every margin of a player carries its own noise, so a large
+  field over-counts the contest: fresh equals with `beta = sigma / 2` keep `0.6^(k − 1)` of their variance
+  (`sigma` × 0.46 at `k = 4`, × 0.02 at `k = 16`) and the moves grow with `k` alike. Use `pairs: mean` above a
+  few entries (every `sigma` × 0.77, a two-player contest's, whatever the field).
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
@@ -478,14 +483,16 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     its other members still read. A member never rated reads its prior, so a known seller with a new agent
     reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its
     shares. The rows of one and the same team are not compared with each other.
-  - `plackettLuce` / `bradleyTerry` only: `elo` keeps no variance to share by. The state, the stage key (global,
+  - `plackettLuce` / `bradleyTerry` / `gaussian` only: `elo` keeps no variance to share by. The state, the stage key (global,
     or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
   twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
-  `bradleyTerry` or unknown, a `tauPer` that is not positive or comes without `tau`),
+  `bradleyTerry` / `gaussian` or unknown, a `tauPer` that is not positive or comes without `tau`),
+  `sequence.rating.gaussian.units` (warning: `gaussian` with `sigma` or `beta` left to its default, which derives
+  from the prior `mu` rather than from the outcome's spread),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
   segment with different parameters — they would share one running state; name them apart with `as`).
 

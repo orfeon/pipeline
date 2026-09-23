@@ -142,8 +142,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `gaussian` is the
   margin-of-victory method (exact Gaussian conditioning per pair on the signed margin, `Rating.margin` honours `order`;
   Ω = Σ v_i / c² · residual, Δ = Σ v_i / c²; prior and beta in outcome units, warning `sequence.rating.gaussian.units`); it
-  mirrors bradleyTerry's pairing loop rather than sharing it, so the frozen player arithmetic stays untouched. `Pairs` (`all` / `adjacent` /
-  `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
+  shares bradleyTerry's pairing (`Rating.neighbours` / `Rating.paired`: comparisons only, so the frozen player arithmetic
+  stays untouched) — the pairs are combined as if independent, so `all` over-counts a large field. `Pairs` (`all` / `adjacent` /
+  `mean`) is bradleyTerry / gaussian only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in
   `validateRatingTeam` under the one code `sequence.rating.with`; `SequenceEvaluator.readRating` picks member / team. INVARIANT: the
   columns of one `stateKey` share ONE fold pointer, so they need one availability contract - the same self AND past inputs on every
