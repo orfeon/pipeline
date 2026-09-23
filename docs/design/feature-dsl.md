@@ -878,7 +878,8 @@ under its own name (intermediate columns, most recent first) and then:
 
 - `transitionStats` is a **desugaring** into an expanding `encoding`: `stats: [distribution]` of the field keyed on
   the state — the lag path, `order` steps long — and shrunk along `(entity, state) → (state) → shorter states →
-  marginal` (the entity level only with `blend.perEntity`; `blend.priorWeight` is λ). `emit` is `{toValueProb: v}`
+  marginal` (the entity level only with `blend.perEntity`; `blend.priorWeight` is λ; back-off is the chain rule of
+  §5.3.1 — the effective leaf is the deepest level with rows, and leave-node-out starts from it). `emit` is `{toValueProb: v}`
   (a column `<name>_to_<v>`), `distribution` (the map `<name>_to`), or a readout of the map — `ownValueProb` /
   `surprisal` (the row's own value's share and its −ln: they read the row's value, so on an outcome field they
   are violations), `entropy`, `expected` (Σ v·p over an integer code) — each a row column over the map. The n-gram readout once planned for the

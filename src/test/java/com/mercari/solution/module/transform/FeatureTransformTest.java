@@ -1257,20 +1257,82 @@ public class FeatureTransformTest {
 
     @Test
     public void testParallelWavesRowIdMerge() throws java.io.IOException {
-        // shrinkage lattice: the seller / global levels and the session context branch; the category stage
-        // (a keyed stage hosting the compose rows) follows, so the merge is a row-id GroupByKey
+        // shrinkage lattice: the seller / global / category levels and the session context are one wave; the compose
+        // rows the category stage hosts are deferred (nobody reads them), so the merge is a row-id GroupByKey and
+        // the compose rows are evaluated on the merged rows (Final_Rows) - the level statistics they read leave the
+        // rows only after that (engine doc §9.4.7)
         final String lattice = FEATURE_CONFIG
                 .replace("- {expr: \"sold >= 1\", stats: [mean]}",
                         "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
                 .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]");
-        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge"), List.of("Wave1_FanIn"));
+        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge", "Final_Rows"), List.of("Wave1_FanIn", "Wave2"));
+    }
+
+    @Test
+    public void testParallelWavesProjectDistributionMaps() throws java.io.IOException {
+        // transitionStats chains (per entity and pooled) next to the fold-into-context wave: the level maps are read
+        // by the composed maps only (deferred, with their readouts), so no branch's GroupByKey carries them and the
+        // merged rows drop them once the readouts ran; an emitted distribution (qty_next_to) rides to the output
+        final String blocks = """
+                    - name: grade_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      emit: [{toValueProb: good}, ownValueProb, surprisal, entropy]
+                      blend: {priorWeight: 2}
+                    - name: qty_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: quantity}
+                      emit: [distribution, expected, entropy]
+                      blend: {perEntity: false, priorWeight: 2}
+                """;
+        // (the chains' level stages join the second wave, so both waves merge by row id and the readouts run last)
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n"), 6,
+                List.of("_Partial", "Wave1_Merge", "Wave2_Merge", "Final_Rows"), List.of("Wave1_FanIn"));
+    }
+
+    @Test
+    public void testParallelWavesRowIdMergeFoldIntoGroupBy() throws java.io.IOException {
+        // the lattice of testParallelWavesRowIdMerge under output.groupBy: the one wave folds into the grouped finalize,
+        // which evaluates the deferred compose / deviation rows on the merged rows - so Finalize_Key must keep their
+        // inputs (the level statistics), not only what the output reads (they came out null before the fix)
+        final String lattice = FEATURE_CONFIG
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
+                .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]")
+                .replace("      output:\n        prefix: f_\n", "      output:\n        prefix: f_\n        groupBy: session\n");
+        Assertions.assertNotEquals(FEATURE_CONFIG, lattice);
+        final Config config = Config.load(SOURCE_CONFIG + lattice);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "Wave1_FanIn"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "Wave1_Merge"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "Final_Rows"), names::toString);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int sessions = 0, children = 0, composed = 0;
+            for (final MElement row : rows) {
+                sessions++;
+                for (final Object child : (List<?>) row.getPrimitiveValue("rows")) {
+                    children++;
+                    final Map<?, ?> values = child instanceof MElement e ? e.asPrimitiveMap() : (Map<?, ?>) child;
+                    if (values.get("f_enc__seller_id__e2__mean") != null) composed++;
+                }
+            }
+            Assertions.assertEquals(4, sessions);
+            Assertions.assertEquals(6, children);
+            // C and D read the earlier sessions' statistics; A and B read nothing but the prior (null before any row)
+            Assertions.assertEquals(3, composed, "the deferred compose rows are evaluated on the merged rows");
+            return null;
+        });
+        pipeline.run();
     }
 
     @Test
     public void testParallelWavesFoldIntoGroupedFinalize() throws java.io.IOException {
         // two independent keyed blocks and output.groupBy: the last wave merges inside the finalize GroupByKey
-        // (vs_market is dropped: a row column over the context stage is placed in the last keyed stage and
-        // makes it depend on the context stage, i.e. a wave of its own)
+        // (vs_market is dropped for the fixture's shape: it once pulled the last keyed stage into a wave of its own;
+        // as a deferred column it no longer would - see testParallelWavesRowIdMergeFoldIntoGroupBy)
         final String grouped = FEATURE_CONFIG
                 .replace("        - name: vs_market\n          scope: row\n          type: residual\n          input: relative_start_price_shareOfTotal\n          baseline: market\n", "")
                 .replace("            - {type: aggregate, field: start_price, funcs: [count, mean]}\n",
