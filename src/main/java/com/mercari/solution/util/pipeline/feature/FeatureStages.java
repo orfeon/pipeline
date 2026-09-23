@@ -317,6 +317,10 @@ public final class FeatureStages {
         for (final StaticFitBlock<?> block : staticFitBlocks(plan.getColumns())) {
             if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
         }
+        // a rating's state snapshots: one directory per block (a file per rating state and pool inside it)
+        for (final RatingSnapshot.Spec spec : RatingSnapshot.specsOf(plan.getColumns(), version)) {
+            paths.putIfAbsent(spec.block(), RatingSnapshot.directory(spec.uri(), version, spec.block()));
+        }
         return paths;
     }
 
@@ -462,7 +466,7 @@ public final class FeatureStages {
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future,
-                                        minIntervalAudits.getOrDefault(stage.index(), Map.of())))
+                                        minIntervalAudits.getOrDefault(stage.index(), Map.of()), RatingSnapshot.specsOf(stageColumns, plan.getArtifactVersion())))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
@@ -3436,16 +3440,46 @@ public final class FeatureStages {
          */
         private final Map<String, Long> minIntervals;
         private transient Map<String, Counter> belowMinInterval;
+        /** The rating states of this stage that are snapshotted ({@link RatingSnapshot}): loaded before a key's replay, written after it. */
+        private final List<RatingSnapshot.Spec> snapshots;
+        private transient Map<String, Counter> rowsBeforeSnapshot;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
                          final KeyedSpillSorter sorter, final String label, final boolean mirrored,
-                         final Map<String, Long> minIntervals) {
+                         final Map<String, Long> minIntervals, final List<RatingSnapshot.Spec> snapshots) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.sorter = sorter;
             this.label = label;
             this.mirrored = mirrored;
             this.minIntervals = mirrored ? Map.of() : minIntervals;
+            this.snapshots = snapshots;
+        }
+
+        /** Starts the key's rating states from their snapshots where one exists (and no refit is asked); returns the specs so loaded. */
+        private Set<RatingSnapshot.Spec> loadSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key) {
+            final Set<RatingSnapshot.Spec> loaded = new HashSet<>();
+            for (final RatingSnapshot.Spec spec : snapshots) {
+                if (spec.refit() || !RatingSnapshot.exists(spec, key)) continue;
+                sequenceState.column(spec.stateKey()).bySubkey.put("", RatingSnapshot.read(spec, key));
+                loaded.add(spec);
+            }
+            return loaded;
+        }
+
+        /** Writes the key's rating states that were replayed from scratch; reports the rows a loaded state served too early. */
+        private void writeSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final Set<RatingSnapshot.Spec> loaded) {
+            for (final RatingSnapshot.Spec spec : snapshots) {
+                final SequenceEvaluator.ColumnState cs = sequenceState.columns.get(spec.stateKey());
+                if (cs == null || !(cs.bySubkey.get("") instanceof Rating.State state)) continue;
+                if (state.rowsBeforeSnapshot > 0) {
+                    if (rowsBeforeSnapshot == null) rowsBeforeSnapshot = new HashMap<>();
+                    rowsBeforeSnapshot.computeIfAbsent(spec.stateKey(), k -> Metrics.counter("feature", "ratingSnapshot_" + k + "_rowsBefore")).inc(state.rowsBeforeSnapshot);
+                    LOG.warn("rating snapshot of {} key={}: {} row(s) lie before the snapshot's last contest ({}) and read a state that already holds contests"
+                            + " after them - start the input after the snapshot, or refit", spec.stateKey(), key, state.rowsBeforeSnapshot, state.foldedUntilMillis);
+                }
+                if (!loaded.contains(spec)) RatingSnapshot.write(spec, key, state);
+            }
         }
 
         private void auditInterval(final long millis, final long previousMillis) {
@@ -3515,7 +3549,7 @@ public final class FeatureStages {
                 return;
             }
             try (sorted) {
-                replay(c, sorted);
+                replay(c, sorted, kv.getKey());
             } catch (final UncheckedIOException e) {
                 // a chunk could not be read back mid-merge: the rows already emitted stand, the key is failed
                 // row by row like every other failure path (the grouped iterable is re-iterable)
@@ -3530,10 +3564,11 @@ public final class FeatureStages {
             }
         }
 
-        private void replay(final ProcessContext c, final Iterable<KV<Long, MElement>> rows) {
+        private void replay(final ProcessContext c, final Iterable<KV<Long, MElement>> rows, final String key) {
             final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
+            final Set<RatingSnapshot.Spec> loaded = snapshots.isEmpty() ? Set.of() : loadSnapshots(sequenceState, key);
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
@@ -3551,6 +3586,7 @@ public final class FeatureStages {
                 auditInterval(millis, previousMillis);
                 evaluate(c, input, history, sequenceState, populationState, pending, false);
             }
+            if (!snapshots.isEmpty()) writeSnapshots(sequenceState, key, loaded);
         }
 
         private void evaluate(final ProcessContext c, final MElement input, final SequenceEvaluator.History history,

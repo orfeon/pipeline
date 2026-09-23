@@ -3527,6 +3527,45 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(column(plan, "__baseline_market").isIntermediate());
     }
 
+    private static final String SNAPSHOT_BLOCK = """
+      - name: skill
+        scope: sequence
+        entity: seller
+        fit: {artifact: {uri: "gs://bucket/feature", refit: true}}
+        ops:
+          - {type: rating, field: final_price, context: session, order: descending, as: pl, funcs: [mu, sigma]}
+    """;
+
+    /** fit.artifact on a rating's sequence block = the state snapshot: coordinates on every readout column, outside the plan hash. */
+    @Test
+    public void testRatingSnapshotArtifact() {
+        final FeaturePlan plan = compile(SOURCES, withBlocks(SNAPSHOT_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (final String func : List.of("mu", "sigma")) {
+            final OutputColumn c = column(plan, "skill_all_pl_" + func);
+            Assertions.assertEquals("gs://bucket/feature", c.getCoordinates().get("artifact"));
+            Assertions.assertEquals("true", c.getCoordinates().get("artifactRefit"));
+        }
+        Assertions.assertTrue(hasCode(plan, "sequence.rating.artifact"), plan::describe);
+        // the artifact is where the state is stored, not what it is: the plan hash ignores it, as it ignores every fit.artifact
+        // (the hash strips the artifact and keeps the block's fit object, so the comparison declares an empty one;
+        // the text block runs at a 4-space indent for the block's keys)
+        final String noArtifact = SNAPSHOT_BLOCK.replace("    fit: {artifact: {uri: \"gs://bucket/feature\", refit: true}}\n", "    fit: {}\n");
+        Assertions.assertNotEquals(SNAPSHOT_BLOCK, noArtifact);
+        final FeaturePlan without = compile(SOURCES, withBlocks(noArtifact));
+        Assertions.assertEquals(without.getHash(), plan.getHash());
+        Assertions.assertNull(column(without, "skill_all_pl_mu").getCoordinates().get("artifact"), without::describe);
+        Assertions.assertFalse(hasCode(without, "sequence.rating.artifact"));
+        // the plain string form, without refit
+        final FeaturePlan plain = compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("{artifact: {uri: \"gs://bucket/feature\", refit: true}}", "{artifact: \"gs://bucket/feature\"}")));
+        Assertions.assertEquals("gs://bucket/feature", column(plain, "skill_all_pl_mu").getCoordinates().get("artifact"));
+        Assertions.assertNull(column(plain, "skill_all_pl_mu").getCoordinates().get("artifactRefit"));
+        // a sequence block fits nothing: any other fit setting is an error; the artifact without a rating op is ignored
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("fit: {artifact: {uri: \"gs://bucket/feature\", refit: true}}", "fit: {mode: static}"))), "sequence.fit"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("- {type: rating, field: final_price, context: session, order: descending, as: pl, funcs: [mu, sigma]}",
+                "- {type: lag, fields: [final_price], k: 1}"))), "sequence.fit.ignored"));
+    }
+
     @Test
     public void testSoftmaxDiagnosticsAndIndicators() {
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: nope"))), "context.softmax.offset"));

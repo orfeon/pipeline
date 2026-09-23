@@ -215,6 +215,9 @@ not expand because another block failed).
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
+| `sequence.fit` | error | a sequence block takes `fit: {artifact: ...}` only (a rating's state snapshot); `mode` and the other fit settings belong to population blocks |
+| `sequence.fit.ignored` | warning | `fit.artifact` on a sequence block without a rating op: nothing to snapshot |
+| `sequence.rating.artifact` | info | the rating snapshots every pool's state to `<uri>/<planHash>/<block>.rating/` after the replay; a run that finds a pool's snapshot starts from it and folds only the later contests (serving: the input holds the rows to serve and every contest after the snapshot time); `refit: true` replays from scratch and rewrites it. Run-time counter `feature/ratingSnapshot_<state>_rowsBefore` = rows whose near edge lies before the snapshot's last contest (they read too much: start the input later) |
 
 ## Population
 

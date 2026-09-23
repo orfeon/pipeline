@@ -89,9 +89,19 @@ public final class Rating implements Serializable {
         public long lastMillis;
     }
 
-    /** The ratings of one pool: player key → rating (players never seen read the prior). */
+    /**
+     * The ratings of one pool: player key → rating (players never seen read the prior). {@code foldedUntilMillis} is
+     * the event time of the last run of contests folded in ({@code Long.MIN_VALUE}: none) — a state loaded from a
+     * snapshot ({@link RatingSnapshot}) skips the runs up to it, so a replay continues where the snapshot stopped;
+     * {@code rowsBeforeSnapshot} counts the rows served after such a load whose window near edge lies before it (they
+     * read a state that already holds contests they should not see: the run's input starts too early).
+     */
     public static final class State implements Serializable {
         public final Map<String, Player> players = new HashMap<>();
+        public long foldedUntilMillis = Long.MIN_VALUE;
+        public long rowsBeforeSnapshot;
+        /** The row last counted into {@code rowsBeforeSnapshot} (every readout column of a row advances the state once more). */
+        transient Object countedRow;
     }
 
     /**

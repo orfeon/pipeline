@@ -139,7 +139,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   the rows of ONE event time and splits them into contests by the context keys; `SequenceEvaluator.advanceRating`
   feeds it run by run from the fold pointer, `replay` is the scan reference. With `tauPer` the drift runs on the time since the
   player last competed (`Player.lastMillis` = the run event time) and `read(state, player, func, nowMillis)` adds the drift up to
-  the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. `Pairs` (`all` / `adjacent` /
+  the row: the op has ONE row-time-dependent readout (`sigma`), so both paths must pass `nowMillis`. **Snapshot** (`RatingSnapshot`):
+  `fit.artifact` on the block (or top level) → coordinates `artifact` / `artifactRefit` on every readout column (outside the plan hash) →
+  `RatingSnapshot.specsOf(stageColumns)` in `Wiring.applyStage` → `KeyedHistoryDoFn.loadSnapshots` before a key's replay (a found
+  snapshot becomes the `Rating.State` of the stateKey; `foldedUntilMillis` makes `advanceRating` skip the runs up to it and count
+  rows whose near edge precedes it into `rowsBeforeSnapshot` → counter `feature/ratingSnapshot_<stateKey>_rowsBefore`) and
+  `writeSnapshots` after it (only states replayed from scratch; `refit` ignores an existing file). One JSON file per (stateKey, pool):
+  `<uri>/<version>/<block>.rating/<stateKey>.<sha256(key)[:32]>.json`, Gson of the State. `Pairs` (`all` / `adjacent` /
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in
   `validateRatingTeam` under the one code `sequence.rating.with`; `SequenceEvaluator.readRating` picks member / team. INVARIANT: the

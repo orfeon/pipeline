@@ -389,6 +389,11 @@ not alter values).
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
   relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
   member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+- **Serving a `rating`**: put `fit: {artifact: {uri: ...}}` on the block. The backfill writes every pool's state
+  after its replay; the serving run (same spec, the artifact is outside the plan hash) finds it and folds only
+  the contests after the snapshot time, so its input is the rows to serve plus the contests since — not the
+  whole history. Advance the snapshot with `refit: true` on a full-history run. The counter
+  `feature/ratingSnapshot_<state>_rowsBefore` > 0 means the serving input started before the snapshot time.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

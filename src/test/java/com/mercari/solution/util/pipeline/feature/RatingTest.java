@@ -588,6 +588,37 @@ public class RatingTest {
         }
     }
 
+    /** A state round-trips through its snapshot file: players, the fold position; the served-too-early count is reset. */
+    @Test
+    public void testSnapshotRoundTrip() {
+        final Rating rating = duo(Rating.Method.plackettLuce, 0d, null, 25d, PRIOR_SIGMA);
+        final Rating.State state = new Rating.State();
+        rating.update(state, List.of(team("s1", "a1", 1), team("s2", "a2", 2)), 1_000L);
+        rating.update(state, List.of(team("s1", "a1", 2), team("s3", "a2", 1)), 2_000L);
+        state.foldedUntilMillis = 2_000L;
+        state.rowsBeforeSnapshot = 3;
+        final RatingSnapshot.Spec spec = new RatingSnapshot.Spec("skill_all_duo", "skill", "target/feature-artifacts/" + java.util.UUID.randomUUID(), "abc123", false);
+        Assertions.assertFalse(RatingSnapshot.exists(spec, "<global>"));
+        RatingSnapshot.write(spec, "<global>", state);
+        Assertions.assertTrue(RatingSnapshot.exists(spec, "<global>"));
+        Assertions.assertTrue(RatingSnapshot.path(spec, "<global>").startsWith(spec.uri() + "/abc123/skill.rating/skill_all_duo."), RatingSnapshot.path(spec, "<global>"));
+        Assertions.assertNotEquals(RatingSnapshot.path(spec, "a"), RatingSnapshot.path(spec, "b"), "one file per pool");
+        final Rating.State loaded = RatingSnapshot.read(spec, "<global>");
+        Assertions.assertEquals(state.players.keySet(), loaded.players.keySet());
+        for (final Map.Entry<String, Rating.Player> e : state.players.entrySet()) {
+            final Rating.Player p = loaded.players.get(e.getKey());
+            Assertions.assertEquals(e.getValue().mu, p.mu, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().sigma, p.sigma, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().count, p.count, e.getKey());
+            Assertions.assertEquals(e.getValue().delta, p.delta, 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().lastMillis, p.lastMillis, e.getKey());
+        }
+        Assertions.assertEquals(2_000L, loaded.foldedUntilMillis);
+        Assertions.assertEquals(0L, loaded.rowsBeforeSnapshot, "a loaded state starts counting afresh");
+        // the same contest folded again is a no-op for a continued replay: the reads are what the snapshot holds
+        Assertions.assertEquals((Double) rating.read(state, 0, "seller\u0001s1", "mu", 0L), (Double) rating.read(loaded, 0, "seller\u0001s1", "mu", 0L), 0d);
+    }
+
     /**
      * A member of several teams of one contest receives the sum of its shares, the rows of one team are not compared
      * with each other, and nothing depends on the order the rows arrive in — with ties, a shared agent, a shared seller

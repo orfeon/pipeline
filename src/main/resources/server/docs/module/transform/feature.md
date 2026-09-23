@@ -368,6 +368,20 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (the rating's change in its last contest, null before the first). An entity never rated reads the prior
   (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
+- **Serving from a snapshot (`fit.artifact` on the block).** A rating is a replay of every contest of its pool,
+  so serving it from scratch means replaying the whole history for a handful of rows. With
+  `fit: {artifact: {uri: gs://bucket/feature}}` on the block (or the top-level `fit.artifact`) the replay writes
+  the state of every pool after it is done — `<uri>/<planHash>/<block>.rating/<state>.<pool>.json`, one file
+  per rating op and pool — and a later run that finds a pool's snapshot **starts from it** and folds only the
+  contests after the time it stopped at: the serving input then holds the rows to serve plus every contest after
+  that time, and reads the same ratings the full replay would give. The training config and the serving config
+  share the directory (the plan hash ignores `fit.artifact`, as it does for every fit). A snapshot found is never
+  rewritten; `refit: true` replays from scratch and rewrites it — the way to advance it (run it on the full history
+  again). A row whose window near edge lies before the snapshot's last contest reads a state that already holds
+  contests it should not see: such rows are counted (`feature/ratingSnapshot_<state>_rowsBefore`, a warning per
+  pool in the log) and never repaired — start the serving input after the snapshot time. The info
+  `sequence.rating.artifact` describes the arrangement; a sequence block accepts no other `fit` setting
+  (`sequence.fit`).
 - **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
   window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
   its outcome is available at the row's `computeAt`. The entity's `minInterval` does not absorb that shift —

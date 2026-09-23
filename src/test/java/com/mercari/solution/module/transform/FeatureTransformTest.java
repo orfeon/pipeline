@@ -3800,6 +3800,92 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /** A rating block whose state is snapshotted to {@code dir} (block-level fit.artifact). */
+    private static String snapshotConfig(final String dir) {
+        final String block = """
+                - name: skill
+                  scope: sequence
+                  entity: seller
+                  fit: {artifact: {uri: "%s"}}
+                  ops:
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: pl, funcs: [mu, sigma, count]}
+            """.formatted(dir).replaceAll("(?m)^", "    ");
+        return FEATURE_CONFIG.replace("      output:\n", block + "      output:\n");
+    }
+
+    /**
+     * The serving form of a rating: run 1 replays the whole input and writes the state of its pool; run 2 sees only the
+     * rows to serve, starts from the snapshot and reads the same ratings; a run whose input reaches back before the
+     * snapshot's last contest is counted (the rows read contests they should not see) but not repaired.
+     */
+    @Test
+    public void testRatingSnapshotWritesAndContinues() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = snapshotConfig(dir);
+        // what D reads: the contests A (s1 150 over s2 0) and C (s1 95 over s2 72), both settled before D's near edge
+        final Rating rating = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of(), "y");
+        final Rating.State expected = new Rating.State();
+        final String s1 = rating.player(Map.of("seller_id", "s1")), s2 = rating.player(Map.of("seller_id", "s2"));
+        rating.update(expected, List.of(new Rating.Entry(s1, 150), new Rating.Entry(s2, 0)));
+        rating.update(expected, List.of(new Rating.Entry(s1, 95), new Rating.Entry(s2, 72)));
+        final double muD = (Double) rating.read(expected, s1, "mu"), sigmaD = (Double) rating.read(expected, s1, "sigma");
+
+        final Map<String, MCollection> first = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(first.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if (!"D".equals(row.getAsString("session_id"))) continue;
+                Assertions.assertEquals(muD, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+                Assertions.assertEquals(sigmaD, row.getAsDouble("f_skill_all_pl_sigma"), 1e-12);
+                Assertions.assertEquals(2L, row.getPrimitiveValue("f_skill_all_pl_count"));
+            }
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] hashes = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(hashes, "artifact directory missing: " + dir);
+        Assertions.assertEquals(1, hashes.length);
+        final java.io.File[] snapshots = new java.io.File(hashes[0], "skill.rating").listFiles();
+        Assertions.assertNotNull(snapshots, "snapshot directory missing");
+        Assertions.assertEquals(1, snapshots.length, "one pool (the global key), one file");
+        Assertions.assertTrue(snapshots[0].getName().startsWith("skill_all_pl."), snapshots[0].getName());
+
+        // run 2: the rows to serve only; the snapshot supplies the contests before them
+        final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> served = MPipeline.apply(second, Config.load(SOURCE_CONFIG.replaceAll("(?m)^ *- \\{session_id: [ABC],.*\\n", "") + config));
+        PAssert.that(served.get("features").getCollection()).satisfies(rows -> {
+            int n = 0;
+            for (final MElement row : rows) {
+                n++;
+                Assertions.assertEquals("D", row.getAsString("session_id"));
+                Assertions.assertEquals(muD, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+                Assertions.assertEquals(sigmaD, row.getAsDouble("f_skill_all_pl_sigma"), 1e-12);
+                Assertions.assertEquals(2L, row.getPrimitiveValue("f_skill_all_pl_count"));
+            }
+            Assertions.assertEquals(1, n);
+            return null;
+        });
+        second.run();
+        Assertions.assertEquals(1, new java.io.File(hashes[0], "skill.rating").listFiles().length, "a reused snapshot is not rewritten");
+
+        // run 3: the input reaches back to C, whose rows lie before the snapshot's last contest (C itself): counted,
+        // D still reads the snapshot (C is not folded twice)
+        final TestPipeline third = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> early = MPipeline.apply(third, Config.load(SOURCE_CONFIG.replaceAll("(?m)^ *- \\{session_id: [AB],.*\\n", "") + config));
+        PAssert.that(early.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if ("D".equals(row.getAsString("session_id"))) Assertions.assertEquals(muD, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+            }
+            return null;
+        });
+        final org.apache.beam.sdk.PipelineResult result = third.run();
+        long before = 0;
+        for (final org.apache.beam.sdk.metrics.MetricResult<Long> counter : result.metrics().queryMetrics(org.apache.beam.sdk.metrics.MetricsFilter.builder()
+                .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.named("feature", "ratingSnapshot_skill_all_pl_rowsBefore")).build()).getCounters()) {
+            before += counter.getAttempted();
+        }
+        Assertions.assertEquals(2L, before, "the two rows of C read a state that already holds C");
+    }
+
     private static final String RATING_BLOCKS = """
                 - name: skill
                   scope: sequence
