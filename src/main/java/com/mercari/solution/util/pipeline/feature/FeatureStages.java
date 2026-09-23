@@ -3081,6 +3081,11 @@ public final class FeatureStages {
             return names;
         }
 
+        /** The rating pools of a key after its replay ({@link SequenceEvaluator#ratingSummaries}). */
+        List<String> ratingSummaries(final SequenceEvaluator.KeyState sequenceState) {
+            return sequence.ratingSummaries(sequenceState);
+        }
+
         /** Trim watermarks of the shared history: both evaluators fold their columns' retention into one reused instance. */
         SequenceEvaluator.Watermarks watermarks(final long nowMillis, final List<Past> history,
                                                 final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
@@ -3595,7 +3600,7 @@ public final class FeatureStages {
                 return;
             }
             try (sorted) {
-                replay(c, sorted);
+                replay(c, sorted, kv.getKey());
             } catch (final UncheckedIOException e) {
                 // a chunk could not be read back mid-merge: the rows already emitted stand, the key is failed
                 // row by row like every other failure path (the grouped iterable is re-iterable)
@@ -3610,7 +3615,7 @@ public final class FeatureStages {
             }
         }
 
-        private void replay(final ProcessContext c, final Iterable<KV<Long, MElement>> rows) {
+        private void replay(final ProcessContext c, final Iterable<KV<Long, MElement>> rows, final String key) {
             final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
@@ -3630,6 +3635,13 @@ public final class FeatureStages {
                 // how far this row is from the key's previous event time is what minInterval declared
                 auditInterval(millis, previousMillis);
                 evaluate(c, input, history, sequenceState, populationState, pending, false);
+            }
+            // a rating pool's warm-up, for the run log: one line per rating state of the key (a pool is one key) —
+            // the state as the key's last row read it (a summary sorts every player's count: skipped when not logged)
+            if (LOG.isInfoEnabled()) {
+                for (final String summary : evaluator.ratingSummaries(sequenceState)) {
+                    LOG.info("rating state of {} after the replay: {}", spillContext(label, key), summary);
+                }
             }
         }
 

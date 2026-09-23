@@ -1374,7 +1374,7 @@ public class FeatureSpec implements Serializable {
             // not Json.strings: a team that is not a list of readout names must be reported, not silently dropped
             for (final JsonElement f : arrayOf(o.get("team"))) {
                 if (f.isJsonPrimitive()) op.team.add(f.getAsString());
-                else op.withInvalid = "team must list the readouts of the whole team (mu / sigma): " + f;
+                else op.withInvalid = "team must list the readouts of the whole team (mu / sigma / count / deviation): " + f;
             }
         }
         op.as = Json.string(o, "as");
