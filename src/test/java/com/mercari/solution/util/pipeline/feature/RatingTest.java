@@ -659,6 +659,28 @@ public class RatingTest {
         Assertions.assertTrue(solo.describe(single).startsWith("pool <players>: players=2"), solo.describe(single));
     }
 
+    /** The pool's moments are taken from the prior: a large prior next to a small spread still gives a z, ties give none. */
+    @Test
+    public void testPoolMomentsKeepPrecisionUnderALargePrior() {
+        final Rating rating = Rating.of(Rating.Method.plackettLuce, true, 1e9, 1e-3, 5e-4, 0d, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State state = new Rating.State();
+        rating.update(state, List.of(entry("w", 1), entry("l", 2)));
+        final Rating.Pool pool = state.pools.get("");
+        Assertions.assertEquals(1e9, pool.shift, 0d);
+        Assertions.assertEquals(2, pool.players);
+        // the two moved symmetrically by a few 1e-4: the spread is well below the prior's rounding (1e9 · 1e-16 ~ 1e-7)
+        final double w = state.players.get("w").mu, l = state.players.get("l").mu;
+        Assertions.assertTrue(w > 1e9 && l < 1e9 && w - l > 1e-4, w + " / " + l);
+        Assertions.assertEquals((w - l) / 2, pool.sd(), 1e-12);
+        Assertions.assertEquals(1d, (Double) rating.read(state, "w", "z"), 1e-6);
+        Assertions.assertEquals(-1d, (Double) rating.read(state, "l", "z"), 1e-6);
+        // a tie between equals: no spread at all, so no z (the floor reads the rounding as zero)
+        final Rating.State tie = new Rating.State();
+        rating.update(tie, List.of(entry("a", 1), entry("b", 1)));
+        Assertions.assertEquals(0d, tie.pools.get("").sd(), 0d);
+        Assertions.assertNull(rating.read(tie, "a", "z"));
+    }
+
     /**
      * A member of several teams of one contest receives the sum of its shares, the rows of one team are not compared
      * with each other, and nothing depends on the order the rows arrive in — with ties, a shared agent, a shared seller

@@ -94,31 +94,43 @@ public final class Rating implements Serializable {
         public long lastMillis;
     }
 
-    /** The running moments of {@code mu} over the rated players of one pool (a member entity, or the single pool of a rating without a team). */
+    /**
+     * The running moments of {@code mu} over the rated players of one pool (a member entity, or the single pool of a
+     * rating without a team). The sums are taken of {@code mu − shift}, the shift being the pool's prior {@code mu}
+     * (every player of a pool shares one): the deviations are on the scale of the spread, so a large prior next to a
+     * small spread does not cancel the variance away in {@code Σx² − n·mean²}. Below a relative floor the sd reads 0.
+     */
     public static final class Pool implements Serializable {
         public long players;
+        public double shift;
         public double sum, sumSq;
 
-        void add(final double mu) {
+        /** The sd below which the pool has no spread to standardise by (relative to the deviations' scale). */
+        private static final double RELATIVE_FLOOR = 1e-7;
+
+        void add(final double mu, final double prior) {
+            if (players == 0) shift = prior;
             players++;
-            sum += mu;
-            sumSq += mu * mu;
+            sum += mu - shift;
+            sumSq += (mu - shift) * (mu - shift);
         }
 
         void move(final double from, final double to) {
             sum += to - from;
-            sumSq += to * to - from * from;
+            sumSq += (to - shift) * (to - shift) - (from - shift) * (from - shift);
         }
 
         /** The mean of {@code mu} over the pool's rated players. */
         public double mean() {
-            return sum / players;
+            return shift + sum / players;
         }
 
-        /** The population sd of {@code mu} over the pool's rated players. */
+        /** The population sd of {@code mu} over the pool's rated players; 0 when it is below rounding of the deviations. */
         public double sd() {
-            final double mean = mean();
-            return Math.sqrt(Math.max(0d, sumSq / players - mean * mean));
+            final double meanDeviation = sum / players, meanSquare = sumSq / players;
+            final double variance = meanSquare - meanDeviation * meanDeviation;
+            if (!(variance > RELATIVE_FLOOR * RELATIVE_FLOOR * Math.max(meanSquare, Double.MIN_NORMAL))) return 0d;
+            return Math.sqrt(variance);
         }
     }
 
@@ -532,7 +544,7 @@ public final class Rating implements Serializable {
             p.lastMillis = millis;
             // the pool's moments of mu follow the player (a bookkeeping beside the players: their numbers are untouched)
             final Pool pool = state.pools.computeIfAbsent(c.member.pool() == null ? "" : c.member.pool(), key -> new Pool());
-            if (created) pool.add(p.mu); else pool.move(before, p.mu);
+            if (created) pool.add(p.mu, c.member.mu()); else pool.move(before, p.mu);
         }
         if (countTeams) {
             // the contests a team ran: once per contest, whatever the number of rows it held in it (the entries are
