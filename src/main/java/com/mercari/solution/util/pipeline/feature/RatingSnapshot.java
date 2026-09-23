@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.feature;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mercari.solution.util.domain.file.ResourceUtil;
@@ -8,9 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -24,6 +22,11 @@ import java.util.Set;
  * full replay is otherwise one thread over the whole history; a run that finds none (or {@code refit: true}) replays
  * from scratch and writes it. The plan hash strips {@code fit.artifact}, so the training and the serving config share
  * the directory. A JSON file, because the state is a map of small records and a snapshot is read once per pool.
+ *
+ * <p>Every file records the run that wrote it ({@code run}): a snapshot is written from inside the keyed replay, so a
+ * retried attempt of the same key (a failed bundle, a lost worker) finds the file its first attempt wrote. That one is
+ * not a snapshot to continue from — it already holds every contest of the rows the retry is about to serve — so
+ * {@link #read} ignores it and the retry replays from scratch, as the first attempt did.
  */
 public final class RatingSnapshot {
 
@@ -53,41 +56,47 @@ public final class RatingSnapshot {
         return FitArtifact.directory(uri, version) + "/" + block + ".rating";
     }
 
+    /** The file of a stage key: the key text carries separators and length prefixes, so its hash names the file. */
     public static String path(final Spec spec, final String key) {
-        return directory(spec.uri(), spec.version(), spec.block()) + "/" + spec.stateKey() + "." + hash(key) + ".json";
-    }
-
-    /** A file name for a stage key: the key text carries separators and length prefixes, so its hash names the file. */
-    static String hash(final String key) {
-        try {
-            final byte[] digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8));
-            final StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", digest[i]));
-            return sb.toString();
-        } catch (final NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return directory(spec.uri(), spec.version(), spec.block()) + "/" + spec.stateKey() + "." + FeaturePlanCompiler.sha256(key) + ".json";
     }
 
     public static boolean exists(final Spec spec, final String key) {
         return ResourceUtil.exists(path(spec, key));
     }
 
-    public static void write(final Spec spec, final String key, final Rating.State state) {
+    /** Writes the key's state, marked with the {@code run} writing it (see the class doc). */
+    public static void write(final Spec spec, final String key, final Rating.State state, final String run) {
         final String path = path(spec, key);
         final JsonObject json = FitArtifact.manifest(spec.version(), spec.block());
         json.addProperty("stateKey", spec.stateKey());
         json.addProperty("key", key);
+        if (run != null) json.addProperty("run", run);
         json.add("state", GSON.toJsonTree(state));
         ResourceUtil.writeString(path, json.toString());
         LOG.info("wrote rating snapshot {} ({} players, contests folded until {})", path, state.players.size(), state.foldedUntilMillis);
     }
 
-    public static Rating.State read(final Spec spec, final String key) {
+    /**
+     * The key's snapshot to continue from, or null when there is none or the {@code run} asking wrote it itself (an
+     * earlier attempt of a retried key, which must replay from scratch again).
+     */
+    public static Rating.State read(final Spec spec, final String key, final String run) {
         final String path = path(spec, key);
+        if (!ResourceUtil.exists(path)) return null;
         final JsonObject json = JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject();
-        final Rating.State state = GSON.fromJson(json.get("state"), Rating.State.class);
-        state.rowsBeforeSnapshot = 0;
+        final JsonElement writer = json.get("run");
+        if (run != null && writer != null && writer.isJsonPrimitive() && run.equals(writer.getAsString())) {
+            LOG.info("rating snapshot {} was written by this run (a retried key): replaying from scratch", path);
+            return null;
+        }
+        final Rating.State parsed = json.has("state") ? GSON.fromJson(json.get("state"), Rating.State.class) : null;
+        if (parsed == null) throw new IllegalStateException("rating snapshot " + path + " holds no state");
+        // copied into a fresh state: Gson hands the players over as its own tree map (an ordered tree, O(log n) string
+        // compares per lookup), and the served-too-early count starts afresh
+        final Rating.State state = new Rating.State();
+        state.players.putAll(parsed.players);
+        state.foldedUntilMillis = parsed.foldedUntilMillis;
         LOG.info("loaded rating snapshot {} ({} players, contests folded until {}): the replay continues after it", path, state.players.size(), state.foldedUntilMillis);
         return state;
     }

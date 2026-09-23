@@ -443,6 +443,15 @@ public final class FeatureStages {
             final PCollectionView<Map<String, Double>> lambdas = specs.isEmpty() ? null
                     : VarianceComponents.estimate(estimateInput, specs, label + "_Vc");
             final List<PCollectionView<?>> sideInputs = lambdas == null ? List.of() : List.of(lambdas);
+            // a rating's state snapshot is one file per pool: the keyed replay runs once per window, so under any other
+            // window every window of a pool would read / write that one file (a window starting from another one's state)
+            final List<RatingSnapshot.Spec> snapshots = RatingSnapshot.specsOf(stageColumns, plan.getArtifactVersion());
+            if (!snapshots.isEmpty() && !(current.getWindowingStrategy().getWindowFn() instanceof GlobalWindows)) {
+                throw new IllegalStateException("the rating snapshot (fit.artifact) of " + snapshots.stream().map(RatingSnapshot.Spec::stateKey).toList()
+                        + " requires the global window, but the input is windowed by " + current.getWindowingStrategy().getWindowFn()
+                        + ": the replay of a pool runs once per window and every window would share its one snapshot file - drop the module's"
+                        + " windowing strategy or the rating's fit.artifact");
+            }
             final PCollectionTuple outputs = switch (stage.kind()) {
                 case row -> current.apply(label, ParDo
                         .of(new RowStageDoFn(evaluator, lambdas, loggings, failFast, failureTag))
@@ -466,7 +475,7 @@ public final class FeatureStages {
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future,
-                                        minIntervalAudits.getOrDefault(stage.index(), Map.of()), RatingSnapshot.specsOf(stageColumns, plan.getArtifactVersion())))
+                                        minIntervalAudits.getOrDefault(stage.index(), Map.of()), snapshots))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
@@ -3442,6 +3451,11 @@ public final class FeatureStages {
         private transient Map<String, Counter> belowMinInterval;
         /** The rating states of this stage that are snapshotted ({@link RatingSnapshot}): loaded before a key's replay, written after it. */
         private final List<RatingSnapshot.Spec> snapshots;
+        /**
+         * Drawn once when the pipeline is built, so every worker and every retried attempt of this run share it: with the
+         * runtime job name it marks the snapshots this run writes, which a retried key must not continue from.
+         */
+        private final String constructionId;
         private transient Map<String, Counter> rowsBeforeSnapshot;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
@@ -3454,31 +3468,42 @@ public final class FeatureStages {
             this.mirrored = mirrored;
             this.minIntervals = mirrored ? Map.of() : minIntervals;
             this.snapshots = snapshots;
+            this.constructionId = java.util.UUID.randomUUID().toString();
+        }
+
+        /**
+         * This run's mark on the snapshots it writes ({@link RatingSnapshot}): the build-time id — unique per launch — and
+         * the runtime job name, which tells apart the executions of a pipeline built once (a classic template).
+         */
+        private String run(final ProcessContext c) {
+            return constructionId + "/" + c.getPipelineOptions().getJobName();
         }
 
         /** Starts the key's rating states from their snapshots where one exists (and no refit is asked); returns the specs so loaded. */
-        private Set<RatingSnapshot.Spec> loadSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key) {
+        private Set<RatingSnapshot.Spec> loadSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final String run) {
             final Set<RatingSnapshot.Spec> loaded = new HashSet<>();
             for (final RatingSnapshot.Spec spec : snapshots) {
-                if (spec.refit() || !RatingSnapshot.exists(spec, key)) continue;
-                sequenceState.column(spec.stateKey()).bySubkey.put("", RatingSnapshot.read(spec, key));
+                if (spec.refit()) continue;
+                final Rating.State state = RatingSnapshot.read(spec, key, run);
+                if (state == null) continue;
+                sequenceState.column(spec.stateKey()).bySubkey.put("", state);
                 loaded.add(spec);
             }
             return loaded;
         }
 
         /** Writes the key's rating states that were replayed from scratch; reports the rows a loaded state served too early. */
-        private void writeSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final Set<RatingSnapshot.Spec> loaded) {
+        private void writeSnapshots(final SequenceEvaluator.KeyState sequenceState, final String key, final Set<RatingSnapshot.Spec> loaded, final String run) {
             for (final RatingSnapshot.Spec spec : snapshots) {
                 final SequenceEvaluator.ColumnState cs = sequenceState.columns.get(spec.stateKey());
                 if (cs == null || !(cs.bySubkey.get("") instanceof Rating.State state)) continue;
                 if (state.rowsBeforeSnapshot > 0) {
                     if (rowsBeforeSnapshot == null) rowsBeforeSnapshot = new HashMap<>();
                     rowsBeforeSnapshot.computeIfAbsent(spec.stateKey(), k -> Metrics.counter("feature", "ratingSnapshot_" + k + "_rowsBefore")).inc(state.rowsBeforeSnapshot);
-                    LOG.warn("rating snapshot of {} key={}: {} row(s) lie before the snapshot's last contest ({}) and read a state that already holds contests"
-                            + " after them - start the input after the snapshot, or refit", spec.stateKey(), key, state.rowsBeforeSnapshot, state.foldedUntilMillis);
+                    LOG.warn("rating snapshot of {} ({}): {} row(s) lie before the snapshot's last contest ({}) and read a state that already holds contests"
+                            + " after them - start the input after the snapshot, or refit", spec.stateKey(), spillContext(label, key), state.rowsBeforeSnapshot, state.foldedUntilMillis);
                 }
-                if (!loaded.contains(spec)) RatingSnapshot.write(spec, key, state);
+                if (!loaded.contains(spec)) RatingSnapshot.write(spec, key, state, run);
             }
         }
 
@@ -3568,7 +3593,8 @@ public final class FeatureStages {
             final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
-            final Set<RatingSnapshot.Spec> loaded = snapshots.isEmpty() ? Set.of() : loadSnapshots(sequenceState, key);
+            final String run = snapshots.isEmpty() ? null : run(c);
+            final Set<RatingSnapshot.Spec> loaded = snapshots.isEmpty() ? Set.of() : loadSnapshots(sequenceState, key, run);
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
@@ -3586,7 +3612,7 @@ public final class FeatureStages {
                 auditInterval(millis, previousMillis);
                 evaluate(c, input, history, sequenceState, populationState, pending, false);
             }
-            if (!snapshots.isEmpty()) writeSnapshots(sequenceState, key, loaded);
+            if (!snapshots.isEmpty()) writeSnapshots(sequenceState, key, loaded, run);
         }
 
         private void evaluate(final ProcessContext c, final MElement input, final SequenceEvaluator.History history,

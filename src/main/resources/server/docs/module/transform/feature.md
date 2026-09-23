@@ -381,7 +381,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   contests it should not see: such rows are counted (`feature/ratingSnapshot_<state>_rowsBefore`, a warning per
   pool in the log) and never repaired — start the serving input after the snapshot time. The info
   `sequence.rating.artifact` describes the arrangement; a sequence block accepts no other `fit` setting
-  (`sequence.fit`).
+  (`sequence.fit`). A snapshot is one file per pool, so the input must stay in the global window (no module
+  windowing `strategy`): a windowed input is rejected when the pipeline is built.
 - **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
   window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
   its outcome is available at the row's `computeAt`. The entity's `minInterval` does not absorb that shift —

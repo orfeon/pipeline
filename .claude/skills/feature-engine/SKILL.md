@@ -145,7 +145,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   snapshot becomes the `Rating.State` of the stateKey; `foldedUntilMillis` makes `advanceRating` skip the runs up to it and count
   rows whose near edge precedes it into `rowsBeforeSnapshot` → counter `feature/ratingSnapshot_<stateKey>_rowsBefore`) and
   `writeSnapshots` after it (only states replayed from scratch; `refit` ignores an existing file). One JSON file per (stateKey, pool):
-  `<uri>/<version>/<block>.rating/<stateKey>.<sha256(key)[:32]>.json`, Gson of the State. `Pairs` (`all` / `adjacent` /
+  `<uri>/<version>/<block>.rating/<stateKey>.<FeaturePlanCompiler.sha256(key)>.json`, Gson of the State plus the `run` that
+  wrote it (a build-time UUID of the DoFn + the runtime job name): a retried key finds its own first attempt's file and must
+  replay from scratch, so `read` ignores a snapshot of the asking run. The stage throws at construction under a non-global
+  window (one file per pool, one replay per window). `Pairs` (`all` / `adjacent` /
   `mean`) is bradleyTerry only; `adjacent` is defined on outcomes, never on entry positions (ties stay order-free). Teams
   (`withTeam`; DSL `with:` / `team:` → coordinates `teamPool` / `teamMembers` and per column `readout` / `memberIndex`, validated in
   `validateRatingTeam` under the one code `sequence.rating.with`; `SequenceEvaluator.readRating` picks member / team. INVARIANT: the

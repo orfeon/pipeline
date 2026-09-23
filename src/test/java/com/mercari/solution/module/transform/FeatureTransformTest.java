@@ -3848,6 +3848,8 @@ public class FeatureTransformTest {
         Assertions.assertNotNull(snapshots, "snapshot directory missing");
         Assertions.assertEquals(1, snapshots.length, "one pool (the global key), one file");
         Assertions.assertTrue(snapshots[0].getName().startsWith("skill_all_pl."), snapshots[0].getName());
+        // the file carries its createdAt: a rewrite changes its content
+        final String written = java.nio.file.Files.readString(snapshots[0].toPath());
 
         // run 2: the rows to serve only; the snapshot supplies the contests before them
         final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
@@ -3865,7 +3867,8 @@ public class FeatureTransformTest {
             return null;
         });
         second.run();
-        Assertions.assertEquals(1, new java.io.File(hashes[0], "skill.rating").listFiles().length, "a reused snapshot is not rewritten");
+        Assertions.assertEquals(1, new java.io.File(hashes[0], "skill.rating").listFiles().length);
+        Assertions.assertEquals(written, java.nio.file.Files.readString(snapshots[0].toPath()), "a reused snapshot is not rewritten");
 
         // run 3: the input reaches back to C, whose rows lie before the snapshot's last contest (C itself): counted,
         // D still reads the snapshot (C is not folded twice)

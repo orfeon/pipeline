@@ -599,11 +599,15 @@ public class RatingTest {
         state.rowsBeforeSnapshot = 3;
         final RatingSnapshot.Spec spec = new RatingSnapshot.Spec("skill_all_duo", "skill", "target/feature-artifacts/" + java.util.UUID.randomUUID(), "abc123", false);
         Assertions.assertFalse(RatingSnapshot.exists(spec, "<global>"));
-        RatingSnapshot.write(spec, "<global>", state);
+        Assertions.assertNull(RatingSnapshot.read(spec, "<global>", "run-2"), "no snapshot yet");
+        RatingSnapshot.write(spec, "<global>", state, "run-1");
         Assertions.assertTrue(RatingSnapshot.exists(spec, "<global>"));
         Assertions.assertTrue(RatingSnapshot.path(spec, "<global>").startsWith(spec.uri() + "/abc123/skill.rating/skill_all_duo."), RatingSnapshot.path(spec, "<global>"));
         Assertions.assertNotEquals(RatingSnapshot.path(spec, "a"), RatingSnapshot.path(spec, "b"), "one file per pool");
-        final Rating.State loaded = RatingSnapshot.read(spec, "<global>");
+        // the run that wrote it (a retried key) does not continue from it: it replays from scratch again
+        Assertions.assertNull(RatingSnapshot.read(spec, "<global>", "run-1"));
+        final Rating.State loaded = RatingSnapshot.read(spec, "<global>", "run-2");
+        Assertions.assertNotNull(loaded);
         Assertions.assertEquals(state.players.keySet(), loaded.players.keySet());
         for (final Map.Entry<String, Rating.Player> e : state.players.entrySet()) {
             final Rating.Player p = loaded.players.get(e.getKey());
@@ -615,7 +619,7 @@ public class RatingTest {
         }
         Assertions.assertEquals(2_000L, loaded.foldedUntilMillis);
         Assertions.assertEquals(0L, loaded.rowsBeforeSnapshot, "a loaded state starts counting afresh");
-        // the same contest folded again is a no-op for a continued replay: the reads are what the snapshot holds
+        // the loaded state reads what the snapshotted one reads
         Assertions.assertEquals((Double) rating.read(state, 0, "seller\u0001s1", "mu", 0L), (Double) rating.read(loaded, 0, "seller\u0001s1", "mu", 0L), 0d);
     }
 
