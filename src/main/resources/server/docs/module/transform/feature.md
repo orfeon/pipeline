@@ -471,6 +471,42 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     shares. The rows of one and the same team are not compared with each other.
   - `plackettLuce` / `bradleyTerry` only: `elo` keeps no variance to share by. The state, the stage key (global,
     or the `$self` pool) and the cost are those of the rating without a team, plus one rating per member.
+  - **Components of one entity.** A member is any `entities[].name`, and an entity may take a composite key —
+    so the members of a team can be *parts of the rated entity itself*: its level in this category, its pairing
+    with this agent. The contest then estimates an overall level plus condition-specific offsets in one model,
+    the random-effects decomposition of a mixed model:
+
+    ```yaml
+    entities:
+      - {name: seller,         keys: [seller_id]}
+      - {name: sellerCategory, keys: [seller_id, category]}     # the seller in this category
+      - {name: sellerAgent,    keys: [seller_id, agent_id]}     # this seller with this agent
+      - {name: agent,          keys: [agent_id]}
+    features:
+      - name: skill
+        scope: sequence
+        entity: seller
+        ops:
+          - type: rating
+            field: final_price
+            context: session
+            order: descending
+            as: parts
+            with: [{entity: agent, mu: 0, sigma: 4}, {entity: sellerCategory, mu: 0, sigma: 2},
+                   {entity: sellerAgent, mu: 0, sigma: 1.5}]
+            funcs: [mu, sigma, count]
+            team: [mu, sigma]
+      - name: skill_here                                          # the seller as it stands in this category
+        scope: row
+        expr: "skill_all_parts_mu + skill_all_parts_sellerCategory_mu"
+    ```
+
+    A component's prior `sigma` is the size you expect that effect to be; it fixes the component's share of every
+    change, so a component given too wide a prior absorbs what the others should explain. Sum the components you
+    need as a row `expr` over the member columns (the `sigma` of a subset is the root of the sum of the squares);
+    the identifiability note above holds between components too — `seller` and `sellerCategory` can shift against
+    each other by category — so read them in sums or relative to the contest. The `count` of a pairing member
+    (`sellerAgent`) is how many contests that pairing has run.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
   twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
@@ -935,18 +971,29 @@ state and shrunk along the chain `(entity, state) → (state) → shorter states
 case of *Shrinkage*, `p(level) = (counts + λ · p(parent)) / (n + λ)` with `λ = blend.priorWeight` (default 20) — so it
 is strictly past, leak-checked and windowless like any expanding encoding, and a row reads exactly what the explicit
 `lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
-entities: `(state) → … → marginal`. `{toValueProb: v}` emits the probability of one next value (0 when it has no
-mass, null when nothing is known yet) — `v` is written as the field holds it, a number for an integer code
+entities: `(state) → … → marginal`. The chain backs off the way every chain lattice does (*Shrinkage* below):
+a row reads from the **deepest level of its chain that has rows** — its effective leaf — and leave-node-out
+(always on here) takes *that* level's rows out of the coarser levels before they are blended in. An entity's first
+transition out of a state has an empty `(entity, state)` level, so it reads the pooled `(state)` level, shrunk toward
+the marginal net of that state's rows; a state never seen at all reads the marginal. Recompute it with the declared
+leaf and the backed-off rows come out a few percent off — the effective leaf is the reference.
+`{toValueProb: v}` emits the probability of one next value (0 when the value is absent from the map, null when nothing
+is known yet) — `v` is written as the field holds it, a number for an integer code
 (`{toValueProb: 0}` → `<name>_to_0`); `distribution` emits the whole map. Four **readouts** of the distribution
 take one column each, `<name>_<readout>`: `ownValueProb` is the probability the state gave to *the row's own
-value* — how usual this step was for the entity, without listing every value — and `surprisal` its `−ln`
-(null when the value has no mass); `entropy` is `−Σ p ln p` of the map (how undecided the state is); `expected`
-is `Σ v · p`, the probability-weighted mean of an integer code (an ordered band, a bin index: the field must be
-numeric, `transitionStats.emit`). `ownValueProb` and `surprisal` read the row's own value, so they are as
+value* — how usual this step was for the entity, without listing every value — and `surprisal` its `−ln`;
+`entropy` is `−Σ p ln p` of the map (how undecided the state is); `expected`
+is `Σ v · p`, the probability-weighted mean of an integer code (an ordered band, a bin index: the field must be an
+integer type — a string field, even one holding digits, is a `transitionStats.emit` error). `ownValueProb` and `surprisal` read the row's own value, so they are as
 available as the field: on an **outcome** field they are availability violations — usable as an intermediate
 target or a label, not as a feature (`transitionStats.emit.own` hint) — while `entropy`, `expected` and
-`toValueProb` read the distribution only. All are null when nothing is known yet. An entity's first event has no previous
-value, so its state levels are empty and it reads the marginal; a state never seen before reads its parent. It is
+`toValueProb` read the distribution only. **What the map holds.** Its categories are the values counted at any
+level of the row's chain before the row (strictly past, leave-node-out applied) — it is built per row, not from the
+whole input, and it never holds a zero entry (the blend weight is strictly between 0 and 1). So `ownValueProb` is
+**0 when the row's own value is absent** from the map — a value the chain had never seen up to that row, an
+entity's first appearance in the field — and `surprisal` is then null (no `−ln 0`); both, like the other readouts, are
+**null when nothing is known yet** (the map is empty: the entity's first event has no previous value and no transition
+was counted anywhere). It is
 always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
 outcome the usual window shift applies to the lag and to the counted transitions alike.
 
