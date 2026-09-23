@@ -856,8 +856,8 @@ unsorted data file, `deleteOnExit`. The `beam-sdks-java-extensions-sorter` depen
 **Budget (P4)**: `engine.spill.memoryMB` > `--featureSpillMemoryMB` (pipeline option) > the default
 `clamp(maxHeap / (cores × 4), 16 MB, 256 MB)` computed on the worker (batch runners process one bundle
 per core, so concurrent sorts = cores). `engine.spill.directory` and `engine.spill.compress` (default
-false) complete the block. The spill configuration is part of `FeaturePlan.toJson()` / `describe()`,
-and the audit-query note says that the top row count is the spill bound.
+false) complete the block. The spill configuration is an `engine` setting — outside the plan hash and not
+part of `FeaturePlan.toJson()` / `describe()`; the audit-query note says that the top row count is the spill bound.
 
 **Edges**: `NULL_KEY` rows bypass the sorter; an empty iterable returns empty; an `IOException` fails
 the key (row by row, `failFast`) and the files are deleted in `finally`.

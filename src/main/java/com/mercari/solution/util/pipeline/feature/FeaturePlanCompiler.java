@@ -2800,7 +2800,8 @@ public final class FeaturePlanCompiler {
         diagnostics.info("transitionStats.expansion", loc, "transitionStats is the expanding distribution of " + def.sequenceField + " keyed on "
                 + leaf + " (the previous " + (order == 1 ? "value" : order + " values") + " of entity " + def.sequenceEntity + (perEntity ? ", per entity" : ", pooled over entities")
                 + "), shrunk along " + String.join(" -> ", chain) + " with pseudo-count " + priorWeight
-                + " (Dirichlet-Multinomial); an event without a previous value reads the coarser levels");
+                + " (Dirichlet-Multinomial); a row reads from the deepest level of the chain that has rows (the effective leaf), leave-node-out from that level;"
+                + " an event without a previous value reads the coarser levels");
     }
 
     /**
