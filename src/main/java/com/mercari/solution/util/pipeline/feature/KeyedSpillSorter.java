@@ -156,8 +156,8 @@ public final class KeyedSpillSorter implements Serializable {
         sources.add(new MemorySource(buffer));
         final long live = LIVE_BYTES.addAndGet(bytes);
         final long peak = PEAK_BYTES.accumulateAndGet(live, Math::max);
-        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory (~{} KB per encoded row); live spill on this worker {} MB (peak {} MB)",
-                context, chunks.size(), bytes >> 20, buffer.size(), rowBytes >> 10, live >> 20, peak >> 20);
+        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory (~{} bytes per encoded row); live spill on this worker {} MB (peak {} MB)",
+                context, chunks.size(), bytes >> 20, buffer.size(), rowBytes, live >> 20, peak >> 20);
         return new Sorted(null, sources, chunks, bytes);
     }
 

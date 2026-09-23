@@ -112,7 +112,11 @@ public final class FeaturePlanCompiler {
     private void hintWideRows(final FeaturePlan plan) {
         for (final FeaturePlan.Stage s : plan.getStages()) {
             if (!s.isKeyed() || s.kind() == FeaturePlan.StageKind.groupBy) continue;
-            final List<String> maps = plan.mapColumns(plan.getCarriedColumns(s));
+            // the carry of the engine that runs: the wave engine's branches, or the linear chain (parallelWaves off, or no
+            // wave to branch) - the chain hosts the deferred readouts in the last stage, so a consumed map rides every
+            // keyed stage before it
+            final boolean waves = plan.branchesWaves();
+            final List<String> maps = plan.mapColumns(waves ? plan.getCarriedColumns(s) : plan.getCarriedColumnsLinear(s));
             if (maps.isEmpty()) continue;
             final List<String> blocks = new ArrayList<>();
             for (final String name : maps) {
@@ -120,10 +124,12 @@ public final class FeaturePlanCompiler {
                 if (!blocks.contains(block)) blocks.add(block);
             }
             diagnostics.hint("engine.rowWidth", "features." + String.join(",", blocks),
-                    "stage #" + s.index() + " groups rows that carry the map column(s) " + maps + " (read by it or a later stage, or emitted):"
-                            + " a map over many categories makes a wide row, and a hot key's spill grows with the row width times its row count"
-                            + " (the audit's row_count bounds the count only); a map that only its readouts read is dropped before this stage"
-                            + " - emit the readouts rather than the distribution, or place the block so that its map is consumed before the widest key");
+                    "stage #" + s.index() + " groups rows that carry the map column(s) " + maps + " (read by it or a later stage, or emitted"
+                            + (waves ? "" : "; the linear chain evaluates the readouts in the last stage, so a consumed map rides every keyed stage before it")
+                            + "): a map over many categories makes a wide row, and a hot key's spill grows with the row width times its row count"
+                            + " (the audit's row_count bounds the count only); " + (waves ? "a map that only its readouts read is dropped before this stage"
+                            + " - emit the readouts rather than the distribution, or place the block so that its map is consumed before the widest key"
+                            : "with engine.parallelWaves the wave engine evaluates the readouts as soon as the levels are merged and drops the map"));
         }
     }
 

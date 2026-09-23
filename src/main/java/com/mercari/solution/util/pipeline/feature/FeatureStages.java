@@ -109,9 +109,7 @@ public final class FeatureStages {
         // execution waves (engine doc §9.4): the groupBy stage is the finalize, not a stage of the chain
         final List<List<Stage>> waves = plan.getEngineWaves();
         // streaming stays linear: the fan-out merge is a GroupByKey (the stateful merge is the streaming follow-up, §9.4.6)
-        final boolean parallel = spec.engine.parallelWaves
-                && !com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)
-                && waves.stream().anyMatch(w -> w.size() >= 2);
+        final boolean parallel = plan.branchesWaves() && !com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input);
         if (parallel) {
             LOG.info("feature engine: {} stages in {} waves, parallel branches per wave {}", plan.getStages().size(), waves.size(),
                     waves.stream().map(List::size).toList());
@@ -219,7 +217,8 @@ public final class FeatureStages {
                     .withOutputTags(outputTag, TupleTagList.of(failureTag).and(countTag)));
         } else {
             finalized = (pending != null ? pending : current)
-                    .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys(), wiring.dropExcept(plan.getOutputReads())))).setCoder(kvCoder)
+                    // a folded last wave leaves its final prelude to the grouped finalize: the prelude's inputs must ride too
+                    .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys(), wiring.dropExcept(pending != null ? plan.getFinalizeKeep() : plan.getOutputReads())))).setCoder(kvCoder)
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
                             .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy,
@@ -3230,9 +3229,21 @@ public final class FeatureStages {
      */
     static MElement project(final MElement element, final Set<String> drop) {
         if (drop.isEmpty()) return element;
+        // probe the element's own map before copying it: a row that holds none of the dropped columns (the first
+        // stages, a partial row) passes as it is - the copy is the hot path
+        if (element.getValue() instanceof Map<?, ?> raw && !holdsAny(raw, drop)) return element;
         final Map<String, Object> values = element.asPrimitiveMap();
         if (!values.keySet().removeAll(drop)) return element;
         return MElement.of(values, element.getTimestamp());
+    }
+
+    private static boolean holdsAny(final Map<?, ?> raw, final Set<String> drop) {
+        if (raw.size() < drop.size()) {
+            for (final Object key : raw.keySet()) if (drop.contains(key)) return true;
+            return false;
+        }
+        for (final String name : drop) if (raw.containsKey(name)) return true;
+        return false;
     }
 
     /** Keys a merge piece by its row id, without the columns nothing after the merge reads. */

@@ -1822,9 +1822,11 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   output. The plan report's `-- carry` section lists, per keyed stage, the columns its rows carry in the wave
   engine and in the linear chain (`engine.parallelWaves: false` hosts those row columns in the last stage,
   so a consumed map rides every keyed stage before it), naming the map columns; the `engine.rowWidth` hint
-  points at a keyed stage whose rows still carry a map — a map over many categories makes a wide row, which
+  points at a keyed stage whose rows still carry a map in the engine that will run (the waves, or the chain
+  when `parallelWaves` is off or no wave has two stages) — a map over many categories makes a wide row, which
   the audit's row counts do not show. Input fields always ride (`output.passThrough` decides only what is
-  emitted).
+  emitted). When the last wave folds into the `output.groupBy` finalize, the grouped rows also keep the inputs of
+  the row columns that finalize still evaluates.
 
 ## Limitations (current engine)
 

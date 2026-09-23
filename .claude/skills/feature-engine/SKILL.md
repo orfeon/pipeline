@@ -341,8 +341,12 @@ reads what the compile layer wrote into each column's `coordinates`.
    linear chain), rejects duplicate row ids as a whole group, `rejectionRecords` → `BadRecord`.
    **Liveness projection** (engine doc §9.4.7): every key DoFn (`KeyDoFn` / `SortKeyDoFn` / `RowIdKeyDoFn` /
    `Finalize_Key`) drops the computed columns nothing after it reads — `FeatureStages.project` with
-   `Wiring.dropExcept(plan.getWaveKeep(stage) | getLiveBefore(k) | getLiveAfterWave(w) | getOutputReads())`;
-   input fields always ride. The plan's `-- carry` section / stage JSON `carry` / `carryLinear` / `carryMaps` and
+   `Wiring.dropExcept(plan.getWaveKeep(stage) | getLiveBefore(k) | getLiveAfterWave(w) | getOutputReads() |
+   getFinalizeKeep())` — `getFinalizeKeep` = the output's reads plus the inputs of the final prelude, which the grouped
+   finalize evaluates when the last wave folds into it (dropping them made every deferred column null: PR #182 review);
+   input fields always ride. `plan.branchesWaves()` (parallelWaves and a wave of ≥ 2 stages) is the one decision the
+   engine (plus `!streaming`), the report and the `engine.rowWidth` hint share; `getFoldTarget` checks the VC fields of the
+   fold columns (the wave's prelude included), not only the stage's own. The plan's `-- carry` section / stage JSON `carry` / `carryLinear` / `carryMaps` and
    the `engine.rowWidth` hint report what rides; `KeyedSpillSorter` logs the sampled row width per stage.
 4. `Finalize` / `Finalize_Key` + `Finalize_Group` + `GroupedFinalize` (`output.groupBy`: parent
    record + child array `output.childName`, `parentFields`, `passThrough`, `nullPolicy`,

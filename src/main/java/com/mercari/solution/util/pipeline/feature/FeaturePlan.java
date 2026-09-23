@@ -527,7 +527,8 @@ public class FeaturePlan implements Serializable {
             if (waves.get(w).size() == 1) keep.addAll(getLiveAfterWave(w));
             return keep;
         }
-        return getOutputReads();
+        // the groupBy finalize: what the output reads, plus the final prelude's inputs when the last wave folds into it
+        return foldsIntoGroupBy(waves.size() - 1) ? getFinalizeKeep() : getOutputReads();
     }
 
     /**
@@ -614,9 +615,34 @@ public class FeaturePlan implements Serializable {
      */
     public Stage getFoldTarget(final Stage next, final int w) {
         if (next.kind != StageKind.context || !keysAvailable(next.keys, w)) return null;
+        // the fold target evaluates its own wave's prelude too (getFoldColumns): a variance-components estimate of
+        // a deferred column there is taken over the wave input as well, so its fields must be on it
         final List<OutputColumn> stageColumns = new ArrayList<>();
-        for (final String name : next.columnNames) stageColumns.add(columnsByName().get(name));
+        for (final String name : getFoldColumns(next, w + 1)) stageColumns.add(columnsByName().get(name));
         return vcFieldsAvailable(stageColumns, getWaveInputFields(w)) ? next : null;
+    }
+
+    /**
+     * Whether the wave engine branches this plan: {@code engine.parallelWaves} and a wave of two or more stages
+     * (otherwise the stages run as the linear chain, whatever the setting; a streaming pipeline runs the chain too,
+     * which the engine decides). The report's carry figures and the {@code engine.rowWidth} hint read the engine
+     * that runs.
+     */
+    public boolean branchesWaves() {
+        return spec.engine.parallelWaves && getEngineWaves().stream().anyMatch(w -> w.size() >= 2);
+    }
+
+    /**
+     * Computed columns the finalize must keep on the rows it groups when the last wave folds into it
+     * ({@link #foldsIntoGroupBy}): what the output reads, and the inputs of the final prelude — the deferred columns
+     * the grouped finalize evaluates on the merged rows, which would otherwise read null.
+     */
+    public Set<String> getFinalizeKeep() {
+        final Set<String> keep = new LinkedHashSet<>(getOutputReads());
+        final List<List<OutputColumn>> preludes = preludes();
+        final List<OutputColumn> last = preludes.get(preludes.size() - 1);
+        keep.addAll(readsOf(List.of(), last.stream().map(OutputColumn::getCanonicalName).toList()));
+        return keep;
     }
 
     private boolean vcFieldsAvailable(final List<OutputColumn> stageColumns, final Set<String> available) {
