@@ -3931,7 +3931,7 @@ public class FeatureTransformTest {
                   scope: sequence
                   entity: seller
                   ops:
-                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: duo, with: [{entity: cat, mu: 0, sigma: 4}], funcs: [mu, sigma, count], team: [mu, sigma]}
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: duo, with: [{entity: cat, mu: 0, sigma: 4}], funcs: [mu, sigma, count, z], team: [mu, sigma, count]}
                     - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: solo, funcs: [mu]}
                 - name: field
                   scope: context
@@ -3959,6 +3959,8 @@ public class FeatureTransformTest {
     public void testSequenceRatingTeam() throws java.io.IOException {
         final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + teamConfig(FEATURE_CONFIG))).get("features");
         Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_duo_cat_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_duo_team_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_skill_all_duo_cat_z").getFieldType().getType());
         Assertions.assertEquals("member", output.getSchema().getField("f_skill_all_duo_cat_mu").getOptions().get("feature.coord.readout"));
         PAssert.that(output.getCollection()).satisfies(rows -> {
             final Rating rating = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of(), "y")
@@ -3984,14 +3986,23 @@ public class FeatureTransformTest {
                     default -> throw new AssertionError("unexpected row " + id);
                 };
                 final Map<String, Object> keys = id.endsWith("s1") ? s1 : s2;
-                for (final String func : List.of("mu", "sigma", "count")) {
+                // z is null until the pool holds two rated players (before session A's outcome is known)
+                for (final String func : List.of("mu", "sigma", "count", "z")) {
                     final Object seller = rating.read(known, 0, rating.memberKey(keys, 0), func, Long.MIN_VALUE), category = rating.read(known, 1, rating.memberKey(keys, 1), func, Long.MIN_VALUE);
+                    if (seller == null) {
+                        Assertions.assertNull(row.getPrimitiveValue("f_skill_all_duo_" + func), id + " seller " + func);
+                        Assertions.assertNull(row.getPrimitiveValue("f_skill_all_duo_cat_" + func), id + " category " + func);
+                        continue;
+                    }
                     Assertions.assertEquals(((Number) seller).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_" + func)).doubleValue(), 1e-9, id + " seller " + func);
                     Assertions.assertEquals(((Number) category).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_cat_" + func)).doubleValue(), 1e-9, id + " category " + func);
                 }
-                for (final String func : List.of("mu", "sigma")) {
-                    Assertions.assertEquals(rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE), row.getAsDouble("f_skill_all_duo_team_" + func), 1e-9, id + " team " + func);
+                for (final String func : List.of("mu", "sigma", "count")) {
+                    final Object team = rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE);
+                    Assertions.assertEquals(((Number) team).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_team_" + func)).doubleValue(), 1e-9, id + " team " + func);
                 }
+                // the pairing's contests: s1 / electronics ran A (known at C) and C (known at D)
+                Assertions.assertEquals(known == null ? 0L : known == afterA ? 1L : 2L, row.getPrimitiveValue("f_skill_all_duo_team_count"), id);
                 // nothing known: the priors — 25 and 0, and the sum's sigma
                 if (known == null) {
                     Assertions.assertEquals(25d, row.getAsDouble("f_skill_all_duo_team_mu"), 0d, id);

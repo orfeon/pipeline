@@ -364,9 +364,14 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
   that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
   constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` only; the period is wall time.
-- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
-  (the rating's change in its last contest, null before the first). An entity never rated reads the prior
-  (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
+- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far), `delta`
+  (the rating's change in its last contest, null before the first), `deviation` (`mu` net of the prior: what the
+  contests added, 0 before the first) and `z` (`mu` standardised against the mean and sd of `mu` over the
+  **pool's rated players** — the entity's players rated so far, one pool per `$self` filter value and, in a team,
+  per member entity; null until two players with different ratings are known). `z` reads a level free of the
+  pool's own scale and shift, which is what makes a member of a team comparable in itself (below). An entity never
+  rated reads the prior (`count` 0, `deviation` 0, `z` at the prior's place), a row without the entity key reads null.
+  Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
 - **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
   window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
@@ -422,7 +427,13 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   stretch out of the training window, or read the rating relative to its contest with a **scale-free** context
   op over it (`zscore`, `rank`): a `gapToBest` is in `mu` units, so it drifts with the spread exactly like `mu`
   itself, and a contest whose players are all still at the prior has no spread at all (`zscore` reads null
-  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool.
+  there). `count` tells how warm a player is; a pool split by a `$self` filter warms up per pool. The `z` func
+  is the pool-wide form of that reading: `mu` standardised over the pool's rated players, so the warm-up's
+  growing spread cancels out of it (null until two players with different ratings are rated). At the end of a
+  pool's replay the run log prints `rating state of Stage<N>_sequence key=<pool> after the replay: pool
+  <entity>: players=<n> contests/player median=<m> max=<k> mu mean=<..> sd=<..>` — one entry per member entity
+  of a team — which says how warm each pool got over the input: a median of a few contests per player means
+  the pool is still near its prior, and a team's member pools warm up at different speeds.
 - **Teams (`with`).** A rating gives the whole result of a row to the one entity it rates, so an entity that
   always appears in company — an agent selling for sellers, a driver in a car — is rated for the company it
   keeps: its rating is mostly theirs. `with` rates the row as a **team** instead, the block's entity together
@@ -444,10 +455,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
           as: duo                                     # required with a team
           with: [{entity: agent, mu: 0, sigma: 4}]    # or just [agent]: the op's prior and drift
           funcs: [mu, sigma, count]                   # read for every member
-          team: [mu, sigma]                           # the row's whole strength (optional)
+          team: [mu, sigma, count]                    # the row's whole strength (optional); count = this pairing's contests
   # skill_all_duo_mu / _sigma / _count              the seller — the names of a rating without a team
   # skill_all_duo_agent_mu / _sigma / _count        the agent
-  # skill_all_duo_team_mu / _sigma                  seller + agent
+  # skill_all_duo_team_mu / _sigma / _count         seller + agent
   ```
 
   The team's strength is the sum of its members' (`mu = Σ mu_j`, `sigma² = Σ sigma_j²`, the noise `beta` once per
@@ -460,11 +471,14 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     that is an *effect on top of* the rated player, declare `mu: 0` and a `sigma` the size of that effect: `sigma`
     is what decides the shares (above: the seller takes `8.33² / (8.33² + 4²)` = 81% of every change while both
     are new).
-  - **Read a member relative to its contest, or read the team.** Only the sum is identified — every seller up
-    and every agent down by the same amount changes no expectation — so the members' levels can shift against
-    each other over a long replay. `team: [mu, sigma]` is what the contests pin down ("this seller with this
-    agent"); a member's `mu` is comparable among the members of its entity at one time: feed it to a context
-    block (`zscore`, `gapToBest`).
+  - **Read a member relative to its contest or to its pool, or read the team.** Only the sum is identified —
+    every seller up and every agent down by the same amount changes no expectation — so the members' levels can
+    shift against each other over a long replay. `team: [mu, sigma]` is what the contests pin down ("this seller
+    with this agent"), `team: [deviation]` the same net of the priors, and `team: [count]` how many contests this
+    exact team has run (a pairing's experience); a member's `mu` is comparable among the members of its entity
+    at one time: feed it to a context block (`zscore`, `gapToBest`), or read `z` — `mu` standardised within the
+    member's pool of rated players, which is that comparison without the contest (a pool's shift and scale
+    cancel out of it) — and `deviation`, what the contests added to the member's prior.
   - A row without one of the members' keys joins no contest and reads null for that member and for the team;
     its other members still read. A member never rated reads its prior, so a known seller with a new agent
     reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its

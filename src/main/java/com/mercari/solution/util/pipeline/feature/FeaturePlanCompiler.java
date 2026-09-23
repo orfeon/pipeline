@@ -1717,7 +1717,8 @@ public final class FeaturePlanCompiler {
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
                     + " (a well-known member hardly moves, an uncertain one takes the update). The members' levels are identified up to a shift between the"
-                    + " entities - read a member relative to its contest (a context block over the column), or the team's sum (team: [mu, sigma])");
+                    + " entities - read a member relative to its contest (a context block over the column) or to its pool (func z), or the team's sum"
+                    + " (team: [mu, sigma, count, deviation])");
         }
     }
 

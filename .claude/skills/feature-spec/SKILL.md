@@ -387,8 +387,12 @@ not alter values).
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
-  relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
-  member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+  relative to its contest (a context `zscore` / `gapToBest`) or to its pool (`funcs: [z]`: standardised over
+  the agents rated so far), or the row's whole strength `team: [mu]`; `team: [count]` is how many contests
+  this exact pairing ran. The
+  member's `sigma` is a modelling choice: it decides how much of every change that member takes. The run log
+  prints one `rating state of ... after the replay: pool <entity>: players=n contests/player median=m ... mu
+  mean= sd=` line per pool — the warm-up cue (a pool of few contests per player is still near its prior).
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is
