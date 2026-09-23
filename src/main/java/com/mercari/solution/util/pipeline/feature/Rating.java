@@ -17,10 +17,11 @@ import java.util.TreeMap;
  * context group sharing an event time — moves the strength of all its players at once, so a player's rating reflects
  * the strength of the opponents it met, which a per-entity aggregate of the outcome cannot.
  *
- * <p>Methods: {@code elo} (the pairwise logistic update, {@code kFactor} shared over the opponents) and the two
+ * <p>Methods: {@code elo} (the pairwise logistic update, {@code kFactor} shared over the opponents), the two
  * closed-form Bayesian approximations of Weng &amp; Lin (JMLR 2011) over a Gaussian strength {@code (mu, sigma)}:
  * {@code bradleyTerry} (pairwise — every opponent, the rank neighbours only, or the mean over the opponents:
- * {@link Pairs}) and {@code plackettLuce} (the ranking likelihood). Before a contest every participant's variance
+ * {@link Pairs}) and {@code plackettLuce} (the ranking likelihood), and {@code gaussian} (the margin-of-victory
+ * update on the signed margin of every pair, paired as {@code bradleyTerry} is). Before a contest every participant's variance
  * grows by {@code tau²} (strengths drift) — per contest, or, with {@code tauPer}, in proportion to the time since the
  * player's previous contest, so that an absence reopens the uncertainty and a busy stretch does not.
  *
@@ -48,10 +49,15 @@ import java.util.TreeMap;
  */
 public final class Rating implements Serializable {
 
-    public enum Method { elo, bradleyTerry, plackettLuce }
+    /**
+     * {@code gaussian}: the margin-of-victory update — the outcome is a continuous score and every strength of the
+     * contest is conditioned at once on the outcomes up to a common shift (exact Gaussian conditioning, see
+     * {@link #gaussian}). The prior and {@code beta} are in the outcome's units; no pairing applies.
+     */
+    public enum Method { elo, bradleyTerry, plackettLuce, gaussian }
 
     /**
-     * The opponents a {@code bradleyTerry} player is paired with. {@code all}: every opponent, the sums growing with
+     * The opponents a {@code bradleyTerry} / {@code gaussian} player is paired with. {@code all}: every opponent, the sums growing with
      * the field (the paper's full-pair update — in a field of sixteen one contest is fifteen games). {@code adjacent}:
      * the rank neighbours only (the paper's partial-pair update) — the opponents sharing the player's outcome and those
      * at the nearest better and the nearest worse outcome, a set the outcomes alone decide. {@code mean}: every
@@ -227,7 +233,11 @@ public final class Rating implements Serializable {
 
     /** The prior rating of a method when the spec declares none. */
     public static double defaultMu(final Method method) {
-        return method == Method.elo ? 1500d : 25d;
+        return switch (method) {
+            case elo -> 1500d;
+            case gaussian -> 0d; // a margin's origin: the prior mu is a typical outcome, 0 for a standardised one
+            default -> 25d;
+        };
     }
 
     /** The defaults that derive from the prior: {@code sigma = |mu| / 3}, {@code beta = sigma / 2}, {@code tau = sigma / 100}. */
@@ -255,13 +265,15 @@ public final class Rating implements Serializable {
 
     /**
      * @param tauPerMillis the time {@code tau} is the drift of (null / 0: {@code tau} is the drift of one contest)
-     * @param pairs        bradleyTerry's pairing (null: all)
+     * @param pairs        the bradleyTerry pairing (null: all)
      */
     public static Rating of(final Method method, final boolean ascending, final Double mu, final Double sigma, final Double beta,
                             final Double tau, final Double kFactor, final Double scale, final Long tauPerMillis, final Pairs pairs,
                             final List<String> playerKeys, final List<String> contestKeys, final String field) {
         final double m = mu != null ? mu : defaultMu(method);
-        final double s = sigma != null ? sigma : defaultSigma(m);
+        // a margin model has no scale of its own (the compiler requires sigma and beta): the class-level default is a standardised
+        // margin, mu 0 / sigma 1 / beta 0.5, rather than |mu| / 3 of a prior at 0
+        final double s = sigma != null ? sigma : method == Method.gaussian ? 1d : defaultSigma(m);
         // a rating without a team: one member under no pool, its state keyed by the bare keys as it always was
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
@@ -318,7 +330,8 @@ public final class Rating implements Serializable {
      * This rating over teams: the rated player — its keys now in the namespace {@code pool} — together with the members
      * {@code with}, each of a pool of its own. The rating's {@code mu} / {@code sigma} / {@code tau} stay the player's;
      * {@code beta}, the pairing and the clock of a drift in time are the team's. {@code elo} keeps no uncertainty to
-     * share a team's change by, so a team is rated by the two Bayesian methods only. The contests per team are kept
+     * share a team's change by, so a team is rated by the Bayesian methods only (bradleyTerry / plackettLuce /
+     * gaussian). The contests per team are kept
      * ({@code team: [count]}); {@link #withTeam(String, List, boolean)} drops them.
      */
     public Rating withTeam(final String pool, final List<Member> with) {
@@ -331,7 +344,7 @@ public final class Rating implements Serializable {
      */
     public Rating withTeam(final String pool, final List<Member> with, final boolean countTeams) {
         if (method == Method.elo) {
-            throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce");
+            throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce / gaussian");
         }
         // the whole team is declared at once: a second call would otherwise drop the members the first one added
         if (members.size() > 1) {
@@ -515,6 +528,7 @@ public final class Rating implements Serializable {
             case elo -> elo(entries, ids, m, dMu);
             case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
             case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
+            case gaussian -> gaussian(entries, m, v, dMu, deltas);
         }
 
         // a team's change is shared among its members by their part of its variance (1 for a player). The entries are
@@ -593,29 +607,45 @@ public final class Rating implements Serializable {
         }
     }
 
+    /**
+     * {@link Pairs#adjacent}: the nearest better ({@code [0]}) and the nearest worse ({@code [1]}) outcome among the
+     * OPPONENTS of entry {@code i} (the player's own other rows are no opponents), NaN where there is none — which with
+     * the player's own outcome name its rank neighbours, a set the outcomes decide, not the order of the entries, so
+     * tied neighbours all count. Comparisons only: the pairwise methods share it without touching their arithmetic.
+     */
+    private void neighbours(final List<Entry> entries, final String[] ids, final int i, final double[] into) {
+        final Entry self = entries.get(i);
+        double better = Double.NaN, worse = Double.NaN;
+        for (int q = 0; q < entries.size(); q++) {
+            final Entry other = entries.get(q);
+            if (ids[q].equals(ids[i])) continue;
+            final double sc = score(other, self);
+            if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
+            if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
+        }
+        into[0] = better;
+        into[1] = worse;
+    }
+
+    /** Whether entry {@code i} is paired with opponent {@code q} (not one of its own rows) under the pairing, given its {@link #neighbours}. */
+    private boolean paired(final List<Entry> entries, final String[] ids, final int i, final int q, final double[] neighbours) {
+        if (ids[q].equals(ids[i])) return false;
+        if (pairs != Pairs.adjacent) return true;
+        final double self = entries.get(i).outcome(), other = entries.get(q).outcome();
+        return other == self || other == neighbours[0] || other == neighbours[1];
+    }
+
     private void bradleyTerry(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
+        final double[] adjacent = new double[2];
         for (int i = 0; i < n; i++) {
             final Entry self = entries.get(i);
-            // adjacent: the nearest better and the nearest worse outcome among the OPPONENTS (the player's own other
-            // rows are no opponents), which with the player's own outcome name its rank neighbours — a set the
-            // outcomes decide, not the order of the entries, so tied neighbours all count
-            double better = Double.NaN, worse = Double.NaN;
-            if (pairs == Pairs.adjacent) {
-                for (int q = 0; q < n; q++) {
-                    final Entry other = entries.get(q);
-                    if (ids[q].equals(ids[i])) continue;
-                    final double sc = score(other, self);
-                    if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
-                    if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
-                }
-            }
+            if (pairs == Pairs.adjacent) neighbours(entries, ids, i, adjacent);
             double omega = 0, delta = 0;
             int opponents = 0;
             for (int q = 0; q < n; q++) {
+                if (!paired(entries, ids, i, q, adjacent)) continue;
                 final Entry other = entries.get(q);
-                if (ids[q].equals(ids[i])) continue;
-                if (pairs == Pairs.adjacent && other.outcome() != self.outcome() && other.outcome() != better && other.outcome() != worse) continue;
                 final double c = Math.sqrt(v[i] + v[q] + 2 * beta * beta);
                 final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
                 omega += v[i] / c * (score(self, other) - p);
@@ -628,6 +658,39 @@ public final class Rating implements Serializable {
             }
             dMu[i] = omega;
             deltas[i] = delta;
+        }
+    }
+
+    /**
+     * The margin-of-victory update ({@link Method#gaussian}): the outcomes of a contest are {@code y_i = s_i + e_i} with
+     * the strengths {@code s_i ~ N(m_i, v_i)} and independent performance noise {@code e_i ~ N(0, beta²)}, and what the
+     * contest reveals is the outcomes up to a common shift (their differences). Conditioning every strength on all of
+     * them at once has a closed form because the prior is diagonal: with {@code w_i = 1 / (v_i + beta²)},
+     * {@code W = Σ w}, the residuals {@code r_i = y_i − m_i} (signed by the order) and their weighted mean
+     * {@code r̄ = Σ w_i r_i / W}, the mean moves by {@code v_i · w_i · (r_i − r̄)} and the variance keeps
+     * {@code 1 − v_i · w_i · (1 − w_i / W)}. For two entries this is the pairwise update on the margin with
+     * {@code c² = v_i + v_q + 2 beta²}; over a field it is one observation per entry, not {@code k − 1} independent
+     * ones (the pairs of an entry share its own noise: summing them, as {@code bradleyTerry} does, moves and narrows
+     * too far — sixteen fresh equals would keep 2% of their sigma instead of 50%). Ties between equals move nobody and
+     * still narrow everyone; a contest of equals whose outcomes are all equal is uninformative about the differences
+     * and still narrows, since the noise is what is bounded. No pairing applies.
+     */
+    private void gaussian(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
+        final int n = entries.size();
+        final double beta2 = beta * beta;
+        final double[] w = new double[n];
+        double total = 0, weighted = 0;
+        for (int i = 0; i < n; i++) {
+            w[i] = 1d / (v[i] + beta2);
+            final double residual = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
+            total += w[i];
+            weighted += w[i] * residual;
+        }
+        final double mean = weighted / total;
+        for (int i = 0; i < n; i++) {
+            final double residual = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
+            dMu[i] = v[i] * w[i] * (residual - mean);
+            deltas[i] = v[i] * w[i] * (1 - w[i] / total);
         }
     }
 

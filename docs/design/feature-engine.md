@@ -300,8 +300,9 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   trimmed entry and a readout may walk it from its own start (`Rating.replay` does) rather than only touching a
   bounded tail — and the base never passes a column's own watermark, so the entries it can still need are held.
 - **Ratings** (`rating`, `Rating`): the block's entity is the rated player, `context` the contest (the rows of one
-  group at one event time), `field` its outcome; `elo` and the Weng–Lin closed-form updates (`bradleyTerry`,
-  `plackettLuce`) over (mu, sigma) with a drift `tau` — per contest, or with `tauPer` in proportion to the time since
+  group at one event time), `field` its outcome; `elo`, the Weng–Lin closed-form updates (`bradleyTerry`,
+  `plackettLuce`) and the margin-of-victory `gaussian` (every strength of the contest conditioned at once on the outcomes up to a
+  common shift — closed form over a diagonal prior, one observation per entry; prior and `beta` in the outcome's units, required) over (mu, sigma) with a drift `tau` — per contest, or with `tauPer` in proportion to the time since
   the player's previous contest: the state then keeps each player's last contest time (`Player.lastMillis`, the
   event time of the run `Rating.fold` was handed), a first contest drifts nothing, and a **read** adds the drift up to
   the row (`Rating.read(state, player, func, nowMillis)`) — the one readout of the op that depends on the row's time,

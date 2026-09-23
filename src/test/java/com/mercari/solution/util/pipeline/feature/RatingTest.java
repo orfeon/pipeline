@@ -246,6 +246,91 @@ public class RatingTest {
     }
 
     /**
+     * The margin-of-victory update by hand: every strength conditioned at once on the contest's outcomes up to a common
+     * shift — two players give the pairwise margin update, a field gives one observation per entry (not k − 1), ties,
+     * order, a confirming margin, the sum of the moves, and a team's shares.
+     */
+    @Test
+    public void testGaussianMargin() {
+        final java.util.function.Function<Boolean, Rating> gs = ascending ->
+                Rating.of(Rating.Method.gaussian, ascending, 0d, 1d, 0.5, 0d, null, null, List.of("p"), List.of("c"), "y");
+        // two players from the prior N(0, 1), a margin of 2: w = 1 / 1.25 each, the weighted mean residual 1, move 0.8 · (2 − 1),
+        // variance kept 1 − 0.8 · (1 − 1/2) = 0.6 — the pairwise form with c² = 1 + 1 + 2 · 0.25
+        final Rating.State two = new Rating.State();
+        gs.apply(false).update(two, List.of(entry("w", 2), entry("l", 0)));
+        Assertions.assertEquals(0.8, two.players.get("w").mu, 1e-12);
+        Assertions.assertEquals(-0.8, two.players.get("l").mu, 1e-12);
+        Assertions.assertEquals(Math.sqrt(0.6), two.players.get("w").sigma, 1e-12);
+        Assertions.assertEquals(Math.sqrt(0.6), two.players.get("l").sigma, 1e-12);
+        // ascending: a smaller outcome is the better one, the same margin the other way round
+        final Rating.State asc = new Rating.State();
+        gs.apply(true).update(asc, List.of(entry("w", 0), entry("l", 2)));
+        Assertions.assertEquals(0.8, asc.players.get("w").mu, 1e-12);
+        // a tie between equals moves nobody and still narrows both; a margin equal to the expected one confirms the ratings
+        final Rating.State tie = new Rating.State();
+        gs.apply(false).update(tie, List.of(entry("a", 1), entry("b", 1)));
+        Assertions.assertEquals(0d, tie.players.get("a").mu, 0d);
+        Assertions.assertEquals(Math.sqrt(0.6), tie.players.get("a").sigma, 1e-12);
+        gs.apply(false).update(two, List.of(entry("w", 1.6), entry("l", 0)));
+        Assertions.assertEquals(0.8, two.players.get("w").mu, 1e-12, "a margin equal to the expected one (0.8 − (−0.8)) confirms the ratings");
+        Assertions.assertEquals(Math.sqrt(0.6 * (1 - 0.6 / (0.6 + 0.6 + 0.5))), two.players.get("w").sigma, 1e-12);
+        // three players, outcomes 3 / 1 / 0: w = 0.8 each, W = 2.4, the weighted mean residual 4/3 — the winner moves by
+        // 0.8 · (3 − 4/3) = 4/3 (a pairwise sum would say 2), the moves sum to zero, every variance keeps
+        // 1 − 0.8 · (1 − 0.8 / 2.4) = 7/15 (a pairwise product would keep 0.36)
+        final List<Rating.Entry> three = List.of(entry("a", 3), entry("b", 1), entry("c", 0));
+        final Rating.State field = new Rating.State();
+        gs.apply(false).update(field, three);
+        Assertions.assertEquals(4d / 3, field.players.get("a").mu, 1e-12);
+        Assertions.assertEquals(0.8 * (1 - 4d / 3), field.players.get("b").mu, 1e-12);
+        Assertions.assertEquals(0.8 * (0 - 4d / 3), field.players.get("c").mu, 1e-12);
+        Assertions.assertEquals(0d, field.players.get("a").mu + field.players.get("b").mu + field.players.get("c").mu, 1e-12, "the moves sum to zero");
+        for (final String p : List.of("a", "b", "c")) Assertions.assertEquals(Math.sqrt(7d / 15), field.players.get(p).sigma, 1e-12, p);
+        // sixteen fresh equals keep 1 − 0.8 · (1 − 1/16) = 1/4 of their variance: half their sigma, not 2% (pairwise sums)
+        final List<Rating.Entry> sixteen = new ArrayList<>();
+        for (int i = 1; i <= 16; i++) sixteen.add(entry("p" + i, i));
+        final Rating.State large = new Rating.State();
+        gs.apply(false).update(large, sixteen);
+        for (int i = 1; i <= 16; i++) Assertions.assertEquals(0.5, large.players.get("p" + i).sigma, 1e-12);
+        Assertions.assertEquals(0.8 * (16 - 8.5), large.players.get("p16").mu, 1e-12, "the winner (outcome 16) moves by w · (16 − mean 8.5)");
+        // a team shares the change by variance and moves like one player of the summed strength
+        final Rating duo = gs.apply(false).withTeam("seller", List.of(new Rating.Member("agent", List.of("a"), 0d, 2d, 0d)));
+        final Rating.State teams = new Rating.State();
+        duo.update(teams, List.of(team("s1", "a1", 2), team("s2", "a2", 0)));
+        final double c2 = (1 + 4) + (1 + 4) + 2 * 0.25, move = 5 / c2 * 2;
+        Assertions.assertEquals(move * 1 / 5, teams.players.get("seller\u0001s1").mu, 1e-12);
+        Assertions.assertEquals(move * 4 / 5, teams.players.get("agent\u0001a1").mu, 1e-12);
+        Assertions.assertEquals(move, (Double) duo.readTeam(teams, List.of("seller\u0001s1", "agent\u0001a1"), "mu", 0L), 1e-12);
+        // and each member's variance is conditioned exactly: v_j · (1 − v_j / c²)
+        Assertions.assertEquals(Math.sqrt(1 * (1 - 1 / c2)), teams.players.get("seller\u0001s1").sigma, 1e-12);
+        Assertions.assertEquals(Math.sqrt(4 * (1 - 4 / c2)), teams.players.get("agent\u0001a1").sigma, 1e-12);
+    }
+
+    /**
+     * gaussian at compile time: a margin model has no scale of its own, so {@code sigma} and {@code beta} must be declared
+     * (an error, not a default derived from the rating-level {@code mu}), {@code mu} defaults to 0, and {@code pairs} —
+     * a pairwise notion — is rejected: the update conditions on the whole contest at once.
+     */
+    @Test
+    public void testGaussianCompile() {
+        final String op = "      - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma, count, delta]}";
+        Assertions.assertTrue(SPEC.contains(op));
+        final String gaussian = "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, ";
+        final FeaturePlan declared = compile(SPEC.replace(op, gaussian + "sigma: 40, beta: 20, as: gs}"));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertEquals("gaussian", declared.getColumn("skill_all_gs_mu").getCoordinates().get("method"));
+        Assertions.assertEquals("0.0", declared.getColumn("skill_all_gs_mu").getCoordinates().get("mu"), "a margin's origin");
+        Assertions.assertNull(declared.getColumn("skill_all_gs_mu").getCoordinates().get("pairs"));
+        for (final String params : List.of("as: gs}", "mu: 0, sigma: 40, as: gs}", "mu: 0, beta: 20, as: gs}")) {
+            final FeaturePlan plan = compile(SPEC.replace(op, gaussian + params));
+            Assertions.assertTrue(hasCode(plan, "sequence.rating.gaussian.units"), () -> params + "\n" + plan.describe());
+            Assertions.assertTrue(plan.getDiagnostics().hasErrors(), params);
+        }
+        final FeaturePlan paired = compile(SPEC.replace(op, gaussian + "sigma: 40, beta: 20, pairs: mean, as: gs}"));
+        Assertions.assertTrue(paired.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("sequence.rating.parameter") && m.message().contains("whole contest")), paired::describe);
+    }
+
+    /**
      * bradleyTerry's pairings on a field of sixteen fresh players: {@code mean} weighs the contest like one game — the
      * winner's move and everyone's sigma are those of a two-player contest — {@code adjacent} pairs the rank
      * neighbours (the ends have one, the others a better and a worse one: no move between equals, twice the
@@ -324,6 +409,8 @@ public class RatingTest {
     public void testPlayerArithmeticIsUnchangedByTeams() {
         int compared = 0;
         for (final Rating.Method method : Rating.Method.values()) {
+            // gaussian came after the oracle was frozen: its team-of-one arithmetic is the shared sharing code (testGaussianMargin)
+            if (method == Rating.Method.gaussian) continue;
             for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
                 for (final Long tauPer : method == Rating.Method.elo ? new Long[]{null} : new Long[]{null, 3 * DAY}) {
                     final Double tau = method == Rating.Method.elo ? null : 1.5;
@@ -1300,7 +1387,8 @@ public class RatingTest {
     public void testIncrementalMatchesScanAndTrimmedWithDriftAndPairs() {
         final String ops = "      - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P1D, as: pl, funcs: [mu, sigma, count, delta]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -1308,7 +1396,7 @@ public class RatingTest {
         Assertions.assertNull(plan.getColumn("skill_all_pl_sigma").getCoordinates().get("pairs"));
         Assertions.assertEquals("adjacent", plan.getColumn("skill_all_adj_mu").getCoordinates().get("pairs"));
         Assertions.assertNull(plan.getColumn("skill_all_adj_mu").getCoordinates().get("tauPerMillis"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 8);
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 10);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {
