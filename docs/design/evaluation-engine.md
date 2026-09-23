@@ -16,7 +16,7 @@ live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen 
 | `AlignedRow` | one row of a scored unit as the calibration tables read it (split, ỹ, p, every q, the table fields, the utility) | coder only |
 | `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `fitInputs` / `derive` (the fit inputs f, o of a set; the derived sets' means from the fitted parameters), `temperatureLogLikelihoods` / `blendEvaluate` (the fit passes' contributions: the grid log scores; the Newton evaluation via `GlmFit` at the uniform share), `score` (log score, hit@1, Brier per set, the baseline at index 0, derived sets last), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `dimensionValues` / `accumulateDiscovery` (the unit's discovery dimension values — a numeric one binned by the sketch edges — and its `[n, Σd, Σd²]` into every candidate cell of up to `maxDepth` dimensions, discovery and confirmation splits only), `aligned`, `unitRecords`, `standardErrors` | no |
 | `FitResults` | the fits' outcome as a singleton side input: derived set name → parameters, and the fit records of the summary / `output.calibration` | Serializable |
-| `MetricAccumulator` | 9 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier, Σw·utility) plus 7 × samples replicate slots; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
+| `MetricAccumulator` | 9 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier, Σw·utility) plus 7 × samples replicate slots, expanded lazily from pending contributions (slots + bootstrap key) once they exceed `Fn.PENDING_MAX` or at extraction; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
 | `SketchAccumulator` | a KLL doubles sketch (k = 400) of one table's value stream; bytes coder + `Fn` | coder + CombineFn |
 | `EvaluationReport` | `metric` (a weighted mean, the excess as a difference of means, the binomial prior reference from Σwỹ / Σw), `replicate` / `interval` (the 2.5 / 97.5 percentiles), `build` (records + pair records + slice discovery + summary), `discoveryZ` / `discoveryThreshold` / `discovery` (the random-subset z, the max-of-K threshold, the candidate records with their confirmation), `calibration` (bins with bounds, Wilson), the table value / bin functions, the output schemas, `describe` | no |
 | `EvaluationStages` | the graph (§2–§3) and its DoFns | yes |
@@ -44,7 +44,10 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   after the sort — and whether each slice / dimension varies over its rows; `accumulate` writes them into the
   split bookkeeping and the `sliceVaries` / `dimensionVaries` counters) / `score` / `accumulate` per unit into a bundle-local
   `Map<String, MetricAccumulator>` flushed at `@FinishBundle` (a partial combine: the shuffle carries keys ×
-  bundles elements), emits the unit records straight away (no coder for a unit result type), when tables
+  bundles elements; a unit enters as a **contribution** — its slots and bootstrap key — and the replicate sums
+  are expanded only when a key's pending contributions exceed `PENDING_MAX`, in the bundle map, in the
+  Combine's merges, or at extraction, so a runner that gives the align step one unit per bundle ships a few
+  dozen bytes per key per unit, not 7 × samples doubles), emits the unit records straight away (no coder for a unit result type), when tables
   are declared the aligned rows, and when a `rows` output is declared the row records of the selected splits
   (`EvaluationScorer.rowRecords`: every compared set's mean per row; the `rowId` values ride `EvaluationRow`
   only then). A skipped unit is counted on its split's bookkeeping key.
@@ -129,11 +132,22 @@ are why the transform needs the global window.
 ## 4. Determinism and cost
 
 - Every random draw is `seededRandom(seed, bootKey + "bootstrap")` → `samples` Poisson(1) draws by Knuth's
-  method: a pure function of the seed and the key, so bundle boundaries, worker counts and runners do not
+  method: a pure function of the seed and the key, so bundle boundaries, worker counts, runners and the point
+  at which a pending contribution is expanded do not
   change an interval. Unit rows are sorted by (time, identity) before any per-row computation.
 - Accumulator width: (2 + 5) × samples doubles per key (56 KB at 1000 samples); keys = splits × (1 + k) ×
   (1 + slice values). A bundle-local map of a few hundred keys is a few tens of MB.
-- Poisson draws: samples × units per unit scored (10 M draws for 10 k units at 1000 samples), a few seconds.
+- Poisson draws: samples × keys per unit scored (the draws are redone per key at expansion: (1 + k) × (1 +
+  slice values) × samples per unit, 80 M draws for 10 k units at 1000 samples and 8 keys), seconds.
+- DirectRunner (the consumer's local runs, feedback item 12): the runner hands every grouped unit to the
+  align step as its own bundle and, in its lifted combine, wraps every element in an accumulator of its own,
+  so before the lazy expansion every unit cost (1 + k) × (1 + slices) encodings of 7 × samples doubles.
+  Measured on 1000 sessions × 8 rows, bootstrap 1000, one blend + one temperature fit, one quantile table
+  (a local bench class kept out of the repository): 104 s before, 40 s after — the same 39 s as without
+  bootstrap, so the replicate sums no longer cost anything a local run can feel; 4000 sessions (32 k rows)
+  take 141 s, linear in the units. The fit passes now read a
+  per-split filtered copy of the units (`FitUnits_<split>`), so an unrolled blend pass past convergence
+  decodes the selection split only.
 
 ## 5. Tests
 

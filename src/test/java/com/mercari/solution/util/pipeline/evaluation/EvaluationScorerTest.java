@@ -622,4 +622,56 @@ public class EvaluationScorerTest {
         Assertions.assertNull(rows.get(1).get("utility"));
         Assertions.assertEquals(0d, rows.get(1).get("label"));
     }
+
+    @Test
+    public void testLazyReplicateExpansionMatchesEagerAndSurvivesTheCoder() throws Exception {
+        final long seed = 7;
+        final int samples = 50;
+        final MetricAccumulator eager = new MetricAccumulator();
+        final MetricAccumulator lazy = new MetricAccumulator();
+        for (int u = 0; u < 40; u++) {
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            slots[MetricAccumulator.N_UNITS] = 1;
+            slots[MetricAccumulator.W] = 1;
+            slots[MetricAccumulator.LOG] = -0.1 * u;
+            slots[MetricAccumulator.UTILITY] = u;
+            eager.add(slots);
+            eager.addReplicates(slots, MetricAccumulator.poissonWeights(seed, "u" + u, samples));
+            lazy.contribute(slots, "u" + u);
+        }
+        Assertions.assertEquals(40, lazy.pending());
+        Assertions.assertEquals(0, lazy.samples());
+        // a pending accumulator round-trips through the coder with its contributions
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        MetricAccumulator.CODER.encode(lazy, bytes);
+        final MetricAccumulator decoded = MetricAccumulator.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray()));
+        Assertions.assertEquals(40, decoded.pending());
+        Assertions.assertTrue(bytes.size() < 40 * 120, "pending form: " + bytes.size() + " bytes");
+        decoded.expand(seed, samples);
+        Assertions.assertEquals(0, decoded.pending());
+        Assertions.assertArrayEquals(eager.getTotal(), decoded.getTotal(), 1e-12);
+        Assertions.assertArrayEquals(eager.getBoot(), decoded.getBoot(), 1e-9);
+        // the Combine: one-contribution inputs merge unexpanded up to PENDING_MAX, then expand; extraction expands
+        final MetricAccumulator.Fn fn = new MetricAccumulator.Fn(seed, samples);
+        MetricAccumulator acc = fn.createAccumulator();
+        for (int u = 0; u < 40; u++) {
+            final MetricAccumulator one = new MetricAccumulator();
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            slots[MetricAccumulator.N_UNITS] = 1;
+            slots[MetricAccumulator.W] = 1;
+            slots[MetricAccumulator.LOG] = -0.1 * u;
+            slots[MetricAccumulator.UTILITY] = u;
+            one.contribute(slots, "u" + u);
+            acc = fn.addInput(acc, one);
+            Assertions.assertTrue(acc.pending() <= MetricAccumulator.Fn.PENDING_MAX);
+        }
+        Assertions.assertTrue(acc.samples() > 0);   // expanded once past the bound
+        final MetricAccumulator out = fn.extractOutput(fn.mergeAccumulators(List.of(acc, fn.createAccumulator())));
+        Assertions.assertEquals(0, out.pending());
+        Assertions.assertArrayEquals(eager.getBoot(), out.getBoot(), 1e-9);
+        // without bootstrap a contribution carries no key and nothing expands
+        final MetricAccumulator none = new MetricAccumulator();
+        none.contribute(new double[MetricAccumulator.SLOTS], null);
+        Assertions.assertEquals(0, none.pending());
+    }
 }

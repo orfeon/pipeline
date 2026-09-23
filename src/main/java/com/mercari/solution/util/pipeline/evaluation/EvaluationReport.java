@@ -85,6 +85,8 @@ public final class EvaluationReport {
 
     /** @param fits the calibration fit results (null without fits): the summary's {@code fits} records */
     public static Result build(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
+        // contributions that never went through the Combine (the pure path) expand here; a no-op after it
+        for (final MetricAccumulator acc : accumulators.values()) acc.expand(spec.bootstrapSeed, spec.bootstrapSamples);
         final List<String> names = spec.predictionNames();
         final int k = spec.setCount();
         final Map<String, String> roles = spec.roles();

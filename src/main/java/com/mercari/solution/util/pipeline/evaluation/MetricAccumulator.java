@@ -1,10 +1,12 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
+import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.DoubleCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.transforms.Combine;
@@ -13,12 +15,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.SplittableRandom;
 
 /**
  * Bounded accumulator of one metrics key (split × prediction set × slice value): the weighted sums of the
  * per-unit metrics plus, per bootstrap replicate, the same sums under the replicate's Poisson weights. The
  * same shape carries the run's bookkeeping (row counts, per-split unit counts and time range) under the
- * {@link #SEP}-prefixed keys. Combined by {@link Fn} (input = accumulator = output).
+ * {@link #SEP}-prefixed keys.
+ *
+ * <p>The replicate sums are expanded lazily: a unit's contribution enters as its slots plus its bootstrap key
+ * ({@link #contribute}), and the {@code samples × 7} replicate sums are computed ({@link #expand}) only when
+ * the pending contributions exceed {@link Fn#PENDING_MAX} or the output is extracted. A partial accumulator
+ * of a few units — what a runner that hands the align step one unit per bundle (the DirectRunner) or one
+ * element per accumulator (a lifted combine's first step) encodes — is therefore a few dozen bytes per
+ * contribution instead of 7 × samples doubles, on every runner, while an accumulator that has seen many
+ * units is the expanded form as before. The Poisson draws are a pure function of (seed, key), so the
+ * expansion point does not affect the result.
  */
 public final class MetricAccumulator implements Serializable {
 
@@ -42,26 +56,29 @@ public final class MetricAccumulator implements Serializable {
     double[] boot;
     long minTime = Long.MAX_VALUE;
     long maxTime = Long.MIN_VALUE;
+    /** contributions whose replicate sums are not expanded yet: the slots and the bootstrap key, pairwise */
+    private List<double[]> pendingSlots = new ArrayList<>();
+    private List<String> pendingKeys = new ArrayList<>();
 
     public MetricAccumulator() {
         this.boot = new double[0];
-    }
-
-    MetricAccumulator(final int samples) {
-        this.boot = new double[samples * BOOT_SLOTS];
     }
 
     public double[] getTotal() {
         return total;
     }
 
-    /** The replicate sums: {@code boot[b * BOOT_SLOTS + (slot - BOOT_FIRST)]}. */
+    /** The replicate sums: {@code boot[b * BOOT_SLOTS + (slot - BOOT_FIRST)]} (after {@link #expand}). */
     public double[] getBoot() {
         return boot;
     }
 
     public int samples() {
         return boot.length / BOOT_SLOTS;
+    }
+
+    public int pending() {
+        return pendingKeys.size();
     }
 
     public long getMinTime() {
@@ -76,6 +93,18 @@ public final class MetricAccumulator implements Serializable {
         for (int i = 0; i < SLOTS; i++) total[i] += slots[i];
     }
 
+    /**
+     * Adds one unit's contribution: the slots into the totals now, and — with a bootstrap key — the replicate
+     * sums later ({@link #expand}); a null key (no bootstrap, or a bookkeeping / discovery contribution) has none.
+     */
+    public void contribute(final double[] slots, final String bootKey) {
+        add(slots);
+        if (bootKey != null) {
+            pendingSlots.add(slots.clone());
+            pendingKeys.add(bootKey);
+        }
+    }
+
     /** Adds one unit's metrics under the replicate weights {@code w[b]} (the unit weight folded into {@code slots}). */
     public void addReplicates(final double[] slots, final double[] w) {
         final int b = w.length;
@@ -84,6 +113,34 @@ public final class MetricAccumulator implements Serializable {
             final int base = r * BOOT_SLOTS;
             for (int s = 0; s < BOOT_SLOTS; s++) boot[base + s] += w[r] * slots[BOOT_FIRST + s];
         }
+    }
+
+    /** Expands every pending contribution into the replicate sums under its Poisson weights ({@code samples} draws from {@code seed} and the key). */
+    public void expand(final long seed, final int samples) {
+        if (pendingKeys.isEmpty()) return;
+        if (samples > 0) {
+            for (int i = 0; i < pendingKeys.size(); i++) addReplicates(pendingSlots.get(i), poissonWeights(seed, pendingKeys.get(i), samples));
+        }
+        pendingSlots = new ArrayList<>();
+        pendingKeys = new ArrayList<>();
+    }
+
+    /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key). */
+    public static double[] poissonWeights(final long seed, final String key, final int samples) {
+        final double[] w = new double[samples];
+        if (samples == 0) return w;
+        final SplittableRandom rng = FeatureValues.seededRandom(seed, key + SEP + "bootstrap");
+        final double limit = Math.exp(-1d);
+        for (int b = 0; b < samples; b++) {
+            int c = 0;
+            double p = 1d;
+            do {
+                c++;
+                p *= rng.nextDouble();
+            } while (p > limit);
+            w[b] = c - 1;
+        }
+        return w;
     }
 
     public void time(final long t) {
@@ -101,6 +158,8 @@ public final class MetricAccumulator implements Serializable {
                 for (int i = 0; i < boot.length; i++) boot[i] += other.boot[i];
             }
         }
+        pendingSlots.addAll(other.pendingSlots);
+        pendingKeys.addAll(other.pendingKeys);
         if (other.minTime < minTime) minTime = other.minTime;
         if (other.maxTime > maxTime) maxTime = other.maxTime;
         return this;
@@ -112,6 +171,7 @@ public final class MetricAccumulator implements Serializable {
         private static final DoubleCoder DOUBLE = DoubleCoder.of();
         private static final VarIntCoder INT = VarIntCoder.of();
         private static final VarLongCoder LONG = VarLongCoder.of();
+        private static final StringUtf8Coder STRING = StringUtf8Coder.of();
 
         @Override
         public void encode(final MetricAccumulator value, final OutputStream out) throws CoderException, IOException {
@@ -120,6 +180,11 @@ public final class MetricAccumulator implements Serializable {
             for (final double v : value.boot) DOUBLE.encode(v, out);
             LONG.encode(value.minTime, out);
             LONG.encode(value.maxTime, out);
+            INT.encode(value.pendingKeys.size(), out);
+            for (int i = 0; i < value.pendingKeys.size(); i++) {
+                STRING.encode(value.pendingKeys.get(i), out);
+                for (final double v : value.pendingSlots.get(i)) DOUBLE.encode(v, out);
+            }
         }
 
         @Override
@@ -131,11 +196,34 @@ public final class MetricAccumulator implements Serializable {
             for (int i = 0; i < n; i++) a.boot[i] = DOUBLE.decode(in);
             a.minTime = LONG.decode(in);
             a.maxTime = LONG.decode(in);
+            final int p = INT.decode(in);
+            for (int i = 0; i < p; i++) {
+                a.pendingKeys.add(STRING.decode(in));
+                final double[] slots = new double[SLOTS];
+                for (int s = 0; s < SLOTS; s++) slots[s] = DOUBLE.decode(in);
+                a.pendingSlots.add(slots);
+            }
             return a;
         }
     }
 
+    /**
+     * The Combine of the accumulators (input = accumulator = output). Pending contributions are expanded once
+     * they exceed {@link #PENDING_MAX} in a merge, and always on extraction, so a merged accumulator's size is
+     * bounded by the expanded form plus {@code PENDING_MAX} contributions.
+     */
     public static class Fn extends Combine.CombineFn<MetricAccumulator, MetricAccumulator, MetricAccumulator> {
+        /** the expanded form (7 × samples doubles) is the break-even of about this many pending contributions at 1000 samples */
+        public static final int PENDING_MAX = 32;
+
+        private final long seed;
+        private final int samples;
+
+        public Fn(final long seed, final int samples) {
+            this.seed = seed;
+            this.samples = samples;
+        }
+
         @Override
         public MetricAccumulator createAccumulator() {
             return new MetricAccumulator();
@@ -143,18 +231,24 @@ public final class MetricAccumulator implements Serializable {
 
         @Override
         public MetricAccumulator addInput(final MetricAccumulator accumulator, final MetricAccumulator input) {
-            return accumulator.merge(input);
+            return bounded(accumulator.merge(input));
         }
 
         @Override
         public MetricAccumulator mergeAccumulators(final Iterable<MetricAccumulator> accumulators) {
             final MetricAccumulator merged = new MetricAccumulator();
-            for (final MetricAccumulator a : accumulators) merged.merge(a);
+            for (final MetricAccumulator a : accumulators) bounded(merged.merge(a));
             return merged;
         }
 
         @Override
         public MetricAccumulator extractOutput(final MetricAccumulator accumulator) {
+            accumulator.expand(seed, samples);
+            return accumulator;
+        }
+
+        private MetricAccumulator bounded(final MetricAccumulator accumulator) {
+            if (accumulator.pending() > PENDING_MAX) accumulator.expand(seed, samples);
             return accumulator;
         }
 
