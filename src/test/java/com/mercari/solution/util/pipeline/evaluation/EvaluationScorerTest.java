@@ -196,6 +196,18 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(0, EvaluationReport.bin(1, new double[]{1, 2}));
         Assertions.assertEquals(1, EvaluationReport.bin(1.5, new double[]{1, 2}));
         Assertions.assertEquals(2, EvaluationReport.bin(3, new double[]{1, 2}));
+        // left-closed: an edge belongs to the bin above it
+        Assertions.assertEquals(0, EvaluationReport.bin(0.5, new double[]{1, 2}, true));
+        Assertions.assertEquals(1, EvaluationReport.bin(1, new double[]{1, 2}, true));
+        Assertions.assertEquals(2, EvaluationReport.bin(2, new double[]{1, 2}, true));
+        Assertions.assertEquals(2, EvaluationReport.bin(3, new double[]{1, 2}, true));
+        Assertions.assertEquals(1, EvaluationReport.bin(2, new double[]{1, 2}, false));
+        // a sketch declared at a larger k keeps it through the Combine's identity accumulator
+        final SketchAccumulator fine = new SketchAccumulator(4000);
+        for (int i = 1; i <= 1000; i++) fine.update(i);
+        final SketchAccumulator merged = new SketchAccumulator.Fn().mergeAccumulators(List.of(new SketchAccumulator(), fine));
+        Assertions.assertEquals(4000, merged.k());
+        Assertions.assertEquals(500d, merged.edges(2)[0], 1.0);
         // Wilson: 30 of 100 → [0.2189, 0.3985]
         final double[] ci = EvaluationReport.wilson(30, 100);
         Assertions.assertEquals(0.2189, ci[0], 5e-4);

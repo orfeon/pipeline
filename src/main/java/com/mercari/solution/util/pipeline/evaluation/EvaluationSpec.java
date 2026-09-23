@@ -62,6 +62,9 @@ public final class EvaluationSpec implements Serializable {
     public static final String BY_DIVERGENCE = "divergence";
     public static final String BY_FIELD = "field";
     public static final List<String> BYS = List.of(BY_PREDICTION, BY_DIVERGENCE, BY_FIELD);
+    public static final String CLOSED_LEFT = "left";
+    public static final String CLOSED_RIGHT = "right";
+    public static final List<String> CLOSED = List.of(CLOSED_LEFT, CLOSED_RIGHT);
 
     public static final int MAX_BOOTSTRAP = 10_000;
 
@@ -115,6 +118,10 @@ public final class EvaluationSpec implements Serializable {
         public String field;
         public int bins;
         public double[] edges;
+        /** by: field — whether an edge belongs to the bin above it ({@code [a, b)}, the default) or below it ({@code (a, b]}) */
+        public boolean closedLeft = true;
+        /** quantile tables — the KLL sketch parameter (rank error ≈ 0.8% at 400; larger = finer boundaries, larger sketch) */
+        public int k = SketchAccumulator.K;
         public double[] thresholds;
         /** position of {@code field} in {@link EvaluationRow#x} (by: field) */
         public int fieldIndex = -1;
@@ -160,7 +167,12 @@ public final class EvaluationSpec implements Serializable {
         public double gridMin = 0.25;
         public double gridMax = 4d;
         public int gridSize = 76;
-        public double l2 = 1e-4;
+        /**
+         * L2 penalty on the average log likelihood (the screen transform's conditioning): 0 by default — a blend is
+         * a 2-3 parameter MLE whose estimate and z-values should not be shrunk (the shrinkage of a penalty on the
+         * average grows with the unit count: ≈ l2 · N · se² · θ); a positive value only when the columns are collinear.
+         */
+        public double l2 = 0d;
         public int maxIter = 10;
         public double tol = 1e-8;
 
@@ -624,11 +636,23 @@ public final class EvaluationSpec implements Serializable {
                             t.edges = numbers(o, "edges", at + ".edges", errors);
                             if (t.edges == null || t.edges.length == 0) errors.add(at + ".edges is required for by: field (ascending bin boundaries)");
                             else for (int k = 1; k < t.edges.length; k++) if (!(t.edges[k] > t.edges[k - 1])) errors.add(at + ".edges must be strictly ascending");
+                            final String closed = string(o, "closed");
+                            if (closed != null) {
+                                if (!CLOSED.contains(closed)) errors.add(at + ".closed '" + closed + "' is unknown (available: " + CLOSED + ")");
+                                t.closedLeft = !CLOSED_RIGHT.equals(closed);
+                            }
+                            if (o.has("k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
                         } else {
                             final Integer bins = integer(o, "bins");
                             t.bins = bins == null ? 10 : bins;
                             if (t.bins < 2 || t.bins > 1000) errors.add(at + ".bins must be in [2, 1000]");
                             if (o.has("edges")) errors.add(at + ".edges apply to by: field only (quantile bins otherwise)");
+                            if (o.has("closed")) errors.add(at + ".closed applies to by: field only (quantile bins are right-closed at the sketch's boundaries)");
+                            final Integer k = integer(o, "k");
+                            if (k != null) {
+                                t.k = k;
+                                if (k < 8 || k > 65535) errors.add(at + ".k must be in [8, 65535] (the KLL sketch parameter)");
+                            }
                         }
                     }
                     s.tables.add(t);

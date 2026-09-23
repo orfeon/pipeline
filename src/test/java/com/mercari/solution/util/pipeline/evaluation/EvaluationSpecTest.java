@@ -98,6 +98,16 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field}]}")).contains("field is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [2, 1]}]}")).contains("strictly ascending"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: prediction, bins: 1}]}")).contains("bins must be"));
+        // edges close on the left by default, right on request; k belongs to quantile tables
+        final EvaluationSpec closed = parse(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1, 2]}, {by: field, field: u, edges: [1, 2], closed: right}, {by: prediction, k: 4000}]}")).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertTrue(closed.tables.get(0).closedLeft);
+        Assertions.assertFalse(closed.tables.get(1).closedLeft);
+        Assertions.assertEquals(SketchAccumulator.K, closed.tables.get(0).k);
+        Assertions.assertEquals(4000, closed.tables.get(2).k);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], closed: both}]}")).contains("closed 'both'"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: prediction, closed: left}]}")).contains("closed applies to by: field"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], k: 500}]}")).contains("k applies to quantile"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: divergence, k: 4}]}")).contains("k must be in"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge}]}")).contains("thresholds is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: region, bucket: decade}]}")).contains("bucket 'decade'"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: u, bucket: month}]}")).contains("needs a timestamp"));
@@ -133,6 +143,7 @@ public class EvaluationSpecTest {
         Assertions.assertEquals(1, s.tables.size());
         Assertions.assertArrayEquals(new double[]{0.5, 1, 1.5, 2}, s.fits.get(0).grid(), 1e-12);
         Assertions.assertEquals(0.01, s.fits.get(1).l2);
+        Assertions.assertEquals(0d, parse(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid}]}")).fits.get(0).l2, "a blend is an unpenalised MLE by default");
         Assertions.assertEquals(List.of("baseline", "A", "A@T", "A@blend"), s.predictionNames());
         Assertions.assertEquals(List.of(1), s.derivedOf(0));
         Assertions.assertEquals(List.of(2), s.derivedOf(1));

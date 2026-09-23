@@ -813,7 +813,7 @@ public final class EvaluationStages {
                     if (!table.isQuantile()) continue;
                     final double v = EvaluationReport.tableValue(table, t, row, j);
                     if (Double.isNaN(v)) continue;
-                    partials.computeIfAbsent(EvaluationReport.tableKey(row.split, 1 + j, t), k -> new SketchAccumulator()).update(v);
+                    partials.computeIfAbsent(EvaluationReport.tableKey(row.split, 1 + j, t), k -> new SketchAccumulator(table.k)).update(v);
                 }
             }
         }
@@ -874,7 +874,9 @@ public final class EvaluationStages {
                     } else {
                         bounds = table.edges;
                     }
-                    add(row, q, EvaluationReport.binKey(row.split, 1 + j, t, EvaluationReport.bin(v, bounds)));
+                    // quantile bins are right-closed at the sketch's boundaries (an inclusive-rank quantile is a value of
+                    // the stream); declared edges close on the side the table says
+                    add(row, q, EvaluationReport.binKey(row.split, 1 + j, t, EvaluationReport.bin(v, bounds, !table.isQuantile() && table.closedLeft)));
                 }
             }
         }

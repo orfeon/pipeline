@@ -21,13 +21,22 @@ import java.io.Serializable;
  */
 public final class SketchAccumulator implements Serializable {
 
-    /** sketch parameter: rank error about 0.8% (the bin boundaries' approximation) */
+    /** default sketch parameter: rank error about 0.8% (the bin boundaries' approximation) */
     public static final int K = 400;
 
     private transient KllDoublesSketch sketch;
 
     public SketchAccumulator() {
-        this.sketch = KllDoublesSketch.newHeapInstance(K);
+        this(K);
+    }
+
+    /** @param k the KLL parameter: a larger k gives finer quantiles (rank error ≈ 1 / k-ish) for a larger sketch */
+    public SketchAccumulator(final int k) {
+        this.sketch = KllDoublesSketch.newHeapInstance(k);
+    }
+
+    public int k() {
+        return sketch.getK();
     }
 
     private SketchAccumulator(final KllDoublesSketch sketch) {
@@ -61,8 +70,17 @@ public final class SketchAccumulator implements Serializable {
         return edges;
     }
 
+    /**
+     * Merges another sketch in. A KLL merge keeps this sketch's k, so an empty accumulator (the Combine's
+     * identity, created at the default k) adopts the other's sketch instead: a table's declared k survives.
+     */
     public SketchAccumulator merge(final SketchAccumulator other) {
-        if (!other.sketch.isEmpty()) sketch.merge(other.sketch);
+        if (other.sketch.isEmpty()) return this;
+        if (sketch.isEmpty()) {
+            sketch = KllDoublesSketch.heapify(Memory.wrap(other.sketch.toByteArray()));
+        } else {
+            sketch.merge(other.sketch);
+        }
         return this;
     }
 

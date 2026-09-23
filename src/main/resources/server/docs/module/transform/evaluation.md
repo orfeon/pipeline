@@ -98,7 +98,7 @@ splits:
 calibration:
   - {type: reliability, by: prediction, bins: 10}
   - {type: reliability, by: divergence, bins: 10}
-  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100]}
+  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100], closed: left}
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
@@ -118,9 +118,12 @@ compares with `p_model` directly when every group has one positive; with several
 | `reliability` / `field` | fixed `edges` on a declared numeric field | rare-event bands (a price band, an odds band) |
 | `edge` | one group per threshold: the rows with q > threshold × p | if the rate exceeds `p_baseline` systematically, the divergence is information |
 
-Quantile boundaries are sketch approximations (rank error under 1%); `edges` are exact: `by: field` bins are
-right-closed `(a, b]` (a value on an edge falls in the lower bin; the first bin is open below, the last open
-above). An `edge` group holds the rows with q strictly greater than threshold × p.
+Quantile boundaries are sketch approximations (a KLL sketch with `k` 400 by default: rank error about 0.8%,
+so a bin's count can differ from the exact decile's by that much; raise `k` — up to 65535 — to compare with an
+exact reference, at the cost of a larger sketch per split × set × table). `edges` are exact: `by: field` bins
+are left-closed `[a, b)` by default (a value on an edge falls in the bin above it, the convention of price and
+odds bands: "the 2s" = [2, 3)); `closed: right` makes them `(a, b]`. The first bin is open below, the last
+open above. An `edge` group holds the rows with q strictly greater than threshold × p.
 
 ### Calibration fits
 
@@ -146,11 +149,28 @@ standard errors scale with its magnitude.
 | type | model | estimate | reading |
 |---|---|---|---|
 | `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`l2`, `maxIter`, `tol` as the screen transform's conditioning), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear (the standard errors then come out null) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
 
 The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
 declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
 with a note) are the summary's `fits`; `output.calibration` also writes them as JSON.
+
+#### Reproducing a Benter-style regression
+
+The classic check of a model against a market — the conditional logit of the outcome on the model's and the
+market's logits, α · logit(p_model) + β · logit(p_market) — is a `blend` on a **score set** whose score and
+offset are those logits (computed upstream, e.g. in a `select`):
+
+```yaml
+predictions:
+  - {name: benter, score: logit_model, offset: logit_market, offsetScale: log}
+calibration:
+  - {type: blend, fitOn: valid, of: [benter]}
+```
+
+`a` is α and `b` is β with their standard errors; `z_a` tests whether the model adds information orthogonal
+to the market. A blend on a **probability set** is a different regression: its f is the log share within the
+group (the softmax's natural scale), not the logit, so its coefficients do not match a logit-based reference.
 
 ### Slice discovery
 
@@ -225,7 +245,7 @@ the time partition.
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
 | utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
-| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
+| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}` (`l2` default 0). |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
 | slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`). Meant for low-cardinality dimensions (see Limits). |

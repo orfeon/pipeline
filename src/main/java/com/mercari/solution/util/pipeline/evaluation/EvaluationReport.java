@@ -479,10 +479,23 @@ public final class EvaluationReport {
         };
     }
 
-    /** The bin of a value against ascending interior edges: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
+    /** The bin of a value against ascending interior edges, right-closed: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
     public static int bin(final double value, final double[] edges) {
+        return bin(value, edges, false);
+    }
+
+    /**
+     * The bin of a value against ascending interior edges: left-closed {@code [edges[i-1], edges[i])} (an edge
+     * belongs to the bin above it) or right-closed {@code (edges[i-1], edges[i]]}; the first bin is open below,
+     * the last open above.
+     */
+    public static int bin(final double value, final double[] edges, final boolean closedLeft) {
         int b = 0;
-        while (b < edges.length && value > edges[b]) b++;
+        if (closedLeft) {
+            while (b < edges.length && value >= edges[b]) b++;
+        } else {
+            while (b < edges.length && value > edges[b]) b++;
+        }
         return b;
     }
 
