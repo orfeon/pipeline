@@ -388,12 +388,38 @@ not alter values).
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
-  relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
-  member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+  relative to its contest (a context `zscore` / `gapToBest`) or to its pool (`funcs: [z]`: standardised over
+  the agents rated so far), or the row's whole strength `team: [mu]`; `team: [count]` is how many contests
+  this exact pairing ran. The
+  member's `sigma` is a modelling choice: it decides how much of every change that member takes. The run log
+  prints one `rating state of ... after the replay: <block>_<window>_<as>: pool <entity>: players=n
+  contests/player median=m ... mu mean= sd=` line per rating op and key, one `pool` entry per member entity —
+  the warm-up cue (a pool of few contests per player is still near its prior).
 - **`rating` from margins**: when the outcome is a continuous score (a time, a standardised margin) rather than a
   rank, `method: gaussian` observes each pair's margin and moves the ratings by the residual against the expected
   margin — a rout moves more than a close finish. Declare `mu` / `sigma` / `beta` in the outcome's units
   (`mu: 0, sigma: 1, beta: 0.5` for a standardised margin); `pairs: mean` keeps a large field from over-moving.
+- **`rating` split into components** (a seller's overall level, its level in this category, its pairing with
+  this agent): members are any other `entities[].name`, and entities take composite keys, so
+  `with: [{entity: sellerCategory, mu: 0, sigma: 2}, {entity: sellerAgent, mu: 0, sigma: 1.5}, ...]` with
+  `entities: [{name: sellerCategory, keys: [seller_id, category]}, ...]` rates the row as the sum of those components (a random-effects
+  decomposition in one contest model). Sum the components you need as a row `expr` over the member columns
+  (`sigma` of a subset = the root of the sum of squares); the `count` of a pairing member is how many contests
+  that pairing has run. Only sums are identified, so read components in sums or relative to the contest. A row
+  with a null key in any component (no `category`) joins no contest at all — not even for the seller's overall
+  level — so add a component only where its keys are always present.
+- **A rating as a probability**: a context `{type: ratingProb, field: <rating>_mu, sigma: <rating>_sigma, beta: <the
+  rating's beta>}` reads the Plackett–Luce win probability the rating model gives each row of its group —
+  on the scale of a market share, so `ln(p_rating / p_market)` is the rating's disagreement with the market,
+  the natural feature for a model whose initial score is the market's log share.
+- **Serving a `rating`**: put `fit: {artifact: {uri: ..., require: true}}` on the block (the top-level artifact
+  is not inherited). The backfill writes every pool's state after its replay; a run whose input starts after the
+  snapshot's last contest continues from it and folds only the contests since — so the serving input is the rows
+  to serve plus the contests since, not the whole history. A run whose input reaches back to the snapshot (the
+  next full backfill) replays from scratch and rewrites it, which is how the snapshot advances. `require: true`
+  on the serving config makes a missing snapshot fail the pool instead of silently replaying its short input
+  from the prior. The counter `feature/ratingSnapshot_<state>_rowsBefore` > 0 means a continued pool's input
+  started before its snapshot time.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

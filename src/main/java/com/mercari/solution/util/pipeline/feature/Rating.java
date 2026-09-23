@@ -78,8 +78,13 @@ public final class Rating implements Serializable {
     /** The method names as the DSL spells them, in declaration order (derived so it cannot drift from the enum). */
     public static final List<String> METHODS = Arrays.stream(Method.values()).map(Method::name).toList();
 
-    /** Readouts: the rating, its uncertainty (not for elo), the contests rated so far, the rating's last change. */
-    public static final List<String> FUNCS = List.of("mu", "sigma", "count", "delta");
+    /**
+     * Readouts: the rating, its uncertainty (not for elo), the contests rated so far, the rating's last change, the
+     * rating net of the prior ({@code deviation}: what the contests added), and the rating standardised within its
+     * pool ({@code z}: against the mean and sd of {@code mu} over the pool's rated players — a member's level is
+     * identified up to a shift of its pool, which this reads it free of).
+     */
+    public static final List<String> FUNCS = List.of("mu", "sigma", "count", "delta", "deviation", "z");
 
     public static final List<String> ORDERS = List.of("ascending", "descending");
 
@@ -96,9 +101,65 @@ public final class Rating implements Serializable {
         public long lastMillis;
     }
 
-    /** The ratings of one pool: player key → rating (players never seen read the prior). */
+    /**
+     * The running moments of {@code mu} over the rated players of one pool (a member entity, or the single pool of a
+     * rating without a team). The sums are taken of {@code mu − shift}, the shift being the pool's prior {@code mu}
+     * (every player of a pool shares one): the deviations are on the scale of the spread, so a large prior next to a
+     * small spread does not cancel the variance away in {@code Σx² − n·mean²}. Below a relative floor the sd reads 0.
+     */
+    public static final class Pool implements Serializable {
+        public long players;
+        public double shift;
+        public double sum, sumSq;
+
+        /** The sd below which the pool has no spread to standardise by (relative to the deviations' scale). */
+        private static final double RELATIVE_FLOOR = 1e-7;
+
+        void add(final double mu, final double prior) {
+            if (players == 0) shift = prior;
+            players++;
+            sum += mu - shift;
+            sumSq += (mu - shift) * (mu - shift);
+        }
+
+        void move(final double from, final double to) {
+            sum += to - from;
+            sumSq += (to - shift) * (to - shift) - (from - shift) * (from - shift);
+        }
+
+        /** The mean of {@code mu} over the pool's rated players. */
+        public double mean() {
+            return shift + sum / players;
+        }
+
+        /** The population sd of {@code mu} over the pool's rated players; 0 when it is below rounding of the deviations. */
+        public double sd() {
+            final double meanDeviation = sum / players, meanSquare = sumSq / players;
+            final double variance = meanSquare - meanDeviation * meanDeviation;
+            if (!(variance > RELATIVE_FLOOR * RELATIVE_FLOOR * Math.max(meanSquare, Double.MIN_NORMAL))) return 0d;
+            return Math.sqrt(variance);
+        }
+    }
+
+    /**
+     * The ratings of one pool: player key → rating (players never seen read the prior). Beside them, what a readout
+     * needs and the players do not hold: per team the contests it ran ({@code teams}, teams of two or more members
+     * only, and only when the rating counts teams — {@link #withTeam(String, List, boolean)}: one entry per distinct
+     * team is a cost a spec that reads no {@code team: [count]} does not pay), per member pool the moments of
+     * {@code mu} over its rated players ({@code pools}, keyed by the pool name, {@code ""} for a rating without a team).
+     * {@code foldedUntilMillis} is the event time of the last run of contests folded in ({@code Long.MIN_VALUE}: none) — a state
+     * loaded from a snapshot ({@link RatingSnapshot}) skips the runs up to it, so a replay continues where the snapshot stopped;
+     * {@code rowsBeforeSnapshot} counts the rows served after such a load whose window near edge lies before it (they read a
+     * state that already holds contests they should not see: the run's input starts too early).
+     */
     public static final class State implements Serializable {
         public final Map<String, Player> players = new HashMap<>();
+        public final Map<String, Long> teams = new HashMap<>();
+        public final Map<String, Pool> pools = new HashMap<>();
+        public long foldedUntilMillis = Long.MIN_VALUE;
+        public long rowsBeforeSnapshot;
+        /** The row last counted into {@code rowsBeforeSnapshot} (every readout column of a row advances the state once more). */
+        transient Object countedRow;
     }
 
     /**
@@ -124,8 +185,11 @@ public final class Rating implements Serializable {
      */
     public record Member(String pool, List<String> keys, double mu, double sigma, double tau) implements Serializable {}
 
-    /** The team readouts: the sum of the members' ratings and the uncertainty of that sum. */
-    public static final List<String> TEAM_FUNCS = List.of("mu", "sigma");
+    /**
+     * The team readouts: the sum of the members' ratings, the uncertainty of that sum, the contests this very team
+     * (all its members together) has run, and the sum net of the members' priors.
+     */
+    public static final List<String> TEAM_FUNCS = List.of("mu", "sigma", "count", "deviation");
 
     /**
      * Between a pool and a key in a state key ({@link #memberKey}), and between the members in a team's identity
@@ -149,10 +213,14 @@ public final class Rating implements Serializable {
      * key fields live here and nowhere else (the rating's {@code mu} / {@code sigma} / {@code tau} are its first member's).
      */
     private final List<Member> members;
+    /** Whether {@link #update} keeps the contests per team ({@code State.teams}, the {@code team: [count]} readout). */
+    private final boolean countTeams;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
-                   final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members) {
+                   final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
+                   final boolean countTeams) {
         this.members = members;
+        this.countTeams = countTeams;
         this.tauPerMillis = tauPerMillis;
         this.pairs = pairs;
         this.method = method;
@@ -205,18 +273,20 @@ public final class Rating implements Serializable {
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
                 tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
-                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))));
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false);
     }
 
     /**
      * The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). A
      * team is the two coordinates {@code teamPool} (the rated player's pool) and {@code teamMembers}
-     * ({@link #encodeMembers}); without them the rating is one of players, as it always was.
+     * ({@link #encodeMembers}); without them the rating is one of players, as it always was. {@code teamCounts} (an
+     * op coordinate, so every column of the op agrees) keeps the contests per team for a {@code team: [count]} column.
      */
     public static Rating of(final Map<String, String> coordinates) {
         final Rating players = playersOf(coordinates);
         final String members = coordinates.get("teamMembers");
-        return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members));
+        return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members),
+                "true".equals(coordinates.get("teamCounts")));
     }
 
     /** {@code pool|key,key|mu|sigma|tau} per member, joined by {@code ;} (names are checked for the separators at compile time). */
@@ -255,9 +325,19 @@ public final class Rating implements Serializable {
      * This rating over teams: the rated player — its keys now in the namespace {@code pool} — together with the members
      * {@code with}, each of a pool of its own. The rating's {@code mu} / {@code sigma} / {@code tau} stay the player's;
      * {@code beta}, the pairing and the clock of a drift in time are the team's. {@code elo} keeps no uncertainty to
-     * share a team's change by, so a team is rated by the Bayesian methods only (bradleyTerry / plackettLuce / gaussian).
+     * share a team's change by, so a team is rated by the Bayesian methods only (bradleyTerry / plackettLuce /
+     * gaussian). The contests per team are kept
+     * ({@code team: [count]}); {@link #withTeam(String, List, boolean)} drops them.
      */
     public Rating withTeam(final String pool, final List<Member> with) {
+        return withTeam(pool, with, true);
+    }
+
+    /**
+     * {@link #withTeam(String, List)}, keeping the contests per team ({@code State.teams}, read by {@code team:
+     * [count]}) only when {@code countTeams}: one entry per distinct team, held for the whole replay of the pool.
+     */
+    public Rating withTeam(final String pool, final List<Member> with, final boolean countTeams) {
         if (method == Method.elo) {
             throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce / gaussian");
         }
@@ -288,7 +368,7 @@ public final class Rating implements Serializable {
                 throw new IllegalArgumentException("a member needs a finite mu, sigma > 0 and tau >= 0: " + member);
             }
         }
-        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team));
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team), countTeams);
     }
 
     /** The members of the team a row is rated as (one: a player). */
@@ -321,7 +401,11 @@ public final class Rating implements Serializable {
 
     /** What makes two rows the same team: all their members (a player's own rows, in a rating without a team). */
     private static String id(final Entry entry) {
-        return entry.members().size() == 1 ? entry.members().get(0) : String.join(String.valueOf(MEMBER_SEPARATOR), entry.members());
+        return teamId(entry.members());
+    }
+
+    private static String teamId(final List<String> members) {
+        return members.size() == 1 ? members.get(0) : String.join(String.valueOf(MEMBER_SEPARATOR), members);
     }
 
     /**
@@ -461,17 +545,30 @@ public final class Rating implements Serializable {
         }
         for (final Map.Entry<String, Change> e : changes.entrySet()) {
             final Change c = e.getValue();
-            final Player p = state.players.computeIfAbsent(e.getKey(), key -> {
-                final Player created = new Player();
-                created.mu = c.member.mu();
-                created.sigma = c.member.sigma();
-                return created;
-            });
+            Player p = state.players.get(e.getKey());
+            final boolean created = p == null;
+            if (created) {
+                p = new Player();
+                p.mu = c.member.mu();
+                p.sigma = c.member.sigma();
+                state.players.put(e.getKey(), p);
+            }
+            final double before = p.mu;
             p.mu = c.mu + c.change;
             if (method != Method.elo) p.sigma = Math.sqrt(c.variance * c.factor);
             p.delta = c.change;
             p.count++;
             p.lastMillis = millis;
+            // the pool's moments of mu follow the player (a bookkeeping beside the players: their numbers are untouched)
+            final Pool pool = state.pools.computeIfAbsent(c.member.pool() == null ? "" : c.member.pool(), key -> new Pool());
+            if (created) pool.add(p.mu, c.member.mu()); else pool.move(before, p.mu);
+        }
+        if (countTeams) {
+            // the contests a team ran: once per contest, whatever the number of rows it held in it (the entries are
+            // sorted by team, so a team's rows are adjacent)
+            for (int i = 0; i < n; i++) {
+                if (i == 0 || !ids[i].equals(ids[i - 1])) state.teams.merge(ids[i], 1L, Long::sum);
+            }
         }
     }
 
@@ -643,7 +740,8 @@ public final class Rating implements Serializable {
 
     /**
      * A readout of a player's rating as the state holds it ({@code state} may be null: nothing folded yet). A player
-     * never rated reads the prior {@code mu} / {@code sigma}, count 0 and a null {@code delta}.
+     * never rated reads the prior {@code mu} / {@code sigma}, count 0, a null {@code delta}, {@code deviation} 0 and
+     * the {@code z} of its prior's place in the pool.
      *
      * <p>Under a drift in time ({@code tauPer}) this reads the uncertainty of the player's <b>last contest</b>, not the
      * one it carries now: every path that serves a row must pass the row's time
@@ -675,18 +773,34 @@ public final class Rating implements Serializable {
             case "sigma" -> p == null ? m.sigma() : sigmaAt(m, p, nowMillis);
             case "count" -> p == null ? 0L : p.count;
             case "delta" -> p == null ? null : (Object) p.delta;
+            case "deviation" -> p == null ? 0d : p.mu - m.mu();
+            case "z" -> poolZ(state, m, p == null ? m.mu() : p.mu);
             default -> throw new IllegalArgumentException("unknown rating readout: " + func);
         };
     }
 
     /**
+     * {@code mu} standardised within the member's pool: against the mean and sd of {@code mu} over the pool's rated
+     * players (the prior of a player never rated is where it stands). Null until the pool holds two rated players
+     * with different ratings — before that there is no scale to read against.
+     */
+    private static Double poolZ(final State state, final Member m, final double mu) {
+        final Pool pool = state == null ? null : state.pools.get(m.pool() == null ? "" : m.pool());
+        if (pool == null || pool.players < 2) return null;
+        final double sd = pool.sd();
+        return sd > 0 ? (mu - pool.mean()) / sd : null;
+    }
+
+    /**
      * A readout of the team a row is rated as ({@code team}: {@link #teamOf}, null = a member is missing → null): the
      * strength the contest will see — {@code mu} the sum of the members' ratings, {@code sigma} the uncertainty of that
-     * sum, under a drift in time as of {@code nowMillis}. A member never rated counts with its prior, so a known player
+     * sum, under a drift in time as of {@code nowMillis} — and beside it {@code count}, the contests this very team
+     * has run (every member together; 0 before the first), and {@code deviation}, the sum net of the members' priors.
+     * A member never rated counts with its prior, so a known player
      * in new company still reads a team. The sum is what the contests identify: the members' levels may shift against
      * each other over a long replay (every player up, every agent down changes no expectation), their sum does not.
      */
-    public Double readTeam(final State state, final List<String> team, final String func, final long nowMillis) {
+    public Object readTeam(final State state, final List<String> team, final String func, final long nowMillis) {
         if (team == null) return null;
         // func null first: TEAM_FUNCS is an immutable list, whose contains(null) throws
         if (func == null || !TEAM_FUNCS.contains(func)) {
@@ -695,18 +809,55 @@ public final class Rating implements Serializable {
         if (team.size() != members.size()) {
             throw new IllegalArgumentException("a team of " + team.size() + " read from a rating of teams of " + members.size());
         }
+        if ("count".equals(func)) {
+            if (!countTeams) {
+                throw new IllegalStateException("this rating keeps no contests per team: team: [count] needs withTeam(pool, with, true)"
+                        + " (the coordinate teamCounts)");
+            }
+            return state == null ? 0L : state.teams.getOrDefault(teamId(team), 0L);
+        }
         double sum = 0;
         for (int j = 0; j < members.size(); j++) {
             final Member m = members.get(j);
             final Player p = state == null ? null : state.players.get(team.get(j));
-            if ("mu".equals(func)) {
-                sum += p == null ? m.mu() : p.mu;
-            } else {
-                final double s = p == null ? m.sigma() : sigmaAt(m, p, nowMillis);
-                sum += s * s;
+            switch (func) {
+                case "mu" -> sum += p == null ? m.mu() : p.mu;
+                case "deviation" -> sum += p == null ? 0d : p.mu - m.mu();
+                default -> {
+                    final double s = p == null ? m.sigma() : sigmaAt(m, p, nowMillis);
+                    sum += s * s;
+                }
             }
         }
-        return "mu".equals(func) ? sum : Math.sqrt(sum);
+        return "sigma".equals(func) ? Math.sqrt(sum) : sum;
+    }
+
+    /**
+     * The state after a replay, one line per pool — for the run log, so the warm-up of a pool can be judged: how many
+     * players were rated, the median of their contest counts, and the spread of {@code mu} the contests produced
+     * (the scale a {@code z} readout standardises by). A pool of few contests per player is still near its prior.
+     */
+    public String describe(final State state) {
+        final Map<String, List<Long>> counts = new TreeMap<>();
+        for (final Map.Entry<String, Player> e : state.players.entrySet()) {
+            final int at = members.get(0).pool() == null ? -1 : e.getKey().indexOf(POOL_SEPARATOR);
+            counts.computeIfAbsent(at < 0 ? "" : e.getKey().substring(0, at), k -> new ArrayList<>()).add(e.getValue().count);
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (final Map.Entry<String, List<Long>> e : counts.entrySet()) {
+            final List<Long> sorted = e.getValue();
+            sorted.sort(null);
+            final Pool pool = state.pools.get(e.getKey());
+            if (sb.length() > 0) sb.append("; ");
+            sb.append("pool ").append(e.getKey().isEmpty() ? "<players>" : e.getKey())
+                    .append(": players=").append(sorted.size())
+                    .append(" contests/player median=").append(sorted.get(sorted.size() / 2))
+                    .append(" max=").append(sorted.get(sorted.size() - 1));
+            if (pool != null && pool.players > 0) {
+                sb.append(String.format(java.util.Locale.ROOT, " mu mean=%.3f sd=%.3f", pool.mean(), pool.sd()));
+            }
+        }
+        return sb.length() == 0 ? "no player rated" : sb.toString();
     }
 
     /**
