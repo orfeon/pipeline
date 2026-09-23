@@ -11,9 +11,12 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.SplittableRandom;
 
 /**
@@ -39,12 +42,27 @@ public final class EvaluationScorer implements Serializable {
     private final int k;
     /** compared sets: declared + derived */
     private final int sets;
+    /**
+     * per declared slice: a period bucket of the time field, the unit's by definition (the bucket of its earliest
+     * row, as the unit's time is): a unit spanning two periods is not a row-level slice
+     */
+    private final boolean[] unitPeriodSlices;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
         this.sets = spec.setCount();
+        this.unitPeriodSlices = new boolean[spec.slices.size()];
+        for (int s = 0; s < unitPeriodSlices.length; s++) {
+            final EvaluationSpec.Slice sl = spec.slices.get(s);
+            unitPeriodSlices[s] = sl.bucket != null && sl.field != null && sl.field.equals(spec.timeField);
+        }
+    }
+
+    /** Equality of two numeric values with NaN equal to NaN and 0.0 equal to −0.0. */
+    private static boolean sameValue(final double a, final double b) {
+        return a == b || (Double.isNaN(a) && Double.isNaN(b));
     }
 
     /** Why a unit cannot be scored (the common unit set: any invalid side skips the unit for every side). */
@@ -61,9 +79,12 @@ public final class EvaluationScorer implements Serializable {
         public final double[] y;
         public final double[] w;
         public final double unitWeight;
-        /** rows whose identity repeats an earlier row's (the same row twice in the unit) */
+        /** rows whose identity repeats an earlier row's (the same row twice in the unit, at any time) */
         public final int duplicates;
-        /** per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is used) */
+        /**
+         * per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is
+         * used); a period bucket of the time field never varies (it is the unit's), a dimension only on the discovery splits
+         */
         public final boolean[] sliceVaries;
         public final boolean[] dimensionVaries;
 
@@ -119,23 +140,35 @@ public final class EvaluationScorer implements Serializable {
         final List<EvaluationRow> rows = new ArrayList<>(input);
         rows.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final int n = rows.size();
-        // the unit's integrity: the same row twice (adjacent after the sort by identity within a time), and a
-        // slice / dimension the rows disagree on (a group-level attribute by contract; the first row's value is used)
+        // the unit's integrity: the same row twice, and a slice / dimension the rows disagree on (a group-level
+        // attribute by contract; the first row's value is used)
         int duplicates = 0;
         final EvaluationRow first = rows.get(0);
         final boolean[] sliceVaries = new boolean[first.slices.length];
         final boolean[] dimensionVaries = new boolean[spec.hasDiscovery() ? spec.discovery.dimensions.size() : 0];
-        for (int i = 1; i < n; i++) {
-            final EvaluationRow r = rows.get(i);
-            if (r.time == rows.get(i - 1).time && r.identity.equals(rows.get(i - 1).identity)) duplicates++;
-            for (int s = 0; s < sliceVaries.length; s++) if (!sliceVaries[s] && !java.util.Objects.equals(r.slices[s], first.slices[s])) sliceVaries[s] = true;
-            for (int d = 0; d < dimensionVaries.length; d++) {
-                if (dimensionVaries[d]) continue;
-                final EvaluationSpec.Dimension dim = spec.discovery.dimensions.get(d);
-                if (dim.index < 0) continue;
-                dimensionVaries[d] = dim.isNumeric()
-                        ? Double.compare(r.x[dim.index], first.x[dim.index]) != 0
-                        : !java.util.Objects.equals(r.dims[dim.index], first.dims[dim.index]);
+        // the dimensions are only read (and their disagreement only counted) on the discovery and confirmation splits
+        final boolean discoverySplit = dimensionVaries.length > 0
+                && (first.split.equals(spec.discovery.discoverOn) || first.split.equals(spec.discovery.confirmOn));
+        if (n > 1) {
+            // an identity seen earlier in the unit, whatever its time: the rowId names the row
+            final Set<String> seen = new HashSet<>(2 * n);
+            seen.add(first.identity);
+            for (int i = 1; i < n; i++) {
+                final EvaluationRow r = rows.get(i);
+                if (!seen.add(r.identity)) duplicates++;
+                for (int s = 0; s < sliceVaries.length; s++) {
+                    if (sliceVaries[s] || (s < unitPeriodSlices.length && unitPeriodSlices[s])) continue;
+                    sliceVaries[s] = !Objects.equals(r.slices[s], first.slices[s]);
+                }
+                if (!discoverySplit) continue;
+                for (int d = 0; d < dimensionVaries.length; d++) {
+                    if (dimensionVaries[d]) continue;
+                    final EvaluationSpec.Dimension dim = spec.discovery.dimensions.get(d);
+                    if (dim.index < 0) continue;
+                    dimensionVaries[d] = dim.isNumeric()
+                            ? !sameValue(r.x[dim.index], first.x[dim.index])
+                            : !Objects.equals(r.dims[dim.index], first.dims[dim.index]);
+                }
             }
         }
         final double[][] means = new double[1 + sets][n];
@@ -504,15 +537,13 @@ public final class EvaluationScorer implements Serializable {
         integrity(unit, into);
     }
 
-    /** Counts the unit under every slice / dimension its rows disagree on (the summary's notes). */
-    private void integrity(final Unit unit, final Map<String, MetricAccumulator> into) {
+    /** Counts the unit under every slice / dimension its rows disagree on (the summary's notes; dimensions: discovery splits only, see {@link #prepare}). */
+    private static void integrity(final Unit unit, final Map<String, MetricAccumulator> into) {
         for (int s = 0; s < unit.sliceVaries.length; s++) {
             if (unit.sliceVaries[s]) count(into, MetricAccumulator.SLICE_VARIES_KEY_PREFIX + s);
         }
-        if (unit.dimensionVaries.length > 0 && (unit.split.equals(spec.discovery.discoverOn) || unit.split.equals(spec.discovery.confirmOn))) {
-            for (int d = 0; d < unit.dimensionVaries.length; d++) {
-                if (unit.dimensionVaries[d]) count(into, MetricAccumulator.DIMENSION_VARIES_KEY_PREFIX + d);
-            }
+        for (int d = 0; d < unit.dimensionVaries.length; d++) {
+            if (unit.dimensionVaries[d]) count(into, MetricAccumulator.DIMENSION_VARIES_KEY_PREFIX + d);
         }
     }
 

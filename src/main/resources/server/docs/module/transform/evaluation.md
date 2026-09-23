@@ -104,8 +104,9 @@ calibration:
 
 Row-level, per split × prediction set; each bin reports `n`, `positives` (Σ y: the label as declared, so a
 dead heat or a second positive in a group counts whole), `positivesShare` (Σ ỹ: the normalised label the log
-score uses, at most one per group), the means `p_model` and `p_baseline`, `rate` (positives / n) with its
-Wilson 95% interval and `utility` (Σ utility · y / n when `utility.field` is set: the flat return of taking
+score uses, at most one per group; equal to `positives` with `normalizeTies: false`), the means `p_model` and
+`p_baseline`, `rate` (positives / n) with its Wilson 95% interval (read for a 0 / 1 label: a graded or count
+label makes `rate` a mean outcome the interval does not bound) and `utility` (Σ utility · y / n when `utility.field` is set: the flat return of taking
 every row of the bin at unit stake — a payout already prorated for a tie is not discounted again). `rate`
 compares with `p_model` directly when every group has one positive; with several positives per group
 (several purchases in a session, several clicks in a query) `rate` is the realised rate and
@@ -228,7 +229,7 @@ the time partition.
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
-| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`). Meant for low-cardinality dimensions (see Limits). |
+| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`); a period bucket of `time.field` is the unit's own (its earliest row's) and is not noted when a unit spans two periods. Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
 ## Outputs
@@ -445,8 +446,9 @@ parameters:
   the summary records which column and form the baseline was.
 - The bootstrap interval assumes independent resampling units; correlated units need `bootstrap.unit`.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
-- Duplicate rows are counted, not removed: a row twice in a grouped unit doubles its weight in every metric
-  (Δ is unchanged, `logScore` / `brier` / `n_rows` are not) and is reported as `nRowsDuplicate` with a note;
+- Duplicate rows are counted, not removed: a row whose `rowId` appears twice in a grouped unit (at any time)
+  is a second candidate — the shares renormalise over it, so every metric of the unit shifts, Δ included —
+  and is reported as `nRowsDuplicate` with a note;
   for `binomial` every row is its own unit and a duplicate is invisible. Deduplicate upstream. A group
   arriving twice under two identities (two overlapping input windows) shows only in the split's observed
   range and counts.

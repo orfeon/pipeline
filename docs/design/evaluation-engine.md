@@ -39,8 +39,9 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   128-bit murmur3 hash of the `rowId` fields, else of every field value). Unassigned and invalid rows are
   counted per bundle on the `rows` key; a null time with time-range splits is a failure. The unit key is
   `split  group` (or the identity), so a group whose rows fall in two splits is two units.
-- **Align** calls `EvaluationScorer.prepare` (which also counts the unit's duplicate identities — adjacent
-  after the sort — and whether each slice / dimension varies over its rows; `accumulate` writes them into the
+- **Align** calls `EvaluationScorer.prepare` (which also counts the unit's repeated identities — a set of
+  the identities seen, whatever the rows' times — and whether each slice varies over its rows, except a period
+  bucket of the time field, and each dimension on the discovery splits; `accumulate` writes them into the
   split bookkeeping and the `sliceVaries` / `dimensionVaries` counters) / `score` / `accumulate` per unit into a bundle-local
   `Map<String, MetricAccumulator>` flushed at `@FinishBundle` (a partial combine: the shuffle carries keys ×
   bundles elements), emits the unit records straight away (no coder for a unit result type) and, when tables

@@ -233,7 +233,7 @@ public final class EvaluationReport {
             if (book.getMinTime() != Long.MAX_VALUE) observed.put(sp.name, new long[]{book.getMinTime(), book.getMaxTime()});
             // integrity: a split without a unit (a report split has nothing to report), a row twice in a unit
             if (book.getTotal()[MetricAccumulator.UNITS] == 0) {
-                notes.add("split " + sp.name + " (" + sp.role + ") has no scored unit" + (sp.isSelection()
+                notes.add("split " + sp.name + " (" + sp.role + ") has no scored unit" + (sp.isSelection() && fitsOrDiscovers(spec, sp.name)
                         ? ": the fits and the discovery on it have no data" : ": nothing to report; check the split range and the input"));
             }
             if (duplicates > 0) {
@@ -292,6 +292,12 @@ public final class EvaluationReport {
         s.put("outputHash", spec.manifestOutputHash);
         s.put("notes", notes);
         return s;
+    }
+
+    /** Whether a calibration fit is estimated on the split or the slice discovery reads it. */
+    private static boolean fitsOrDiscovers(final EvaluationSpec spec, final String split) {
+        for (final EvaluationSpec.Fit f : spec.fits) if (split.equals(f.fitOn)) return true;
+        return spec.hasDiscovery() && (split.equals(spec.discovery.discoverOn) || split.equals(spec.discovery.confirmOn));
     }
 
     // ---- slice discovery -----------------------------------------------------------------------------------

@@ -360,16 +360,18 @@ label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in
 
 Integrity notes (the summary's `notes`; the run completes, the numbers are reported as computed):
 
-- a split with no scored unit — for a `report` split "nothing to report", for a `selection` split "the fits
-  and the discovery on it have no data";
-- duplicate rows: a row whose identity (`rowId`) repeats within a grouped unit is counted twice in every
-  metric of the unit (Δ is invariant, `logScore` / `brier` / `n_rows` are not); the split's `nRowsDuplicate`
-  and a note carry the count. Rows are not dropped: deduplication is the input's job, and the same group
-  arriving under two identities (overlapping input windows) is not detectable here at all — the split's
-  observed range and counts are the check;
+- a split with no scored unit — for a `report` split "nothing to report", for a `selection` split a fit or
+  the discovery reads "the fits and the discovery on it have no data";
+- duplicate rows: a row whose identity (`rowId`) repeats within a grouped unit (at any time) stays in the
+  unit as a second candidate: the shares p and q renormalise over it and a positive duplicate splits ỹ, so
+  every metric of the unit shifts, Δ included; the split's `nRowsDuplicate` and a note carry the count. Rows
+  are not dropped: deduplication is the input's job, and the same group arriving under two identities
+  (overlapping input windows) is not detectable here at all — the split's observed range and counts are the
+  check;
 - a declared slice or a discovery dimension whose value is not constant within a unit: the first row's value
   was used, the note gives the field and the unit count. A row-level slice (a rank within the group, a
-  per-candidate ratio) is a `binomial` evaluation, not a grouped one.
+  per-candidate ratio) is a `binomial` evaluation, not a grouped one. A period bucket of the time field is
+  the unit's by definition (its earliest row's, as the unit's time is) and never noted.
 
 ## 10. Limits
 
