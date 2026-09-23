@@ -61,8 +61,14 @@ public final class EvaluationScorer implements Serializable {
         public final double[] y;
         public final double[] w;
         public final double unitWeight;
+        /** rows whose identity repeats an earlier row's (the same row twice in the unit) */
+        public final int duplicates;
+        /** per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is used) */
+        public final boolean[] sliceVaries;
+        public final boolean[] dimensionVaries;
 
-        Unit(final List<EvaluationRow> rows, final String key, final Skip skip, final double[][] means, final double[] y, final double[] w, final double unitWeight) {
+        Unit(final List<EvaluationRow> rows, final String key, final Skip skip, final double[][] means, final double[] y, final double[] w, final double unitWeight,
+             final int duplicates, final boolean[] sliceVaries, final boolean[] dimensionVaries) {
             this.rows = rows;
             this.key = key;
             this.split = rows.get(0).split;
@@ -71,6 +77,9 @@ public final class EvaluationScorer implements Serializable {
             this.y = y;
             this.w = w;
             this.unitWeight = unitWeight;
+            this.duplicates = duplicates;
+            this.sliceVaries = sliceVaries;
+            this.dimensionVaries = dimensionVaries;
         }
 
         public int size() {
@@ -110,6 +119,25 @@ public final class EvaluationScorer implements Serializable {
         final List<EvaluationRow> rows = new ArrayList<>(input);
         rows.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final int n = rows.size();
+        // the unit's integrity: the same row twice (adjacent after the sort by identity within a time), and a
+        // slice / dimension the rows disagree on (a group-level attribute by contract; the first row's value is used)
+        int duplicates = 0;
+        final EvaluationRow first = rows.get(0);
+        final boolean[] sliceVaries = new boolean[first.slices.length];
+        final boolean[] dimensionVaries = new boolean[spec.hasDiscovery() ? spec.discovery.dimensions.size() : 0];
+        for (int i = 1; i < n; i++) {
+            final EvaluationRow r = rows.get(i);
+            if (r.time == rows.get(i - 1).time && r.identity.equals(rows.get(i - 1).identity)) duplicates++;
+            for (int s = 0; s < sliceVaries.length; s++) if (!sliceVaries[s] && !java.util.Objects.equals(r.slices[s], first.slices[s])) sliceVaries[s] = true;
+            for (int d = 0; d < dimensionVaries.length; d++) {
+                if (dimensionVaries[d]) continue;
+                final EvaluationSpec.Dimension dim = spec.discovery.dimensions.get(d);
+                if (dim.index < 0) continue;
+                dimensionVaries[d] = dim.isNumeric()
+                        ? Double.compare(r.x[dim.index], first.x[dim.index]) != 0
+                        : !java.util.Objects.equals(r.dims[dim.index], first.dims[dim.index]);
+            }
+        }
         final double[][] means = new double[1 + sets][n];
         for (int j = 1 + k; j <= sets; j++) Arrays.fill(means[j], Double.NaN);
         // baseline
@@ -117,7 +145,7 @@ public final class EvaluationScorer implements Serializable {
             final double[] baseline = new double[n];
             for (int i = 0; i < n; i++) baseline[i] = rows.get(i).baseline;
             if (Baselines.means(family, spec.baselineForm, baseline, means[0]) != Baselines.Skip.NONE) {
-                return new Unit(rows, unitKey, Skip.INVALID_BASELINE, means, null, null, 0);
+                return new Unit(rows, unitKey, Skip.INVALID_BASELINE, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
             }
         } else if (family.isGrouped()) {
             Arrays.fill(means[0], 1d / n);
@@ -128,12 +156,12 @@ public final class EvaluationScorer implements Serializable {
         for (int j = 0; j < k; j++) {
             final EvaluationSpec.Prediction d = spec.predictions.get(j);
             if (d.isScore()) {
-                if (!softmax(rows, d, means[1 + j])) return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0);
+                if (!softmax(rows, d, means[1 + j])) return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
             } else {
                 final double[] values = new double[n];
                 for (int i = 0; i < n; i++) values[i] = rows.get(i).x[d.offset];
                 if (Baselines.means(family, d.form, values, means[1 + j]) != Baselines.Skip.NONE) {
-                    return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0);
+                    return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
                 }
             }
         }
@@ -141,7 +169,7 @@ public final class EvaluationScorer implements Serializable {
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
         if (Baselines.normalizeLabels(family, spec.normalizeTies, y) != Baselines.Skip.NONE) {
-            return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, means, y, null, 0);
+            return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, means, y, null, 0, duplicates, sliceVaries, dimensionVaries);
         }
         final double[] w = new double[n];
         double wsum = 0;
@@ -149,7 +177,7 @@ public final class EvaluationScorer implements Serializable {
             w[i] = rows.get(i).weight;
             wsum += w[i];
         }
-        return new Unit(rows, unitKey, Skip.NONE, means, y, w, wsum / n);
+        return new Unit(rows, unitKey, Skip.NONE, means, y, w, wsum / n, duplicates, sliceVaries, dimensionVaries);
     }
 
     /**
@@ -470,8 +498,28 @@ public final class EvaluationScorer implements Serializable {
         final double[] slots = new double[MetricAccumulator.SLOTS];
         slots[MetricAccumulator.UNITS] = 1;
         slots[MetricAccumulator.ROWS] = n;
+        slots[MetricAccumulator.ROWS_DUPLICATE] = unit.duplicates;
         book.add(slots);
         for (final EvaluationRow r : unit.rows) if (r.time != EvaluationRow.NO_TIME) book.time(r.time);
+        integrity(unit, into);
+    }
+
+    /** Counts the unit under every slice / dimension its rows disagree on (the summary's notes). */
+    private void integrity(final Unit unit, final Map<String, MetricAccumulator> into) {
+        for (int s = 0; s < unit.sliceVaries.length; s++) {
+            if (unit.sliceVaries[s]) count(into, MetricAccumulator.SLICE_VARIES_KEY_PREFIX + s);
+        }
+        if (unit.dimensionVaries.length > 0 && (unit.split.equals(spec.discovery.discoverOn) || unit.split.equals(spec.discovery.confirmOn))) {
+            for (int d = 0; d < unit.dimensionVaries.length; d++) {
+                if (unit.dimensionVaries[d]) count(into, MetricAccumulator.DIMENSION_VARIES_KEY_PREFIX + d);
+            }
+        }
+    }
+
+    private static void count(final Map<String, MetricAccumulator> into, final String key) {
+        final double[] slots = new double[MetricAccumulator.SLOTS];
+        slots[0] = 1;
+        into.computeIfAbsent(key, k -> new MetricAccumulator()).add(slots);
     }
 
     private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final double[] boot) {
@@ -582,7 +630,9 @@ public final class EvaluationScorer implements Serializable {
         final MetricAccumulator book = into.computeIfAbsent(MetricAccumulator.SPLIT_KEY_PREFIX + unit.split, key -> new MetricAccumulator());
         final double[] slots = new double[MetricAccumulator.SLOTS];
         slots[MetricAccumulator.UNITS_SKIPPED] = family.isGrouped() ? 1 : unit.size();
+        slots[MetricAccumulator.ROWS_DUPLICATE] = unit.duplicates;
         book.add(slots);
+        integrity(unit, into);
     }
 
     /** The unit's rows as the calibration tables read them (every compared set, derived ones included). */
@@ -599,7 +649,7 @@ public final class EvaluationScorer implements Serializable {
                 fields[t] = idx >= 0 ? unit.rows.get(i).x[idx] : Double.NaN;
             }
             final double utility = spec.hasUtility() ? unit.rows.get(i).x[spec.utilityIndex] : Double.NaN;
-            out.add(new AlignedRow(unit.split, unit.y[i], unit.means[0][i], q, fields, utility));
+            out.add(new AlignedRow(unit.split, unit.rows.get(i).label, unit.y[i], unit.means[0][i], q, fields, utility));
         }
         return out;
     }

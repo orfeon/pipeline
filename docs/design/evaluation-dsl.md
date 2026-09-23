@@ -98,6 +98,11 @@ hitAt1          = ỹ at argmax q                       (ties at the maximum sha
 brier           = Σ_i (q_i − ỹ_i)²
 ```
 
+`hitAt1` is the share of the positives the top-ranked row holds: with a dead heat (ỹ = 0.5 on two rows) a
+top-ranked positive scores 0.5, and m rows tied at the maximum q split the credit (Σ ỹ over them / m), so
+the metric does not depend on which of the tied rows sorts first. A reference implementation taking the
+first maximum (`idxmax`) differs by the tie count.
+
 For a `binomial` row with label y ∈ {0, 1} and probability q: `logScore = y log q + (1 − y) log(1 − q)`,
 the same under the baseline, `brier = (q − y)²`; `hitAt1` is not defined (null).
 
@@ -182,9 +187,13 @@ calibration:
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
-Row-level, per split × prediction set. Each bin reports `n`, `positives` (Σ ỹ), `p_model`, `p_baseline`
-(means), `rate` (positives / n) with its Wilson 95% interval, and `utility` — the flat return Σ u ỹ / n when
-`utility.field` is set (the mean realised value of buying every row of the bin at unit stake).
+Row-level, per split × prediction set. Each bin reports `n`, `positives` (Σ y: the label as declared — a
+dead heat or a second positive in a group is a whole positive), `positivesShare` (Σ ỹ, the likelihood's
+label), `p_model`, `p_baseline` (means), `rate` (positives / n) with its Wilson 95% interval, and `utility`
+— the flat return Σ u y / n when `utility.field` is set (the mean realised value of buying every row of the
+bin at unit stake; a payout already prorated for a tie is not discounted again by ỹ). The tables count
+outcomes, the metrics (§4) count likelihood terms: `rate` is a realised rate under the binomial premise of
+the Wilson interval, `positivesShare / n` the share `p_model` predicts.
 
 | type / by | bins | reading |
 |---|---|---|
@@ -195,7 +204,9 @@ Row-level, per split × prediction set. Each bin reports `n`, `positives` (Σ �
 
 Quantile bins are `bins` equal-rank intervals of the sketch (`k = 400`, an approximation of the boundaries
 within the sketch's rank error; the counts per bin are exact for the boundaries used); `edges` bins are
-exact. Every bin record carries `lower` / `upper`; edge records carry the threshold in `lower`.
+exact and right-closed `(a, b]` (the first open below, the last open above). An `edge` group holds the rows
+with q > threshold × p (strict). Every bin record carries `lower` / `upper`; edge records carry the threshold
+in `lower`.
 
 ### 7.1 Calibration fits
 
@@ -298,15 +309,17 @@ low-cardinality dimensions — every distinct value is a set of accumulators gat
 ### 8.2 Calibration (`<name>.calibration`)
 
 One record per split × prediction set × table × bin: `split`, `prediction`, `type`, `by`, `field`, `table`
-(the index in `calibration[]`), `bin`, `lower`, `upper`, `n`, `positives`, `p_model`, `p_baseline`, `rate`,
-`rate_lo`, `rate_hi`, `utility`.
+(the index in `calibration[]`), `bin`, `lower`, `upper`, `n`, `positives`, `positivesShare`, `p_model`,
+`p_baseline`, `rate`, `rate_lo`, `rate_hi`, `utility`.
 
 ### 8.3 Summary (`<name>.summary`)
 
 One record per run: the roles, `predictions`, the splits (name, role, declared range, observed range, units,
-rows), the row / unit counts (in, invalid, unassigned, scored, skipped), the bootstrap parameters, the
-calibration table count, `fits` (§7.1), `discovery` (§7.2), `parametersHash` and `notes` (role defaults
-applied, overlapping split ranges, prior mode, a fit that produced no estimate, a truncated candidate set).
+rows, duplicate rows), the row / unit counts (in, invalid, unassigned, scored, skipped), the bootstrap
+parameters, the calibration table count, `fits` (§7.1), `discovery` (§7.2), `parametersHash` and `notes`
+(role defaults applied, overlapping split ranges, prior mode, a fit that produced no estimate, a truncated
+candidate set, and the integrity notes of §9: a split without a scored unit, duplicate rows within a unit, a
+slice or dimension that is not constant within a unit).
 
 ### 8.4 Slices (`<name>.slices`)
 
@@ -345,12 +358,26 @@ Row validity: a null / non-finite label, a null group, a null / negative weight,
 counted, not scored; a null time with a time-range split → the failure output. Unit skips: no positive
 label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in the family's unit).
 
+Integrity notes (the summary's `notes`; the run completes, the numbers are reported as computed):
+
+- a split with no scored unit — for a `report` split "nothing to report", for a `selection` split "the fits
+  and the discovery on it have no data";
+- duplicate rows: a row whose identity (`rowId`) repeats within a grouped unit is counted twice in every
+  metric of the unit (Δ is invariant, `logScore` / `brier` / `n_rows` are not); the split's `nRowsDuplicate`
+  and a note carry the count. Rows are not dropped: deduplication is the input's job, and the same group
+  arriving under two identities (overlapping input windows) is not detectable here at all — the split's
+  observed range and counts are the check;
+- a declared slice or a discovery dimension whose value is not constant within a unit: the first row's value
+  was used, the note gives the field and the unit count. A row-level slice (a rank within the group, a
+  per-candidate ratio) is a `binomial` evaluation, not a grouped one.
+
 ## 10. Limits
 
 - Δ is relative to the baseline: swapping the baseline (an odds snapshot at another time) changes its
   meaning; the summary records which column and form the baseline was.
 - The bootstrap CI assumes independent resampling units; correlated units need `bootstrap.unit`.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
+- Duplicate rows and row-level slices are noted, not rejected (§9).
 - Batch, global window only.
 
 ## 11. Stages designed, not built

@@ -33,7 +33,10 @@ public final class MetricAccumulator implements Serializable {
     /** bookkeeping keys and their slots (the same array, read differently) */
     public static final String ROWS_KEY = SEP + "rows";
     public static final String SPLIT_KEY_PREFIX = SEP + "split" + SEP;
-    public static final int ROWS_IN = 0, ROWS_INVALID = 1, ROWS_UNASSIGNED = 2, UNITS_SKIPPED = 3, UNITS = 4, ROWS = 5;
+    /** integrity counters (slot 0 = units): a declared slice / a discovery dimension the rows of a unit disagree on, by index */
+    public static final String SLICE_VARIES_KEY_PREFIX = SEP + "sliceVaries" + SEP;
+    public static final String DIMENSION_VARIES_KEY_PREFIX = SEP + "dimensionVaries" + SEP;
+    public static final int ROWS_IN = 0, ROWS_INVALID = 1, ROWS_UNASSIGNED = 2, UNITS_SKIPPED = 3, UNITS = 4, ROWS = 5, ROWS_DUPLICATE = 6;
 
     final double[] total = new double[SLOTS];
     double[] boot;

@@ -281,7 +281,12 @@ public class EvaluationTransformTest {
             Assertions.assertEquals(4L, summary.getAsLong("nCalibrationTables"));
             final List<?> splits = (List<?>) summary.getPrimitiveValue("splits");
             Assertions.assertEquals(2, splits.size());
-            Assertions.assertEquals(List.of(), summary.getPrimitiveValue("notes"));
+            // start_price is a listing-level field declared as a discovery dimension: every unit's rows disagree on it
+            final List<?> notes = (List<?>) summary.getPrimitiveValue("notes");
+            Assertions.assertEquals(1, notes.size(), notes.toString());
+            Assertions.assertEquals("sliceDiscovery dimension start_price is not constant within a unit (" + (validUnits + testUnits)
+                    + " units; the first row's value was used): a row-level dimension needs family: binomial", notes.get(0));
+            for (final Object split : splits) Assertions.assertEquals(0L, ((Map<?, ?>) split).get("nRowsDuplicate"));
             // the fits: the true model needs no temperature (T ≈ 1) and no re-weighting (a ≈ 1, b ≈ 0); the score
             // set blends with the baseline at coefficients near 1
             final List<?> fits = (List<?>) summary.getPrimitiveValue("fits");

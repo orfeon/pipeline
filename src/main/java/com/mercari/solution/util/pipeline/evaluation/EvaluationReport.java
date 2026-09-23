@@ -225,10 +225,35 @@ public final class EvaluationReport {
             r.put("nUnits", (long) book.getTotal()[MetricAccumulator.UNITS]);
             r.put("nUnitsSkipped", (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED]);
             r.put("nRows", (long) book.getTotal()[MetricAccumulator.ROWS]);
+            final long duplicates = (long) book.getTotal()[MetricAccumulator.ROWS_DUPLICATE];
+            r.put("nRowsDuplicate", duplicates);
             splits.add(r);
             nUnits += (long) book.getTotal()[MetricAccumulator.UNITS];
             nUnitsSkipped += (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED];
             if (book.getMinTime() != Long.MAX_VALUE) observed.put(sp.name, new long[]{book.getMinTime(), book.getMaxTime()});
+            // integrity: a split without a unit (a report split has nothing to report), a row twice in a unit
+            if (book.getTotal()[MetricAccumulator.UNITS] == 0) {
+                notes.add("split " + sp.name + " (" + sp.role + ") has no scored unit" + (sp.isSelection()
+                        ? ": the fits and the discovery on it have no data" : ": nothing to report; check the split range and the input"));
+            }
+            if (duplicates > 0) {
+                notes.add("split " + sp.name + ": " + duplicates + " duplicate rows (the same rowId twice within a unit); their units' metrics count them twice");
+            }
+        }
+        // a slice / dimension declared as a group-level attribute whose value the rows of a unit disagree on
+        for (int i = 0; i < spec.slices.size(); i++) {
+            final MetricAccumulator varies = accumulators.get(MetricAccumulator.SLICE_VARIES_KEY_PREFIX + i);
+            if (varies == null) continue;
+            notes.add("slice " + spec.slices.get(i).name() + " is not constant within a unit (" + (long) varies.getTotal()[0]
+                    + " units; the first row's value was used): a row-level slice needs family: binomial");
+        }
+        if (spec.hasDiscovery()) {
+            for (int d = 0; d < spec.discovery.dimensions.size(); d++) {
+                final MetricAccumulator varies = accumulators.get(MetricAccumulator.DIMENSION_VARIES_KEY_PREFIX + d);
+                if (varies == null) continue;
+                notes.add("sliceDiscovery dimension " + spec.discovery.dimensions.get(d).field + " is not constant within a unit (" + (long) varies.getTotal()[0]
+                        + " units; the first row's value was used): a row-level dimension needs family: binomial");
+            }
         }
         // a selection split whose observed range overlaps a report split's: the selection has seen the report period
         for (final EvaluationSpec.Split sel : spec.splits) {
@@ -408,8 +433,22 @@ public final class EvaluationReport {
 
     // ---- calibration ---------------------------------------------------------------------------------------
 
-    /** Layout of a calibration bin vector. */
-    public static final int BIN_N = 0, BIN_POSITIVES = 1, BIN_Q = 2, BIN_P = 3, BIN_UTILITY = 4, BIN_SLOTS = 5;
+    /** Layout of a calibration bin vector: {@code [n, Σy, Σq, Σp, Σ u·y, Σỹ]}. */
+    public static final int BIN_N = 0, BIN_POSITIVES = 1, BIN_Q = 2, BIN_P = 3, BIN_UTILITY = 4, BIN_SHARE = 5, BIN_SLOTS = 6;
+
+    /**
+     * Adds a row to a bin vector with the set's mean q: the realised outcome y counts the positives, the rate and
+     * the utility (a tie or a second positive in a unit is a whole positive, as the payout side counts it); the
+     * share ỹ — the likelihood's label — only its own column, for the comparison with the share `p_model`.
+     */
+    public static void addBin(final double[] v, final AlignedRow row, final double q) {
+        v[BIN_N] += 1;
+        v[BIN_POSITIVES] += row.label;
+        v[BIN_SHARE] += row.share;
+        v[BIN_Q] += q;
+        v[BIN_P] += row.baseline;
+        if (!Double.isNaN(row.utility)) v[BIN_UTILITY] += row.utility * row.label;
+    }
 
     public static String tableKey(final String split, final int prediction, final int table) {
         return split + SEP + prediction + SEP + table;
@@ -501,6 +540,7 @@ public final class EvaluationReport {
                         final double n = v[BIN_N];
                         r.put("n", (long) n);
                         r.put("positives", v[BIN_POSITIVES]);
+                        r.put("positivesShare", v[BIN_SHARE]);
                         r.put("p_model", n > 0 ? v[BIN_Q] / n : null);
                         r.put("p_baseline", n > 0 && !Double.isNaN(v[BIN_P]) ? v[BIN_P] / n : null);
                         r.put("rate", n > 0 ? v[BIN_POSITIVES] / n : null);
@@ -555,6 +595,7 @@ public final class EvaluationReport {
                 .withField("upper", Schema.FieldType.FLOAT64)
                 .withField("n", Schema.FieldType.INT64)
                 .withField("positives", Schema.FieldType.FLOAT64)
+                .withField("positivesShare", Schema.FieldType.FLOAT64)
                 .withField("p_model", Schema.FieldType.FLOAT64)
                 .withField("p_baseline", Schema.FieldType.FLOAT64)
                 .withField("rate", Schema.FieldType.FLOAT64)
@@ -678,6 +719,7 @@ public final class EvaluationReport {
                 .withField("nUnits", Schema.FieldType.INT64)
                 .withField("nUnitsSkipped", Schema.FieldType.INT64)
                 .withField("nRows", Schema.FieldType.INT64)
+                .withField("nRowsDuplicate", Schema.FieldType.INT64)
                 .build();
         return Schema.builder()
                 .withField("family", Schema.FieldType.STRING)

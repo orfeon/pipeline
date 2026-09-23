@@ -39,7 +39,9 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   128-bit murmur3 hash of the `rowId` fields, else of every field value). Unassigned and invalid rows are
   counted per bundle on the `rows` key; a null time with time-range splits is a failure. The unit key is
   `split  group` (or the identity), so a group whose rows fall in two splits is two units.
-- **Align** calls `EvaluationScorer.prepare` / `score` / `accumulate` per unit into a bundle-local
+- **Align** calls `EvaluationScorer.prepare` (which also counts the unit's duplicate identities — adjacent
+  after the sort — and whether each slice / dimension varies over its rows; `accumulate` writes them into the
+  split bookkeeping and the `sliceVaries` / `dimensionVaries` counters) / `score` / `accumulate` per unit into a bundle-local
   `Map<String, MetricAccumulator>` flushed at `@FinishBundle` (a partial combine: the shuffle carries keys ×
   bundles elements), emits the unit records straight away (no coder for a unit result type) and, when tables
   are declared, the aligned rows. A skipped unit is counted on its split's bookkeeping key.
@@ -112,7 +114,8 @@ AlignedRow ─ Bins [side: sketches] ─ Combine.perKey(VectorAccumulator.Fn) �
   divergence logit q − logit p) enters a bundle-local `SketchAccumulator` keyed by (split, prediction, table).
 - **Bins**: the edges of a quantile table are read once per key from the sketch view (cached per bundle);
   `edges` tables use their declared boundaries; an `edge` table adds the row to every threshold it exceeds.
-  The bin vector is `[n, positives, Σq, Σp, Σ utility·ỹ]`, bundle-local, then `Combine.perKey`.
+  The bin vector is `[n, Σy, Σq, Σp, Σ utility·y, Σỹ]` (`EvaluationReport.addBin`: the outcome y as declared
+  for positives / rate / utility, the share ỹ in its own slot), bundle-local, then `Combine.perKey`.
 - **Bins_Finalize** reads the sketch view again for the bounds (the outer bins carry the sketch minimum /
   maximum) and runs `EvaluationReport.calibration` once. Without tables the output is an empty collection.
 
@@ -135,7 +138,9 @@ are why the transform needs the global window.
   maxima, the score set reproducing the baseline, the skip reasons, deterministic Poisson weights with mean 1,
   a four-unit report with slices and the pair record of two identical sets — the pair interval collapses to
   [0, 0] and a single-unit slice to a degenerate interval — binomial prior mode deriving the reference, the bin
-  function, Wilson, the calibration records from hand-filled bins), `EvaluationSpecTest` (the layout with
+  function, Wilson, the calibration records from bins filled through `addBin`, a dead heat counted whole in
+  the tables while the log score uses ỹ, the integrity notes: a duplicate row, a slice / dimension varying
+  within a unit, a split without units), `EvaluationSpecTest` (the layout with
   shared columns, every split / prediction / table / slice / bootstrap rule, the role defaults from the
   feature lineage, the hash ignoring `manifest`).
 - e2e (`EvaluationTransformTest`, DirectRunner): sessions of listings with the exact conditional baseline,

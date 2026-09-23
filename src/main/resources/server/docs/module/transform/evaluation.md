@@ -37,7 +37,7 @@ baseline shares p and a prediction set's shares q:
 |---|---|---|
 | `logScore` | Σ ỹ log q | the mean over tied positives |
 | `excessLogScore` (Δ) | Σ ỹ log q − Σ ỹ log p | the first-class metric; the baseline's own record has Δ = 0 |
-| `hitAt1` | ỹ at argmax q | ties at the maximum share the credit; null for `binomial` |
+| `hitAt1` | ỹ at argmax q | the share of the positives the top-ranked row holds: a dead heat (two positives) scores 0.5 when one of them ranks first, and tied maxima split the credit evenly (two rows at the maximum, the positive among them: 0.5). Null for `binomial` |
 | `brier` | Σ (q − ỹ)² | |
 | `logloss` | −logScore | derived, no interval of its own |
 
@@ -102,9 +102,14 @@ calibration:
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
-Row-level, per split × prediction set; each bin reports `n`, `positives` (Σ ỹ), the means `p_model` and
-`p_baseline`, `rate` with its Wilson 95% interval and `utility` (Σ utility · ỹ / n when `utility.field` is set:
-the flat return of taking every row of the bin at unit stake).
+Row-level, per split × prediction set; each bin reports `n`, `positives` (Σ y: the label as declared, so a
+dead heat or a second positive in a group counts whole), `positivesShare` (Σ ỹ: the normalised label the log
+score uses, at most one per group), the means `p_model` and `p_baseline`, `rate` (positives / n) with its
+Wilson 95% interval and `utility` (Σ utility · y / n when `utility.field` is set: the flat return of taking
+every row of the bin at unit stake — a payout already prorated for a tie is not discounted again). `rate`
+compares with `p_model` directly when every group has one positive; with several positives per group
+(several purchases in a session, several clicks in a query) `rate` is the realised rate and
+`positivesShare / n` the share the model's `p_model` predicts.
 
 | type / by | bins | reading |
 |---|---|---|
@@ -113,7 +118,9 @@ the flat return of taking every row of the bin at unit stake).
 | `reliability` / `field` | fixed `edges` on a declared numeric field | rare-event bands (a price band, an odds band) |
 | `edge` | one group per threshold: the rows with q > threshold × p | if the rate exceeds `p_baseline` systematically, the divergence is information |
 
-Quantile boundaries are sketch approximations (rank error under 1%); `edges` are exact.
+Quantile boundaries are sketch approximations (rank error under 1%); `edges` are exact: `by: field` bins are
+right-closed `(a, b]` (a value on an edge falls in the lower bin; the first bin is open below, the last open
+above). An `edge` group holds the rows with q strictly greater than threshold × p.
 
 ### Calibration fits
 
@@ -182,7 +189,7 @@ a third window. The statistic is the **unweighted** per-unit mean (`weight` does
 | `time` | the time field the split ranges and period buckets read. Defaults to the feature transform's time role. |
 | `splits` | the time splits with their roles (required). |
 | `weight` | a sample-weight field. |
-| `rowId` | fields identifying a row (the sort tie-break within a unit; the bootstrap unit of independent rows). Default: every field value. |
+| `rowId` | fields identifying a row (the sort tie-break within a unit; the bootstrap unit of independent rows). Default: every field value. A row appearing twice in a grouped unit is counted (`nRowsDuplicate` per split) and noted, not dropped. |
 | `utility` | `{field}`: the realised value of a positive row. |
 | `manifest` | the upstream feature manifest URI: role defaults when the table came back through a sink. |
 
@@ -219,9 +226,9 @@ the time partition.
 | utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
-| sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). |
+| sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
-| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row. Meant for low-cardinality dimensions (see Limits). |
+| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`). Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
 ## Outputs
@@ -254,7 +261,8 @@ the time partition.
 `split`, `prediction`, `type`, `by`, `field`, `table` (the index in `calibration[]`), `bin`, `lower`, `upper`
 (the bin bounds: the sketch's minimum / maximum for the outer quantile bins, the declared edges, null
 outside the edges; the threshold in `lower` for `edge`), `n`, `positives`, `p_model`, `p_baseline` (null in
-binomial prior mode), `rate`, `rate_lo`, `rate_hi` (Wilson), `utility`.
+binomial prior mode), `rate`, `rate_lo`, `rate_hi` (Wilson), `utility`. `positives`, `rate` and `utility`
+count the label as declared; `positivesShare` is Σ ỹ (see [Calibration tables](#calibration-tables)).
 
 ### Slices record
 
@@ -273,8 +281,9 @@ split's), `z_discover`, `threshold`, `passed`, `n_confirm`, `mean_confirm`, `del
 ### Summary record
 
 `family`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `timeField`, `splitField`, `predictions`,
-`splits` (ARRAY<STRUCT<name, role, from, to, minTime, maxTime, nUnits, nUnitsSkipped, nRows\>\> — the declared
-and observed range of each split), `nRows`, `nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
+`splits` (ARRAY<STRUCT<name, role, from, to, minTime, maxTime, nUnits, nUnitsSkipped, nRows, nRowsDuplicate\>\> —
+the declared and observed range of each split; `nRowsDuplicate` counts the rows whose `rowId` repeats within a
+unit), `nRows`, `nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
 (in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value),
 `bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `fits` (ARRAY<STRUCT<prediction,
 derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, nUnits, logScore,
@@ -282,7 +291,9 @@ logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>)
 (ARRAY<STRUCT<prediction, metric, nCandidates, threshold, nPassed, nConfirmed, note\>\>), `slices`,
 `parametersHash` (the SHA-256, 16 hex characters, of the canonical parameters without `manifest` and
 `output`), `planHash` / `outputHash` (of the feature manifest when given), `notes` (role defaults applied,
-prior mode, overlapping split ranges, a fit without an estimate).
+prior mode, overlapping split ranges, a split without a scored unit — a report split with nothing to report —,
+duplicate rows within a unit, a slice or discovery dimension whose value is not constant within a unit, a fit
+without an estimate). Read `notes` before the numbers: every entry names a way the report can mislead.
 
 ## Examples
 
@@ -434,6 +445,18 @@ parameters:
   the summary records which column and form the baseline was.
 - The bootstrap interval assumes independent resampling units; correlated units need `bootstrap.unit`.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
+- Duplicate rows are counted, not removed: a row twice in a grouped unit doubles its weight in every metric
+  (Δ is unchanged, `logScore` / `brier` / `n_rows` are not) and is reported as `nRowsDuplicate` with a note;
+  for `binomial` every row is its own unit and a duplicate is invisible. Deduplicate upstream. A group
+  arriving twice under two identities (two overlapping input windows) shows only in the split's observed
+  range and counts.
+- Slices and discovery dimensions are group-level attributes under `groupedMultinomial`: a row-level field
+  (a rank within the group, a per-candidate ratio) is read from the unit's first row — an arbitrary row — and
+  noted in the summary. A row-level slice is a `binomial` evaluation.
+- On the DirectRunner a run with the default bootstrap is slow: the runner hands every grouped unit to the
+  align step as its own bundle, so the bundle-local accumulators (6 × `bootstrap.samples` doubles per split
+  × set × slice value) are encoded once per unit, and every blend pass re-reads the units. Validate locally
+  with `bootstrap: false` (or a few samples) and a small input; run the real evaluation on Dataflow.
 - Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
   accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
