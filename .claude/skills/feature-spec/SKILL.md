@@ -389,6 +389,10 @@ not alter values).
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
   relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
   member's `sigma` is a modelling choice: it decides how much of every change that member takes.
+- **`rating` from margins**: when the outcome is a continuous score (a time, a standardised margin) rather than a
+  rank, `method: gaussian` observes each pair's margin and moves the ratings by the residual against the expected
+  margin — a rout moves more than a close finish. Declare `mu` / `sigma` / `beta` in the outcome's units
+  (`mu: 0, sigma: 1, beta: 0.5` for a standardised margin); `pairs: mean` keeps a large field from over-moving.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

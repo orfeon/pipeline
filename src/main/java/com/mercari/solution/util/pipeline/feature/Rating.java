@@ -48,7 +48,13 @@ import java.util.TreeMap;
  */
 public final class Rating implements Serializable {
 
-    public enum Method { elo, bradleyTerry, plackettLuce }
+    /**
+     * {@code gaussian}: the margin-of-victory update — the outcome is a continuous score and the difference of two
+     * entries' outcomes is observed as {@code d ~ N(mu_i − mu_q, v_i + v_q + 2 beta²)}, so a pair's update is the exact
+     * Gaussian conditioning: {@code mu_i += v_i / c² · (d − (mu_i − mu_q))}, {@code v_i *= 1 − v_i / c²}. The prior and
+     * {@code beta} are then in the outcome's units, and {@link Pairs} applies as it does to {@code bradleyTerry}.
+     */
+    public enum Method { elo, bradleyTerry, plackettLuce, gaussian }
 
     /**
      * The opponents a {@code bradleyTerry} player is paired with. {@code all}: every opponent, the sums growing with
@@ -432,6 +438,7 @@ public final class Rating implements Serializable {
             case elo -> elo(entries, ids, m, dMu);
             case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
             case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
+            case gaussian -> gaussian(entries, ids, m, v, dMu, deltas);
         }
 
         // a team's change is shared among its members by their part of its variance (1 for a player). The entries are
@@ -532,6 +539,54 @@ public final class Rating implements Serializable {
             }
             dMu[i] = omega;
             deltas[i] = delta;
+        }
+    }
+
+    /** The signed margin of {@code self} over {@code other}: positive when self did better, whatever the order. */
+    private double margin(final Entry self, final Entry other) {
+        return ascending ? other.outcome() - self.outcome() : self.outcome() - other.outcome();
+    }
+
+    /**
+     * The margin-of-victory update ({@link Method#gaussian}): per pair the residual of the observed margin against
+     * the expected one, scaled by the entry's share of the pair's variance {@code c² = v_i + v_q + 2 beta²}; the
+     * variance keeps {@code 1 − v_i / c²} per pair (exact Gaussian conditioning — a tie between equals moves nobody
+     * and still narrows both). Over several opponents the moves add up and the kept fractions multiply (each pair
+     * conditions what the last one left: a sum, as in bradleyTerry, would exceed 1 in a field of a few equals and
+     * collapse every variance to κ); {@code mean} divides the move by the opponents and takes the geometric mean of
+     * the kept fractions. The pairing follows {@code bradleyTerry}'s: every opponent, the rank neighbours, or the mean.
+     */
+    private void gaussian(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
+        final int n = entries.size();
+        for (int i = 0; i < n; i++) {
+            final Entry self = entries.get(i);
+            double better = Double.NaN, worse = Double.NaN;
+            if (pairs == Pairs.adjacent) {
+                for (int q = 0; q < n; q++) {
+                    final Entry other = entries.get(q);
+                    if (ids[q].equals(ids[i])) continue;
+                    final double sc = score(other, self);
+                    if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
+                    if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
+                }
+            }
+            double omega = 0, kept = 1;
+            int opponents = 0;
+            for (int q = 0; q < n; q++) {
+                final Entry other = entries.get(q);
+                if (ids[q].equals(ids[i])) continue;
+                if (pairs == Pairs.adjacent && other.outcome() != self.outcome() && other.outcome() != better && other.outcome() != worse) continue;
+                final double c2 = v[i] + v[q] + 2 * beta * beta;
+                omega += v[i] / c2 * (margin(self, other) - (m[i] - m[q]));
+                kept *= 1 - v[i] / c2;
+                opponents++;
+            }
+            if (pairs == Pairs.mean && opponents > 0) {
+                omega /= opponents;
+                kept = Math.pow(kept, 1d / opponents);
+            }
+            dMu[i] = omega;
+            deltas[i] = 1 - kept;
         }
     }
 

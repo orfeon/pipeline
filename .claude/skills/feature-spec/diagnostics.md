@@ -215,6 +215,7 @@ not expand because another block failed).
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
+| `sequence.rating.gaussian.units` | warning | `method: gaussian` reads the outcome as a margin, so `mu` / `sigma` / `beta` are in the outcome's units; one of `sigma` / `beta` was left to the rating-unit default (25 / 8.33 / 4.17) — declare `mu` (a typical outcome), `sigma` (the spread of strengths), `beta` (the noise of one outcome) |
 
 ## Population
 

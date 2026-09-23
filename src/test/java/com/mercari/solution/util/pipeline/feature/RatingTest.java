@@ -251,6 +251,52 @@ public class RatingTest {
      * neighbours (the ends have one, the others a better and a worse one: no move between equals, twice the
      * shrinkage), and ties are neighbours of each other and of both sides, whatever the order of the entries.
      */
+    /** The margin-of-victory update by hand: the residual against the expected margin, the variance kept, ties, order, pairs and teams. */
+    @Test
+    public void testGaussianMargin() {
+        final java.util.function.BiFunction<Boolean, Rating.Pairs, Rating> gs = (ascending, pairs) ->
+                Rating.of(Rating.Method.gaussian, ascending, 0d, 1d, 0.5, 0d, null, null, null, pairs, List.of("p"), List.of("c"), "y");
+        // two players from the prior N(0, 1), a margin of 2: c² = 1 + 1 + 2 · 0.25 = 2.5, move = 2 / 2.5, variance 1 − 1 / 2.5
+        final Rating.State two = new Rating.State();
+        gs.apply(false, null).update(two, List.of(entry("w", 2), entry("l", 0)));
+        Assertions.assertEquals(0.8, two.players.get("w").mu, 1e-12);
+        Assertions.assertEquals(-0.8, two.players.get("l").mu, 1e-12);
+        Assertions.assertEquals(Math.sqrt(0.6), two.players.get("w").sigma, 1e-12);
+        Assertions.assertEquals(Math.sqrt(0.6), two.players.get("l").sigma, 1e-12);
+        // ascending: a smaller outcome is the better one, the same margin the other way round
+        final Rating.State asc = new Rating.State();
+        gs.apply(true, null).update(asc, List.of(entry("w", 0), entry("l", 2)));
+        Assertions.assertEquals(0.8, asc.players.get("w").mu, 1e-12);
+        // a tie between equals moves nobody and still narrows both; the expected margin is what a known gap predicts
+        final Rating.State tie = new Rating.State();
+        gs.apply(false, null).update(tie, List.of(entry("a", 1), entry("b", 1)));
+        Assertions.assertEquals(0d, tie.players.get("a").mu, 0d);
+        Assertions.assertEquals(Math.sqrt(0.6), tie.players.get("a").sigma, 1e-12);
+        gs.apply(false, null).update(two, List.of(entry("w", 1.6), entry("l", 0)));
+        Assertions.assertEquals(0.8, two.players.get("w").mu, 1e-12, "a margin equal to the expected one (0.8 − (−0.8)) confirms the ratings");
+        Assertions.assertEquals(Math.sqrt(0.6 * (1 - 0.6 / (0.6 + 0.6 + 0.5))), two.players.get("w").sigma, 1e-12);
+        // three players: all pairs sum, mean divides by the two opponents, adjacent reads the rank neighbours only
+        final List<Rating.Entry> three = List.of(entry("a", 3), entry("b", 1), entry("c", 0));
+        final Rating.State all = new Rating.State(), mean = new Rating.State(), adjacent = new Rating.State();
+        gs.apply(false, Rating.Pairs.all).update(all, three);
+        gs.apply(false, Rating.Pairs.mean).update(mean, three);
+        gs.apply(false, Rating.Pairs.adjacent).update(adjacent, three);
+        Assertions.assertEquals((2 + 3) / 2.5, all.players.get("a").mu, 1e-12);
+        Assertions.assertEquals((2 + 3) / 2.5 / 2, mean.players.get("a").mu, 1e-12);
+        Assertions.assertEquals(Math.sqrt(0.6 * 0.6), all.players.get("a").sigma, 1e-12, "two pairs, each keeping 1 − 1 / 2.5, multiplied");
+        Assertions.assertEquals(Math.sqrt(0.6), mean.players.get("a").sigma, 1e-12, "mean: the geometric mean of the kept fractions");
+        Assertions.assertEquals(2 / 2.5, adjacent.players.get("a").mu, 1e-12, "a's only neighbour is b");
+        Assertions.assertEquals((-2 + 1) / 2.5, adjacent.players.get("b").mu, 1e-12, "b meets both");
+        // a team shares the change by variance and moves like one player of the summed strength
+        final Rating duo = gs.apply(false, null).withTeam("seller", List.of(new Rating.Member("agent", List.of("a"), 0d, 2d, 0d)));
+        final Rating.State teams = new Rating.State();
+        duo.update(teams, List.of(team("s1", "a1", 2), team("s2", "a2", 0)));
+        final double c2 = (1 + 4) + (1 + 4) + 2 * 0.25, move = 5 / c2 * 2;
+        Assertions.assertEquals(move * 1 / 5, teams.players.get("seller\u0001s1").mu, 1e-12);
+        Assertions.assertEquals(move * 4 / 5, teams.players.get("agent\u0001a1").mu, 1e-12);
+        Assertions.assertEquals(move, (Double) duo.readTeam(teams, List.of("seller\u0001s1", "agent\u0001a1"), "mu", 0L), 1e-12);
+    }
+
     @Test
     public void testBradleyTerryPairs() {
         final java.util.function.Function<Rating.Pairs, Rating> bt = pairs ->
@@ -324,6 +370,8 @@ public class RatingTest {
     public void testPlayerArithmeticIsUnchangedByTeams() {
         int compared = 0;
         for (final Rating.Method method : Rating.Method.values()) {
+            // gaussian came after the oracle was frozen: its team-of-one arithmetic is the shared sharing code (testGaussianMargin)
+            if (method == Rating.Method.gaussian) continue;
             for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
                 for (final Long tauPer : method == Rating.Method.elo ? new Long[]{null} : new Long[]{null, 3 * DAY}) {
                     final Double tau = method == Rating.Method.elo ? null : 1.5;
@@ -1153,7 +1201,8 @@ public class RatingTest {
     public void testIncrementalMatchesScanAndTrimmedWithDriftAndPairs() {
         final String ops = "      - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P1D, as: pl, funcs: [mu, sigma, count, delta]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, pairs: mean, as: gs}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -1161,7 +1210,7 @@ public class RatingTest {
         Assertions.assertNull(plan.getColumn("skill_all_pl_sigma").getCoordinates().get("pairs"));
         Assertions.assertEquals("adjacent", plan.getColumn("skill_all_adj_mu").getCoordinates().get("pairs"));
         Assertions.assertNull(plan.getColumn("skill_all_adj_mu").getCoordinates().get("tauPerMillis"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 8);
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 10);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {

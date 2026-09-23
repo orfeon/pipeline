@@ -1576,9 +1576,10 @@ public final class FeaturePlanCompiler {
                     : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau, tauPer"));
             valid = false;
         }
-        if (op.pairs != null && method != Rating.Method.bradleyTerry) {
+        final boolean pairwise = method == Rating.Method.bradleyTerry || method == Rating.Method.gaussian;
+        if (op.pairs != null && !pairwise) {
             // elo already shares kFactor over the opponents, and plackettLuce has no pairs: it reads the whole ranking
-            diagnostics.error("sequence.rating.parameter", loc, "pairs chooses the opponents of a bradleyTerry update (" + String.join(" | ", Rating.PAIRS) + "): " + methodName + " has none");
+            diagnostics.error("sequence.rating.parameter", loc, "pairs chooses the opponents of a bradleyTerry / gaussian update (" + String.join(" | ", Rating.PAIRS) + "): " + methodName + " has none");
             valid = false;
         } else if (op.pairs != null && !Rating.PAIRS.contains(op.pairs)) {
             diagnostics.error("sequence.rating.parameter", loc, "unknown pairs: " + op.pairs + " (available: " + String.join(" | ", Rating.PAIRS) + ")");
@@ -1636,7 +1637,13 @@ public final class FeaturePlanCompiler {
             shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
-            if (method == Rating.Method.bradleyTerry && op.pairs != null) shared.put("pairs", op.pairs);
+            if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
+        }
+        if (method == Rating.Method.gaussian && (op.sigma == null || op.beta == null) && hintedBlocks.add("sequence.rating.gaussian.units:" + def.name + ":" + field)) {
+            // the defaults are rating units (25 / 8.33 / 4.17): a margin in seconds or standard deviations is on another scale
+            diagnostics.warning("sequence.rating.gaussian.units", loc, "gaussian reads the outcome '" + field + "' as a margin, so its prior mu / sigma and beta are in the"
+                    + " outcome's units: " + (op.sigma == null ? "sigma" : "beta") + " is defaulted (mu " + mu + ", sigma " + sigma + ", beta "
+                    + (op.beta != null ? op.beta : Rating.defaultBeta(sigma)) + ") - declare mu (a typical outcome), sigma (how far strengths spread) and beta (the noise of one outcome)");
         }
         shared.put("context", contest.name());
         // what a past row brings to its contest: the outcome, the player and the contest it belongs to

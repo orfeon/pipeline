@@ -345,11 +345,20 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   receives the sum of their changes (its own rows are not compared with each other in `elo` / `bradleyTerry`).
 - **`method`**: `plackettLuce` (default) and `bradleyTerry` are the closed-form Bayesian updates of Weng & Lin
   (2011) over a Gaussian strength `(mu, sigma)` — the ranking likelihood, and all pairs of the contest;
-  `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty).
+  `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty);
+  `gaussian` is the **margin-of-victory** update: the outcome is read as a continuous score and the difference of
+  two entries' outcomes is observed as `d ~ N(mu_i − mu_q, sigma_i² + sigma_q² + 2 beta²)`, so a pair's update is
+  the exact Gaussian conditioning — `mu_i += sigma_i² / c² · (d − (mu_i − mu_q))`, `sigma_i² *= 1 − sigma_i² / c²`
+  — the TrueSkill "score" extension, the counterpart of a margin-of-victory Elo. A close finish moves the ratings
+  little and a rout a lot, which the ordinal methods cannot tell apart; a tie between equals moves nobody and
+  still narrows both. Over the opponents of a contest the moves add up and the kept variance fractions multiply
+  (`pairs: mean`: the mean move and the geometric mean of the fractions). `pairs` applies as to `bradleyTerry`. The prior `mu` / `sigma` and `beta` are then in the
+  **outcome's units** (a margin in seconds, a standardised time: `mu: 0, sigma: 1, beta: 0.5`), not the rating
+  units of the defaults — `sequence.rating.gaussian.units` warns when they are left to default.
   Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
   default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
   default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
-  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
+  time*), `pairs` (`bradleyTerry` / `gaussian`: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
   (32), `scale` (400).
 - **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
   months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
