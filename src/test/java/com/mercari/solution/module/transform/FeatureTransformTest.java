@@ -3932,13 +3932,19 @@ public class FeatureTransformTest {
         Assertions.assertEquals(1, new java.io.File(hashes[0], "skill.rating").listFiles().length);
         Assertions.assertEquals(written, java.nio.file.Files.readString(snapshots[0].toPath()), "a reused snapshot is not rewritten");
 
-        // run 3: the input reaches back to C, whose rows lie before the snapshot's last contest (C itself): counted,
-        // D still reads the snapshot (C is not folded twice)
+        // run 3: the input reaches back to C, the snapshot's last folded contest: the pool is replayed from scratch over
+        // this input (C only - as a backfill over that range would) and the snapshot is rewritten; nothing is counted
+        final Rating.State cOnly = new Rating.State();
+        rating.update(cOnly, List.of(new Rating.Entry(s1, 95), new Rating.Entry(s2, 72)));
+        final double muCOnly = (Double) rating.read(cOnly, s1, "mu");
         final TestPipeline third = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final Map<String, MCollection> early = MPipeline.apply(third, Config.load(SOURCE_CONFIG.replaceAll("(?m)^ *- \\{session_id: [AB],.*\\n", "") + config));
         PAssert.that(early.get("features").getCollection()).satisfies(rows -> {
             for (final MElement row : rows) {
-                if ("D".equals(row.getAsString("session_id"))) Assertions.assertEquals(muD, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+                if ("D".equals(row.getAsString("session_id"))) {
+                    Assertions.assertEquals(muCOnly, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+                    Assertions.assertEquals(1L, row.getPrimitiveValue("f_skill_all_pl_count"));
+                }
             }
             return null;
         });
@@ -3948,7 +3954,29 @@ public class FeatureTransformTest {
                 .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.named("feature", "ratingSnapshot_skill_all_pl_rowsBefore")).build()).getCounters()) {
             before += counter.getAttempted();
         }
-        Assertions.assertEquals(2L, before, "the two rows of C read a state that already holds C");
+        Assertions.assertEquals(0L, before, "an input reaching back replays from scratch: no row reads too much");
+        Assertions.assertNotEquals(written, java.nio.file.Files.readString(snapshots[0].toPath()), "the snapshot was rewritten");
+        // run 4: the rows to serve only, after run 3's snapshot: what run 3 left (C only) is what they continue from
+        final TestPipeline fourth = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> again = MPipeline.apply(fourth, Config.load(SOURCE_CONFIG.replaceAll("(?m)^ *- \\{session_id: [ABC],.*\\n", "") + config));
+        PAssert.that(again.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) Assertions.assertEquals(muCOnly, row.getAsDouble("f_skill_all_pl_mu"), 1e-12);
+            return null;
+        });
+        fourth.run();
+    }
+
+    /** {@code require: true}: a pool without a snapshot fails instead of replaying its short input from the prior. */
+    @Test
+    public void testRatingSnapshotRequired() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = snapshotConfig(dir).replace("fit: {artifact: {uri: \"" + dir + "\"}}", "fit: {artifact: {uri: \"" + dir + "\", require: true}}");
+        Assertions.assertNotEquals(snapshotConfig(dir), config);
+        // no snapshot yet: the pool's rows are failed (failFast: the run fails)
+        MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG.replaceAll("(?m)^ *- \\{session_id: [ABC],.*\\n", "") + config));
+        final Throwable failure = Assertions.assertThrows(Throwable.class, pipeline::run);
+        Assertions.assertTrue(String.valueOf(failure).contains("snapshot") || String.valueOf(failure.getCause()).contains("snapshot"), failure::toString);
+        Assertions.assertFalse(new java.io.File(dir).exists(), "nothing was written");
     }
 
     private static final String RATING_BLOCKS = """

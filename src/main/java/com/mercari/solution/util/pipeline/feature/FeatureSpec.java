@@ -490,6 +490,8 @@ public class FeatureSpec implements Serializable {
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
         public boolean refit;
+        /** {@code fit.artifact.require}: a rating's pool whose snapshot is missing fails instead of replaying from the prior (ratings only). */
+        public boolean artifactRequired;
         /** Explicit artifact version replacing the plan hash in artifact paths (pin a fitted version). */
         public String artifactId;
         /** fit.mode forward: the time blocks ({@code blocks.bucket} calendar bucket, else {@code blocks.size}; default P90D). */
@@ -627,6 +629,7 @@ public class FeatureSpec implements Serializable {
             } else if (a.isJsonObject()) {
                 spec.artifactUri = Json.string(a.getAsJsonObject(), "uri");
                 spec.refit = Json.bool(a.getAsJsonObject(), "refit", false);
+                spec.artifactRequired = Json.bool(a.getAsJsonObject(), "require", false);
                 if (Json.string(a.getAsJsonObject(), "id") != null) spec.artifactId = Json.string(a.getAsJsonObject(), "id");
             }
         }

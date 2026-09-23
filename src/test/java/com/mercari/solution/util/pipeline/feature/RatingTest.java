@@ -597,18 +597,29 @@ public class RatingTest {
         rating.update(state, List.of(team("s1", "a1", 2), team("s3", "a2", 1)), 2_000L);
         state.foldedUntilMillis = 2_000L;
         state.rowsBeforeSnapshot = 3;
-        final RatingSnapshot.Spec spec = new RatingSnapshot.Spec("skill_all_duo", "skill", "target/feature-artifacts/" + java.util.UUID.randomUUID(), "abc123", false);
+        final RatingSnapshot.Spec spec = new RatingSnapshot.Spec("skill_all_duo", "skill", "target/feature-artifacts/" + java.util.UUID.randomUUID(), "abc123", false, false);
         Assertions.assertFalse(RatingSnapshot.exists(spec, "<global>"));
-        Assertions.assertNull(RatingSnapshot.read(spec, "<global>", "run-2"), "no snapshot yet");
-        RatingSnapshot.write(spec, "<global>", state, "run-1");
+        Assertions.assertNull(RatingSnapshot.read(spec, "<global>"), "no snapshot yet");
+        RatingSnapshot.write(spec, "<global>", state);
         Assertions.assertTrue(RatingSnapshot.exists(spec, "<global>"));
         Assertions.assertTrue(RatingSnapshot.path(spec, "<global>").startsWith(spec.uri() + "/abc123/skill.rating/skill_all_duo."), RatingSnapshot.path(spec, "<global>"));
         Assertions.assertNotEquals(RatingSnapshot.path(spec, "a"), RatingSnapshot.path(spec, "b"), "one file per pool");
-        // the run that wrote it (a retried key) does not continue from it: it replays from scratch again
-        Assertions.assertNull(RatingSnapshot.read(spec, "<global>", "run-1"));
-        final Rating.State loaded = RatingSnapshot.read(spec, "<global>", "run-2");
+        final Rating.State loaded = RatingSnapshot.read(spec, "<global>");
         Assertions.assertNotNull(loaded);
         Assertions.assertEquals(state.players.keySet(), loaded.players.keySet());
+        // the team counters and the pools' moments ride along
+        Assertions.assertEquals(state.teams, loaded.teams);
+        Assertions.assertEquals(state.pools.keySet(), loaded.pools.keySet());
+        for (final Map.Entry<String, Rating.Pool> e : state.pools.entrySet()) {
+            Assertions.assertEquals(e.getValue().players, loaded.pools.get(e.getKey()).players, e.getKey());
+            Assertions.assertEquals(e.getValue().mean(), loaded.pools.get(e.getKey()).mean(), 0d, e.getKey());
+            Assertions.assertEquals(e.getValue().sd(), loaded.pools.get(e.getKey()).sd(), 0d, e.getKey());
+        }
+        // a rewrite overwrites (the second write wins)
+        state.foldedUntilMillis = 3_000L;
+        RatingSnapshot.write(spec, "<global>", state);
+        Assertions.assertEquals(3_000L, RatingSnapshot.read(spec, "<global>").foldedUntilMillis);
+        state.foldedUntilMillis = 2_000L;
         for (final Map.Entry<String, Rating.Player> e : state.players.entrySet()) {
             final Rating.Player p = loaded.players.get(e.getKey());
             Assertions.assertEquals(e.getValue().mu, p.mu, 0d, e.getKey());

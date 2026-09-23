@@ -1720,14 +1720,16 @@ public final class FeaturePlanCompiler {
             if (method == Rating.Method.bradleyTerry && op.pairs != null) shared.put("pairs", op.pairs);
         }
         shared.put("context", contest.name());
-        // the state snapshot (RatingSnapshot): the block's fit.artifact, else the top-level one; outside the plan hash
+        // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a
+        // snapshot is an explicit choice of the block (a spec whose encodings persist artifacts would otherwise start
+        // snapshotting its ratings unasked); outside the plan hash
         final FeatureSpec.FitSpec blockFit = new FeatureSpec.FitSpec();
         FeatureSpec.FitSpec.parseArtifact(parseJsonObject(def.fitJson), blockFit);
-        final String artifactUri = blockFit.artifactUri != null ? blockFit.artifactUri : spec.fit.artifactUri;
+        final String artifactUri = blockFit.artifactUri;
         if (artifactUri != null) {
             shared.put("artifact", artifactUri);
-            // the block's refit counts even when its artifact names no uri of its own (`{artifact: {refit: true}}` under a top-level uri)
-            if (blockFit.refit || (blockFit.artifactUri == null && spec.fit.refit)) shared.put("artifactRefit", "true");
+            if (blockFit.refit) shared.put("artifactRefit", "true");
+            if (blockFit.artifactRequired) shared.put("artifactRequired", "true");
         }
         // what a past row brings to its contest: the outcome, the player and the contest it belongs to
         shared.put("field", canonicalOf(field));
@@ -1765,10 +1767,11 @@ public final class FeaturePlanCompiler {
         if (previous == null && artifactUri != null) {
             diagnostics.info("sequence.rating.artifact", loc, "rating '" + segment + "' snapshots the state of every pool to " + artifactUri + "/"
                     + (spec.fit.artifactId != null ? spec.fit.artifactId : "<planHash>") + "/" + def.name
-                    + ".rating/ after the replay; a run that finds a pool's snapshot there starts from it and folds only the contests after the time it"
-                    + " stopped at (the serving form: the input then holds the rows to serve and every contest after that time)" + (shared.containsKey("artifactRefit")
-                    ? "; refit: true - this run replays every pool from scratch and rewrites its snapshot"
-                    : "; a snapshot found is reused as it is and never rewritten (refit: true replays from scratch and rewrites it)"));
+                    + ".rating/ after the replay; a run whose input starts after a pool's last folded contest continues from its snapshot (the serving"
+                    + " form: the input holds the rows to serve and every contest after that time), a run whose input reaches back to it replays"
+                    + " the pool from scratch and rewrites it" + (shared.containsKey("artifactRefit") ? "; refit: true - this run replays every pool from scratch"
+                    : "") + (shared.containsKey("artifactRequired") ? "; require: true - a pool without a snapshot fails instead of replaying from the prior"
+                    : "; a serving run over a short input without a snapshot would replay from the prior and write that as the snapshot: set require: true"));
         }
         if (previous != null && !previous.equals(shared.toString())) {
             diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"

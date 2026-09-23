@@ -3615,10 +3615,20 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan plain = compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("{artifact: {uri: \"gs://bucket/feature\", refit: true}}", "{artifact: \"gs://bucket/feature\"}")));
         Assertions.assertEquals("gs://bucket/feature", column(plain, "skill_all_pl_mu").getCoordinates().get("artifact"));
         Assertions.assertNull(column(plain, "skill_all_pl_mu").getCoordinates().get("artifactRefit"));
+        Assertions.assertNull(column(plain, "skill_all_pl_mu").getCoordinates().get("artifactRequired"));
+        // require: a pool without a snapshot fails instead of replaying from the prior
+        final FeaturePlan required = compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("refit: true", "require: true")));
+        Assertions.assertEquals("true", column(required, "skill_all_pl_mu").getCoordinates().get("artifactRequired"));
+        Assertions.assertNull(column(required, "skill_all_pl_mu").getCoordinates().get("artifactRefit"));
+        // the top-level fit.artifact is not inherited: a snapshot is the block's own choice
+        final FeaturePlan topLevel = compile(SOURCES, withBlocks(noArtifact).replace("output:\n", "fit: {artifact: \"gs://bucket/top\"}\noutput:\n"));
+        Assertions.assertFalse(topLevel.getDiagnostics().hasErrors(), topLevel::describe);
+        Assertions.assertNull(column(topLevel, "skill_all_pl_mu").getCoordinates().get("artifact"), topLevel::describe);
         // a sequence block fits nothing: any other fit setting is an error; the artifact without a rating op is ignored
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("fit: {artifact: {uri: \"gs://bucket/feature\", refit: true}}", "fit: {mode: static}"))), "sequence.fit"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(SNAPSHOT_BLOCK.replace("- {type: rating, field: final_price, context: session, order: descending, as: pl, funcs: [mu, sigma]}",
                 "- {type: lag, fields: [final_price], k: 1}"))), "sequence.fit.ignored"));
+    }
 
     private static final String RATING_PROB_BLOCK = """
       - name: strength
