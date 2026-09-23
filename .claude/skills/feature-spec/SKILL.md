@@ -403,6 +403,10 @@ not alter values).
   that pairing has run. Only sums are identified, so read components in sums or relative to the contest. A row
   with a null key in any component (no `category`) joins no contest at all — not even for the seller's overall
   level — so add a component only where its keys are always present.
+- **A rating as a probability**: a context `{type: ratingProb, field: <rating>_mu, sigma: <rating>_sigma, beta: <the
+  rating's beta>}` reads the Plackett–Luce win probability the rating model gives each row of its group —
+  on the scale of a market share, so `ln(p_rating / p_market)` is the rating's disagreement with the market,
+  the natural feature for a model whose initial score is the market's log share.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is

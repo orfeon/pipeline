@@ -25,7 +25,7 @@ public final class OperatorCatalog {
     /**
      * @param baselineCallable the op may be called as a function from a {@code baselines[].expr}
      *                         ({@code share(1 / bid)}): it reads one value per row of the group and returns one
-     *                         number per row. An op that needs coordinates of its own (softmax, shuffle and the
+     *                         number per row. An op that needs coordinates of its own (softmax, ratingProb, shuffle and the
      *                         group solvers) is not callable that way — {@link ContextEvaluator} has no place to
      *                         take them from, so the compiler rejects the call instead (baselines.expr.op).
      */
@@ -84,6 +84,7 @@ public final class OperatorCatalog {
         register(Scope.context, "ratioByValue", InputKind.categorical, Schema.FieldType.map(F64), false, "ratio per value within the group");
         registerCallable(Scope.context, "entropy", InputKind.categorical, F64, "entropy of the value distribution within the group");
         register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
+        register(Scope.context, "ratingProb", InputKind.numeric, F64, false, "the probability a rating model gives the row within the group: exp(mu / c) normalised over the group, c = sqrt(sum(sigma^2 + beta^2)) over the group (the Plackett-Luce contest of a rating)");
         register(Scope.context, "residualize", InputKind.numeric, F64, false, "residual of the field regressed (with an intercept) on the 'against' fields over the rows of the group; excludeSelf fits on the other rows");
         register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place)");
         register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");

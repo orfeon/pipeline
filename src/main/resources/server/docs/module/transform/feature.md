@@ -71,7 +71,7 @@ time; warnings and hints from the compiler are part of that report.
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. `minInterval` is a declaration the plan relies on and the run audits (see [minInterval audit](#mininterval-audit-declaration-vs-data)). |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
-| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `residualize`, `harville`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
+| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `ratingProb`, `residualize`, `harville`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) `minBlocks` (default 1), `minHistory` (the same as a duration, rounded up to whole blocks; `minBlocks` wins) and `window` (the range of blocks a row reads) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
@@ -1287,6 +1287,45 @@ column inherits its availability from the score and the offset, and the offset's
 price expires; so does the probability). With f = 0 and T = 1 the output equals the renormalised offset.
 `excludeSelf` has no effect. Row / context only, so the op works in streaming (an `onnx` → `feature`
 → sink serving chain).
+
+### Rating probabilities (context op `ratingProb`)
+
+A rating carries its own definition of a win probability: the Plackett–Luce contest a `plackettLuce`
+rating is updated with, read forward. `ratingProb` evaluates it over the rows of the group — "the
+probability the rating model gives this row" — on the same scale as a market share, so the two can be
+compared directly (`ln(p_rating / p_market)` is the rating's disagreement with the market, the natural
+feature for a model whose initial score is the market's log share):
+
+```yaml
+- name: strength                    # a team rating (see Teams above): seller + agent
+  scope: sequence
+  entity: seller
+  ops:
+    - {type: rating, field: final_price, context: session, order: descending, as: duo,
+       with: [{entity: agent, mu: 0, sigma: 4}], team: [mu, sigma]}
+- name: contest
+  scope: context
+  context: session
+  ops:
+    - {type: ratingProb, field: strength_all_duo_team_mu, sigma: strength_all_duo_team_sigma, beta: 4.1667, as: pWin}
+    # contest_pWin_ratingProb: exp(mu_i / c) / Σ_j exp(mu_j / c), c² = Σ_j (sigma_j² + beta²) over the session
+```
+
+| key | value |
+|---|---|
+| `field` | the strength: a rating's `mu` (a player's, or a team's `team_mu`) — any numeric column |
+| `sigma` | the column of each row's uncertainty (the matching `sigma` readout); optional — without it every row's uncertainty is 0 and `c² = n · beta²`. It belongs to one strength: an op that names a `sigma` takes one `field` (an op over several fields would read every field's contest with the same uncertainty — declare one op per field) |
+| `beta` | required, > 0: the performance noise of the rating the field comes from (its `beta`, by default half the prior's `sigma`: `25 / 6` for the default prior) |
+
+`c` is the contest's own scale — `sqrt(Σ (sigma² + beta²))` over the rows taking part — so it is a
+`softmax` whose temperature the group decides: the same gap in `mu` is worth less in a large or an
+uncertain field, as the rating's update sees it (the update also adds the per-contest drift `tau²` to each
+variance; the `sigma` readout does not carry it). A row without a finite `mu` (or `sigma`, when a
+column is named) reads null and leaves the contest (the others still sum to 1; `nullPolicy: indicator`
+adds `<name>_isnull`); a contest of one row reads 1. `excludeSelf` has no effect. The column inherits
+its availability from the field and the `sigma` column, so a probability over a rating is as available
+as the rating. `bradleyTerry` ratings have no closed-form win probability over a field of more than
+two; the Plackett–Luce read is the sensible one for them too (both share `mu` and `sigma`).
 
 ### Group solvers (context ops `residualize`, `harville`)
 

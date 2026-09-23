@@ -186,8 +186,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   `setup()` (`plan(c)`: every coordinate parsed there, never per group — `against` / `discount` / `order`
   splits, `seed`, `top`, `maxGroupSize`); `apply(op, values, self, excludeSelf)`; group-constant ops are
   evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
-  `softmax` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
-  probability space with a max-shift; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
+  `softmax`, `ratingProb` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
+  probability space with a max-shift; `ratingProb` = the Plackett-Luce contest read forward, `exp(mu / c)` normalised with
+  `c² = Σ (sigma² + beta²)` over the group's active rows — coordinates `sigma` (column, optional) and `beta`; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
   `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
   group solvers `residualize` / `harville` go through `solve(name, plan, rows)` → `GroupOps` (pure
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.

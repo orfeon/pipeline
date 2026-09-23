@@ -3582,6 +3582,64 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(column(plan, "__baseline_market").isIntermediate());
     }
 
+    private static final String RATING_PROB_BLOCK = """
+      - name: strength
+        scope: sequence
+        entity: seller
+        ops:
+          - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma]}
+      - name: contest
+        scope: context
+        context: session
+        ops:
+          - {type: ratingProb, field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma, beta: 4.2, as: pWin}
+    """;
+
+    /** ratingProb: the field is the strength, sigma the column of its uncertainty (a name, not a number), beta required. */
+    @Test
+    public void testRatingProbExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withBlocks(RATING_PROB_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn p = column(plan, "contest_pWin_ratingProb");
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), p.getFieldType().getType());
+        Assertions.assertEquals("strength_all_final_price_rating_mu", p.getCoordinates().get("field"));
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", p.getCoordinates().get("sigma"));
+        Assertions.assertEquals("4.2", p.getCoordinates().get("beta"));
+        Assertions.assertTrue(p.getInputs().containsAll(List.of("strength_all_final_price_rating_mu", "strength_all_final_price_rating_sigma", "session_id")), p::describe);
+        // as available as the rating it reads (the outcome's window shift), never more
+        Assertions.assertEquals(column(plan, "strength_all_final_price_rating_mu").getAvailableAt().describe(), p.getAvailableAt().describe(), p::describe);
+        // without sigma: the uncertainty is 0 (no coordinate); sigma as a number, an unknown or a non-numeric column, and a missing / non-positive beta are errors
+        final FeaturePlan plain = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma, ", "")));
+        Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
+        Assertions.assertNull(column(plain, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: 4"))), "context.ratingProb.sigma"));
+        // an unknown column is an unresolved reference of the block, like any op's field
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: nope"))), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("sigma: strength_all_final_price_rating_sigma", "sigma: category"))), "context.ratingProb.sigma"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace(", beta: 4.2", ""))), "context.ratingProb.beta"));
+        // a sigma belongs to one strength: an op over several fields with one sigma is rejected (one op per field)
+        final FeaturePlan twoFields = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma:",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit], sigma:")));
+        Assertions.assertTrue(twoFields.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("context.ratingProb.sigma") && m.message().contains("one field")), twoFields::describe);
+        Assertions.assertFalse(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma,",
+                "fields: [strength_all_final_price_rating_mu, price_per_unit],"))), "context.ratingProb.sigma"), "without a sigma several fields are fine");
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 0"))), "context.ratingProb.beta"));
+        // nullPolicy indicator: a row out of the contest is flagged like a softmax row
+        final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
+        Assertions.assertNotNull(indicator.getColumn("contest_pWin_ratingProb_isnull"), indicator::describe);
+        // block order does not matter: the sigma column of a block declared later is waited for, even when the field
+        // itself (an input) does not make the block wait
+        final String contest = RATING_PROB_BLOCK.substring(RATING_PROB_BLOCK.indexOf("  - name: contest"))
+                .replace("field: strength_all_final_price_rating_mu", "field: start_price");
+        final String strength = RATING_PROB_BLOCK.substring(0, RATING_PROB_BLOCK.indexOf("  - name: contest"));
+        final FeaturePlan reordered = compile(SOURCES, withBlocks(contest + strength));
+        Assertions.assertFalse(reordered.getDiagnostics().hasErrors(), reordered::describe);
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", column(reordered, "contest_pWin_ratingProb").getCoordinates().get("sigma"));
+        // a column name as sigma belongs to ratingProb only: a rating's prior must still be a number
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("funcs: [mu, sigma]}", "funcs: [mu, sigma], sigma: wide}"))), "sigma.invalid"));
+    }
+
     @Test
     public void testSoftmaxDiagnosticsAndIndicators() {
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: nope"))), "context.softmax.offset"));

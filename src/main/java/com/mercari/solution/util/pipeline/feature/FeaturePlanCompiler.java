@@ -36,7 +36,7 @@ public final class FeaturePlanCompiler {
             "and", "or", "not", "null", "true", "false", "in", "is", "like", "between", "case", "when", "then", "else", "end");
     private static final Set<String> PARENT_CONTEXT_OPS = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
     /** Context ops whose column can be null although the field is present (a null offset, a group the solver declines). */
-    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "residualize", "harville");
+    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "ratingProb", "residualize", "harville");
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
@@ -540,6 +540,8 @@ public final class FeaturePlanCompiler {
             }
             // the explanatory fields of a context residualize (a sequence regression's single series is op.against)
             refs.addAll(op.regressors);
+            // the uncertainty column of a ratingProb: it may come from a block declared after this one
+            if (op.sigmaField != null) refs.add(op.sigmaField);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {
@@ -1162,6 +1164,40 @@ public final class FeaturePlanCompiler {
                 }
                 if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
                 coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
+            }
+            case "ratingProb" -> {
+                // the field is the strength (a rating's mu, a team's), sigma the column of its uncertainty (optional: 0
+                // without it), beta the rating's performance noise: c^2 = sum over the group of (sigma^2 + beta^2)
+                if (op.sigmaField != null) {
+                    // an op fans out over its fields with ONE set of coordinates: a sigma belongs to one strength, so an
+                    // op over several fields would read every field's contest with the same uncertainty
+                    final int fieldCount = !op.fields.isEmpty() ? op.fields.size() : def.inputs.size();
+                    if (fieldCount > 1) {
+                        diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma '" + op.sigmaField + "' is the uncertainty of one strength: an op that names it takes one field"
+                                + " (this op covers " + fieldCount + ") - declare one ratingProb op per field, each with its own sigma");
+                        return null;
+                    }
+                    final Ref ref = resolve(op.sigmaField);
+                    if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
+                        diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma must name a numeric column (the row's rating uncertainty): " + op.sigmaField
+                                + (ref == null ? "" : " is " + (ref.type() == null ? "unknown" : ref.type().getType())));
+                        return null;
+                    }
+                    coordinates.put("sigma", ref.canonical());
+                    inputs.add(ref.canonical());
+                } else if (op.sigma != null) {
+                    diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma names the column of each row's uncertainty (a rating's sigma readout), not a number: " + op.sigma);
+                    return null;
+                }
+                if (op.beta == null || !(op.beta > 0) || op.beta.isInfinite()) {
+                    diagnostics.error("context.ratingProb.beta", loc, "ratingProb requires beta > 0: the performance noise of the rating the field comes from"
+                            + " (its beta parameter; sigma / 2 of its prior by default, 25 / 6 for the default prior)" + (op.beta == null ? "" : ": " + op.beta));
+                    return null;
+                }
+                coordinates.put("beta", Double.toString(op.beta));
+                if (def.excludeSelf) {
+                    diagnostics.warning("context.ratingProb.excludeSelf", loc, "excludeSelf has no effect on ratingProb (the row is part of its own contest)");
+                }
             }
             case "softmax" -> {
                 if (op.offset != null) {
