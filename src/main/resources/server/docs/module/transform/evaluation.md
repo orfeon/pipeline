@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Evaluation Transform Module
-description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; slice discovery (candidate slices over declared dimensions up to a depth, scored against the random-subset null on a selection split and confirmed on another); the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
+description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; slice discovery (candidate slices over declared dimensions up to a depth, scored against the random-subset null on a selection split and confirmed on another); the per-unit loss decomposition and, opt-in, the scored rows with every prediction set's probability (derived sets included) as outputs. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
 tags: [transform, evaluation, machine-learning, statistics, calibration, bootstrap, slices, batch]
 timestamp: 2026-09-13T00:00:00Z
 ---
@@ -40,6 +40,7 @@ baseline shares p and a prediction set's shares q:
 | `hitAt1` | ỹ at argmax q | the share of the positives the top-ranked row holds: a dead heat (two positives) scores 0.5 when one of them ranks first, and tied maxima split the credit evenly (two rows at the maximum, the positive among them: 0.5). Null for `binomial` |
 | `brier` | Σ (q − ỹ)² | |
 | `logloss` | −logScore | derived, no interval of its own |
+| `utility` | Σ u · y / n over the unit's rows | the flat return of taking every row of the unit at unit stake (`utility.field` = the realised value of a positive row, y as declared; a null utility, and any utility on a row with y = 0, is a zero return). A property of the outcomes, not of a set: the same value under every prediction set, null in pair records, null without `utility.field` |
 
 For a `binomial` row: the Bernoulli log score, the same under the baseline, `brier = (q − y)²`. Aggregates are
 weighted means over the units of a key (split × prediction set × slice value); `weight` is per row for
@@ -98,7 +99,7 @@ splits:
 calibration:
   - {type: reliability, by: prediction, bins: 10}
   - {type: reliability, by: divergence, bins: 10}
-  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100]}
+  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100], closed: left}
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
@@ -119,9 +120,12 @@ compares with `p_model` directly when every group has one positive; with several
 | `reliability` / `field` | fixed `edges` on a declared numeric field | rare-event bands (a price band, an odds band) |
 | `edge` | one group per threshold: the rows with q > threshold × p | if the rate exceeds `p_baseline` systematically, the divergence is information |
 
-Quantile boundaries are sketch approximations (rank error under 1%); `edges` are exact: `by: field` bins are
-right-closed `(a, b]` (a value on an edge falls in the lower bin; the first bin is open below, the last open
-above). An `edge` group holds the rows with q strictly greater than threshold × p.
+Quantile boundaries are sketch approximations (a KLL sketch with `k` 400 by default: rank error about 0.8%,
+so a bin's count can differ from the exact decile's by that much; raise `k` — up to 65535 — to compare with an
+exact reference, at the cost of a larger sketch per split × set × table). `edges` are exact: `by: field` bins
+are left-closed `[a, b)` by default (a value on an edge falls in the bin above it, the convention of price and
+odds bands: "the 2s" = [2, 3)); `closed: right` makes them `(a, b]`. The first bin is open below, the last
+open above. An `edge` group holds the rows with q strictly greater than threshold × p.
 
 ### Calibration fits
 
@@ -147,11 +151,33 @@ standard errors scale with its magnitude.
 | type | model | estimate | reading |
 |---|---|---|---|
 | `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`l2`, `maxIter`, `tol` as the screen transform's conditioning), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear or the selection split is separable (a small split the set ranks perfectly: the unpenalised estimate grows without bound). The standard errors come from the unpenalised information whatever `l2`: null when f and o are exactly collinear, very large when nearly so | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
 
 The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
 declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
 with a note) are the summary's `fits`; `output.calibration` also writes them as JSON.
+
+#### Reproducing a Benter-style regression
+
+Benter's combined model — the conditional logit of the winner on the model's and the market's *log*
+probabilities within the group, α · log p_model + β · log p_market — is a `groupedMultinomial` `blend` on a
+**probability set** with the market as the `baseline`: f is the set's log share and o the baseline's (a
+per-group constant does not change a softmax, so log shares and log probabilities give the same fit). The
+variant on the logits, α · logit(p_model) + β · logit(p_market), is a `blend` on a **score set** whose score and
+offset are those logits (computed upstream, e.g. in a `select`):
+
+```yaml
+predictions:
+  - {name: benter, score: logit_model, offset: logit_market, offsetScale: log}
+calibration:
+  - {type: blend, fitOn: valid, of: [benter]}
+```
+
+`a` is α and `b` is β with their standard errors; `z_a` tests whether the model adds information orthogonal
+to the market. The two regressions are on different scales, so the coefficients of one do not match a
+reference computed on the other. The declared score set itself is softmax(logit_model + logit_market) — the
+blend's start, a = b = 1 — so its own metrics and the blend's `logScoreAtIdentity` / `gainPerUnit` are relative
+to that sum: read the blend's `a` and `b`.
 
 ### Slice discovery
 
@@ -178,6 +204,13 @@ a third window. The statistic is the **unweighted** per-unit mean (`weight` does
 `slices`. Dimensions are for low-cardinality fields (see Limits). The candidate cells share the metrics Combine
 (no extra pass); a numeric dimension adds one sketch pass.
 
+**Discovering where the money is.** `metric: utility` asks the same question of the realised return: which
+slices of units (declared by dimensions such as a price band or a divergence ratio) return more or less per
+row than the split overall, under the same random-subset null, found on one window and confirmed on another.
+The utility does not depend on the prediction set, so the discovery runs once (under the first compared set).
+The row-level version — which rows to take — is a `binomial` evaluation whose dimensions are row fields
+(see Limits on the correlation of rows from one group).
+
 ## Input contract
 
 | role | description |
@@ -191,7 +224,7 @@ a third window. The statistic is the **unweighted** per-unit mean (`weight` does
 | `splits` | the time splits with their roles (required). |
 | `weight` | a sample-weight field. |
 | `rowId` | fields identifying a row (the sort tie-break within a unit; the bootstrap unit of independent rows). Default: every field value. A row appearing twice in a grouped unit is counted (`nRowsDuplicate` per split) and noted, not dropped. |
-| `utility` | `{field}`: the realised value of a positive row. |
+| `utility` | `{field}`: the realised value of a positive row (a payout per unit stake). Enables the `utility` metric (with its interval, per slice, in the units output and as a `sliceDiscovery.metric`) and the calibration tables' `utility` column. |
 | `manifest` | the upstream feature manifest URI: role defaults when the table came back through a sink. |
 
 **Defaults from the feature transform.** `group` / `label` / `baseline` / `weight` and `time.field` fall back
@@ -224,11 +257,12 @@ the time partition.
 | time | optional | String or Object | Field name or `{field}`. Required with time-range splits (or a feature time role). |
 | weight | optional | String or Object | Weight field. |
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
-| utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
-| bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
-| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
-| sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
+| utility | optional | String or Object | The realised value of a positive row; the `utility` metric (metrics, units, `sliceDiscovery.metric`) and the calibration records' `utility`. |
+| bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 7 × samples doubles. |
+| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}` (`l2` default 0). |
+| sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`, `utility` — the last needs `utility.field` and runs once, under the first compared set), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
+| rows | optional | Boolean or Object | `true` (the scored rows of the `selection` splits) or `{splits: [...]}` (the named splits) fills the `<name>.rows` output; needs `rowId`. Off by default (the output stays empty). |
 | slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row, and a field whose value differs within a unit is reported in the summary's `notes` (a row-level slice — a rank, a ratio per candidate — needs `family: binomial`); a period bucket of `time.field` is the unit's own (its earliest row's) and is not noted when a unit spans two periods. Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
@@ -241,6 +275,7 @@ the time partition.
 | `<name>.units` | the per-unit loss decomposition: one record per unit × prediction set (the baseline included) |
 | `<name>.slices` | the discovered slices: one record per candidate × set (`output: passed` keeps the passed ones) |
 | `<name>.summary` | one record per run |
+| `<name>.rows` | with `rows`: one record per scored row of the selected splits — the identity, the label, the baseline and every prediction set's probability, derived sets included |
 
 ### Metrics record
 
@@ -254,7 +289,8 @@ the time partition.
 | positives | FLOAT64 | Σ w ỹ (grouped: the weight mass of the units) |
 | weight | FLOAT64 | Σ w |
 | logScore, excessLogScore, hitAt1, brier | FLOAT64 | the metrics (differences for a pair record) |
-| `<metric>_lo`, `<metric>_hi` | FLOAT64 | the bootstrap 95% interval (null without bootstrap, and for the baseline's excess) |
+| utility | FLOAT64 | the weighted mean of the units' flat returns (null without `utility.field`; null in pair records: it does not depend on the set) |
+| `<metric>_lo`, `<metric>_hi` | FLOAT64 | the bootstrap 95% interval (null without bootstrap, for the baseline's excess, and wherever the metric itself is null — `utility` in a pair record or without `utility.field`) |
 | logloss | FLOAT64 | −logScore |
 
 ### Calibration record
@@ -275,9 +311,24 @@ split's), `z_discover`, `threshold`, `passed`, `n_confirm`, `mean_confirm`, `del
 ### Units record
 
 `split`, `unit` (the group key, or the row identity), `time`, `prediction`, `n_rows`, `weight`, `logScore`,
-`logScoreBaseline` (null in binomial prior mode), `excessLogScore`, `hitAt1`, `brier`,
-`slices` (ARRAY<STRUCT<field STRING, value STRING\>\>). Re-aggregate it in a warehouse, or feed it to the
+`logScoreBaseline` (null in binomial prior mode), `excessLogScore`, `hitAt1`, `brier`, `utility` (the unit's
+flat return, null without `utility.field`), `slices` (ARRAY<STRUCT<field STRING, value STRING\>\>). Re-aggregate it in a warehouse, or feed it to the
 [`attribution`](attribution.md) transform to ask which slices Δ's total comes from.
+
+### Rows record
+
+`split`, `unit` (the group key, or the row identity), `rowId` (ARRAY<STRUCT<field STRING, value STRING\>\>:
+the declared `rowId` fields' values, the join key back to the input), `time`, `label` (as declared),
+`labelShare` (ỹ), `baseline` (the baseline's mean for the row; without a baseline the uniform share 1 / n for
+`groupedMultinomial`, null for `binomial`), `predictions`
+(ARRAY<STRUCT<prediction STRING, p FLOAT64\>\>: every compared set's mean for the row — the declared sets and
+the derived `<name>@T` / `<name>@blend`, i.e. the calibrated probabilities the fits imply), `utility`. Only
+the units that were scored appear (a skipped unit's rows do not).
+
+This closes the loop from evaluation back to selection: the calibrated row probabilities of a derived set are
+the input of a `screen` or `query` that looks for what the current model plus its calibration leaves on the
+table, without re-implementing the fit from the calibration JSON. By default only the `selection` splits are
+output — the report split's rows are for reporting, not for building the next rule on.
 
 ### Summary record
 
@@ -455,12 +506,12 @@ parameters:
 - Slices and discovery dimensions are group-level attributes under `groupedMultinomial`: a row-level field
   (a rank within the group, a per-candidate ratio) is read from the unit's first row — an arbitrary row — and
   noted in the summary. A row-level slice is a `binomial` evaluation.
-- On the DirectRunner a run with the default bootstrap is slow: the runner hands every grouped unit to the
-  align step as its own bundle, so the bundle-local accumulators (6 × `bootstrap.samples` doubles per split
-  × set × slice value) are encoded once per unit, and every blend pass re-reads the units. Validate locally
-  with `bootstrap: false` (or a few samples) and a small input; run the real evaluation on Dataflow.
+- The DirectRunner is for validation, not for the real run: every blend pass re-reads the selection split's
+  units and every Combine is single-machine. A unit's bootstrap contribution travels as a few dozen bytes and
+  is expanded into the replicate sums only where many units meet, so the default `bootstrap.samples` no
+  longer dominates a local run; still, validate locally on a small input and run the evaluation on Dataflow.
 - Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
-  accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
+  accumulators of 7 × `bootstrap.samples` doubles (about 56 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
   high-cardinality field (an id) belongs in a coarser bucket, not in `slices`.
 - `sliceDiscovery` dimensions are low-cardinality too: every distinct value combination (up to `maxDepth`) of
@@ -473,6 +524,14 @@ parameters:
 - Slice discovery is a multiple-comparison device: the threshold treats the candidates as independent
   (conservative), the confirmation is one test per passed slice, and the correlation between units is
   ignored (as by the bootstrap). Report the confirmation window's number and ask for a third window before
-  acting.
+  acting. With `metric: utility` on `binomial` rows that come from groups (the candidates of one query, the
+  runners of one race), the units of a slice are not independent: the variance under the null is understated
+  by the within-group correlation and `bootstrap.unit` does not enter the discovery. Treat a utility slice
+  as a lead, confirmed by the next window, not as a measured return.
+- The `utility` metric is an aggregate like the others: the weighted mean over units of each unit's flat
+  return, so a grouped unit of many rows counts as much as one of few (the calibration tables' `utility` is
+  pooled per row instead). It covers the scored units only: a group without a positive row, and a unit
+  skipped for an invalid prediction set or baseline (`nUnitsSkipped`), does not enter it — where a group can
+  end without a positive (a query without a click), the metric is the return given a positive.
 - Batch, global window only. The gaussian / ranking families and the HTML report are the next stages (see
   `docs/design/evaluation-dsl.md` §11).

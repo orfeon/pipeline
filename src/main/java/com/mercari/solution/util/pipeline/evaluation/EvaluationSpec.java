@@ -62,13 +62,17 @@ public final class EvaluationSpec implements Serializable {
     public static final String BY_DIVERGENCE = "divergence";
     public static final String BY_FIELD = "field";
     public static final List<String> BYS = List.of(BY_PREDICTION, BY_DIVERGENCE, BY_FIELD);
+    public static final String CLOSED_LEFT = "left";
+    public static final String CLOSED_RIGHT = "right";
+    public static final List<String> CLOSED = List.of(CLOSED_LEFT, CLOSED_RIGHT);
 
     public static final int MAX_BOOTSTRAP = 10_000;
 
     public static final String DISCOVERY_OUTPUT_PASSED = "passed";
     public static final String DISCOVERY_OUTPUT_ALL = "all";
     public static final List<String> DISCOVERY_OUTPUTS = List.of(DISCOVERY_OUTPUT_PASSED, DISCOVERY_OUTPUT_ALL);
-    public static final List<String> DISCOVERY_METRICS = List.of("excessLogScore", "logScore", "hitAt1", "brier");
+    public static final List<String> DISCOVERY_METRICS = List.of("excessLogScore", "logScore", "hitAt1", "brier", "utility");
+    public static final String METRIC_UTILITY = "utility";
 
     /** A prediction set: a column in a baseline form, or a grouped softmax of a score with an optional offset. */
     public static final class Prediction implements Serializable {
@@ -115,6 +119,10 @@ public final class EvaluationSpec implements Serializable {
         public String field;
         public int bins;
         public double[] edges;
+        /** by: field — whether an edge belongs to the bin above it ({@code [a, b)}, the default) or below it ({@code (a, b]}) */
+        public boolean closedLeft = true;
+        /** quantile tables — the KLL sketch parameter (rank error ≈ 0.8% at 400; larger = finer boundaries, larger sketch) */
+        public int k = SketchAccumulator.K;
         public double[] thresholds;
         /** position of {@code field} in {@link EvaluationRow#x} (by: field) */
         public int fieldIndex = -1;
@@ -125,6 +133,15 @@ public final class EvaluationSpec implements Serializable {
 
         public boolean isEdge() {
             return TABLE_EDGE.equals(type);
+        }
+
+        /**
+         * Whether a value on a boundary falls in the bin above it: the declared closedness of a {@code by: field}
+         * table; quantile bins are right-closed at the sketch's boundaries (an inclusive-rank quantile is a value of
+         * the stream).
+         */
+        public boolean binsClosedLeft() {
+            return !isQuantile() && closedLeft;
         }
 
         /** Number of bins: the quantile bins, the edge intervals (edges + 1), or the thresholds. */
@@ -160,7 +177,13 @@ public final class EvaluationSpec implements Serializable {
         public double gridMin = 0.25;
         public double gridMax = 4d;
         public int gridSize = 76;
-        public double l2 = 1e-4;
+        /**
+         * L2 penalty on the average log likelihood (the screen transform's conditioning): 0 by default — a blend is
+         * a 2-3 parameter MLE whose estimate and z-values should not be shrunk (the shrinkage of a penalty on the
+         * average grows with the unit count: ≈ l2 · N · se² · θ); a positive value only when the columns are collinear
+         * or the selection split is separable (the unpenalised estimate then grows without bound).
+         */
+        public double l2 = 0d;
         public int maxIter = 10;
         public double tol = 1e-8;
 
@@ -261,6 +284,9 @@ public final class EvaluationSpec implements Serializable {
     public List<Derived> derived = new ArrayList<>();
     /** output.calibration: URI / path of the fitted-parameters JSON (null = not written) */
     public String calibrationUri;
+    /** rows: the splits whose scored rows go to the {@code rows} output (null = the output stays empty); {@code true} = the selection splits */
+    public List<String> rowSplits;
+    private boolean rowsSelection;
     /** sliceDiscovery (null = none) */
     public Discovery discovery;
     /** the categorical discovery dimensions carried in {@link EvaluationRow#dims}, in order */
@@ -344,6 +370,15 @@ public final class EvaluationSpec implements Serializable {
 
     public boolean hasFits() {
         return !fits.isEmpty();
+    }
+
+    /** Whether the scored rows of a split go to the rows output. */
+    public boolean outputsRows(final String split) {
+        return rowSplits != null && rowSplits.contains(split);
+    }
+
+    public boolean hasRows() {
+        return rowSplits != null && !rowSplits.isEmpty();
     }
 
     public boolean hasDiscovery() {
@@ -614,6 +649,8 @@ public final class EvaluationSpec implements Serializable {
                         t.thresholds = numbers(o, "thresholds", at + ".thresholds", errors);
                         if (t.thresholds == null || t.thresholds.length == 0) errors.add(at + ".thresholds is required for type edge (ratios p_model / p_baseline)");
                         else for (final double th : t.thresholds) if (!(th > 0)) errors.add(at + ".thresholds must be > 0");
+                        if (declared(o, "closed")) errors.add(at + ".closed applies to by: field only (an edge group holds the rows with q > threshold × p)");
+                        if (declared(o, "k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
                     } else {
                         t.by = string(o, "by");
                         if (t.by == null) t.by = BY_PREDICTION;
@@ -624,11 +661,24 @@ public final class EvaluationSpec implements Serializable {
                             t.edges = numbers(o, "edges", at + ".edges", errors);
                             if (t.edges == null || t.edges.length == 0) errors.add(at + ".edges is required for by: field (ascending bin boundaries)");
                             else for (int k = 1; k < t.edges.length; k++) if (!(t.edges[k] > t.edges[k - 1])) errors.add(at + ".edges must be strictly ascending");
+                            if (declared(o, "closed")) {
+                                // a non-string value reads as null: an error, not the default
+                                final String closed = string(o, "closed");
+                                if (closed == null || !CLOSED.contains(closed)) errors.add(at + ".closed '" + (closed != null ? closed : o.get("closed")) + "' is unknown (available: " + CLOSED + ")");
+                                t.closedLeft = !CLOSED_RIGHT.equals(closed);
+                            }
+                            if (declared(o, "k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
                         } else {
                             final Integer bins = integer(o, "bins");
                             t.bins = bins == null ? 10 : bins;
                             if (t.bins < 2 || t.bins > 1000) errors.add(at + ".bins must be in [2, 1000]");
                             if (o.has("edges")) errors.add(at + ".edges apply to by: field only (quantile bins otherwise)");
+                            if (declared(o, "closed")) errors.add(at + ".closed applies to by: field only (quantile bins are right-closed at the sketch's boundaries)");
+                            final Integer k = integer(o, "k");
+                            if (k != null) {
+                                t.k = k;
+                                if (k < 8 || k > 65535) errors.add(at + ".k must be in [8, 65535] (the KLL sketch parameter)");
+                            }
                         }
                     }
                     s.tables.add(t);
@@ -730,9 +780,31 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        // rows output: true = the selection splits (fixed by resolve), or the named splits
+        final JsonElement rows = p.get("rows");
+        if (rows != null && !rows.isJsonNull()) {
+            if (rows.isJsonPrimitive() && rows.getAsJsonPrimitive().isBoolean()) {
+                if (rows.getAsBoolean()) {
+                    s.rowsSelection = true;
+                    s.rowSplits = new ArrayList<>();
+                }
+            } else if (rows.isJsonObject()) {
+                // the helper names the key only: prefix its errors so they do not read as the top-level splits
+                final List<String> splitErrors = new ArrayList<>();
+                final List<String> names = strings(rows.getAsJsonObject(), "splits", splitErrors);
+                for (final String e : splitErrors) errors.add("rows." + e);
+                if (names.isEmpty()) errors.add("rows.splits must name the splits whose scored rows are output (or use rows: true for the selection splits)");
+                else s.rowSplits = names;
+            } else {
+                errors.add("rows must be true (the selection splits) or an object {splits: [<split names>]}");
+            }
+            if (s.rowSplits != null && s.rowId.isEmpty()) errors.add("rows output needs rowId: the fields that identify a row, so the rows can be joined back");
+        }
+
         final JsonObject canonical = p.deepCopy();
         canonical.remove("manifest");
         canonical.remove("output");
+        canonical.remove("rows");
         s.parametersHash = FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(canonical));
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return s;
@@ -762,8 +834,13 @@ public final class EvaluationSpec implements Serializable {
         }
     }
 
+    /** Whether a key carries a value (an explicit null reads as absent, as the lenient readers treat it). */
+    private static boolean declared(final JsonObject o, final String key) {
+        return o.has(key) && !o.get(key).isJsonNull();
+    }
+
     private static double[] numbers(final JsonObject o, final String key, final String at, final List<String> errors) {
-        if (!o.has(key) || o.get(key).isJsonNull()) return null;
+        if (!declared(o, key)) return null;
         if (!o.get(key).isJsonArray()) {
             errors.add(at + " must be a list of numbers");
             return null;
@@ -897,6 +974,18 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        // rows output: the selection splits, or the named ones
+        if (rowSplits != null) {
+            if (rowsSelection) {
+                // rebuilt, like every other resolved list, so a second resolve does not repeat the splits
+                rowSplits = new ArrayList<>();
+                for (final Split sp : splits) if (sp.isSelection()) rowSplits.add(sp.name);
+                if (rowSplits.isEmpty()) errors.add("rows: true selects the selection splits, and none is declared; name the splits with rows: {splits: [...]}");
+            } else {
+                for (final String name : rowSplits) if (split(name) == null) errors.add("rows.splits '" + name + "' is not a declared split (available: " + splitNames() + ")");
+            }
+        }
+
         // slice discovery: the splits' roles, the sets, the dimensions' types
         dimColumns = new ArrayList<>();
         if (discovery != null) {
@@ -921,6 +1010,15 @@ public final class EvaluationSpec implements Serializable {
             }
             if (!isGrouped() && "hitAt1".equals(discovery.metric)) {
                 errors.add("sliceDiscovery.metric hitAt1 needs family " + Family.GROUPED_MULTINOMIAL.id() + " (a binomial unit has no top-1 pick); use logScore or brier");
+            }
+            if (METRIC_UTILITY.equals(discovery.metric)) {
+                if (utilityField == null) {
+                    errors.add("sliceDiscovery.metric utility needs utility.field (the realised value of a positive row)");
+                } else if (discovery.sets.size() > 1) {
+                    // the utility describes the outcomes, not a set: one discovery, reported under the first compared set
+                    discovery.sets = new ArrayList<>(discovery.sets.subList(0, 1));
+                    notes.add("sliceDiscovery.metric utility does not depend on the prediction set: the discovery runs once, reported under " + names.get(1 + discovery.sets.get(0)));
+                }
             }
             final Set<String> seen = new HashSet<>();
             for (int i = 0; i < discovery.dimensions.size(); i++) {

@@ -90,14 +90,14 @@ public class EvaluationScorerTest {
 
     @Test
     public void testPoissonWeightsAreDeterministicAndMeanOne() {
-        final double[] a = EvaluationScorer.poissonWeights(7, "unit-1", 2000);
-        final double[] b = EvaluationScorer.poissonWeights(7, "unit-1", 2000);
+        final double[] a = MetricAccumulator.poissonWeights(7, "unit-1", 2000);
+        final double[] b = MetricAccumulator.poissonWeights(7, "unit-1", 2000);
         Assertions.assertArrayEquals(a, b);
         double sum = 0;
         for (final double w : a) sum += w;
         Assertions.assertEquals(1d, sum / a.length, 0.08);
-        Assertions.assertFalse(java.util.Arrays.equals(a, EvaluationScorer.poissonWeights(8, "unit-1", 2000)));
-        Assertions.assertFalse(java.util.Arrays.equals(a, EvaluationScorer.poissonWeights(7, "unit-2", 2000)));
+        Assertions.assertFalse(java.util.Arrays.equals(a, MetricAccumulator.poissonWeights(8, "unit-1", 2000)));
+        Assertions.assertFalse(java.util.Arrays.equals(a, MetricAccumulator.poissonWeights(7, "unit-2", 2000)));
     }
 
     @Test
@@ -196,6 +196,26 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(0, EvaluationReport.bin(1, new double[]{1, 2}));
         Assertions.assertEquals(1, EvaluationReport.bin(1.5, new double[]{1, 2}));
         Assertions.assertEquals(2, EvaluationReport.bin(3, new double[]{1, 2}));
+        // left-closed: an edge belongs to the bin above it
+        Assertions.assertEquals(0, EvaluationReport.bin(0.5, new double[]{1, 2}, true));
+        Assertions.assertEquals(1, EvaluationReport.bin(1, new double[]{1, 2}, true));
+        Assertions.assertEquals(2, EvaluationReport.bin(2, new double[]{1, 2}, true));
+        Assertions.assertEquals(2, EvaluationReport.bin(3, new double[]{1, 2}, true));
+        Assertions.assertEquals(1, EvaluationReport.bin(2, new double[]{1, 2}, false));
+        // a sketch declared at a larger k keeps it through the Combine's identity accumulator
+        final SketchAccumulator fine = new SketchAccumulator(4000);
+        for (int i = 1; i <= 1000; i++) fine.update(i);
+        final SketchAccumulator merged = new SketchAccumulator.Fn().mergeAccumulators(List.of(new SketchAccumulator(), fine));
+        Assertions.assertEquals(4000, merged.k());
+        Assertions.assertEquals(500d, merged.edges(2)[0], 1.0);
+        final SketchAccumulator added = new SketchAccumulator.Fn().addInput(new SketchAccumulator.Fn().createAccumulator(), fine);
+        Assertions.assertEquals(4000, added.k());
+        Assertions.assertNotSame(fine, added, "an input is copied, never adopted by reference");
+        Assertions.assertEquals(500d, added.edges(2)[0], 1.0);
+        // a quantile sketch may repeat a boundary: the count of edges below the value either way
+        Assertions.assertEquals(1, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, false));
+        Assertions.assertEquals(3, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, true));
+        Assertions.assertEquals(0, EvaluationReport.bin(1, new double[0], true));
         // Wilson: 30 of 100 → [0.2189, 0.3985]
         final double[] ci = EvaluationReport.wilson(30, 100);
         Assertions.assertEquals(0.2189, ci[0], 5e-4);
@@ -216,7 +236,7 @@ public class EvaluationScorerTest {
         final Map<String, double[]> bins = new HashMap<>();
         for (int i = 0; i < 3; i++) {
             final AlignedRow r = aligned.get(i);
-            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges)), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
+            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges, spec.tables.get(0).binsClosedLeft())), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
             if (r.predictions[0] > 1.0 * r.baseline) EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 1, 0), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
         }
         Assertions.assertArrayEquals(new double[]{1, 1, 0.6, 0.5, 3.0, 1}, bins.get(EvaluationReport.binKey("test", 1, 0, 2)), 1e-12);
@@ -391,6 +411,7 @@ public class EvaluationScorerTest {
                 final EvaluationScorer.Unit unit = scorer.prepare(rows, "g" + i);
                 final EvaluationScorer.Metrics m = scorer.score(unit);
                 Assertions.assertEquals(east ? Math.log(1.6) : Math.log(0.6), scorer.discoveryValue(m, 0, "excessLogScore"), 1e-12);
+                Assertions.assertTrue(Double.isNaN(scorer.discoveryValue(m, 0, "utility")));
                 Assertions.assertArrayEquals(new String[]{east ? "east" : "west", u < 5 ? "q0" : "q1"}, scorer.dimensionValues(unit, edges));
                 scorer.accumulate(unit, m, acc);
                 scorer.accumulateDiscovery(unit, m, edges, cells);
@@ -462,6 +483,33 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(2d / 3, (Double) record.get("rate"), 1e-12);
         Assertions.assertEquals(2d, (Double) record.get("utility"), 1e-12);
         Assertions.assertEquals(1d, (Double) record.get("positivesShare"), 1e-12);
+        // the unit's utility metric: (2 + 4) / 3 rows, the same under the baseline and A, with its interval; null in the pair
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(2d, m.utility, 1e-12);
+        Assertions.assertEquals(2d, (Double) scorer.unitRecords(unit, m).get(1).get("utility"), 1e-12);
+        final EvaluationSpec two = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 50, seed: 1}}");
+        final EvaluationScorer scorer2 = new EvaluationScorer(two);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        final EvaluationScorer.Unit u1 = scorer2.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 0.6, 2.0), row("test", "g1", 0, 0.5, null, 0.4, 0.4, 9.0)), "g1");
+        final EvaluationScorer.Unit u2 = scorer2.prepare(List.of(row("test", "g2", 0, 0.5, null, 0.6, 0.6, 3.0), row("test", "g2", 1, 0.5, null, 0.4, 0.4, 3.0)), "g2");
+        scorer2.accumulate(u1, scorer2.score(u1), acc);
+        scorer2.accumulate(u2, scorer2.score(u2), acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(two, acc).records();
+        // units: 2/2 = 1 and 3/2 = 1.5 → mean 1.25 under every set
+        Assertions.assertEquals(1.25, (Double) records.get(0).get("utility"), 1e-12);
+        Assertions.assertEquals(1.25, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertTrue((Double) records.get(1).get("utility_lo") <= 1.25 && 1.25 <= (Double) records.get(1).get("utility_hi"));
+        Assertions.assertEquals("B", records.get(3).get("pair"));
+        Assertions.assertNull(records.get(3).get("utility"));
+        Assertions.assertNull(records.get(3).get("utility_lo"));
+        // without a utility field the metric is null
+        final EvaluationSpec none = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: false}");
+        final EvaluationScorer scorer3 = new EvaluationScorer(none);
+        final Map<String, MetricAccumulator> acc3 = new HashMap<>();
+        final EvaluationScorer.Unit u3 = scorer3.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6), row("test", "g1", 0, 0.5, null, 0.4)), "g1");
+        scorer3.accumulate(u3, scorer3.score(u3), acc3);
+        Assertions.assertNull(EvaluationReport.build(none, acc3).records().get(1).get("utility"));
     }
 
     @Test
@@ -527,5 +575,173 @@ public class EvaluationScorerTest {
         final EvaluationSpec plain = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: {samples: 0}}");
         final String text = EvaluationReport.build(plain, new HashMap<>()).summary().get("notes").toString();
         Assertions.assertTrue(text.contains("split valid (selection) has no scored unit: nothing to report"), text);
+    }
+
+    @Test
+    public void testUtilityIgnoresTheLosingRowsPayout() {
+        // an infinite payout on a row that did not pay (u = 1/p with p = 0) is a zero return, not ∞·0 = NaN: the
+        // unit, the accumulated metric and the calibration bin stay finite
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 20, seed: 1}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 3.0), row("test", "g1", 0, 0.5, null, 0.4, Double.POSITIVE_INFINITY)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(1.5, m.utility, 1e-12);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        scorer.accumulate(unit, m, acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(spec, acc).records();
+        Assertions.assertEquals(1.5, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertNotNull(records.get(1).get("utility_lo"));
+        final double[] v = new double[EvaluationReport.BIN_SLOTS];
+        for (final AlignedRow r : scorer.aligned(unit)) EvaluationReport.addBin(v, r, r.predictions[0]);
+        Assertions.assertEquals(3d, v[EvaluationReport.BIN_UTILITY], 1e-12);
+    }
+
+    @Test
+    public void testSliceDiscoveryOnUtility() {
+        // twenty units per split, the positive row pays 4 in the east and 1 in the west: the east returns 2 per row,
+        // the west 0.5; both slices pass and are confirmed, reported once (the metric does not depend on the set)
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + SPLITS
+                + ", utility: u, bootstrap: false, sliceDiscovery: {dimensions: [region], minSupport: 4, discoverOn: valid, confirmOn: test, metric: utility}}");
+        Assertions.assertEquals(List.of(0), spec.discovery.sets);
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        final Map<String, double[]> cells = new HashMap<>();
+        for (final String split : List.of("valid", "test")) {
+            for (int i = 0; i < 20; i++) {
+                final boolean east = i < 10;
+                final double pay = east ? 4.0 : 1.0;
+                final List<EvaluationRow> rows = List.of(
+                        new EvaluationRow(split, "g" + i, "a", 1L, null, 1, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{0.6, 0.6, pay}),
+                        new EvaluationRow(split, "g" + i, "b", 1L, null, 0, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{0.4, 0.4, 7.0}));
+                final EvaluationScorer.Unit unit = scorer.prepare(rows, "g" + i);
+                Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+                final EvaluationScorer.Metrics m = scorer.score(unit);
+                Assertions.assertEquals(east ? 2.0 : 0.5, scorer.discoveryValue(m, 0, "utility"), 1e-12);
+                scorer.accumulate(unit, m, acc);
+                scorer.accumulateDiscovery(unit, m, Map.of(), cells);
+            }
+        }
+        for (final Map.Entry<String, double[]> e : cells.entrySet()) {
+            final MetricAccumulator a = new MetricAccumulator();
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            System.arraycopy(e.getValue(), 0, slots, 0, 3);
+            a.add(slots);
+            acc.put(EvaluationReport.DISCOVERY_PREFIX + e.getKey(), a);
+        }
+        final EvaluationReport.Result result = EvaluationReport.build(spec, acc);
+        Assertions.assertEquals(2, result.slices().size(), result.slices().toString());
+        for (final Map<String, Object> r : result.slices()) {
+            Assertions.assertEquals("A", r.get("prediction"));
+            Assertions.assertEquals("utility", r.get("metric"));
+            Assertions.assertEquals(Boolean.TRUE, r.get("confirmed"));
+            final boolean isEast = ((List<?>) r.get("values")).get(0).equals("east");
+            Assertions.assertEquals(isEast ? 2.0 : 0.5, (Double) r.get("mean_discover"), 1e-12);
+        }
+        Assertions.assertEquals(1.25, (Double) result.records().get(1).get("utility"), 1e-12);
+        Assertions.assertTrue(((List<?>) result.summary().get("notes")).toString().contains("runs once"));
+    }
+
+    @Test
+    public void testRowRecordsCarryEveryCompareSetsMean() {
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, rowId: [g, region], predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: u, bootstrap: false, rows: true, calibration: [{type: temperature, fitOn: valid, of: [A], grid: [0.5, 2, 4]}]}");
+        Assertions.assertEquals(List.of("valid"), spec.rowSplits);
+        Assertions.assertTrue(spec.outputsRows("valid"));
+        Assertions.assertFalse(spec.outputsRows("test"));
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(
+                new EvaluationRow("valid", "g1", "r1", 1_700_000_000_000L, null, 1, 0.5, 1d, new String[0], new String[0], new double[]{0.6, 3.0}, new String[]{"g1", "east"}),
+                new EvaluationRow("valid", "g1", "r2", 1_700_000_000_000L, null, 0, 0.5, 1d, new String[0], new String[0], new double[]{0.4, Double.NaN}, new String[]{"g1", "west"})), "g1");
+        final FitResults fits = new FitResults();
+        fits.parameters.put("A@T", new double[]{2.0});   // q ∝ q^(1/2): 0.6^0.5 / (0.6^0.5 + 0.4^0.5)
+        scorer.derive(unit, fits);
+        final List<Map<String, Object>> rows = scorer.rowRecords(unit);
+        Assertions.assertEquals(2, rows.size());
+        final Map<String, Object> first = rows.get(0);
+        Assertions.assertEquals("valid", first.get("split"));
+        Assertions.assertEquals("g1", first.get("unit"));
+        Assertions.assertEquals(List.of(Map.of("field", "g", "value", "g1"), Map.of("field", "region", "value", "east")), first.get("rowId"));
+        Assertions.assertEquals(1_700_000_000_000_000L, first.get("time"));
+        Assertions.assertEquals(1d, first.get("label"));
+        Assertions.assertEquals(1d, first.get("labelShare"));
+        Assertions.assertEquals(0.5, first.get("baseline"));
+        Assertions.assertEquals(3.0, first.get("utility"));
+        final List<?> predictions = (List<?>) first.get("predictions");
+        Assertions.assertEquals(2, predictions.size());
+        Assertions.assertEquals(Map.of("prediction", "A", "p", 0.6), predictions.get(0));
+        final Map<?, ?> tempered = (Map<?, ?>) predictions.get(1);
+        Assertions.assertEquals("A@T", tempered.get("prediction"));
+        Assertions.assertEquals(Math.sqrt(0.6) / (Math.sqrt(0.6) + Math.sqrt(0.4)), (Double) tempered.get("p"), 1e-12);
+        Assertions.assertNull(rows.get(1).get("utility"));
+        Assertions.assertEquals(0d, rows.get(1).get("label"));
+    }
+
+    @Test
+    public void testLazyReplicateExpansionMatchesEagerAndSurvivesTheCoder() throws Exception {
+        final long seed = 7;
+        final int samples = 50;
+        final MetricAccumulator eager = new MetricAccumulator();
+        final MetricAccumulator lazy = new MetricAccumulator();
+        for (int u = 0; u < 40; u++) {
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            slots[MetricAccumulator.N_UNITS] = 1;
+            slots[MetricAccumulator.W] = 1;
+            slots[MetricAccumulator.LOG] = -0.1 * u;
+            slots[MetricAccumulator.UTILITY] = u;
+            eager.add(slots);
+            eager.addReplicates(slots, MetricAccumulator.poissonWeights(seed, "u" + u, samples));
+            lazy.contribute(slots, "u" + u);
+        }
+        Assertions.assertEquals(40, lazy.pending());
+        Assertions.assertEquals(0, lazy.samples());
+        // a pending accumulator round-trips through the coder with its contributions
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        MetricAccumulator.CODER.encode(lazy, bytes);
+        final MetricAccumulator decoded = MetricAccumulator.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray()));
+        Assertions.assertEquals(40, decoded.pending());
+        Assertions.assertTrue(bytes.size() < 40 * 120, "pending form: " + bytes.size() + " bytes");
+        decoded.expand(seed, samples);
+        Assertions.assertEquals(0, decoded.pending());
+        Assertions.assertArrayEquals(eager.getTotal(), decoded.getTotal(), 1e-12);
+        Assertions.assertArrayEquals(eager.getBoot(), decoded.getBoot(), 1e-9);
+        // the Combine: one-contribution inputs merge unexpanded up to the pending limit, then expand; extraction expands
+        final MetricAccumulator.Fn fn = new MetricAccumulator.Fn(seed, samples);
+        final int limit = MetricAccumulator.Fn.pendingLimit(samples);
+        Assertions.assertTrue(limit >= 1 && limit <= MetricAccumulator.Fn.PENDING_MAX && limit <= samples / 2);
+        MetricAccumulator acc = fn.createAccumulator();
+        final List<MetricAccumulator> ones = new java.util.ArrayList<>();
+        for (int u = 0; u < 40; u++) {
+            final MetricAccumulator one = new MetricAccumulator();
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            slots[MetricAccumulator.N_UNITS] = 1;
+            slots[MetricAccumulator.W] = 1;
+            slots[MetricAccumulator.LOG] = -0.1 * u;
+            slots[MetricAccumulator.UTILITY] = u;
+            one.contribute(slots, "u" + u);
+            ones.add(one);
+            acc = fn.addInput(acc, one);
+            Assertions.assertTrue(acc.pending() <= limit);
+        }
+        Assertions.assertTrue(acc.samples() > 0);   // expanded once past the bound
+        Assertions.assertTrue(acc.pending() > 0);   // and pending again since
+        // an expanded accumulator with pending contributions round-trips through the coder
+        final java.io.ByteArrayOutputStream mixed = new java.io.ByteArrayOutputStream();
+        MetricAccumulator.CODER.encode(acc, mixed);
+        final MetricAccumulator mixedDecoded = MetricAccumulator.CODER.decode(new java.io.ByteArrayInputStream(mixed.toByteArray()));
+        Assertions.assertEquals(acc.pending(), mixedDecoded.pending());
+        Assertions.assertArrayEquals(acc.getBoot(), mixedDecoded.getBoot(), 0d);
+        final MetricAccumulator out = fn.extractOutput(fn.mergeAccumulators(List.of(mixedDecoded, fn.createAccumulator())));
+        Assertions.assertEquals(0, out.pending());
+        Assertions.assertArrayEquals(eager.getBoot(), out.getBoot(), 1e-9);
+        // mergeAccumulators bounds the pending count too
+        final MetricAccumulator merged = fn.mergeAccumulators(ones);
+        Assertions.assertTrue(merged.pending() <= limit);
+        Assertions.assertArrayEquals(eager.getBoot(), fn.extractOutput(merged).getBoot(), 1e-9);
+        // without bootstrap a contribution carries no key and nothing expands
+        final MetricAccumulator none = new MetricAccumulator();
+        none.contribute(new double[MetricAccumulator.SLOTS], null);
+        Assertions.assertEquals(0, none.pending());
     }
 }

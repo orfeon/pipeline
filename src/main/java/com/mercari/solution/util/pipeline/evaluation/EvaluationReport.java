@@ -21,7 +21,9 @@ public final class EvaluationReport {
     private EvaluationReport() {}
 
     private static final String SEP = MetricAccumulator.SEP;
-    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
+    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier", "utility");
+    /** the metrics that describe the outcomes, not a prediction set: the same under every set, no pair difference */
+    public static final List<String> SET_INDEPENDENT = List.of("utility");
     static final double Z95 = 1.959963984540054;
 
     /** Result of {@link #build}: the metrics records, the slice discovery records and the summary, as output-schema maps. */
@@ -44,6 +46,7 @@ public final class EvaluationReport {
             case "excessLogScore" -> sums[MetricAccumulator.LOG] / w - baselineLogScore(spec, sums);
             case "hitAt1" -> sums[MetricAccumulator.HIT] / w;
             case "brier" -> sums[MetricAccumulator.BRIER] / w;
+            case "utility" -> spec.hasUtility() ? sums[MetricAccumulator.UTILITY] / w : Double.NaN;
             default -> throw new IllegalArgumentException("unknown metric " + name);
         };
     }
@@ -56,7 +59,7 @@ public final class EvaluationReport {
         return mean * Math.log(mean) + (1 - mean) * Math.log(1 - mean);
     }
 
-    /** The replicate's sums in the slot layout (W .. BRIER from the replicate, the counts from the total). */
+    /** The replicate's sums in the slot layout (W .. UTILITY from the replicate; the counts stay 0). */
     static double[] replicate(final MetricAccumulator acc, final int b) {
         final double[] sums = new double[MetricAccumulator.SLOTS];
         final double[] boot = acc.getBoot();
@@ -82,6 +85,8 @@ public final class EvaluationReport {
 
     /** @param fits the calibration fit results (null without fits): the summary's {@code fits} records */
     public static Result build(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
+        // contributions that never went through the Combine (the pure path) expand here; a no-op after it
+        for (final MetricAccumulator acc : accumulators.values()) acc.expand(spec.bootstrapSeed, spec.bootstrapSamples);
         final List<String> names = spec.predictionNames();
         final int k = spec.setCount();
         final Map<String, String> roles = spec.roles();
@@ -167,6 +172,12 @@ public final class EvaluationReport {
                     r.put("value", sliceValue);
                     putCounts(r, byPrediction.get(a));
                     for (final String m : METRICS) {
+                        if (SET_INDEPENDENT.contains(m)) {
+                            r.put(m, null);
+                            r.put(m + "_lo", null);
+                            r.put(m + "_hi", null);
+                            continue;
+                        }
                         final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
                         final double[] diff = new double[va.length];
                         for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
@@ -453,7 +464,15 @@ public final class EvaluationReport {
         v[BIN_SHARE] += row.share;
         v[BIN_Q] += q;
         v[BIN_P] += row.baseline;
-        if (!Double.isNaN(row.utility)) v[BIN_UTILITY] += row.utility * row.label;
+        v[BIN_UTILITY] += payout(row.utility, row.label);
+    }
+
+    /**
+     * A row's realised return u·y (y as declared): 0 for a row that did not pay (y = 0) whatever its utility — an
+     * infinite payout on a losing row would otherwise turn the sum into NaN (∞·0) — and 0 for a null utility.
+     */
+    static double payout(final double utility, final double label) {
+        return label == 0d || Double.isNaN(utility) ? 0d : utility * label;
     }
 
     public static String tableKey(final String split, final int prediction, final int table) {
@@ -485,11 +504,25 @@ public final class EvaluationReport {
         };
     }
 
-    /** The bin of a value against ascending interior edges: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
+    /** The bin of a value against ascending interior edges, right-closed: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
     public static int bin(final double value, final double[] edges) {
-        int b = 0;
-        while (b < edges.length && value > edges[b]) b++;
-        return b;
+        return bin(value, edges, false);
+    }
+
+    /**
+     * The bin of a value against ascending interior edges: left-closed {@code [edges[i-1], edges[i])} (an edge
+     * belongs to the bin above it) or right-closed {@code (edges[i-1], edges[i]]}; the first bin is open below,
+     * the last open above. A binary search for the count of edges below the value (non-decreasing edges: a
+     * quantile sketch may repeat a boundary); NaN falls in the first bin.
+     */
+    public static int bin(final double value, final double[] edges, final boolean closedLeft) {
+        int lo = 0, hi = edges.length;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (closedLeft ? value >= edges[mid] : value > edges[mid]) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     /** Wilson 95% interval of a rate. */
@@ -611,11 +644,16 @@ public final class EvaluationReport {
                 .build();
     }
 
-    public static Schema unitsSchema() {
-        final Schema slice = Schema.builder()
+    /** The {@code {field, value}} struct of the units' slices and the rows' rowId. */
+    private static Schema fieldValueSchema() {
+        return Schema.builder()
                 .withField("field", Schema.FieldType.STRING)
                 .withField("value", Schema.FieldType.STRING)
                 .build();
+    }
+
+    public static Schema unitsSchema() {
+        final Schema slice = fieldValueSchema();
         return Schema.builder()
                 .withField("split", Schema.FieldType.STRING)
                 .withField("unit", Schema.FieldType.STRING)
@@ -628,7 +666,27 @@ public final class EvaluationReport {
                 .withField("excessLogScore", Schema.FieldType.FLOAT64)
                 .withField("hitAt1", Schema.FieldType.FLOAT64)
                 .withField("brier", Schema.FieldType.FLOAT64)
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.element(slice)))
+                .build();
+    }
+
+    public static Schema rowsSchema() {
+        final Schema id = fieldValueSchema();
+        final Schema prediction = Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("p", Schema.FieldType.FLOAT64)
+                .build();
+        return Schema.builder()
+                .withField("split", Schema.FieldType.STRING)
+                .withField("unit", Schema.FieldType.STRING)
+                .withField("rowId", Schema.FieldType.array(Schema.FieldType.element(id)))
+                .withField("time", Schema.FieldType.TIMESTAMP)
+                .withField("label", Schema.FieldType.FLOAT64)
+                .withField("labelShare", Schema.FieldType.FLOAT64)
+                .withField("baseline", Schema.FieldType.FLOAT64)
+                .withField("predictions", Schema.FieldType.array(Schema.FieldType.element(prediction)))
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .build();
     }
 
@@ -774,6 +832,7 @@ public final class EvaluationReport {
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("bootstrap=" + spec.bootstrapSamples + " seed=" + spec.bootstrapSeed + (spec.bootstrapUnit != null ? " unit=" + spec.bootstrapUnit : ""));
         if (!spec.tables.isEmpty()) parts.add("calibration=" + spec.tables.size() + " tables" + (spec.hasQuantileTables() ? " (+1 sketch pass)" : ""));
+        if (spec.hasRows()) parts.add("rows=" + spec.rowSplits);
         if (spec.hasFits()) {
             final List<String> fits = new ArrayList<>();
             for (int i = 0; i < spec.fits.size(); i++) {
