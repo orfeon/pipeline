@@ -251,7 +251,9 @@ H⊥_p = b_p − 2 γ'a_p + γ'G_pγ        (Σ_p S⊥_p = S⊥, Σ_p H⊥_p = H
 ```
 
 so `partial_period_z` decomposes the partial statistic by period and `partial_periods_agree` counts the
-buckets whose S⊥_p has the sign of S⊥. The per-period Gram costs periods × k² doubles in one accumulator, so
+buckets whose S⊥_p has the sign of S⊥. As for the window (a column the marginal test cannot score has no
+partial), a bucket whose marginal slice is degenerate — no observed or within-unit variation of x — has no
+partial slice: its S⊥_p / H⊥_p would be the fit's own −γ'g_p / γ'G_pγ, not the candidate's. The per-period Gram costs periods × k² doubles in one accumulator, so
 it is carried up to k = 100; beyond, γ'G_pγ is taken as the window's γ'Gγ times the bucket's share of the
 unit mass (S⊥_p and the sign stay exact, H⊥_p is approximate, the sums still match) and a note says so.
 

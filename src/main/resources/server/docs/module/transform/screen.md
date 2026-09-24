@@ -106,7 +106,8 @@ model and reads the score test of what is left:
 - `r2_F = 1 − x⊥'Wx⊥ / x'Wx` — how much of the candidate F already explains (1 = fully redundant);
 - `partial_S`, `partial_H`, `partial_chi2`, `partial_z`, `partial_gain`, `partial_pValue` — the score test of x⊥;
 - with `periods`, `partial_period_z` / `partial_periods_agree` / `partial_n_periods` — the same test sliced by
-  period with the window's orthogonalisation (the slices add up to the window's partial S and H; the per-period
+  period with the window's orthogonalisation (the slices add up to the window's partial S and H; a period the
+  marginal test cannot score — no observed or within-unit variation of the candidate — has no partial slice either; the per-period
   information is exact up to 100 conditioning columns and, beyond, the window's Gram term shared out by the
   period's unit mass — a note says so; the per-period score and sign are always exact).
 
@@ -221,7 +222,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -376,7 +377,7 @@ transforms:
   "version": 1,
   "columns": ["f_extra", "f_recent_bids"],
   "test": "partial",
-  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods", "minPeriodsAgree": 0.67,
+  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66,
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
@@ -414,7 +415,8 @@ transforms:
   "extremeness" effect; `rank` catches monotone non-linear effects and is robust to outliers.
 - `periods_agree` far below `n_periods` means an unstable effect: look at `period_z` for a decay over time. With
   conditioning read `partial_periods_agree` / `partial_period_z` (the test that decided `passed`); an operating
-  rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.67}`, so the pass list
+  rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.66}` (not 0.67: the
+  share is compared as `agree ≥ share × n_periods`, and 2 of 3 is 0.667 < 0.67), so the pass list
   applies it too.
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome.
