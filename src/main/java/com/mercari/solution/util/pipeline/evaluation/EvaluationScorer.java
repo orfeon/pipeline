@@ -45,12 +45,15 @@ public final class EvaluationScorer implements Serializable {
      * row, as the unit's time is): a unit spanning two periods is not a row-level slice
      */
     private final boolean[] unitPeriodSlices;
+    /** a column declares {@code invalid: dropRow}: the rows it rejects leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
         this.sets = spec.setCount();
+        this.dropsRows = spec.dropsRows();
         this.unitPeriodSlices = new boolean[spec.slices.size()];
         for (int s = 0; s < unitPeriodSlices.length; s++) {
             final EvaluationSpec.Slice sl = spec.slices.get(s);
@@ -80,6 +83,11 @@ public final class EvaluationScorer implements Serializable {
         /** rows whose identity repeats an earlier row's (the same row twice in the unit, at any time) */
         public final int duplicates;
         /**
+         * rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}, except on a
+         * unit that lost every row: skipped, its rows are the dropped ones)
+         */
+        public final int dropped;
+        /**
          * per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is
          * used); a period bucket of the time field never varies (it is the unit's), a dimension only on the discovery splits
          */
@@ -87,7 +95,7 @@ public final class EvaluationScorer implements Serializable {
         public final boolean[] dimensionVaries;
 
         Unit(final List<EvaluationRow> rows, final String key, final Skip skip, final double[][] means, final double[] y, final double[] w, final double unitWeight,
-             final int duplicates, final boolean[] sliceVaries, final boolean[] dimensionVaries) {
+             final int duplicates, final int dropped, final boolean[] sliceVaries, final boolean[] dimensionVaries) {
             this.rows = rows;
             this.key = key;
             this.split = rows.get(0).split;
@@ -97,6 +105,7 @@ public final class EvaluationScorer implements Serializable {
             this.w = w;
             this.unitWeight = unitWeight;
             this.duplicates = duplicates;
+            this.dropped = dropped;
             this.sliceVaries = sliceVaries;
             this.dimensionVaries = dimensionVaries;
         }
@@ -140,9 +149,37 @@ public final class EvaluationScorer implements Serializable {
         }
     }
 
+    /**
+     * Sorts the rows by (time, identity), removes the rows a column declared {@code invalid: dropRow} rejects
+     * (the common row set: every set is compared on the remaining rows), derives the baseline and every set's
+     * means, the labels and the weights; {@code skip} says why the unit cannot be scored — an invalid value in a
+     * column that keeps its rows (the common unit set), no positive label among the remaining rows.
+     */
     public Unit prepare(final List<EvaluationRow> input, final String unitKey) {
-        final List<EvaluationRow> rows = new ArrayList<>(input);
-        rows.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
+        final List<EvaluationRow> sorted = new ArrayList<>(input);
+        sorted.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
+        final List<EvaluationRow> rows;
+        int dropped = 0;
+        if (dropsRows) {
+            rows = new ArrayList<>(sorted.size());
+            Skip emptied = Skip.NONE;
+            for (final EvaluationRow r : sorted) {
+                final Skip reason = dropReason(r);
+                if (reason == Skip.NONE) rows.add(r);
+                else {
+                    dropped++;
+                    if (emptied == Skip.NONE) emptied = reason;
+                }
+            }
+            if (rows.isEmpty()) {
+                // every row dropped: nothing to score; reported under the reason of the first row
+                final EvaluationRow first = sorted.get(0);
+                return new Unit(sorted, unitKey, emptied, new double[1 + sets][sorted.size()], null, null, 0, 0, dropped,
+                        new boolean[first.slices.length], new boolean[spec.hasDiscovery() ? spec.discovery.dimensions.size() : 0]);
+            }
+        } else {
+            rows = sorted;
+        }
         final int n = rows.size();
         // the unit's integrity: the same row twice, and a slice / dimension the rows disagree on (a group-level
         // attribute by contract; the first row's value is used)
@@ -182,7 +219,7 @@ public final class EvaluationScorer implements Serializable {
             final double[] baseline = new double[n];
             for (int i = 0; i < n; i++) baseline[i] = rows.get(i).baseline;
             if (Baselines.means(family, spec.baselineForm, baseline, means[0]) != Baselines.Skip.NONE) {
-                return new Unit(rows, unitKey, Skip.INVALID_BASELINE, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
+                return new Unit(rows, unitKey, Skip.INVALID_BASELINE, means, null, null, 0, duplicates, dropped, sliceVaries, dimensionVaries);
             }
         } else if (family.isGrouped()) {
             Arrays.fill(means[0], 1d / n);
@@ -193,12 +230,12 @@ public final class EvaluationScorer implements Serializable {
         for (int j = 0; j < k; j++) {
             final EvaluationSpec.Prediction d = spec.predictions.get(j);
             if (d.isScore()) {
-                if (!softmax(rows, d, means[1 + j])) return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
+                if (!softmax(rows, d, means[1 + j])) return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, dropped, sliceVaries, dimensionVaries);
             } else {
                 final double[] values = new double[n];
                 for (int i = 0; i < n; i++) values[i] = rows.get(i).x[d.offset];
                 if (Baselines.means(family, d.form, values, means[1 + j]) != Baselines.Skip.NONE) {
-                    return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, sliceVaries, dimensionVaries);
+                    return new Unit(rows, unitKey, Skip.INVALID_PREDICTION, means, null, null, 0, duplicates, dropped, sliceVaries, dimensionVaries);
                 }
             }
         }
@@ -206,7 +243,7 @@ public final class EvaluationScorer implements Serializable {
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
         if (Baselines.normalizeLabels(family, spec.normalizeTies, y) != Baselines.Skip.NONE) {
-            return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, means, y, null, 0, duplicates, sliceVaries, dimensionVaries);
+            return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, means, y, null, 0, duplicates, dropped, sliceVaries, dimensionVaries);
         }
         final double[] w = new double[n];
         double wsum = 0;
@@ -214,7 +251,33 @@ public final class EvaluationScorer implements Serializable {
             w[i] = rows.get(i).weight;
             wsum += w[i];
         }
-        return new Unit(rows, unitKey, Skip.NONE, means, y, w, wsum / n, duplicates, sliceVaries, dimensionVaries);
+        return new Unit(rows, unitKey, Skip.NONE, means, y, w, wsum / n, duplicates, dropped, sliceVaries, dimensionVaries);
+    }
+
+    /**
+     * Why a row leaves its unit before scoring: the first column declared {@code invalid: dropRow} whose value the
+     * row fails ({@link Baselines#validRow} for the baseline and a probability set; a finite score and a non-null
+     * offset below +∞, non-negative on the prob scale, for a score set — the values {@link #softmax} cannot use), {@link Skip#NONE}
+     * when every dropping column accepts it.
+     */
+    private Skip dropReason(final EvaluationRow r) {
+        if (spec.baselineDropsRows() && !Baselines.validRow(spec.baselineForm, r.baseline)) return Skip.INVALID_BASELINE;
+        for (final EvaluationSpec.Prediction d : spec.predictions) {
+            if (d.dropsRows() && !validValue(r, d)) return Skip.INVALID_PREDICTION;
+        }
+        return Skip.NONE;
+    }
+
+    /** Whether a row's value(s) of a prediction set are usable (the per-row conditions of {@link #softmax} / {@link Baselines#means}). */
+    private static boolean validValue(final EvaluationRow r, final EvaluationSpec.Prediction d) {
+        final double[] x = r.x;
+        if (!d.isScore()) return Baselines.validRow(d.form, x[d.offset]);
+        if (!Double.isFinite(x[d.offset])) return false;
+        if (d.offsetField == null) return true;
+        final double offset = x[d.offset + 1];
+        // NaN, and +∞ on either scale (η = +∞ turns the whole unit's softmax into NaN)
+        if (Double.isNaN(offset) || offset == Double.POSITIVE_INFINITY) return false;
+        return EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale) || offset >= 0;
     }
 
     /**
@@ -532,6 +595,7 @@ public final class EvaluationScorer implements Serializable {
         slots[MetricAccumulator.UNITS] = 1;
         slots[MetricAccumulator.ROWS] = n;
         slots[MetricAccumulator.ROWS_DUPLICATE] = unit.duplicates;
+        slots[MetricAccumulator.ROWS_DROPPED] = unit.dropped;
         book.add(slots);
         for (final EvaluationRow r : unit.rows) if (r.time != EvaluationRow.NO_TIME) book.time(r.time);
         integrity(unit, into);
@@ -659,12 +723,16 @@ public final class EvaluationScorer implements Serializable {
         }
     }
 
-    /** Counts a skipped unit in its split's bookkeeping. */
+    /** Counts a skipped unit in its split's bookkeeping (by reason), with the rows it dropped and its duplicates. */
     public void skipped(final Unit unit, final Map<String, MetricAccumulator> into) {
         final MetricAccumulator book = into.computeIfAbsent(MetricAccumulator.SPLIT_KEY_PREFIX + unit.split, key -> new MetricAccumulator());
         final double[] slots = new double[MetricAccumulator.SLOTS];
-        slots[MetricAccumulator.UNITS_SKIPPED] = family.isGrouped() ? 1 : unit.size();
+        final double units = family.isGrouped() ? 1 : unit.size();
+        slots[MetricAccumulator.UNITS_SKIPPED] = units;
+        if (unit.skip == Skip.INVALID_BASELINE) slots[MetricAccumulator.UNITS_SKIPPED_BASELINE] = units;
+        else if (unit.skip == Skip.INVALID_PREDICTION) slots[MetricAccumulator.UNITS_SKIPPED_PREDICTION] = units;
         slots[MetricAccumulator.ROWS_DUPLICATE] = unit.duplicates;
+        slots[MetricAccumulator.ROWS_DROPPED] = unit.dropped;
         book.add(slots);
         integrity(unit, into);
     }

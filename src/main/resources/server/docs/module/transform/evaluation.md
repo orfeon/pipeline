@@ -47,7 +47,28 @@ weighted means over the units of a key (split × prediction set × slice value);
 `binomial` and the row mean of the unit for `groupedMultinomial`.
 
 **Common unit set.** A unit with a null / invalid value in any prediction set or in the baseline is skipped
-whole (`nUnitsSkipped`): every prediction set is compared on the same units.
+whole (`nUnitsSkipped`): every prediction set is compared on the same units. What is invalid depends on the
+form: `prob` accepts 0 (a row of share 0), `inverseShare` and `rate` reject a null, 0 or negative value, so
+under `inverseShare` a withdrawn candidate carrying a null or 0 odds / price silently removes its whole group.
+The summary counts the skips by reason (`nUnitsSkippedInvalidBaseline`, `nUnitsSkippedInvalidPrediction`) and
+notes a split whose skipped share passes 1%.
+
+**`invalid: dropRow`.** The baseline and every prediction set accept `invalid: skipUnit` (the default) or
+`invalid: dropRow`: the rows whose value the column rejects leave the unit before anything is scored, and the
+shares are taken over the remaining rows (the common *row* set: every set is compared on the same rows). A
+unit whose positive row was dropped is skipped for no positive label; a unit with no row left is skipped as
+invalid. Dropped rows do not appear in the calibration tables, the rows output or a split's `nRows` (the
+summary's `nRows` still counts them as rows read); they are counted as `nRowsDropped` and noted. Right for a withdrawal (a scratched runner, a delisted item) whose
+row should not exist; wrong for a value that is missing by accident, where the unit skip is the safer report.
+Under `binomial` a row is its own unit, so both policies leave out the same rows; `dropRow` also counts
+each of them in `nRowsDropped`.
+
+```yaml
+baseline: {field: odds_final, form: inverseShare, invalid: dropRow}
+predictions:
+  - {name: candidate, prob: p_candidate}
+  - {name: final, field: odds_final, form: inverseShare, invalid: dropRow}
+```
 
 **Prior mode.** Without `baseline` the reference is the prior: the uniform share within the group, or the
 split's label mean for `binomial`. Δ then reads as the skill over the prior.
@@ -218,7 +239,7 @@ The row-level version — which rows to take — is a `binomial` evaluation whos
 | `family` | `groupedMultinomial` (default; mutually exclusive samples within a group) or `binomial` (independent binary rows). |
 | `group` | the group key; required for `groupedMultinomial`. |
 | `label` | the outcome: a field, or `{field}` / `{expr, normalizeTies}`. Grouped labels are normalised to sum 1 (a tie shares the group's one likelihood term). |
-| `baseline` | the reference prediction: a field or `{field, form}` (`prob` default, `logProb`, `inverseShare` = 1 / x made a share within the group, for odds and prices). Omitted: the prior. |
+| `baseline` | the reference prediction: a field or `{field, form, invalid}` (`prob` default, `logProb`, `inverseShare` = 1 / x made a share within the group, for odds and prices; `invalid`: `skipUnit` default / `dropRow`). Omitted: the prior. |
 | `predictions` | the prediction sets (at least one). |
 | `time` | the time field the split ranges and period buckets read. Defaults to the feature transform's time role. |
 | `splits` | the time splits with their roles (required). |
@@ -251,8 +272,8 @@ the time partition.
 | family | optional | String | `groupedMultinomial` (default) or `binomial`. |
 | group | optional | String | Group key field. Required for `groupedMultinomial`. |
 | label | required | String or Object | Field name, or `{field}` / `{expr, normalizeTies}`. `expr` is a [Lucene expression](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) over numeric fields; `normalizeTies` (default true). |
-| baseline | optional | String or Object | Field name (form `prob`), or `{field, form}` with `prob` / `logProb` / `inverseShare`. Omitted: the prior. |
-| predictions | required | Array<Object\> | `{name, prob}`, `{name, field, form}` or `{name, score, offset, offsetScale, temperature}` (see [Prediction sets](#prediction-sets)). Names are unique; `baseline` is reserved. |
+| baseline | optional | String or Object | Field name (form `prob`), or `{field, form, invalid}` with `prob` / `logProb` / `inverseShare` and `invalid`: `skipUnit` (default, an invalid value skips the unit) / `dropRow` (the row leaves the unit). Omitted: the prior. |
+| predictions | required | Array<Object\> | `{name, prob}`, `{name, field, form}` or `{name, score, offset, offsetScale, temperature}`, each with an optional `invalid` (`skipUnit` / `dropRow`, see [What it computes](#what-it-computes)). Names are unique; `baseline` is reserved. |
 | splits | required | Object | `{<name>: {from, to, role}}` on `time.field`, or `{field, roles: {<value>: role}}`; `role` is `selection` or `report` (at least one `report`). |
 | time | optional | String or Object | Field name or `{field}`. Required with time-range splits (or a feature time role). |
 | weight | optional | String or Object | Weight field. |
@@ -333,10 +354,12 @@ output — the report split's rows are for reporting, not for building the next 
 ### Summary record
 
 `family`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `timeField`, `splitField`, `predictions`,
-`splits` (ARRAY<STRUCT<name, role, from, to, minTime, maxTime, nUnits, nUnitsSkipped, nRows, nRowsDuplicate\>\> —
-the declared and observed range of each split; `nRowsDuplicate` counts the rows whose `rowId` repeats within a
-unit), `nRows`, `nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
-(in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value),
+`splits` (ARRAY<STRUCT<name, role, from, to, minTime, maxTime, nUnits, nUnitsSkipped, nUnitsSkippedInvalidBaseline,
+nUnitsSkippedInvalidPrediction, nRows, nRowsDuplicate, nRowsDropped\>\> — the declared and observed range of each
+split; the skipped units by reason (the rest had no positive label); `nRowsDuplicate` counts the rows whose
+`rowId` repeats within a unit, `nRowsDropped` the rows an `invalid: dropRow` column removed), `nRows`,
+`nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
+(in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value), `nRowsDropped`,
 `bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `fits` (ARRAY<STRUCT<prediction,
 derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, nUnits, logScore,
 logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>), `discovery`
@@ -533,5 +556,9 @@ parameters:
   pooled per row instead). It covers the scored units only: a group without a positive row, and a unit
   skipped for an invalid prediction set or baseline (`nUnitsSkipped`), does not enter it — where a group can
   end without a positive (a query without a click), the metric is the return given a positive.
+- A null / non-positive value under `form: inverseShare` (or `rate`) skips the whole unit, and `prob` does not
+  (0 is a share of 0): a withdrawn candidate that keeps a row with a null odds / price removes its group from
+  every metric. The summary notes a split whose skipped share passes 1%; `invalid: dropRow` on that column
+  scores the remaining rows instead.
 - Batch, global window only. The gaussian / ranking families and the HTML report are the next stages (see
   `docs/design/evaluation-dsl.md` §11).

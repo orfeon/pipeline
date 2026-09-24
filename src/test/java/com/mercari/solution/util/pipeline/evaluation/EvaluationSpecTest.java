@@ -51,6 +51,20 @@ public class EvaluationSpecTest {
     }
 
     @Test
+    public void testInvalidPolicy() {
+        Assertions.assertTrue(error("{group: g, label: y, baseline: {field: b, invalid: drop}, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("baseline.invalid 'drop' is unknown"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa, invalid: skip}], " + EvaluationScorerTest.SPLITS + "}").contains("predictions[0].invalid 'skip' is unknown"));
+        final EvaluationSpec s = parse("{group: g, label: y, baseline: {field: b, form: inverseShare, invalid: dropRow}, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb, invalid: dropRow}], " + EvaluationScorerTest.SPLITS + "}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertTrue(s.baselineDropsRows());
+        Assertions.assertFalse(s.predictions.get(0).dropsRows());
+        Assertions.assertTrue(s.predictions.get(1).dropsRows());
+        Assertions.assertTrue(EvaluationReport.describe(s).contains("b:inverseShare[dropRow]"));
+        Assertions.assertTrue(EvaluationReport.describe(s).contains("B=qb:prob[dropRow]"));
+        final EvaluationSpec plain = parse(OK).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertFalse(plain.dropsRows());
+    }
+
+    @Test
     public void testSplitRules() {
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}]}").contains("splits is required"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], splits: {valid: {from: '2024-01-01', to: '2024-06-30', role: selection}}}").contains("role report"));

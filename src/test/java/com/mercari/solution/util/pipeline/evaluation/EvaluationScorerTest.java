@@ -89,6 +89,111 @@ public class EvaluationScorerTest {
     }
 
     @Test
+    public void testDropRowScoresTheRemainingRowsAndCountsByReason() {
+        // baseline.invalid: dropRow — a null / 0 odds row leaves the unit, the shares renormalise over the rest
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, form: inverseShare, invalid: dropRow}, time: t, predictions: [{name: A, prob: qa}], "
+                + SPLITS + ", bootstrap: {samples: 0}}");
+        Assertions.assertTrue(spec.baselineDropsRows());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        // odds [2, 4, null] -> rows 1-2 kept: p = [2/3, 1/3]; A = [.6, .2] renormalised over the kept rows = [.75, .25]
+        final EvaluationScorer.Unit u1 = scorer.prepare(List.of(row("test", "g1", 1, 2, null, 0.6), row("test", "g1", 0, 4, null, 0.2), row("test", "g1", 0, Double.NaN, null, 0.2)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, u1.skip);
+        Assertions.assertEquals(2, u1.size());
+        Assertions.assertEquals(1, u1.dropped);
+        Assertions.assertEquals(2d / 3, u1.means[0][0], 1e-12);
+        Assertions.assertEquals(0.75, u1.means[1][0], 1e-12);
+        final EvaluationScorer.Metrics m1 = scorer.score(u1);
+        Assertions.assertEquals(Math.log(0.75) - Math.log(2d / 3), m1.logScore[1] - m1.logScore[0], 1e-12);
+        scorer.accumulate(u1, m1, acc);
+        // the positive row is the invalid one: the remaining rows have no positive -> skipped, not scored on the rest
+        final EvaluationScorer.Unit u2 = scorer.prepare(List.of(row("test", "g2", 1, 0, null, 0.6), row("test", "g2", 0, 4, null, 0.4)), "g2");
+        Assertions.assertEquals(EvaluationScorer.Skip.NO_POSITIVE_LABEL, u2.skip);
+        Assertions.assertEquals(1, u2.dropped);
+        scorer.skipped(u2, acc);
+        // every row invalid: nothing left, reported as an invalid baseline
+        final EvaluationScorer.Unit u3 = scorer.prepare(List.of(row("test", "g3", 1, -1, null, 0.6), row("test", "g3", 0, Double.NaN, null, 0.4)), "g3");
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_BASELINE, u3.skip);
+        Assertions.assertEquals(2, u3.dropped);
+        scorer.skipped(u3, acc);
+        final double[] book = acc.get(MetricAccumulator.SPLIT_KEY_PREFIX + "test").getTotal();
+        Assertions.assertEquals(1d, book[MetricAccumulator.UNITS]);
+        Assertions.assertEquals(2d, book[MetricAccumulator.UNITS_SKIPPED]);
+        Assertions.assertEquals(1d, book[MetricAccumulator.UNITS_SKIPPED_BASELINE]);
+        Assertions.assertEquals(0d, book[MetricAccumulator.UNITS_SKIPPED_PREDICTION]);
+        Assertions.assertEquals(4d, book[MetricAccumulator.ROWS_DROPPED]);
+        Assertions.assertEquals(2d, book[MetricAccumulator.ROWS]);
+        final EvaluationReport.Result result = EvaluationReport.build(spec, acc);
+        final Map<?, ?> test = (Map<?, ?>) ((List<?>) result.summary().get("splits")).get(1);
+        Assertions.assertEquals(4L, test.get("nRowsDropped"));
+        Assertions.assertEquals(1L, test.get("nUnitsSkippedInvalidBaseline"));
+        Assertions.assertEquals(0L, test.get("nUnitsSkippedInvalidPrediction"));
+        Assertions.assertEquals(4L, result.summary().get("nRowsDropped"));
+        final String notes = result.summary().get("notes").toString();
+        Assertions.assertTrue(notes.contains("split test: 2 of 3 units skipped (66.7%: invalid baseline 1, invalid prediction 0, no positive label 1)"), notes);
+        Assertions.assertFalse(notes.contains("declare invalid: dropRow"), notes);
+        Assertions.assertTrue(notes.contains("split test: 4 rows dropped (invalid: dropRow)"), notes);
+        // the rows output carries the kept rows only
+        Assertions.assertEquals(2, scorer.rowRecords(u1).size());
+    }
+
+    @Test
+    public void testDropRowOnAPredictionSetAndTheSkipShareNote() {
+        // a probability set that drops its invalid rows; the baseline keeps its rows (skipUnit)
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa, invalid: dropRow}, {name: S, score: s, offset: qb, invalid: dropRow}], "
+                + SPLITS + ", bootstrap: {samples: 0}}");
+        Assertions.assertTrue(spec.dropsRows());
+        Assertions.assertFalse(spec.baselineDropsRows());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        // x = [qa, s, qb]: row 3 has qa > 1 (invalid for A), row 4 a negative prob-scale offset (invalid for S): both dropped
+        final EvaluationScorer.Unit u = scorer.prepare(List.of(
+                row("test", "g1", 1, 0.5, null, 0.6, 1.0, 0.5), row("test", "g1", 0, 0.5, null, 0.4, 0.0, 0.5),
+                row("test", "g1", 0, 0.5, null, 1.5, 0.0, 0.5), row("test", "g1", 0, 0.5, null, 0.4, 0.0, -1)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, u.skip);
+        Assertions.assertEquals(2, u.size());
+        Assertions.assertEquals(2, u.dropped);
+        Assertions.assertEquals(0.6, u.means[1][0], 1e-12);
+        // an invalid baseline on a kept row still skips the unit (the baseline keeps its rows)
+        final EvaluationScorer.Unit skippedUnit = scorer.prepare(List.of(row("test", "g2", 1, Double.NaN, null, 0.6, 1.0, 0.5), row("test", "g2", 0, 0.5, null, 0.4, 0.0, 0.5)), "g2");
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_BASELINE, skippedUnit.skip);
+        Assertions.assertEquals(0, skippedUnit.dropped);
+        // every row dropped by a prediction set -> an invalid prediction
+        final EvaluationScorer.Unit emptied = scorer.prepare(List.of(row("test", "g3", 1, 0.5, null, 2.0, 1.0, 0.5)), "g3");
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, emptied.skip);
+        Assertions.assertEquals(1, emptied.dropped);
+        // a +∞ prob-scale offset is dropped as well: kept, it would turn the whole unit's softmax into NaN
+        final EvaluationScorer.Unit infinite = scorer.prepare(List.of(row("test", "g4", 1, 0.5, null, 0.6, 1.0, 0.5), row("test", "g4", 0, 0.5, null, 0.4, 0.0, Double.POSITIVE_INFINITY)), "g4");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, infinite.skip);
+        Assertions.assertEquals(1, infinite.dropped);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        scorer.accumulate(u, scorer.score(u), acc);
+        scorer.skipped(skippedUnit, acc);
+        scorer.skipped(emptied, acc);
+        final double[] book = acc.get(MetricAccumulator.SPLIT_KEY_PREFIX + "test").getTotal();
+        Assertions.assertEquals(1d, book[MetricAccumulator.UNITS_SKIPPED_BASELINE]);
+        Assertions.assertEquals(1d, book[MetricAccumulator.UNITS_SKIPPED_PREDICTION]);
+        Assertions.assertEquals(3d, book[MetricAccumulator.ROWS_DROPPED]);
+        // the default (skipUnit everywhere): the note names the reason and the way out
+        final EvaluationSpec plain = spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, form: inverseShare}, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: {samples: 0}}");
+        final EvaluationScorer plainScorer = new EvaluationScorer(plain);
+        final Map<String, MetricAccumulator> plainAcc = new HashMap<>();
+        final EvaluationScorer.Unit ok = plainScorer.prepare(List.of(row("test", "g1", 1, 2, null, 0.6), row("test", "g1", 0, 4, null, 0.4)), "g1");
+        plainScorer.accumulate(ok, plainScorer.score(ok), plainAcc);
+        plainScorer.skipped(plainScorer.prepare(List.of(row("test", "g2", 1, 2, null, 0.6), row("test", "g2", 0, 0, null, 0.4)), "g2"), plainAcc);
+        final String notes = EvaluationReport.build(plain, plainAcc).summary().get("notes").toString();
+        Assertions.assertTrue(notes.contains("split test: 1 of 2 units skipped (50.0%: invalid baseline 1, invalid prediction 0, no positive label 0); an invalid value (a null, or a 0 / negative one under form inverseShare) skips the whole unit: declare invalid: dropRow"), notes);
+        Assertions.assertFalse(notes.contains("rows dropped"), notes);
+        // below the share: no note
+        final Map<String, MetricAccumulator> quiet = new HashMap<>();
+        for (int i = 0; i < 200; i++) {
+            final EvaluationScorer.Unit q = plainScorer.prepare(List.of(row("test", "q" + i, 1, 2, null, 0.6), row("test", "q" + i, 0, 4, null, 0.4)), "q" + i);
+            plainScorer.accumulate(q, plainScorer.score(q), quiet);
+        }
+        plainScorer.skipped(plainScorer.prepare(List.of(row("test", "z", 1, 2, null, 0.6), row("test", "z", 0, 0, null, 0.4)), "z"), quiet);
+        Assertions.assertFalse(EvaluationReport.build(plain, quiet).summary().get("notes").toString().contains("units skipped"));
+    }
+
+    @Test
     public void testPoissonWeightsAreDeterministicAndMeanOne() {
         final double[] a = MetricAccumulator.poissonWeights(7, "unit-1", 2000);
         final double[] b = MetricAccumulator.poissonWeights(7, "unit-1", 2000);

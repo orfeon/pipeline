@@ -222,7 +222,7 @@ public final class EvaluationReport {
         for (final EvaluationSpec.Prediction p : spec.predictions) predictions.add(p.name);
         s.put("predictions", predictions);
         final List<Map<String, Object>> splits = new ArrayList<>();
-        long nUnits = 0, nUnitsSkipped = 0;
+        long nUnits = 0, nUnitsSkipped = 0, nRowsDropped = 0;
         final Map<String, long[]> observed = new LinkedHashMap<>();
         for (final EvaluationSpec.Split sp : spec.splits) {
             final MetricAccumulator book = accumulators.getOrDefault(MetricAccumulator.SPLIT_KEY_PREFIX + sp.name, new MetricAccumulator());
@@ -233,14 +233,23 @@ public final class EvaluationReport {
             r.put("to", sp.to);
             r.put("minTime", book.getMinTime() == Long.MAX_VALUE ? null : book.getMinTime() * 1000L);
             r.put("maxTime", book.getMaxTime() == Long.MIN_VALUE ? null : book.getMaxTime() * 1000L);
-            r.put("nUnits", (long) book.getTotal()[MetricAccumulator.UNITS]);
-            r.put("nUnitsSkipped", (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED]);
+            final long units = (long) book.getTotal()[MetricAccumulator.UNITS];
+            final long skipped = (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED];
+            final long skippedBaseline = (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED_BASELINE];
+            final long skippedPrediction = (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED_PREDICTION];
+            final long dropped = (long) book.getTotal()[MetricAccumulator.ROWS_DROPPED];
+            r.put("nUnits", units);
+            r.put("nUnitsSkipped", skipped);
+            r.put("nUnitsSkippedInvalidBaseline", skippedBaseline);
+            r.put("nUnitsSkippedInvalidPrediction", skippedPrediction);
             r.put("nRows", (long) book.getTotal()[MetricAccumulator.ROWS]);
             final long duplicates = (long) book.getTotal()[MetricAccumulator.ROWS_DUPLICATE];
             r.put("nRowsDuplicate", duplicates);
+            r.put("nRowsDropped", dropped);
             splits.add(r);
-            nUnits += (long) book.getTotal()[MetricAccumulator.UNITS];
-            nUnitsSkipped += (long) book.getTotal()[MetricAccumulator.UNITS_SKIPPED];
+            nUnits += units;
+            nUnitsSkipped += skipped;
+            nRowsDropped += dropped;
             if (book.getMinTime() != Long.MAX_VALUE) observed.put(sp.name, new long[]{book.getMinTime(), book.getMaxTime()});
             // integrity: a split without a unit (a report split has nothing to report), a row twice in a unit
             if (book.getTotal()[MetricAccumulator.UNITS] == 0) {
@@ -249,6 +258,15 @@ public final class EvaluationReport {
             }
             if (duplicates > 0) {
                 notes.add("split " + sp.name + ": " + duplicates + " duplicate rows (the same rowId twice within a unit); their units' metrics count them twice");
+            }
+            // skipped units past the share worth a look: which reason, and the way out of an invalid-column skip
+            if (Baselines.skipShareNoted(skipped, units)) {
+                notes.add("split " + sp.name + ": " + skipped + " of " + (units + skipped) + " units skipped (" + Baselines.percent(skipped, units + skipped)
+                        + ": invalid baseline " + skippedBaseline + ", invalid prediction " + skippedPrediction + ", no positive label " + (skipped - skippedBaseline - skippedPrediction) + ")"
+                        + (skippedBaseline + skippedPrediction > 0 && !spec.dropsRows() ? "; an invalid value (a null, or a 0 / negative one under form inverseShare) skips the whole unit: declare invalid: dropRow on that column to score its remaining rows" : ""));
+            }
+            if (dropped > 0) {
+                notes.add("split " + sp.name + ": " + dropped + " rows dropped (invalid: dropRow); their units were scored on the remaining rows, a unit left without a row or a positive label is counted as skipped");
             }
         }
         // a slice / dimension declared as a group-level attribute whose value the rows of a unit disagree on
@@ -281,6 +299,7 @@ public final class EvaluationReport {
         s.put("nRowsUnassigned", (long) rows.getTotal()[MetricAccumulator.ROWS_UNASSIGNED]);
         s.put("nUnits", nUnits);
         s.put("nUnitsSkipped", nUnitsSkipped);
+        s.put("nRowsDropped", nRowsDropped);
         s.put("bootstrapSamples", (long) spec.bootstrapSamples);
         s.put("bootstrapSeed", spec.bootstrapSeed);
         s.put("bootstrapUnit", spec.bootstrapUnit);
@@ -782,8 +801,11 @@ public final class EvaluationReport {
                 .withField("maxTime", Schema.FieldType.TIMESTAMP)
                 .withField("nUnits", Schema.FieldType.INT64)
                 .withField("nUnitsSkipped", Schema.FieldType.INT64)
+                .withField("nUnitsSkippedInvalidBaseline", Schema.FieldType.INT64)
+                .withField("nUnitsSkippedInvalidPrediction", Schema.FieldType.INT64)
                 .withField("nRows", Schema.FieldType.INT64)
                 .withField("nRowsDuplicate", Schema.FieldType.INT64)
+                .withField("nRowsDropped", Schema.FieldType.INT64)
                 .build();
         return Schema.builder()
                 .withField("family", Schema.FieldType.STRING)
@@ -801,6 +823,7 @@ public final class EvaluationReport {
                 .withField("nRowsUnassigned", Schema.FieldType.INT64)
                 .withField("nUnits", Schema.FieldType.INT64)
                 .withField("nUnitsSkipped", Schema.FieldType.INT64)
+                .withField("nRowsDropped", Schema.FieldType.INT64)
                 .withField("bootstrapSamples", Schema.FieldType.INT64)
                 .withField("bootstrapSeed", Schema.FieldType.INT64)
                 .withField("bootstrapUnit", Schema.FieldType.STRING)
@@ -821,7 +844,7 @@ public final class EvaluationReport {
         parts.add("family=" + spec.family);
         if (spec.group != null) parts.add("group=" + spec.group);
         parts.add("label=" + (spec.labelExpr != null ? "expr(" + spec.labelExpr + ")" : spec.labelField));
-        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm : "prior"));
+        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm + (spec.baselineDropsRows() ? "[dropRow]" : "") : "prior"));
         final List<String> predictions = new ArrayList<>();
         for (final EvaluationSpec.Prediction p : spec.predictions) predictions.add(p.describe());
         parts.add("predictions=" + predictions);

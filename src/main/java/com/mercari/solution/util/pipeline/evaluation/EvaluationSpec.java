@@ -6,6 +6,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.feature.FeatureLineage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 
@@ -84,6 +85,8 @@ public final class EvaluationSpec implements Serializable {
         public String offsetField;
         public String offsetScale = OFFSET_SCALE_PROB;
         public double temperature = 1d;
+        /** what an invalid value of the set's column(s) does to the unit: skip it whole (default) or drop the row */
+        public String invalid = Baselines.INVALID_SKIP_UNIT;
         /** position of the set's first column in {@link EvaluationRow#x} (score sets: score, then offset) */
         public int offset;
 
@@ -91,10 +94,14 @@ public final class EvaluationSpec implements Serializable {
             return scoreField != null;
         }
 
+        public boolean dropsRows() {
+            return Baselines.INVALID_DROP_ROW.equals(invalid);
+        }
+
         public String describe() {
-            return isScore()
+            return (isScore()
                     ? name + "=softmax(" + scoreField + (offsetField != null ? " + " + offsetField + "[" + offsetScale + "]" : "") + (temperature != 1d ? " / T=" + temperature : "") + ")"
-                    : name + "=" + field + ":" + form;
+                    : name + "=" + field + ":" + form) + (dropsRows() ? "[dropRow]" : "");
         }
     }
 
@@ -264,6 +271,8 @@ public final class EvaluationSpec implements Serializable {
     public boolean normalizeTies = true;
     public String baselineField;
     public String baselineForm;
+    /** what an invalid baseline value does to the unit: skip it whole (default) or drop the row */
+    public String baselineInvalid = Baselines.INVALID_SKIP_UNIT;
     public String timeField;
     public String timeFieldType;
     public String weightField;
@@ -316,6 +325,17 @@ public final class EvaluationSpec implements Serializable {
 
     public boolean hasBaseline() {
         return baselineField != null;
+    }
+
+    public boolean baselineDropsRows() {
+        return hasBaseline() && Baselines.INVALID_DROP_ROW.equals(baselineInvalid);
+    }
+
+    /** Whether any column (the baseline, a prediction set) drops its invalid rows instead of skipping the unit. */
+    public boolean dropsRows() {
+        if (baselineDropsRows()) return true;
+        for (final Prediction d : predictions) if (d.dropsRows()) return true;
+        return false;
     }
 
     public boolean hasBootstrap() {
@@ -438,8 +458,11 @@ public final class EvaluationSpec implements Serializable {
                 if (s.baselineForm == null) s.baselineForm = forms.get(0);
                 if (s.baselineField == null) errors.add("baseline.field is required when baseline is declared");
                 if (!forms.contains(s.baselineForm)) errors.add("baseline.form '" + s.baselineForm + "' is not valid for family " + s.family + " (available: " + forms + ")");
+                final String invalid = string(o, "invalid");
+                if (invalid != null) s.baselineInvalid = invalid;
+                if (!Baselines.INVALIDS.contains(s.baselineInvalid)) errors.add("baseline.invalid '" + s.baselineInvalid + "' is unknown (available: " + Baselines.INVALIDS + ")");
             } else {
-                errors.add("baseline must be a field name or an object {field, form}");
+                errors.add("baseline must be a field name or an object {field, form, invalid}");
             }
         }
 
@@ -468,7 +491,7 @@ public final class EvaluationSpec implements Serializable {
         // predictions
         final JsonElement predictions = p.get("predictions");
         if (predictions == null || predictions.isJsonNull()) {
-            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset, offsetScale, temperature})");
+            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset, offsetScale, temperature}, each with an optional invalid: skipUnit | dropRow)");
         } else if (!predictions.isJsonArray()) {
             errors.add("predictions must be a list of prediction sets");
         } else {
@@ -488,6 +511,9 @@ public final class EvaluationSpec implements Serializable {
                 else if (!names.add(d.name)) errors.add(at + ".name '" + d.name + "' is duplicated");
                 d.scoreField = string(o, "score");
                 d.offsetField = string(o, "offset");
+                final String invalid = string(o, "invalid");
+                if (invalid != null) d.invalid = invalid;
+                if (!Baselines.INVALIDS.contains(d.invalid)) errors.add(at + ".invalid '" + d.invalid + "' is unknown (available: " + Baselines.INVALIDS + ")");
                 final String prob = string(o, "prob");
                 if (prob != null && (o.has("field") || o.has("form"))) errors.add(at + ": prob is a probability column; specify either prob or field + form, not both");
                 d.field = prob != null ? prob : string(o, "field");

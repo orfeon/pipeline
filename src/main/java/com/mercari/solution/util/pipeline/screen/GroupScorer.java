@@ -28,12 +28,15 @@ public final class GroupScorer implements Serializable {
     private final int nCandidates;
     private final int nColumns;
     private final int shuffleRef;
+    /** {@code baseline.invalid: dropRow}: the invalid rows leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public GroupScorer(final ScreenSpec spec) {
         this.spec = spec;
         this.nCandidates = spec.candidates.size();
         this.nColumns = spec.columnCount();
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
+        this.dropsRows = spec.baselineDropsRows();
     }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
@@ -47,8 +50,10 @@ public final class GroupScorer implements Serializable {
         public final double[] w;
         /** unit weight (the row mean) for the grouped family */
         public final double unitWeight;
+        /** rows removed before scoring by {@code baseline.invalid: dropRow} (not in {@link #rows}, except on a unit that lost every row: skipped, its rows are the dropped ones) */
+        public final int dropped;
 
-        Unit(final List<ScreenRow> rows, final String key, final Skip skip, final double[] p, final double[] y, final double[] w, final double unitWeight) {
+        Unit(final List<ScreenRow> rows, final String key, final Skip skip, final double[] p, final double[] y, final double[] w, final double unitWeight, final int dropped) {
             this.rows = rows;
             this.key = key;
             this.skip = skip;
@@ -56,6 +61,7 @@ public final class GroupScorer implements Serializable {
             this.y = y;
             this.w = w;
             this.unitWeight = unitWeight;
+            this.dropped = dropped;
         }
 
         public int size() {
@@ -67,31 +73,46 @@ public final class GroupScorer implements Serializable {
         }
     }
 
-    /** Sorts the rows and derives p / ỹ / w; {@code skip} says why the unit cannot be scored. */
+    /**
+     * Sorts the rows, removes the rows an invalid baseline value drops ({@code baseline.invalid: dropRow}) and
+     * derives p / ỹ / w over the rest; {@code skip} says why the unit cannot be scored.
+     */
     public Unit prepare(final List<ScreenRow> input, final String unitKey) {
-        final List<ScreenRow> rows = new ArrayList<>(input);
-        rows.sort(Comparator.comparingLong(ScreenRow::getTime).thenComparing(ScreenRow::getIdentity));
+        final List<ScreenRow> sorted = new ArrayList<>(input);
+        sorted.sort(Comparator.comparingLong(ScreenRow::getTime).thenComparing(ScreenRow::getIdentity));
+        final List<ScreenRow> rows;
+        int dropped = 0;
+        if (dropsRows) {
+            rows = new ArrayList<>(sorted.size());
+            for (final ScreenRow r : sorted) {
+                if (Baselines.validRow(spec.baselineForm, r.baseline)) rows.add(r);
+                else dropped++;
+            }
+            if (rows.isEmpty()) return new Unit(sorted, unitKey, Skip.INVALID_BASELINE, new double[sorted.size()], null, null, 0, dropped);
+        } else {
+            rows = sorted;
+        }
         final int n = rows.size();
         final double[] p = new double[n];
         if (spec.hasBaseline()) {
             // Baselines.means reads each baseline before writing the mean at the same index, so p carries both
             for (int i = 0; i < n; i++) p[i] = rows.get(i).baseline;
             final Skip skip = Baselines.means(spec.family(), spec.baselineForm, p, p);
-            if (skip != Skip.NONE) return new Unit(rows, unitKey, skip, p, null, null, 0);
+            if (skip != Skip.NONE) return new Unit(rows, unitKey, skip, p, null, null, 0, dropped);
         } else if (spec.isGroupedMultinomial()) {
             Arrays.fill(p, 1d / n);
         }
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
         final Skip labels = Baselines.normalizeLabels(spec.family(), spec.normalizeTies, y);
-        if (labels != Skip.NONE) return new Unit(rows, unitKey, labels, p, y, null, 0);
+        if (labels != Skip.NONE) return new Unit(rows, unitKey, labels, p, y, null, 0, dropped);
         final double[] w = new double[n];
         double wsum = 0;
         for (int i = 0; i < n; i++) {
             w[i] = rows.get(i).weight;
             wsum += w[i];
         }
-        return new Unit(rows, unitKey, Skip.NONE, p, y, w, wsum / n);
+        return new Unit(rows, unitKey, Skip.NONE, p, y, w, wsum / n, dropped);
     }
 
     /**
@@ -102,9 +123,12 @@ public final class GroupScorer implements Serializable {
         final Unit unit = prepare(input, unitKey);
         final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
         final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
+        bookSlots[ScoreAccumulator.ROWS_DROPPED] = unit.dropped;
         if (unit.skip != Skip.NONE) {
             // same unit as UNITS_SCORED: groups for the grouped family, rows for binomial
-            bookSlots[ScoreAccumulator.UNITS_SKIPPED] = spec.isGroupedMultinomial() ? 1 : unit.size();
+            final double units = spec.isGroupedMultinomial() ? 1 : unit.size();
+            bookSlots[ScoreAccumulator.UNITS_SKIPPED] = units;
+            if (unit.skip == Skip.INVALID_BASELINE) bookSlots[ScoreAccumulator.UNITS_SKIPPED_BASELINE] = units;
             book.add(null, bookSlots);
             return unit.skip;
         }

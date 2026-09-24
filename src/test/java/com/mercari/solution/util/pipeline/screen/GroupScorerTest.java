@@ -87,6 +87,50 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testBaselineInvalidDropRow() {
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, form: inverseShare, invalid: dropRow}, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        // odds [2, 4, 0]: the third row leaves the unit; p = [2/3, 1/3] over the rest, x = [1, 0]
+        // mean = 2/3 ; x~ = [1/3, -2/3] ; S = (1/3)(1 - 2/3) + (-2/3)(0 - 1/3) = 1/3 ; H = (2/3)(1/9) + (1/3)(4/9) - 0 = 2/9
+        Assertions.assertEquals(Baselines.Skip.NONE, scorer.score(List.of(row("a", 1, 1, 2, 1), row("a", 1, 0, 4, 0), row("a", 1, 0, 0, 5)), "a", acc));
+        final double[] a = acc.get(spec.key(0, 0)).getTotal();
+        Assertions.assertEquals(1d / 3, a[ScoreAccumulator.S], 1e-12);
+        Assertions.assertEquals(2d / 9, a[ScoreAccumulator.H], 1e-12);
+        Assertions.assertEquals(2, a[ScoreAccumulator.N_OBS]);
+        double[] book = acc.get(ScoreAccumulator.BOOKKEEPING_KEY).getTotal();
+        Assertions.assertEquals(1, book[ScoreAccumulator.UNITS_SCORED]);
+        Assertions.assertEquals(2, book[ScoreAccumulator.ROWS_SCORED]);
+        Assertions.assertEquals(1, book[ScoreAccumulator.ROWS_DROPPED]);
+        // the positive row is the invalid one: no positive among the rest
+        Assertions.assertEquals(Baselines.Skip.NO_POSITIVE_LABEL, scorer.score(List.of(row("b", 1, 1, Double.NaN, 1), row("b", 1, 0, 4, 0)), "b", acc));
+        // every row invalid: an invalid baseline
+        Assertions.assertEquals(Baselines.Skip.INVALID_BASELINE, scorer.score(List.of(row("c", 1, 1, 0, 1), row("c", 1, 0, -1, 0)), "c", acc));
+        book = acc.get(ScoreAccumulator.BOOKKEEPING_KEY).getTotal();
+        Assertions.assertEquals(2, book[ScoreAccumulator.UNITS_SKIPPED]);
+        Assertions.assertEquals(1, book[ScoreAccumulator.UNITS_SKIPPED_BASELINE]);
+        Assertions.assertEquals(4, book[ScoreAccumulator.ROWS_DROPPED]);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        Assertions.assertEquals(4L, result.summary().get("nRowsDropped"));
+        Assertions.assertEquals(1L, result.summary().get("nUnitsSkippedInvalidBaseline"));
+        final String notes = result.summary().get("notes").toString();
+        Assertions.assertTrue(notes.contains("2 of 3 units skipped (66.7%: invalid baseline 1, no positive label 1)"), notes);
+        Assertions.assertFalse(notes.contains("declare baseline.invalid"), notes);
+        Assertions.assertTrue(notes.contains("4 rows dropped (baseline.invalid: dropRow)"), notes);
+        // the default keeps the whole-unit skip and says the way out
+        final ScreenSpec plain = spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, form: inverseShare}, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
+        final Map<Integer, ScoreAccumulator> plainAcc = new HashMap<>();
+        new GroupScorer(plain).score(List.of(row("a", 1, 1, 2, 1), row("a", 1, 0, 4, 0)), "a", plainAcc);
+        Assertions.assertEquals(Baselines.Skip.INVALID_BASELINE, new GroupScorer(plain).score(List.of(row("b", 1, 1, 2, 1), row("b", 1, 0, 0, 0)), "b", plainAcc));
+        final String plainNotes = ScreenReport.build(plain, plainAcc).summary().get("notes").toString();
+        Assertions.assertTrue(plainNotes.contains("1 of 2 units skipped (50.0%: invalid baseline 1, no positive label 0); an invalid baseline value (a null, or a 0 / negative one under form inverseShare / rate) skips the whole unit: declare baseline.invalid: dropRow"), plainNotes);
+        Assertions.assertEquals(0L, ScreenReport.build(plain, plainAcc).summary().get("nRowsDropped"));
+        // an unknown policy is a spec error
+        final String error = Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, invalid: drop}, time: t, candidates: [x]}")).getMessage();
+        Assertions.assertTrue(error.contains("baseline.invalid 'drop' is unknown"), error);
+    }
+
+    @Test
     public void testBinomialPriorHandComputed() {
         // independent rows y = [1,1,0,0], x = [2,3,0,1]: ybar = .5, xbar = 1.5, S = 5 - 1.5*2 = 2, sxx = 14 - 9 = 5, H = .25*5 = 1.25, chi2 = 3.2
         final ScreenSpec spec = spec("{family: binomial, label: y, time: t, candidates: [x], placebo: {noise: 0}}");

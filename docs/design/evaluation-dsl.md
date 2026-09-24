@@ -51,7 +51,7 @@ the prediction columns. The `output.groupBy` parent / child form of the feature 
 | family | `family` | `groupedMultinomial` (mutually exclusive samples within a group: the candidates of a query, the listings of a session) or `binomial` (independent binary rows). Default `groupedMultinomial`. |
 | unit | `group` | the group key; required for `groupedMultinomial`, optional for `binomial` (then only the default bootstrap unit). |
 | outcome | `label` | a field, or `{field}` / `{expr, normalizeTies}`; `expr` is a Lucene expression over numeric fields. Grouped labels are normalised to sum 1 (`normalizeTies`, default true: a tie shares the group's one likelihood term). |
-| baseline | `baseline` | a field or `{field, form}` with the family's forms (`prob` default, `logProb`, `inverseShare` — 1 / x made a share within the group, for odds and prices). Omitted: the prior (§4.4). |
+| baseline | `baseline` | a field or `{field, form, invalid}` with the family's forms (`prob` default, `logProb`, `inverseShare` — 1 / x made a share within the group, for odds and prices) and the invalid-value policy (`skipUnit` default, `dropRow`; §3). Omitted: the prior (§4.4). |
 | predictions | `predictions[]` | the prediction sets (§3). At least one. |
 | time | `time` | a field (`timestamp` / `date` / ISO string) or `{field}`; the splits' ranges and the period buckets read it. Defaults to the feature transform's time role. Required when a split declares a time range. |
 | splits | `splits` | the time splits with their roles (§5). Required. |
@@ -82,7 +82,13 @@ predictions:
   baseline's log share reads as `score: f, offset: log_m, offsetScale: log`.
 
 A unit with a null / non-finite / invalid value in any set (or in the baseline) is skipped whole
-(`nUnitsSkipped`), never partially compared (the common unit set).
+(`nUnitsSkipped`), never partially compared (the common unit set). Validity follows the form: `prob` accepts 0
+(a share of 0), `inverseShare` / `rate` reject a null, 0 or negative value. Each column (the baseline, a
+prediction set) may instead declare `invalid: dropRow`: the rows it rejects leave the unit before any set is
+read, so every set is compared on the same remaining rows (the common row set); a unit left without a positive
+row is skipped for no positive label, one left without rows as invalid. The dropped rows are counted
+(`nRowsDropped`) and never scored, tabulated or output. Meant for a withdrawal whose row should not exist (a
+scratched runner with a null final odds), not for a value missing by accident.
 
 ## 4. Metrics
 
@@ -335,7 +341,8 @@ One record per split × prediction set × table × bin: `split`, `prediction`, `
 ### 8.3 Summary (`<name>.summary`)
 
 One record per run: the roles, `predictions`, the splits (name, role, declared range, observed range, units,
-rows, duplicate rows), the row / unit counts (in, invalid, unassigned, scored, skipped), the bootstrap
+skipped units by reason, rows, duplicate rows, dropped rows), the row / unit counts (in, invalid, unassigned,
+scored, skipped, dropped), the bootstrap
 parameters, the calibration table count, `fits` (§7.1), `discovery` (§7.2), `parametersHash` and `notes`
 (role defaults applied, overlapping split ranges, prior mode, a fit that produced no estimate, a truncated
 candidate set, and the integrity notes of §9: a split without a scored unit, duplicate rows within a unit, a
@@ -389,7 +396,10 @@ on a non-numeric one), `maxDepth` outside [1, 3], an unknown `metric`, `excessLo
 
 Row validity: a null / non-finite label, a null group, a null / negative weight, a row not in any split →
 counted, not scored; a null time with a time-range split → the failure output. Unit skips: no positive
-label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in the family's unit).
+label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in the family's unit), by reason
+in `nUnitsSkippedInvalidBaseline` / `nUnitsSkippedInvalidPrediction`; a split whose skipped share passes 1% is
+noted with the reasons and, when no column drops its rows, the `invalid: dropRow` way out. Rows an
+`invalid: dropRow` column removed → `nRowsDropped`, noted.
 
 Integrity notes (the summary's `notes`; the run completes, the numbers are reported as computed):
 
