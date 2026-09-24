@@ -178,7 +178,7 @@ order). Re-runs, runners, bundle boundaries and worker counts cannot change a pl
 | transform | definition | catches |
 |---|---|---|
 | `raw` | the column as is | direct linear effect |
-| `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)`, in [0, 1] (the smallest 0, the largest 1; the denominator is the count minus one, not the count of a pandas `rank(pct=True)`), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
+| `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)` with `ties` the other values equal to it, in [0, 1] (an untied minimum 0, an untied maximum 1) — `(r − 1) / (m − 1)` for the average 1-based rank `r` of `m` observed values, i.e. pandas `(rank() − 1) / (count() − 1)`, not `rank(pct=True)` = `r / m` (numerator and denominator both differ), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group's observed values\| | symmetric "extremeness" effects |
 
 Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics: with
