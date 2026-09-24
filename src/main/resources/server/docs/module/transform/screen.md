@@ -66,7 +66,7 @@ for independent rows), so a re-run reproduces the same columns.
 | transform | definition | catches |
 |---|---|---|
 | `raw` | the column as is | direct linear effect |
-| `rank` | percentile rank within the group, in [0, 1] (ties share the mean rank) | monotone non-linear effects, outlier robustness |
+| `rank` | percentile rank within the group over the observed (finite) values: `(number of smaller values + half the ties) / (observed count − 1)`, in [0, 1]; 0.5 when only one value is observed. The denominator is the count minus one (the smallest value reads 0, the largest 1), not the count as in a `rank(pct=True)` of pandas | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group\| | symmetric "extremeness" effects |
 
 Records are keyed by (`candidate`, `transform`). `rank` and `absdev` need `group` (the within-group
@@ -398,6 +398,72 @@ transforms:
   signature of a column computed after the outcome.
 - `output.selection` writes the pass list in the format the feature transform's `output.include` reads, so
   the next feature run emits only the screened columns (see below); `passedColumns` in the summary is the same list.
+
+### Scoring against the settlement reference
+
+Where the return is settled at a price fixed *after* the decision — the closing price of a market, the hammer
+price of an auction, the odds at post time — the reference the decision is made against (the market at decision
+time) and the reference the return is paid at (the settlement market) differ, and the market closes part of the
+gap on its own. Of a candidate's gain over the decision-time market, the part the settlement market absorbs by
+itself earns nothing; what survives against the settlement market is what a probability model can turn into
+return. So screen the same candidates against both references and read the ratio of the two gains (the
+retained share). Two screens over one input, one per reference, and a join downstream:
+
+```yaml
+transforms:
+  - name: screen_bet                       # the decision-time market
+    module: screen
+    inputs: [features]
+    parameters:
+      group: session
+      label: won
+      baseline: {field: price_bet, form: inverseShare, invalid: dropRow}
+      candidates: {exclude: [price_final]}   # the settlement price is not observable at decision time: a yardstick, never a candidate
+      conditioning: {fields: ["base_*"], missing: groupMean}
+      periods: year
+      output: {selection: gs://bucket/screen/${args.version}/passed_bet.json}
+  - name: screen_final                     # the settlement market: same parameters, the other reference
+    module: screen
+    inputs: [features]
+    parameters:
+      group: session
+      label: won
+      baseline: {field: price_final, form: inverseShare, invalid: dropRow}
+      candidates: {exclude: [price_bet]}
+      conditioning: {fields: ["base_*"], missing: groupMean}
+      periods: year
+      output: {selection: gs://bucket/screen/${args.version}/passed_final.json}
+  - name: retained                         # one row per candidate x transform, both gains and their ratio
+    module: beamsql
+    inputs: [screen_bet, screen_final]
+    parameters:
+      sql: |
+        SELECT b.candidate, b.transform,
+               b.partial_gain AS gain_bet, f.partial_gain AS gain_final,
+               SIGN(b.partial_z * f.partial_z) * f.partial_gain / NULLIF(b.partial_gain, 0) AS retained,
+               b.passed AS passed_bet, f.passed AS passed_final
+        FROM `screen_bet` b JOIN `screen_final` f
+          ON b.candidate = f.candidate AND b.transform = f.transform
+        WHERE NOT b.placebo
+```
+
+- `invalid: dropRow` on both: a withdrawn entry has no settlement price (null or 0), and without it the whole
+  group would be skipped under `inverseShare` (`nUnitsSkippedInvalidBaseline`, and a note above 1%).
+- Both screens keep the same `conditioning`, `periods`, `placebo` and `time` window, so the two thresholds are
+  calibrated the same way and the gains are comparable; with `conditioning` compare the partial gains (as
+  above), without it `est_gain` / `z`.
+- **Reading the retained share.** Near 1: information the market never learns (a feature for the probability
+  model). Near 0: information the market absorbs before settlement, or a re-encoding of the market level —
+  useful to execution (when to place the order, what the settlement price will be), not to the probability
+  model. A `rank` / `absdev` variant of a market-level column can still pass against the settlement reference
+  (the skew of the extreme values survives in the settlement market): the retained share of its `raw` variant
+  tells it apart.
+- **The cut.** Use the settlement reference as a marker, not as the cut: take the union of the two pass lists as
+  the candidate set and carry the retained share next to it — a candidate that passes only at decision time
+  with a low retained share is execution information, not noise. The two pass lists are composed in the next
+  feature run's `output.include` (see [Closing the loop](#closing-the-loop-outputselection)).
+- The settlement price column must stay out of `candidates` in the decision-time screen (as above): it is
+  numeric, so it would be screened, and a post-decision price is the textbook `leakSuspect`.
 
 ## Limits
 

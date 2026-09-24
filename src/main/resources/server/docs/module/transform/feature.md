@@ -262,7 +262,11 @@ shrinkage scale:
   undefined there and a clamp would leak its constant into the value). The leaf shrinks that term toward
   the parent's term **by information**, `V / (V + λ′)`, so a key of rare events is trusted less than a key
   of the same row count at even odds; `λ′` is `priorWeight` rows of the average information of the lattice's
-  coarsest (root) level (a declared `priorWeight` keeps its meaning of "rows of average information"), or under
+  coarsest (root) level — `λ′ = priorWeight · V_root / n_root`, both read from the row's root-level totals
+  as they stand (never reduced by leave-node-out, whether or not it is declared), the same under
+  `weights: fixed`; the level's own term is `S_k / V_k` with no ridge, and its weight `V_k / (V_k + λ′)` uses
+  the level's information `V_k` minus the leaf's only when leave-node-out is declared (a declared `priorWeight`
+  keeps its meaning of "rows of average information"), or under
   `weights: varianceComponents` `1 / τ²` with the between-key variance τ² estimated on the score scale. The
   **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
   `deviations` on the same scale and `effectiveN` in rows (info `encoding.offset.additive`). The levels
