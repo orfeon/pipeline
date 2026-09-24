@@ -1695,10 +1695,11 @@ output:
   patterns are exact names, `<block>.*` or selectors, so `dm.*__distribution` matches nothing while
   `dm.*` or the full column name does.
   A URI is read at assembly and its content hash recorded, so a file that changes later is still traceable.
-  Several files combine as `include: {from: [gs://.../passed_bet.json, gs://.../passed_final.json], mode: union}`
+  Several files combine as `include: {from: [gs://.../passed_decision.json, gs://.../passed_final.json], mode: union}`
   — `union` (the default) keeps every name of any file in first-appearance order, `intersection` the first
   file's names present in all of them; the manifest's `include.source` reads `union(uri, uri)` and its
-  `hash` is that of the combined list. The screens against several references, or with several conditioning
+  `hash` is that of the combined list. Each `from` entry must name a readable file (URI / path): one that
+  cannot be read fails assembly rather than joining the list as a name. The screens against several references, or with several conditioning
   sets, close the loop through one projection this way.
   A column a role names (a baseline's `emit` copy, a label derived as a column) is emitted whether or not
   the list contains it — a pass list never names role columns, they were never candidates — and the plan

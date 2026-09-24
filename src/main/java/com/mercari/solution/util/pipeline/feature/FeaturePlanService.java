@@ -9,8 +9,11 @@ import com.mercari.solution.util.TemplateUtil;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Entry point shared by the {@code feature} transform, the REST API and the MCP / agent tools:
@@ -153,9 +156,10 @@ public final class FeaturePlanService {
         final JsonElement include = output.get("include");
         final List<String> references = new ArrayList<>();
         String mode = INCLUDE_UNION;
+        final boolean objectForm = include.isJsonObject();
         if (include.isJsonPrimitive()) {
             references.add(include.getAsString());
-        } else if (include.isJsonObject()) {
+        } else if (objectForm) {
             final JsonObject o = include.getAsJsonObject();
             for (final String key : o.keySet()) {
                 if (!key.equals("from") && !key.equals("mode")) throw new IllegalArgumentException("output.include: unknown key '" + key + "' (an object form is {from: [uri, ...], mode: union | intersection})");
@@ -163,11 +167,11 @@ public final class FeaturePlanService {
             final JsonElement from = o.get("from");
             if (from == null || from.isJsonNull()) {
                 throw new IllegalArgumentException("output.include.from is required in the object form ({from: [uri, ...], mode: union | intersection})");
-            } else if (from.isJsonPrimitive()) {
+            } else if (isString(from)) {
                 references.add(from.getAsString());
             } else if (from.isJsonArray()) {
                 for (final JsonElement e : from.getAsJsonArray()) {
-                    if (!e.isJsonPrimitive()) throw new IllegalArgumentException("output.include.from must list URIs / paths: " + e);
+                    if (!isString(e)) throw new IllegalArgumentException("output.include.from must list URIs / paths: " + e);
                     references.add(e.getAsString());
                 }
             } else {
@@ -175,41 +179,57 @@ public final class FeaturePlanService {
             }
             if (references.isEmpty()) throw new IllegalArgumentException("output.include.from must name at least one file");
             if (o.has("mode") && !o.get("mode").isJsonNull()) {
+                if (!isString(o.get("mode"))) throw new IllegalArgumentException("output.include.mode must be one of " + INCLUDE_MODES + ": " + o.get("mode"));
                 mode = o.get("mode").getAsString();
                 if (!INCLUDE_MODES.contains(mode)) throw new IllegalArgumentException("output.include.mode '" + mode + "' is unknown (available: " + INCLUDE_MODES + ")");
             }
         } else {
             return;
         }
-        List<String> names = null;
-        for (final String reference : references) {
-            final String raw;
-            try {
-                raw = Config.readContent(reference);
-            } catch (final IOException e) {
-                throw new IllegalArgumentException("failed to read output.include: " + reference, e);
-            }
-            final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
-            final List<String> listed = parseIncludeList(text, reference);
-            names = names == null ? new ArrayList<>(listed) : combineInclude(names, listed, mode);
+        if (references.size() == 1) {
+            // a single from reads exactly like the string form: same list, same source, same hash
+            writeInclude(output, readInclude(references.get(0), objectForm, templateArgs), references.get(0));
+            return;
         }
+        // union: every name in first-appearance order; intersection: the first file's names present in all of them
+        final Set<String> names = new LinkedHashSet<>(readInclude(references.get(0), true, templateArgs));
+        for (final String reference : references.subList(1, references.size())) {
+            final List<String> listed = readInclude(reference, true, templateArgs);
+            if (INCLUDE_INTERSECTION.equals(mode)) names.retainAll(new HashSet<>(listed));
+            else names.addAll(listed);
+        }
+        writeInclude(output, new ArrayList<>(names), mode + "(" + String.join(", ", references) + ")");
+    }
+
+    /**
+     * One pass list read and parsed. {@code fileOnly} (the object form's {@code from}, documented as URIs / paths)
+     * rejects a reference {@link Config#readContent} could not read as a file: it falls back to the reference text
+     * itself, so a mistyped path would become a one-name list (in a union, that file's names silently missing).
+     */
+    private static List<String> readInclude(final String reference, final boolean fileOnly, final Map<String, String> templateArgs) {
+        final String raw;
+        try {
+            raw = Config.readContent(reference);
+        } catch (final IOException e) {
+            throw new IllegalArgumentException("failed to read output.include: " + reference, e);
+        }
+        if (fileOnly && reference.equals(raw) && !reference.contains("\n")) {
+            throw new IllegalArgumentException("output.include.from: " + reference + " is not a readable file (URI / path)");
+        }
+        final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
+        return parseIncludeList(text, reference);
+    }
+
+    private static boolean isString(final JsonElement element) {
+        return element.isJsonPrimitive() && element.getAsJsonPrimitive().isString();
+    }
+
+    private static void writeInclude(final JsonObject output, final List<String> names, final String source) {
         final JsonArray array = new JsonArray();
         names.forEach(array::add);
         output.add("include", array);
-        output.addProperty("includeSource", references.size() == 1 ? references.get(0) : mode + "(" + String.join(", ", references) + ")");
+        output.addProperty("includeSource", source);
         output.addProperty("includeHash", FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(array)));
-    }
-
-    /** Two pass lists combined: union keeps every name in first-appearance order, intersection the first list's names present in the second. */
-    static List<String> combineInclude(final List<String> first, final List<String> second, final String mode) {
-        final List<String> out = new ArrayList<>();
-        if (INCLUDE_INTERSECTION.equals(mode)) {
-            for (final String name : first) if (second.contains(name) && !out.contains(name)) out.add(name);
-        } else {
-            for (final String name : first) if (!out.contains(name)) out.add(name);
-            for (final String name : second) if (!out.contains(name)) out.add(name);
-        }
-        return out;
     }
 
     static List<String> parseIncludeList(final String text, final String reference) {
