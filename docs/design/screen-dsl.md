@@ -178,7 +178,7 @@ order). Re-runs, runners, bundle boundaries and worker counts cannot change a pl
 | transform | definition | catches |
 |---|---|---|
 | `raw` | the column as is | direct linear effect |
-| `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)`, in [0, 1] (the smallest 0, the largest 1; the denominator is the count minus one, not the count of a pandas `rank(pct=True)`), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
+| `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)` with `ties` the other values equal to it, in [0, 1] (an untied minimum 0, an untied maximum 1) — `(r − 1) / (m − 1)` for the average 1-based rank `r` of `m` observed values, i.e. pandas `(rank() − 1) / (count() − 1)`, not `rank(pct=True)` = `r / m` (numerator and denominator both differ), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group's observed values\| | symmetric "extremeness" effects |
 
 Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics: with
@@ -259,7 +259,9 @@ H⊥_p = b_p − 2 γ'a_p + γ'G_pγ        (Σ_p S⊥_p = S⊥, Σ_p H⊥_p = H
 ```
 
 so `partial_period_z` decomposes the partial statistic by period and `partial_periods_agree` counts the
-buckets whose S⊥_p has the sign of S⊥. The per-period Gram costs periods × k² doubles in one accumulator, so
+buckets whose S⊥_p has the sign of S⊥. As for the window (a column the marginal test cannot score has no
+partial), a bucket whose marginal slice is degenerate — no observed or within-unit variation of x — has no
+partial slice: its S⊥_p / H⊥_p would be the fit's own −γ'g_p / γ'G_pγ, not the candidate's. The per-period Gram costs periods × k² doubles in one accumulator, so
 it is carried up to k = 100; beyond, γ'G_pγ is taken as the window's γ'Gγ times the bucket's share of the
 unit mass (S⊥_p and the sign stay exact, H⊥_p is approximate, the sums still match) and a note says so.
 

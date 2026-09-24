@@ -456,8 +456,9 @@ Notes:
      large |δ|. Shrinkage pulls a level's δ toward its parent's by **information**, `V / (V + λ′)`: a key of
      rare events shrinks more than a key of the same row count at even odds; `λ′` is `priorWeight` rows of
      the root level's average information (`priorWeight · V_root / n_root`, the root's totals as recorded on
-     the row — never leave-node-out reduced — the same under `weights: fixed`; `V_k` in the weight is the
-     level's information, leaf-reduced only under leave-node-out) or, under
+     the row — never leave-node-out reduced — the same under `weights: fixed`; under leave-node-out, the
+     default, every level above the leaf reads `S_k` and `V_k` minus the leaf's, in its term and in its
+     weight, and the leaf's own are never reduced) or, under
      `weights: varianceComponents`, `1 / τ²` with τ² the between-key variance of the terms estimated on the
      score scale (the DerSimonian–Laird moment estimator, sampling variance `1 / V_k`). The composed value
      **is δ** (the residual effect on the scale), not `t⁻¹(t(baseline) + δ)` — the consumer adds it to its

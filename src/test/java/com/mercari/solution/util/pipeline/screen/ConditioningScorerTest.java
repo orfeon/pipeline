@@ -231,6 +231,44 @@ public class ConditioningScorerTest {
     }
 
     @Test
+    public void testPartialPeriodWithoutMarginalInformationIsDegenerate() {
+        // 2025: x is constant within every unit, so its marginal slice is degenerate (H = 0); the partial slice would be
+        // the fit's own -gamma'g_p / gamma'G_p gamma (the conditioning model's misfit in 2025), not the candidate's
+        final ScreenSpec s = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, periods: year, conditioning: {fields: [f], l2: 0}}");
+        final GroupScorer groups = new GroupScorer(s);
+        final ConditioningScorer scorer = new ConditioningScorer(s);
+        final List<List<ScreenRow>> unitsRows = List.of(
+                List.of(row("a", 0, "2024", 1, 2, 1), row("a", 1, "2024", 0, 0, 0), row("a", 2, "2024", 0, -1, -1)),
+                List.of(row("b", 0, "2024", 0, 1, 1), row("b", 1, "2024", 1, 3, 0), row("b", 2, "2024", 0, -2, -1)),
+                List.of(row("c", 0, "2025", 0, 5, 1), row("c", 1, "2025", 1, 5, 0), row("c", 2, "2025", 0, 5, -1)),
+                List.of(row("d", 0, "2025", 0, 7, 1), row("d", 1, "2025", 1, 7, 0), row("d", 2, "2025", 0, 7, -1)));
+        final double[] moments = {12, 0, 8};
+        FitState state = FitState.initial(1);
+        for (int it = 0; it < 10 && !state.converged; it++) {
+            final VectorAccumulator eval = new VectorAccumulator();
+            for (final List<ScreenRow> rows : unitsRows) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).group), state.proposal, moments));
+            state.advance(eval.getValues(), 0d, 1e-10);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final List<ScreenRow> rows : unitsRows) {
+            final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).group);
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments, partials);
+            groups.score(rows, rows.get(0).group, marginal);
+        }
+        final Map<String, Object> record = ScreenReport.build(s, marginal, partials, state).records().get(0);
+        Assertions.assertFalse(Double.isNaN((Double) record.get("partial_z")));
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> periods = (List<Map<String, Object>>) record.get("partial_period_z");
+        Assertions.assertEquals(2, periods.size());
+        Assertions.assertEquals(1L, record.get("n_periods"));
+        Assertions.assertEquals(1L, record.get("partial_n_periods"));
+        Assertions.assertNotNull(periods.get(0).get("z"));
+        Assertions.assertEquals("2025", periods.get(1).get("period"));
+        Assertions.assertNull(periods.get(1).get("z"));
+    }
+
+    @Test
     public void testFitIsInvariantToWeightScale() {
         // rescaling the weight column must leave the fitted point, the pass count and the partial ridge unchanged
         final ScreenSpec s = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, conditioning: {fields: [f], l2: 0.1, maxIter: 20}}");

@@ -66,7 +66,7 @@ for independent rows), so a re-run reproduces the same columns.
 | transform | definition | catches |
 |---|---|---|
 | `raw` | the column as is | direct linear effect |
-| `rank` | percentile rank within the group over the observed (finite) values: `(number of smaller values + half the ties) / (observed count − 1)`, in [0, 1]; 0.5 when only one value is observed. The denominator is the count minus one (the smallest value reads 0, the largest 1), not the count as in a `rank(pct=True)` of pandas | monotone non-linear effects, outlier robustness |
+| `rank` | percentile rank within the group over the observed (finite) values: `(number of smaller values + half the number of other values tied with it) / (observed count − 1)`, in [0, 1] (an untied minimum reads 0, an untied maximum 1); 0.5 when only one value is observed. With `r` the average 1-based rank and `m` the observed count it is `(r − 1) / (m − 1)` — in pandas `(s.rank() − 1) / (s.count() − 1)`, not `s.rank(pct=True)` (`r / m`: the numerator and the denominator both differ) | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group\| | symmetric "extremeness" effects |
 
 Records are keyed by (`candidate`, `transform`). `rank` and `absdev` need `group` (the within-group
@@ -114,7 +114,8 @@ model and reads the score test of what is left:
 - `r2_F = 1 − x⊥'Wx⊥ / x'Wx` — how much of the candidate F already explains (1 = fully redundant);
 - `partial_S`, `partial_H`, `partial_chi2`, `partial_z`, `partial_gain`, `partial_pValue` — the score test of x⊥;
 - with `periods`, `partial_period_z` / `partial_periods_agree` / `partial_n_periods` — the same test sliced by
-  period with the window's orthogonalisation (the slices add up to the window's partial S and H; the per-period
+  period with the window's orthogonalisation (the slices add up to the window's partial S and H; a period the
+  marginal test cannot score — no observed or within-unit variation of the candidate — has no partial slice either; the per-period
   information is exact up to 100 conditioning columns and, beyond, the window's Gram term shared out by the
   period's unit mass — a note says so; the per-period score and sign are always exact).
 
@@ -229,7 +230,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -384,7 +385,7 @@ transforms:
   "version": 1,
   "columns": ["f_extra", "f_recent_bids"],
   "test": "partial",
-  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods", "minPeriodsAgree": 0.67,
+  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66,
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
@@ -425,14 +426,16 @@ transforms:
   "extremeness" effect; `rank` catches monotone non-linear effects and is robust to outliers.
 - `periods_agree` far below `n_periods` means an unstable effect: look at `period_z` for a decay over time. With
   conditioning read `partial_periods_agree` / `partial_period_z` (the test that decided `passed`); an operating
-  rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.67}`, so the pass list
+  rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.66}` (not 0.67: the
+  share is compared as `agree ≥ share × n_periods`, and 2 of 3 is 0.667 < 0.67), so the pass list
   applies it too.
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome. When strong legitimate candidates trip the flag, read it on
   the partial z (`flags: {leakZ: {z: 20, on: partial}}`): a leak survives the conditioning, a re-summary of what
   the model knows does not.
 - `output.selection` writes the pass list in the format the feature transform's `output.include` reads, so
-  the next feature run emits only the screened columns (see below); `passedColumns` in the summary is the same list.
+  the next feature run emits only the screened columns (see [Closing the loop](#closing-the-loop-outputselection));
+  `passedColumns` in the summary is the same list.
 
 ### Scoring against the settlement reference
 
@@ -477,28 +480,38 @@ transforms:
                b.partial_gain AS gain_bet, f.partial_gain AS gain_final,
                SIGN(b.partial_z * f.partial_z) * f.partial_gain / NULLIF(b.partial_gain, 0) AS retained,
                b.passed AS passed_bet, f.passed AS passed_final
-        FROM `screen_bet` b JOIN `screen_final` f
+        FROM (SELECT candidate, transform, partial_z, partial_gain, passed FROM `screen_bet` WHERE NOT placebo) b
+        JOIN (SELECT candidate, transform, partial_z, partial_gain, passed FROM `screen_final` WHERE NOT placebo) f
           ON b.candidate = f.candidate AND b.transform = f.transform
-        WHERE NOT b.placebo
 ```
 
+- Project the columns before the join (the subqueries above): a scoring record carries the nested `period_z`
+  array, and a Beam SQL join of the whole records fails at assembly (`Types not equal`).
 - `invalid: dropRow` on both: a withdrawn entry has no settlement price (null or 0), and without it the whole
-  group would be skipped under `inverseShare` (`nUnitsSkippedInvalidBaseline`, and a note above 1%).
+  group would be skipped under `inverseShare` (`nUnitsSkippedInvalidBaseline`, and a note above 1%). It still
+  has its decision-time price, so the decision-time screen keeps it (`nRowsDropped` differs between the two
+  summaries); when the two gains must cover the same rows, filter such entries out upstream of both screens.
 - Both screens keep the same `conditioning`, `periods`, `placebo` and `time` window, so the two thresholds are
   calibrated the same way and the gains are comparable; with `conditioning` compare the partial gains (as
-  above), without it `est_gain` / `z`.
+  above), without it `est_gain` / `z`. `periods` (and a `time.to` / `from` fence) read the feature transform's
+  time field when it is the direct upstream, as here; otherwise declare `time: {field, to}` in both.
 - **Reading the retained share.** Near 1: information the market never learns (a feature for the probability
   model). Near 0: information the market absorbs before settlement, or a re-encoding of the market level —
   useful to execution (when to place the order, what the settlement price will be), not to the probability
   model. A `rank` / `absdev` variant of a market-level column can still pass against the settlement reference
   (the skew of the extreme values survives in the settlement market): the retained share of its `raw` variant
-  tells it apart.
+  tells it apart. Read it only where the decision-time gain clears the threshold (`passed_bet`): a ratio of two
+  one-step gains is unstable near zero, so a candidate without a decision-time gain (a conditioning column, a
+  noise-level candidate) reads an arbitrary value, far above 1 included.
 - **The cut.** Use the settlement reference as a marker, not as the cut: take the union of the two pass lists as
   the candidate set and carry the retained share next to it — a candidate that passes only at decision time
-  with a low retained share is execution information, not noise. The two pass lists are composed in the next
-  feature run's `output.include` (see [Closing the loop](#closing-the-loop-outputselection)).
+  with a low retained share is execution information, not noise. The next feature run's `output.include` reads
+  one list (one URI, or the names inline), not several files: write the union as one list — the `candidate`s
+  of the `retained` rows with `passed_bet OR passed_final` — and point `output.include` at it (see
+  [Closing the loop](#closing-the-loop-outputselection)).
 - The settlement price column must stay out of `candidates` in the decision-time screen (as above): it is
-  numeric, so it would be screened, and a post-decision price is the textbook `leakSuspect`.
+  numeric, so it would be screened, and a post-decision price is the textbook leak — flagged as `leakSuspect`
+  only when `flags.leakZ` is set (no flag by default).
 
 ## Limits
 

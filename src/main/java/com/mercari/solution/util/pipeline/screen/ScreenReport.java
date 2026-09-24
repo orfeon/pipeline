@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -146,33 +147,35 @@ public final class ScreenReport {
         final double b = vec[1];
         if (gamma == null) return new Partial(Stats.degenerate(nObs), Double.NaN);
         final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
-        final double gGg = quadratic(gamma, fit.bestG, k);
-        final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + gGg;
+        final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + quadratic(gamma, fit.bestG, k);
+        if (hPerp <= 1e-10 * b) return new Partial(Stats.degenerate(nObs), 1d);
         final double r2 = Math.min(1d, Math.max(0d, 1d - hPerp / b));
-        return new Partial(perpendicular(s, b, a, fit.bestGrad, gGg, gamma, nUnits, nObs, sigma2), r2);
+        return new Partial(perpendicular(s - MatrixOps.dot(gamma, fit.bestGrad), hPerp, b, nUnits, nObs, sigma2), r2);
     }
 
     /**
      * One period's slice of the partial test with the window's γ: S⊥_p = s_p − γ'g_p, H⊥_p = b_p − 2γ'a_p + γ'G_pγ,
      * where {@code fitVec} is the period's {@code [n, g, G]} ({@link ConditioningScorer#FIT_PERIOD_KEY}); without
-     * the Gram the window's γ'Gγ is scaled by the period's share of the unit mass. The slices sum to the window's
-     * S⊥ / H⊥ (exactly with the Gram), so the period signs decompose the partial statistic.
+     * the Gram the window's γ'Gγ ({@code windowGGg}, computed once per column) is scaled by the period's share of
+     * the unit mass. The slices sum to the window's S⊥ / H⊥ (exactly with the Gram), so the period signs decompose
+     * the partial statistic.
      */
     static Stats partialPeriod(final double[] vec, final double[] fitVec, final FitState fit, final double nUnits, final long nObs,
-                               final double sigma2, final double[] gamma) {
+                               final double sigma2, final double[] gamma, final double windowGGg) {
         final int k = fit.k;
         if (gamma == null || fitVec == null || fitVec.length < 1 + k) return Stats.degenerate(nObs);
-        final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
-        final double[] g = Arrays.copyOfRange(fitVec, 1, 1 + k);
         final double gGg;
         if (fitVec.length >= 1 + k + k * k) {
             double q = 0;
             for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) q += gamma[i] * fitVec[1 + k + i * k + j] * gamma[j];
             gGg = q;
         } else {
-            gGg = fit.nUnits > 0 ? fitVec[0] / fit.nUnits * quadratic(gamma, fit.bestG, k) : 0d;
+            gGg = fit.nUnits > 0 ? fitVec[0] / fit.nUnits * windowGGg : 0d;
         }
-        return perpendicular(vec[0], vec[1], a, g, gGg, gamma, nUnits, nObs, sigma2);
+        final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
+        final double[] g = Arrays.copyOfRange(fitVec, 1, 1 + k);
+        final double b = vec[1];
+        return perpendicular(vec[0] - MatrixOps.dot(gamma, g), b - 2 * MatrixOps.dot(gamma, a) + gGg, b, nUnits, nObs, sigma2);
     }
 
     private static double quadratic(final double[] gamma, final double[][] G, final int k) {
@@ -181,11 +184,9 @@ public final class ScreenReport {
         return q;
     }
 
-    /** The score test of x⊥ from the sums and the fit's gradient / quadratic form; degenerate when nothing is left of x. */
-    private static Stats perpendicular(final double s, final double b, final double[] a, final double[] g, final double gGg,
-                                       final double[] gamma, final double nUnits, final long nObs, final double sigma2) {
-        final double sPerp = s - MatrixOps.dot(gamma, g);
-        final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + gGg;
+    /** The score test of x⊥ from S⊥ / H⊥; degenerate when nothing is left of x ({@code hPerp} ≈ 0 relative to {@code b}). */
+    private static Stats perpendicular(final double sPerp, final double hPerp, final double b, final double nUnits, final long nObs,
+                                       final double sigma2) {
         if (hPerp <= 1e-10 * b) return Stats.degenerate(nObs);
         return fromScore(sPerp / sigma2, hPerp / sigma2, nObs, nUnits);
     }
@@ -271,6 +272,7 @@ public final class ScreenReport {
                 r.put("n_obs", st.nObs);
                 // periods
                 final List<Map<String, Object>> periodRecords = new ArrayList<>();
+                final Set<String> scorablePeriods = new HashSet<>();
                 long agree = 0, nPeriods = 0;
                 for (final Map.Entry<String, double[]> e : acc.getPeriods().entrySet()) {
                     final Stats ps = stats(spec, e.getValue(), nUnits);
@@ -282,6 +284,7 @@ public final class ScreenReport {
                     pr.put("n", ps.nObs);
                     periodRecords.add(pr);
                     if (!ps.degenerate) {
+                        scorablePeriods.add(e.getKey());
                         nPeriods++;
                         if (!st.degenerate && st.z != 0 && Math.signum(ps.z) == Math.signum(st.z)) agree++;
                     }
@@ -313,10 +316,18 @@ public final class ScreenReport {
                     final List<Map<String, Object>> partialPeriods = new ArrayList<>();
                     long pAgree = 0, pPeriods = 0;
                     if (vec != null && !st.degenerate && fitPeriods != null) {
+                        // without the per-period Gram every slice scales the window's γ'Gγ: computed once per column
+                        final double windowGGg = gamma != null && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k
+                                ? quadratic(gamma, fit.bestG, fit.k) : 0d;
                         for (final Map.Entry<String, double[]> e : pacc.getPeriods().entrySet()) {
                             final double[] marginalSlot = acc.getPeriods().get(e.getKey());
                             final long pObs = marginalSlot == null ? 0 : (long) marginalSlot[ScoreAccumulator.N_OBS];
-                            final Stats ps = partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma);
+                            // the window rule per period: a period the marginal test cannot score (no observed or
+                            // within-unit variation of x) has no partial slice either — its S⊥_p / H⊥_p would be the
+                            // fit's own −γ'g_p / γ'G_pγ, the conditioning model's period misfit rather than the candidate
+                            final Stats ps = scorablePeriods.contains(e.getKey())
+                                    ? partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma, windowGGg)
+                                    : Stats.degenerate(pObs);
                             final Map<String, Object> pr = new LinkedHashMap<>();
                             pr.put("period", e.getKey());
                             pr.put("z", ps.degenerate ? null : ps.z);

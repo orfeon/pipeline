@@ -261,14 +261,15 @@ shrinkage scale:
   grows with n toward `−1 / (1 − b̄)` instead of diverging (the transformed mean `logit(ȳ) − logit(b̄)` is
   undefined there and a clamp would leak its constant into the value). The leaf shrinks that term toward
   the parent's term **by information**, `V / (V + λ′)`, so a key of rare events is trusted less than a key
-  of the same row count at even odds; `λ′` is `priorWeight` rows of the average information of the lattice's
-  coarsest (root) level — `λ′ = priorWeight · V_root / n_root`, both read from the row's root-level totals
-  as they stand (never reduced by leave-node-out, whether or not it is declared), the same under
-  `weights: fixed`; the level's own term is `S_k / V_k` with no ridge, and its weight `V_k / (V_k + λ′)` uses
-  the level's information `V_k` minus the leaf's only when leave-node-out is declared (a declared `priorWeight`
-  keeps its meaning of "rows of average information"), or under
-  `weights: varianceComponents` `1 / τ²` with the between-key variance τ² estimated on the score scale. The
-  **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
+  of the same row count at even odds. Under `weights: fixed`, `λ′` is `priorWeight` rows of the average
+  information of the lattice's coarsest (root) level (a declared `priorWeight` keeps its meaning of "rows of
+  average information"): `λ′ = priorWeight · V_root / n_root`, both read from the row's root-level totals as
+  they stand, never reduced by leave-node-out (`estimator: joint` reads the information per row of the cells
+  it solves instead). The level's own term is `S_k / V_k` with no ridge, weighted by `V_k / (V_k + λ′)`;
+  under leave-node-out (the default; `leaveNodeOut: false` turns it off) every level above the leaf takes
+  `S_k` and `V_k` minus the leaf's, in the term and in the weight alike — the leaf's own are never reduced.
+  Under `weights: varianceComponents`, `λ′` is `1 / τ²` with the between-key variance τ² estimated on the
+  score scale. The **composed value is the term itself** — a residual on the scale, *not* a probability or rate — with
   `deviations` on the same scale and `effectiveN` in rows (info `encoding.offset.additive`). The levels
   keep a hidden `Σ baseline` (`<level>__sumoff`) and, on logit, `Σ b(1 − b)` (`<level>__suminfo`) next to
   `Σ(y − b)`, in the expanding replay and in the static / fold / forward artifacts alike; `std` and the
