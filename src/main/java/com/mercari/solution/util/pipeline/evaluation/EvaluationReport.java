@@ -308,7 +308,7 @@ public final class EvaluationReport {
         if (fits != null) {
             for (final Map<String, Object> r : fits.records) {
                 fitRecords.add(new LinkedHashMap<>(r));
-                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
+                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " (" + r.get("derived") + ") produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
             }
         }
         s.put("fits", fitRecords);
