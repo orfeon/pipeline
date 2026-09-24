@@ -45,12 +45,15 @@ public final class EvaluationScorer implements Serializable {
      * row, as the unit's time is): a unit spanning two periods is not a row-level slice
      */
     private final boolean[] unitPeriodSlices;
+    /** a column declares {@code invalid: dropRow}: the rows it rejects leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
         this.sets = spec.setCount();
+        this.dropsRows = spec.dropsRows();
         this.unitPeriodSlices = new boolean[spec.slices.size()];
         for (int s = 0; s < unitPeriodSlices.length; s++) {
             final EvaluationSpec.Slice sl = spec.slices.get(s);
@@ -79,7 +82,10 @@ public final class EvaluationScorer implements Serializable {
         public final double unitWeight;
         /** rows whose identity repeats an earlier row's (the same row twice in the unit, at any time) */
         public final int duplicates;
-        /** rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}) */
+        /**
+         * rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}, except on a
+         * unit that lost every row: skipped, its rows are the dropped ones)
+         */
         public final int dropped;
         /**
          * per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is
@@ -154,7 +160,7 @@ public final class EvaluationScorer implements Serializable {
         sorted.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final List<EvaluationRow> rows;
         int dropped = 0;
-        if (spec.dropsRows()) {
+        if (dropsRows) {
             rows = new ArrayList<>(sorted.size());
             Skip emptied = Skip.NONE;
             for (final EvaluationRow r : sorted) {
@@ -250,8 +256,8 @@ public final class EvaluationScorer implements Serializable {
 
     /**
      * Why a row leaves its unit before scoring: the first column declared {@code invalid: dropRow} whose value the
-     * row fails ({@link Baselines#validRow} for the baseline and a probability set; a finite score and a non-null,
-     * non-negative prob-scale offset for a score set — the values {@link #softmax} would reject), {@link Skip#NONE}
+     * row fails ({@link Baselines#validRow} for the baseline and a probability set; a finite score and a non-null
+     * offset below +∞, non-negative on the prob scale, for a score set — the values {@link #softmax} cannot use), {@link Skip#NONE}
      * when every dropping column accepts it.
      */
     private Skip dropReason(final EvaluationRow r) {
@@ -269,7 +275,8 @@ public final class EvaluationScorer implements Serializable {
         if (!Double.isFinite(x[d.offset])) return false;
         if (d.offsetField == null) return true;
         final double offset = x[d.offset + 1];
-        if (Double.isNaN(offset)) return false;
+        // NaN, and +∞ on either scale (η = +∞ turns the whole unit's softmax into NaN)
+        if (Double.isNaN(offset) || offset == Double.POSITIVE_INFINITY) return false;
         return EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale) || offset >= 0;
     }
 

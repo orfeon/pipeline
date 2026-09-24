@@ -161,6 +161,10 @@ public class EvaluationScorerTest {
         final EvaluationScorer.Unit emptied = scorer.prepare(List.of(row("test", "g3", 1, 0.5, null, 2.0, 1.0, 0.5)), "g3");
         Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, emptied.skip);
         Assertions.assertEquals(1, emptied.dropped);
+        // a +∞ prob-scale offset is dropped as well: kept, it would turn the whole unit's softmax into NaN
+        final EvaluationScorer.Unit infinite = scorer.prepare(List.of(row("test", "g4", 1, 0.5, null, 0.6, 1.0, 0.5), row("test", "g4", 0, 0.5, null, 0.4, 0.0, Double.POSITIVE_INFINITY)), "g4");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, infinite.skip);
+        Assertions.assertEquals(1, infinite.dropped);
         final Map<String, MetricAccumulator> acc = new HashMap<>();
         scorer.accumulate(u, scorer.score(u), acc);
         scorer.skipped(skippedUnit, acc);
@@ -177,7 +181,7 @@ public class EvaluationScorerTest {
         plainScorer.accumulate(ok, plainScorer.score(ok), plainAcc);
         plainScorer.skipped(plainScorer.prepare(List.of(row("test", "g2", 1, 2, null, 0.6), row("test", "g2", 0, 0, null, 0.4)), "g2"), plainAcc);
         final String notes = EvaluationReport.build(plain, plainAcc).summary().get("notes").toString();
-        Assertions.assertTrue(notes.contains("split test: 1 of 2 units skipped (50.0%: invalid baseline 1, invalid prediction 0, no positive label 0); a null or non-positive value under form inverseShare / rate skips the whole unit: declare invalid: dropRow"), notes);
+        Assertions.assertTrue(notes.contains("split test: 1 of 2 units skipped (50.0%: invalid baseline 1, invalid prediction 0, no positive label 0); an invalid value (a null, or a 0 / negative one under form inverseShare) skips the whole unit: declare invalid: dropRow"), notes);
         Assertions.assertFalse(notes.contains("rows dropped"), notes);
         // below the share: no note
         final Map<String, MetricAccumulator> quiet = new HashMap<>();
