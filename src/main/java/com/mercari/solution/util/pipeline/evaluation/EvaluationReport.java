@@ -88,7 +88,7 @@ public final class EvaluationReport {
         // contributions that never went through the Combine (the pure path) expand here; a no-op after it
         for (final MetricAccumulator acc : accumulators.values()) acc.expand(spec.bootstrapSeed, spec.bootstrapSamples);
         final List<String> names = spec.predictionNames();
-        final int k = spec.setCount();
+        final List<int[]> pairs = pairs(spec);
         final Map<String, String> roles = spec.roles();
         // (split, slice, value) → prediction index → accumulator
         final Map<String, Map<Integer, MetricAccumulator>> cells = new LinkedHashMap<>();
@@ -159,41 +159,53 @@ public final class EvaluationReport {
                 r.put("logloss", logScore == null ? null : -logScore);
                 records.add(r);
             }
-            // pair differences A − B over the same units (the weights are per unit, so the series subtract)
-            for (int a = 1; a <= k; a++) {
-                for (int b = a + 1; b <= k; b++) {
-                    if (!series.containsKey(a) || !series.containsKey(b)) continue;
-                    final Map<String, Object> r = new LinkedHashMap<>();
-                    r.put("split", parts[0]);
-                    r.put("role", roles.get(parts[0]));
-                    r.put("prediction", names.get(a));
-                    r.put("pair", names.get(b));
-                    r.put("slice", sliceName);
-                    r.put("value", sliceValue);
-                    putCounts(r, byPrediction.get(a));
-                    for (final String m : METRICS) {
-                        if (SET_INDEPENDENT.contains(m)) {
-                            r.put(m, null);
-                            r.put(m + "_lo", null);
-                            r.put(m + "_hi", null);
-                            continue;
-                        }
-                        final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
-                        final double[] diff = new double[va.length];
-                        for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
-                        r.put(m, finiteOrNull(diff[0]));
-                        final double[] ci = spec.hasBootstrap() ? interval(Arrays.copyOfRange(diff, 1, diff.length)) : new double[]{Double.NaN, Double.NaN};
-                        r.put(m + "_lo", finiteOrNull(ci[0]));
-                        r.put(m + "_hi", finiteOrNull(ci[1]));
+            // pair differences A − B over the same units (the weights are per unit, so the series subtract): the
+            // declared pairs, else every unordered pair of compared sets in declaration order (the earlier minus the later)
+            for (final int[] ab : pairs) {
+                final int a = ab[0], b = ab[1];
+                if (!series.containsKey(a) || !series.containsKey(b)) continue;
+                final Map<String, Object> r = new LinkedHashMap<>();
+                r.put("split", parts[0]);
+                r.put("role", roles.get(parts[0]));
+                r.put("prediction", names.get(a));
+                r.put("pair", names.get(b));
+                r.put("slice", sliceName);
+                r.put("value", sliceValue);
+                putCounts(r, byPrediction.get(a));
+                for (final String m : METRICS) {
+                    if (SET_INDEPENDENT.contains(m)) {
+                        r.put(m, null);
+                        r.put(m + "_lo", null);
+                        r.put(m + "_hi", null);
+                        continue;
                     }
-                    final Double logScore = (Double) r.get("logScore");
-                    r.put("logloss", logScore == null ? null : -logScore);
-                    records.add(r);
+                    final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
+                    final double[] diff = new double[va.length];
+                    for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
+                    r.put(m, finiteOrNull(diff[0]));
+                    final double[] ci = spec.hasBootstrap() ? interval(Arrays.copyOfRange(diff, 1, diff.length)) : new double[]{Double.NaN, Double.NaN};
+                    r.put(m + "_lo", finiteOrNull(ci[0]));
+                    r.put(m + "_hi", finiteOrNull(ci[1]));
                 }
+                final Double logScore = (Double) r.get("logScore");
+                r.put("logloss", logScore == null ? null : -logScore);
+                records.add(r);
             }
         }
         final Discovery discovery = spec.hasDiscovery() ? discovery(spec, accumulators) : null;
         return new Result(records, discovery == null ? List.of() : discovery.records, summary(spec, accumulators, fits, discovery));
+    }
+
+    /** The pair records as (of, minus) indices into the prediction names: the declared pairs (none for {@code pairs: []}), else every unordered pair of the compared sets. */
+    static List<int[]> pairs(final EvaluationSpec spec) {
+        final List<int[]> out = new ArrayList<>();
+        if (spec.pairsDeclared) {
+            for (final EvaluationSpec.Pair p : spec.pairs) out.add(new int[]{p.ofIndex, p.minusIndex});
+            return out;
+        }
+        final int k = spec.setCount();
+        for (int a = 1; a <= k; a++) for (int b = a + 1; b <= k; b++) out.add(new int[]{a, b});
+        return out;
     }
 
     private static void putCounts(final Map<String, Object> r, final MetricAccumulator acc) {
@@ -859,6 +871,11 @@ public final class EvaluationReport {
         final List<String> splits = new ArrayList<>();
         for (final EvaluationSpec.Split s : spec.splits) splits.add(s.name + ":" + s.role + (s.from != null || s.to != null ? "[" + s.from + ".." + s.to + "]" : ""));
         parts.add("splits=" + (spec.splitField != null ? spec.splitField + " " : "") + splits);
+        if (spec.pairsDeclared) {
+            final List<String> pairs = new ArrayList<>();
+            for (final EvaluationSpec.Pair p : spec.pairs) pairs.add(p.of + "-" + p.minus);
+            parts.add("pairs=" + pairs);
+        }
         if (spec.timeField != null) parts.add("time=" + spec.timeField);
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("bootstrap=" + spec.bootstrapSamples + " seed=" + spec.bootstrapSeed + (spec.bootstrapUnit != null ? " unit=" + spec.bootstrapUnit : ""));
