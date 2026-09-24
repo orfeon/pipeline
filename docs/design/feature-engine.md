@@ -663,9 +663,10 @@ estimate**: `Shrinkage.ownScore` computes the level's term `S / V = Σ(y − b) 
 sums — one Fisher-scoring step from the baseline, finite for every level, null (no estimate at that level, like
 `n = 0`) when `V ≤ 0` — and `estimate` shrinks it by information, `w = V / (V + λ′)`. The pseudo-count of a
 score level is on the score scale: a declared `priorWeight` (rows) is converted once per composition by the
-root level's information per row (`Shrinkage.rootInfoPerRow`, the coarsest level's totals — "priorWeight rows of
-average information"; one constant for the whole lattice when that level is the global one, the key's own average
-when the lattice stops at a keyed level), an estimated entry of the `lambdas` map
+root level's information per row (`Shrinkage.rootInfoPerRow`, the coarsest level's totals as they stand on the
+row, before any leave-node-out subtraction — "priorWeight rows of average information"; one constant for the
+whole lattice when that level is the global one, the key's own average when the lattice stops at a keyed
+level), an estimated entry of the `lambdas` map
 is `1 / τ²` already (`Shrinkage.lambdaFromScore`, the DerSimonian–Laird moment estimator over the keys' terms
 `S_k / V_k` with sampling variance `1 / V_k`) and is used as is; `effectiveN` is converted back to rows.
 `compose` returns the shrunk term through `Shrinkage.output` (no inverse transform under an offset term). The

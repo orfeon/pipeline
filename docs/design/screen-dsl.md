@@ -178,7 +178,7 @@ order). Re-runs, runners, bundle boundaries and worker counts cannot change a pl
 | transform | definition | catches |
 |---|---|---|
 | `raw` | the column as is | direct linear effect |
-| `rank` | percentile rank within the group, in [0, 1], ties sharing the mean rank, 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
+| `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)` with `ties` the other values equal to it, in [0, 1] (an untied minimum 0, an untied maximum 1) — `(r − 1) / (m − 1)` for the average 1-based rank `r` of `m` observed values, i.e. pandas `(rank() − 1) / (count() − 1)`, not `rank(pct=True)` = `r / m` (numerator and denominator both differ), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group's observed values\| | symmetric "extremeness" effects |
 
 Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics: with
@@ -324,6 +324,13 @@ negative weight → `nRowsInvalid`; a null time → the failure output. Unit ski
   100.
 - Blind to time dynamics: the statistic is a window average; read `period_z` for decay.
 - Batch only; conditioning and the pass list need the global window.
+- One reference per run. Where the return is settled at a price fixed after the decision (a closing price, a
+  hammer price), the gain over the decision-time reference overstates what a model can earn: the user doc's
+  "Scoring against the settlement reference" runs two screens over one input (one per reference) and joins
+  the records downstream for the retained share. A multi-baseline run (`baselines: [...]` with a retained-share
+  column and a union pass rule) was considered and declined: it adds a second dimension to every accumulator
+  key, the placebo calibration and the conditioning fit to save one input scan, and the retained share — a
+  ratio of two one-step gains — is unstable near zero, so it belongs to a downstream join, not to the record.
 
 ## 12. Extension positions (designed, not built)
 
