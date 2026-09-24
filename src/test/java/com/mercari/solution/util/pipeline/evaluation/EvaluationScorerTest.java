@@ -544,6 +544,27 @@ public class EvaluationScorerTest {
     }
 
     @Test
+    public void testUtilityIgnoresTheLosingRowsPayout() {
+        // an infinite payout on a row that did not pay (u = 1/p with p = 0) is a zero return, not ∞·0 = NaN: the
+        // unit, the accumulated metric and the calibration bin stay finite
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 20, seed: 1}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 3.0), row("test", "g1", 0, 0.5, null, 0.4, Double.POSITIVE_INFINITY)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(1.5, m.utility, 1e-12);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        scorer.accumulate(unit, m, acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(spec, acc).records();
+        Assertions.assertEquals(1.5, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertNotNull(records.get(1).get("utility_lo"));
+        final double[] v = new double[EvaluationReport.BIN_SLOTS];
+        for (final AlignedRow r : scorer.aligned(unit)) EvaluationReport.addBin(v, r, r.predictions[0]);
+        Assertions.assertEquals(3d, v[EvaluationReport.BIN_UTILITY], 1e-12);
+    }
+
+    @Test
     public void testSliceDiscoveryOnUtility() {
         // twenty units per split, the positive row pays 4 in the east and 1 in the west: the east returns 2 per row,
         // the west 0.5; both slices pass and are confirmed, reported once (the metric does not depend on the set)

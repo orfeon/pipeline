@@ -109,13 +109,16 @@ the same under the baseline, `brier = (q − y)²`; `hitAt1` is not defined (nul
 With `utility.field` (u, the realised value of a positive row) a unit also has
 
 ```
-utility = Σ_i u_i y_i / n            (y as declared, not ỹ; a null u counts 0)
+utility = Σ_i u_i y_i / n            (y as declared, not ỹ; a null u, and any u on a row with y = 0, counts 0)
 ```
 
 the flat return of taking every row of the unit at unit stake. It describes the outcomes, not a set: it is
 reported under every prediction set with the same value (and its own interval), is null in pair records, and
 is a `sliceDiscovery.metric` — the realised-return question ("where does taking every row pay?") under the
-same random-subset null as Δ. A set-dependent return (taking the set's top pick) is not this metric.
+same random-subset null as Δ. A set-dependent return (taking the set's top pick) is not this metric. Like
+every metric it is aggregated (§4.2) over the common scored unit set (§3): a group without a positive row is not
+scored, so where a group can end without one the aggregate is the return given a positive; and it is a mean
+of per-unit returns, not the per-row pooled return of the calibration tables (§7).
 
 ### 4.2 Aggregates
 

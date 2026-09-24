@@ -40,7 +40,7 @@ baseline shares p and a prediction set's shares q:
 | `hitAt1` | ỹ at argmax q | the share of the positives the top-ranked row holds: a dead heat (two positives) scores 0.5 when one of them ranks first, and tied maxima split the credit evenly (two rows at the maximum, the positive among them: 0.5). Null for `binomial` |
 | `brier` | Σ (q − ỹ)² | |
 | `logloss` | −logScore | derived, no interval of its own |
-| `utility` | Σ u · y / n over the unit's rows | the flat return of taking every row of the unit at unit stake (`utility.field` = the realised value of a positive row, y as declared; a null utility is a zero return). A property of the outcomes, not of a set: the same value under every prediction set, null in pair records, null without `utility.field` |
+| `utility` | Σ u · y / n over the unit's rows | the flat return of taking every row of the unit at unit stake (`utility.field` = the realised value of a positive row, y as declared; a null utility, and any utility on a row with y = 0, is a zero return). A property of the outcomes, not of a set: the same value under every prediction set, null in pair records, null without `utility.field` |
 
 For a `binomial` row: the Bernoulli log score, the same under the baseline, `brier = (q − y)²`. Aggregates are
 weighted means over the units of a key (split × prediction set × slice value); `weight` is per row for
@@ -281,8 +281,8 @@ the time partition.
 | positives | FLOAT64 | Σ w ỹ (grouped: the weight mass of the units) |
 | weight | FLOAT64 | Σ w |
 | logScore, excessLogScore, hitAt1, brier | FLOAT64 | the metrics (differences for a pair record) |
-| utility | FLOAT64 | the flat return per row (null without `utility.field`; null in pair records: it does not depend on the set) |
-| `<metric>_lo`, `<metric>_hi` | FLOAT64 | the bootstrap 95% interval (null without bootstrap, and for the baseline's excess) |
+| utility | FLOAT64 | the weighted mean of the units' flat returns (null without `utility.field`; null in pair records: it does not depend on the set) |
+| `<metric>_lo`, `<metric>_hi` | FLOAT64 | the bootstrap 95% interval (null without bootstrap, for the baseline's excess, and wherever the metric itself is null — `utility` in a pair record or without `utility.field`) |
 | logloss | FLOAT64 | −logScore |
 
 ### Calibration record
@@ -504,5 +504,10 @@ parameters:
   runners of one race), the units of a slice are not independent: the variance under the null is understated
   by the within-group correlation and `bootstrap.unit` does not enter the discovery. Treat a utility slice
   as a lead, confirmed by the next window, not as a measured return.
+- The `utility` metric is an aggregate like the others: the weighted mean over units of each unit's flat
+  return, so a grouped unit of many rows counts as much as one of few (the calibration tables' `utility` is
+  pooled per row instead). It covers the scored units only: a group without a positive row, and a unit
+  skipped for an invalid prediction set or baseline (`nUnitsSkipped`), does not enter it — where a group can
+  end without a positive (a query without a click), the metric is the return given a positive.
 - Batch, global window only. The gaussian / ranking families and the HTML report are the next stages (see
   `docs/design/evaluation-dsl.md` §11).

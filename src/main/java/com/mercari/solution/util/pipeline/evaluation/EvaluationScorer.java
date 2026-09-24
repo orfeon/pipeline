@@ -442,14 +442,14 @@ public final class EvaluationScorer implements Serializable {
         return new Metrics(logScore, hit, brier, utility(unit));
     }
 
-    /** The unit's flat return Σ u·y / n over its rows (the label as declared; a null utility counts 0); NaN without a utility field. */
+    /**
+     * The unit's flat return Σ u·y / n over its rows (the label as declared; a null utility and a losing row
+     * count 0, see {@link EvaluationReport#payout}); NaN without a utility field.
+     */
     private double utility(final Unit unit) {
         if (!spec.hasUtility()) return Double.NaN;
         double sum = 0;
-        for (final EvaluationRow r : unit.rows) {
-            final double u = r.x[spec.utilityIndex];
-            if (!Double.isNaN(u)) sum += u * r.label;
-        }
+        for (final EvaluationRow r : unit.rows) sum += EvaluationReport.payout(r.x[spec.utilityIndex], r.label);
         return sum / unit.size();
     }
 

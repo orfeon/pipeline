@@ -59,7 +59,7 @@ public final class EvaluationReport {
         return mean * Math.log(mean) + (1 - mean) * Math.log(1 - mean);
     }
 
-    /** The replicate's sums in the slot layout (W .. BRIER from the replicate, the counts from the total). */
+    /** The replicate's sums in the slot layout (W .. UTILITY from the replicate; the counts stay 0). */
     static double[] replicate(final MetricAccumulator acc, final int b) {
         final double[] sums = new double[MetricAccumulator.SLOTS];
         final double[] boot = acc.getBoot();
@@ -456,7 +456,15 @@ public final class EvaluationReport {
         v[BIN_SHARE] += row.share;
         v[BIN_Q] += q;
         v[BIN_P] += row.baseline;
-        if (!Double.isNaN(row.utility)) v[BIN_UTILITY] += row.utility * row.label;
+        v[BIN_UTILITY] += payout(row.utility, row.label);
+    }
+
+    /**
+     * A row's realised return u·y (y as declared): 0 for a row that did not pay (y = 0) whatever its utility — an
+     * infinite payout on a losing row would otherwise turn the sum into NaN (∞·0) — and 0 for a null utility.
+     */
+    static double payout(final double utility, final double label) {
+        return label == 0d || Double.isNaN(utility) ? 0d : utility * label;
     }
 
     public static String tableKey(final String split, final int prediction, final int table) {
