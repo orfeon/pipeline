@@ -183,7 +183,7 @@ differences (§4.3).
 calibration:
   - {type: reliability, by: prediction, bins: 10}
   - {type: reliability, by: divergence, bins: 10}
-  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100]}
+  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100], closed: left}
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
@@ -202,18 +202,20 @@ the Wilson interval, `positivesShare / n` the share `p_model` predicts.
 | `reliability` / `field` | fixed `edges` on a declared numeric field (a price band, an odds band) | rare-event bands |
 | `edge` | one group per threshold: the rows with q > threshold × p | if the rate exceeds `p_baseline` systematically, the divergence is information |
 
-Quantile bins are `bins` equal-rank intervals of the sketch (`k = 400`, an approximation of the boundaries
-within the sketch's rank error; the counts per bin are exact for the boundaries used); `edges` bins are
-exact and right-closed `(a, b]` (the first open below, the last open above). An `edge` group holds the rows
-with q > threshold × p (strict). Every bin record carries `lower` / `upper`; edge records carry the threshold
-in `lower`.
+Quantile bins are `bins` equal-rank intervals of the sketch (KLL, `k` 400 by default — rank error about
+0.8% —, raised per table with `k` up to 65535 when the bins must match an exact reference; the boundaries
+are values of the stream, so the bins are right-closed at them; the counts per bin are exact for the
+boundaries used). `edges` bins are exact and left-closed `[a, b)` by default — the convention of price and
+odds bands — or right-closed `(a, b]` with `closed: right`; the first bin is open below, the last open above.
+An `edge` group holds the rows with q > threshold × p (strict). Every bin record carries `lower` / `upper`;
+edge records carry the threshold in `lower`.
 
 ### 7.1 Calibration fits
 
 ```yaml
 calibration:
   - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
-  - {type: blend, fitOn: valid, of: [scored], l2: 1e-4, maxIter: 10, tol: 1e-8}
+  - {type: blend, fitOn: valid, of: [scored], l2: 0, maxIter: 10, tol: 1e-8}
 output:
   calibration: gs://bucket/eval/${args.version}/calibration.json
 ```
@@ -233,11 +235,13 @@ standard errors scale with the magnitude of the `weight` column.
 | type | model | estimation | record |
 |---|---|---|---|
 | `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, L2 on the average log likelihood, `maxIter` unrolled passes, a rejected step halves the step), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram; a separable selection split — a small one the set ranks perfectly — is the other case for a positive `l2`: the unpenalised estimate grows without bound), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
 
 Reading a blend: a ≈ 1 and b at its start says the declared set is calibrated; a < 1 says the score needs
 shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter
-regression). The records are the summary's `fits` and, with `output.calibration`, a JSON document
+regression: Benter's own, on log probabilities, is the grouped blend of a probability set against the market
+as baseline — f and o are log shares —; the variant on logits is reproduced by a score set whose score and
+offset are the model's and the market's logits). The records are the summary's `fits` and, with `output.calibration`, a JSON document
 (`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).
 Isotonic / Platt recalibration is out of scope: it breaks the within-group sum.
 

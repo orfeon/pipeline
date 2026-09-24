@@ -21,13 +21,22 @@ import java.io.Serializable;
  */
 public final class SketchAccumulator implements Serializable {
 
-    /** sketch parameter: rank error about 0.8% (the bin boundaries' approximation) */
+    /** default sketch parameter: rank error about 0.8% (the bin boundaries' approximation) */
     public static final int K = 400;
 
     private transient KllDoublesSketch sketch;
 
     public SketchAccumulator() {
-        this.sketch = KllDoublesSketch.newHeapInstance(K);
+        this(K);
+    }
+
+    /** @param k the KLL parameter: a larger k gives finer quantiles (rank error ≈ 1 / k-ish) for a larger sketch */
+    public SketchAccumulator(final int k) {
+        this.sketch = KllDoublesSketch.newHeapInstance(k);
+    }
+
+    public int k() {
+        return sketch.getK();
     }
 
     private SketchAccumulator(final KllDoublesSketch sketch) {
@@ -54,15 +63,25 @@ public final class SketchAccumulator implements Serializable {
     public double[] edges(final int bins) {
         final double[] edges = new double[bins - 1];
         // getQuantile lazily builds and caches the sketch's sorted view, so a sketch shared through a side input
-        // must not be read from two bundles at once (the concurrent build corrupts the sort).
-        synchronized (sketch) {
+        // must not be read from two bundles at once (the concurrent build corrupts the sort). The lock is the
+        // accumulator: merge may replace the sketch field.
+        synchronized (this) {
             for (int i = 1; i < bins; i++) edges[i - 1] = sketch.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
         }
         return edges;
     }
 
+    /**
+     * Merges another sketch in. A KLL merge keeps this sketch's k, so an empty accumulator (the Combine's
+     * identity, created at the default k) adopts the other's sketch instead: a table's declared k survives.
+     */
     public SketchAccumulator merge(final SketchAccumulator other) {
-        if (!other.sketch.isEmpty()) sketch.merge(other.sketch);
+        if (other.sketch.isEmpty()) return this;
+        if (sketch.isEmpty()) {
+            sketch = KllDoublesSketch.heapify(Memory.wrap(other.sketch.toByteArray()));
+        } else {
+            sketch.merge(other.sketch);
+        }
         return this;
     }
 
@@ -107,11 +126,16 @@ public final class SketchAccumulator implements Serializable {
             return accumulator.merge(input);
         }
 
+        /** Builds on the first non-empty accumulator (the contract lets a merge modify and return an argument): no copy, and its k. */
         @Override
         public SketchAccumulator mergeAccumulators(final Iterable<SketchAccumulator> accumulators) {
-            final SketchAccumulator merged = new SketchAccumulator();
-            for (final SketchAccumulator a : accumulators) merged.merge(a);
-            return merged;
+            SketchAccumulator merged = null;
+            for (final SketchAccumulator a : accumulators) {
+                if (a.isEmpty()) continue;
+                if (merged == null) merged = a;
+                else merged.merge(a);
+            }
+            return merged == null ? new SketchAccumulator() : merged;
         }
 
         @Override

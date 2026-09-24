@@ -485,11 +485,25 @@ public final class EvaluationReport {
         };
     }
 
-    /** The bin of a value against ascending interior edges: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
+    /** The bin of a value against ascending interior edges, right-closed: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
     public static int bin(final double value, final double[] edges) {
-        int b = 0;
-        while (b < edges.length && value > edges[b]) b++;
-        return b;
+        return bin(value, edges, false);
+    }
+
+    /**
+     * The bin of a value against ascending interior edges: left-closed {@code [edges[i-1], edges[i])} (an edge
+     * belongs to the bin above it) or right-closed {@code (edges[i-1], edges[i]]}; the first bin is open below,
+     * the last open above. A binary search for the count of edges below the value (non-decreasing edges: a
+     * quantile sketch may repeat a boundary); NaN falls in the first bin.
+     */
+    public static int bin(final double value, final double[] edges, final boolean closedLeft) {
+        int lo = 0, hi = edges.length;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (closedLeft ? value >= edges[mid] : value > edges[mid]) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     /** Wilson 95% interval of a rate. */
