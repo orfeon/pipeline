@@ -79,6 +79,11 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A}]}")).contains("of and minus are required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A, minus: baseline}, {of: A, minus: baseline}]}")).contains("declared twice"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: {of: A, minus: baseline}}")).contains("pairs must be a list"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A, minus: baseline, as: gain}]}")).contains("pairs[0].as is unknown"));
+        // binomial prior mode: the reference is not a per-unit value, a baseline side would be all null
+        Assertions.assertTrue(error("{family: binomial, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS
+                + ", pairs: [{of: A, minus: baseline}]}").contains("baseline needs a declared baseline"));
+        Assertions.assertTrue(parse(OK.replace("}}}", "}}, pairs: []}")).resolve(EvaluationScorerTest.SCHEMA, null).pairsDeclared);
         // resolving twice keeps the indices (the lists are rebuilt from the declaration)
         Assertions.assertEquals(3, s.resolve(EvaluationScorerTest.SCHEMA, null).pairs.get(0).ofIndex);
     }

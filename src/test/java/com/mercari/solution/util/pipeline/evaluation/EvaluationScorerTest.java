@@ -269,10 +269,10 @@ public class EvaluationScorerTest {
         // declared pairs: the direction as written, the baseline as a side, nothing else
         final EvaluationSpec declared = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], "
                 + SPLITS + ", bootstrap: {samples: 200, seed: 3}, slices: [{field: region}], pairs: [{of: B, minus: A}, {of: A, minus: baseline}]}");
-        Assertions.assertArrayEquals(new int[]{2, 1}, EvaluationReport.pairs(declared, 2).get(0));
-        Assertions.assertArrayEquals(new int[]{1, 0}, EvaluationReport.pairs(declared, 2).get(1));
-        Assertions.assertEquals(1, EvaluationReport.pairs(spec, 2).size(), "the default: one unordered pair of the two sets");
-        Assertions.assertArrayEquals(new int[]{1, 2}, EvaluationReport.pairs(spec, 2).get(0));
+        Assertions.assertArrayEquals(new int[]{2, 1}, EvaluationReport.pairs(declared).get(0));
+        Assertions.assertArrayEquals(new int[]{1, 0}, EvaluationReport.pairs(declared).get(1));
+        Assertions.assertEquals(1, EvaluationReport.pairs(spec).size(), "the default: one unordered pair of the two sets");
+        Assertions.assertArrayEquals(new int[]{1, 2}, EvaluationReport.pairs(spec).get(0));
         final EvaluationReport.Result named = EvaluationReport.build(declared, acc);
         // overall: baseline, A, B, B−A, A−baseline; east / west the same
         Assertions.assertEquals(15, named.records().size());
@@ -288,6 +288,11 @@ public class EvaluationScorerTest {
         Assertions.assertEquals((Double) overallA.get("brier") - (Double) named.records().get(0).get("brier"), (Double) aMinusBaseline.get("brier"), 1e-12);
         Assertions.assertNotNull(aMinusBaseline.get("brier_lo"));
         Assertions.assertTrue(EvaluationReport.describe(declared).contains("pairs=[B-A, A-baseline]"));
+        // pairs: [] writes no pair record (not the default's every pair)
+        final EvaluationSpec none = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], "
+                + SPLITS + ", bootstrap: {samples: 200, seed: 3}, slices: [{field: region}], pairs: []}");
+        Assertions.assertTrue(EvaluationReport.pairs(none).isEmpty());
+        Assertions.assertEquals(9, EvaluationReport.build(none, acc).records().size());
     }
 
     @Test

@@ -84,8 +84,9 @@ sets, in declaration order (the earlier set minus the later; derived sets after 
 `prediction: A, pair: B` exists and `prediction: B, pair: A` does not. `pairs: [{of, minus}]` names the
 records instead — the direction you want to read (`of: candidate, minus: current`), a reference declared as
 a set, or `minus: baseline` (the difference of every metric against the baseline, where `excessLogScore`
-covers the log score only) — and only those are written, which also bounds the output of a run with many
-sets. `bootstrap.unit` names a field whose value is the resampling unit —
+covers the log score only; `binomial` without a `baseline` rejects it, the prior reference not being a
+per-unit value) — and only those are written, which also bounds the output of a run with many sets
+(`pairs: []` writes none). `bootstrap.unit` names a field whose value is the resampling unit —
 `unit: event_date` makes a cluster bootstrap by day, the answer to correlated units (same-day, same-venue
 groups) that the group bootstrap ignores.
 
@@ -176,9 +177,10 @@ output:
 A fit is a small model, so it is estimated on a `selection` split only (`fitOn`; a `report` split is an
 assembly error) and its result enters the run as a **derived prediction set** — `<name>@T` / `<name>@blend`,
 or `<name>@<as>` when the fit names its suffix — compared on every split like a declared set: metrics with
-intervals, pair records against its base set, slices, calibration tables, units. `of` names the base sets
-(default: every declared set); one derived name per set, so a second fit of the same type on a set needs
-its own `as`.
+intervals, pair records (by default `<name> − <name>@<suffix>`, the base set first; declare
+`pairs: [{of: <name>@<suffix>, minus: <name>}]` to read what the fit bought), slices, calibration tables,
+units. `of` names the base sets (default: every declared set); one derived name per set, so a second fit of
+the same type on a set needs its own `as`.
 
 Each base set has two fit inputs per row: f — a score set's score, a probability set's log share (grouped) /
 logit (binomial) — and o — the score set's own offset on the log scale, else the baseline's log share /
@@ -240,14 +242,15 @@ predictions:
 calibration:
   - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}}                       # a = α estimated, b = 1
 pairs:
-  - {of: rebased@blend, minus: bet}                                               # the decision-time Δ of the rebased set
+  - {of: model, minus: bet}                                                       # the decision-time Δ
   - {of: rebased@blend, minus: rebased}                                           # what α bought
 ```
 
 On the report split, `rebased@blend`'s `excessLogScore` is the settlement-reference Δ at the fitted α (and
 `rebased`'s own is the same at α = 1: a set whose correction is over-confident goes negative there, which
-is what α repairs). With the model itself and the decision-time market declared as two more *sets*, the pair
-record `model − bet` is the decision-time Δ on the same units with a paired interval (not `rebased − bet`:
+is what α repairs; the pair record `rebased@blend − rebased` is that repair with a paired interval). With the
+model itself and the decision-time market declared as two more *sets*, the pair record `model − bet` is the
+decision-time Δ on the same units with a paired interval (not `rebased − bet` or `rebased@blend − bet`:
 `rebased` is the correction laid over the settlement market, not the model), so the retained share is the
 ratio of the two records; `utility` next to them turns the three-step reading — decision-time Δ,
 settlement Δ, realised return — into one run. The settlement price is a yardstick only: it is never a
@@ -335,7 +338,7 @@ the time partition.
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
 | utility | optional | String or Object | The realised value of a positive row; the `utility` metric (metrics, units, `sliceDiscovery.metric`) and the calibration records' `utility`. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 7 × samples doubles. |
-| pairs | optional | Array<Object\> | `{of, minus}`: the pair records to write (`prediction: of, pair: minus`, values = of − minus); names are prediction sets, derived sets (`<name>@T`, `<name>@blend`, `<name>@<as>`) or `baseline`. Omitted: every unordered pair of compared sets in declaration order. See [Bootstrap intervals](#bootstrap-intervals). |
+| pairs | optional | Array<Object\> | `{of, minus}`: the pair records to write (`prediction: of, pair: minus`, values = of − minus); names are prediction sets, derived sets (`<name>@T`, `<name>@blend`, `<name>@<as>`) or `baseline` (needs a declared `baseline` under `binomial`). Omitted: every unordered pair of compared sets in declaration order; `[]`: none. See [Bootstrap intervals](#bootstrap-intervals). |
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid, as}`, `{type: blend, fitOn, of, fix, l2, maxIter, tol, as}` (`l2` default 0; `fix: {a, b, intercept}` holds coefficients at a value; `as` names the derived set's suffix, default `T` / `blend`). |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`, `utility` — the last needs `utility.field` and runs once, under the first compared set), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |

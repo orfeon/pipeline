@@ -330,8 +330,10 @@ public final class EvaluationSpec implements Serializable {
     public List<Fit> fits = new ArrayList<>();
     /** the derived prediction sets, in (fit, base set) order; fixed by {@link #resolve} */
     public List<Derived> derived = new ArrayList<>();
-    /** the pair records to report ({@code of − minus}); empty = every unordered pair of compared sets in declaration order */
+    /** the pair records to report ({@code of − minus}), when {@link #pairsDeclared}; else every unordered pair of compared sets in declaration order */
     public List<Pair> pairs = new ArrayList<>();
+    /** whether {@code pairs} was declared: an empty declared list writes no pair record */
+    public boolean pairsDeclared;
     /** output.calibration: URI / path of the fitted-parameters JSON (null = not written) */
     public String calibrationUri;
     /** rows: the splits whose scored rows go to the {@code rows} output (null = the output stays empty); {@code true} = the selection splits */
@@ -686,12 +688,13 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
-        // pair records: the declared differences (default: every unordered pair in declaration order)
+        // pair records: the declared differences (default: every unordered pair in declaration order; [] = none)
         final JsonElement pairs = p.get("pairs");
         if (pairs != null && !pairs.isJsonNull()) {
             if (!pairs.isJsonArray()) {
                 errors.add("pairs must be a list of {of, minus} (the pair record of − minus; names are prediction sets, derived sets or baseline)");
             } else {
+                s.pairsDeclared = true;
                 int i = 0;
                 for (final JsonElement e : pairs.getAsJsonArray()) {
                     final String at = "pairs[" + i++ + "]";
@@ -699,9 +702,13 @@ public final class EvaluationSpec implements Serializable {
                         errors.add(at + " must be an object {of, minus}");
                         continue;
                     }
+                    final JsonObject o = e.getAsJsonObject();
+                    for (final String key : o.keySet()) {
+                        if (!"of".equals(key) && !"minus".equals(key)) errors.add(at + "." + key + " is unknown (a pair is {of, minus})");
+                    }
                     final Pair pair = new Pair();
-                    pair.of = string(e.getAsJsonObject(), "of");
-                    pair.minus = string(e.getAsJsonObject(), "minus");
+                    pair.of = string(o, "of");
+                    pair.minus = string(o, "minus");
                     if (pair.of == null || pair.minus == null) errors.add(at + ": of and minus are required (the record is of − minus)");
                     else if (pair.of.equals(pair.minus)) errors.add(at + ": of and minus are the same set '" + pair.of + "'");
                     s.pairs.add(pair);
@@ -1123,7 +1130,7 @@ public final class EvaluationSpec implements Serializable {
 
         // pair records: names among the compared sets (derived ones included) and the baseline
         final List<String> compared = predictionNames();
-        final Set<String> seenPairs = new HashSet<>();
+        final Set<List<String>> seenPairs = new HashSet<>();
         for (int i = 0; i < pairs.size(); i++) {
             final Pair pair = pairs.get(i);
             if (pair.of == null || pair.minus == null) continue;
@@ -1131,7 +1138,13 @@ public final class EvaluationSpec implements Serializable {
             pair.minusIndex = compared.indexOf(pair.minus);
             if (pair.ofIndex < 0) errors.add("pairs[" + i + "].of '" + pair.of + "' is not a compared set (available: " + compared + ")");
             if (pair.minusIndex < 0) errors.add("pairs[" + i + "].minus '" + pair.minus + "' is not a compared set (available: " + compared + ")");
-            if (!seenPairs.add(pair.of + " - " + pair.minus)) errors.add("pairs[" + i + "] " + pair.of + " − " + pair.minus + " is declared twice");
+            if (!seenPairs.add(List.of(pair.of, pair.minus))) errors.add("pairs[" + i + "] " + pair.of + " − " + pair.minus + " is declared twice");
+            // binomial prior mode: the reference is a function of the split's label mean, not a per-unit value, so a
+            // baseline side would leave every difference null
+            if (!hasBaseline() && !isGrouped() && (pair.ofIndex == 0 || pair.minusIndex == 0)) {
+                errors.add("pairs[" + i + "] " + pair.of + " − " + pair.minus + ": baseline needs a declared baseline for family " + Family.BINOMIAL.id()
+                        + " (the prior reference is not a per-unit value; excessLogScore already is the difference against it)");
+            }
         }
 
         // rows output: the selection splits, or the named ones

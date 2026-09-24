@@ -58,7 +58,7 @@ the prediction columns. The `output.groupBy` parent / child form of the feature 
 | weight | `weight` | a sample-weight field: per row for `binomial`, the unit mean for the grouped family. |
 | identity | `rowId` | fields identifying a row (the sort tie-break within a unit, the bootstrap unit of independent rows). Default: every field value. |
 | utility | `utility` | `{field}`: the realised value of a positive row (a payoff per unit stake); the `utility` metric (§4.1) and the calibration tables' flat return per bin (§7). |
-| pairs | `pairs[]` | `{of, minus}`: the pair records to write (§4.3); names are compared sets (declared or derived) or `baseline`. Omitted: every unordered pair in declaration order. |
+| pairs | `pairs[]` | `{of, minus}`: the pair records to write (§4.3); names are compared sets (declared or derived) or `baseline`. Omitted: every unordered pair in declaration order; `[]`: none. |
 | manifest | `manifest` | the upstream feature manifest URI, for the role defaults and the lineage selectors when the table came back through a sink. |
 
 **Defaults from the feature transform.** As for screen: `group` / `label` / `baseline` / `weight` and
@@ -154,10 +154,11 @@ the same units, with the paired bootstrap CI (§6): the weights are drawn per un
 Σ w m_A − Σ w m_B and the pair CI costs no accumulator of its own. The record is one-directional: `B − A`
 is its negation and is not written. `pairs: [{of, minus}]` replaces the default with the named records —
 any two of the compared sets or `baseline` (against which `excessLogScore` already is the log-score
-difference; the pair record adds the other metrics' differences with their intervals) — in the direction
-declared, and writes only those: the direction a report wants to read (the new configuration minus the
-incumbent), a reference declared as a set (§7.1's settlement recipe), or a bound on the k(k−1)/2 records
-of a run with many sets.
+difference; the pair record adds the other metrics' differences with their intervals; `binomial` prior mode
+rejects it, its reference being a function of the split's label mean rather than a per-unit value) — in the
+direction declared, and writes only those (`pairs: []` none): the direction a report wants to read (the new
+configuration minus the incumbent), a reference declared as a set (§7.1's settlement recipe), or a bound on
+the k(k−1)/2 records of a run with many sets.
 
 ### 4.4 Prior mode
 
