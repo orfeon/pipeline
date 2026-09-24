@@ -451,11 +451,6 @@ public final class EvaluationScorer implements Serializable {
         return sum / unit.size();
     }
 
-    /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key) — see {@link MetricAccumulator#poissonWeights}. */
-    public static double[] poissonWeights(final long seed, final String key, final int samples) {
-        return MetricAccumulator.poissonWeights(seed, key, samples);
-    }
-
     /** Accumulator key of (split, prediction index, slice index, slice value); slice −1 = the overall record. */
     public static String key(final String split, final int prediction, final int slice, final String value) {
         return split + SEP + prediction + SEP + slice + SEP + (value == null ? "" : value);
@@ -471,7 +466,8 @@ public final class EvaluationScorer implements Serializable {
     /**
      * Adds a scored unit into the accumulators: one key per set (the baseline first) for the overall record and
      * for each of its slice values (a null slice value is skipped), as a contribution under the unit's bootstrap
-     * key (the replicate sums are expanded by the Combine, see {@link MetricAccumulator#expand}); and the
+     * key (the replicate sums are expanded once a key's pending contributions pass the bound, else by the
+     * Combine, see {@link MetricAccumulator#bound}); and the
      * split's bookkeeping (units, rows, time range).
      */
     public void accumulate(final Unit unit, final Metrics m, final Map<String, MetricAccumulator> into) {
@@ -527,7 +523,11 @@ public final class EvaluationScorer implements Serializable {
     }
 
     private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final String boot) {
-        into.computeIfAbsent(key, x -> new MetricAccumulator()).contribute(slots, boot);
+        final MetricAccumulator acc = into.computeIfAbsent(key, x -> new MetricAccumulator());
+        acc.contribute(slots, boot);
+        // a large bundle expands the key's replicate sums here (bounded memory; the shuffle carries the expanded
+        // form at most once per key per bundle); a one-unit bundle ships the contribution unexpanded
+        acc.bound(spec.bootstrapSeed, spec.bootstrapSamples);
     }
 
     // ---- slice discovery -----------------------------------------------------------------------------------

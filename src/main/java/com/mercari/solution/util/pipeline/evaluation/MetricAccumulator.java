@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
 
@@ -25,14 +26,14 @@ import java.util.SplittableRandom;
  * same shape carries the run's bookkeeping (row counts, per-split unit counts and time range) under the
  * {@link #SEP}-prefixed keys.
  *
- * <p>The replicate sums are expanded lazily: a unit's contribution enters as its slots plus its bootstrap key
- * ({@link #contribute}), and the {@code samples × 7} replicate sums are computed ({@link #expand}) only when
- * the pending contributions exceed {@link Fn#PENDING_MAX} or the output is extracted. A partial accumulator
- * of a few units — what a runner that hands the align step one unit per bundle (the DirectRunner) or one
- * element per accumulator (a lifted combine's first step) encodes — is therefore a few dozen bytes per
- * contribution instead of 7 × samples doubles, on every runner, while an accumulator that has seen many
- * units is the expanded form as before. The Poisson draws are a pure function of (seed, key), so the
- * expansion point does not affect the result.
+ * <p>The replicate sums are expanded lazily: a unit's contribution enters as its replicate slots plus its
+ * bootstrap key ({@link #contribute}), and the {@code samples × 7} replicate sums are computed ({@link #expand})
+ * only when the pending contributions exceed {@link Fn#pendingLimit} ({@link #bound}) or the output is
+ * extracted. A partial accumulator of a few units — what a runner that hands the align step one unit per
+ * bundle (the DirectRunner) or one element per accumulator (a lifted combine's first step) encodes — is
+ * therefore 7 doubles and a key per contribution instead of 7 × samples doubles, on every runner, while an
+ * accumulator that has seen many units is the expanded form as before. The Poisson draws are a pure function
+ * of (seed, key), so the expansion point does not affect the result.
  */
 public final class MetricAccumulator implements Serializable {
 
@@ -56,7 +57,7 @@ public final class MetricAccumulator implements Serializable {
     double[] boot;
     long minTime = Long.MAX_VALUE;
     long maxTime = Long.MIN_VALUE;
-    /** contributions whose replicate sums are not expanded yet: the slots and the bootstrap key, pairwise */
+    /** contributions whose replicate sums are not expanded yet: the replicate slots (W .. UTILITY) and the bootstrap key, pairwise */
     private List<double[]> pendingSlots = new ArrayList<>();
     private List<String> pendingKeys = new ArrayList<>();
 
@@ -100,18 +101,24 @@ public final class MetricAccumulator implements Serializable {
     public void contribute(final double[] slots, final String bootKey) {
         add(slots);
         if (bootKey != null) {
-            pendingSlots.add(slots.clone());
+            // only the replicate slots expand (the counts come from the total)
+            pendingSlots.add(Arrays.copyOfRange(slots, BOOT_FIRST, BOOT_FIRST + BOOT_SLOTS));
             pendingKeys.add(bootKey);
         }
     }
 
     /** Adds one unit's metrics under the replicate weights {@code w[b]} (the unit weight folded into {@code slots}). */
     public void addReplicates(final double[] slots, final double[] w) {
+        addReplicateSums(slots, BOOT_FIRST, w);
+    }
+
+    /** {@code sums[from .. from + BOOT_SLOTS)} (the slots W .. UTILITY) into the replicate sums under the weights {@code w[b]}. */
+    private void addReplicateSums(final double[] sums, final int from, final double[] w) {
         final int b = w.length;
         if (boot.length == 0) boot = new double[b * BOOT_SLOTS];
         for (int r = 0; r < b; r++) {
             final int base = r * BOOT_SLOTS;
-            for (int s = 0; s < BOOT_SLOTS; s++) boot[base + s] += w[r] * slots[BOOT_FIRST + s];
+            for (int s = 0; s < BOOT_SLOTS; s++) boot[base + s] += w[r] * sums[from + s];
         }
     }
 
@@ -119,10 +126,16 @@ public final class MetricAccumulator implements Serializable {
     public void expand(final long seed, final int samples) {
         if (pendingKeys.isEmpty()) return;
         if (samples > 0) {
-            for (int i = 0; i < pendingKeys.size(); i++) addReplicates(pendingSlots.get(i), poissonWeights(seed, pendingKeys.get(i), samples));
+            for (int i = 0; i < pendingKeys.size(); i++) addReplicateSums(pendingSlots.get(i), 0, poissonWeights(seed, pendingKeys.get(i), samples));
         }
         pendingSlots = new ArrayList<>();
         pendingKeys = new ArrayList<>();
+    }
+
+    /** Expands the pending contributions once there are more than {@link Fn#pendingLimit} of them; returns this accumulator. */
+    public MetricAccumulator bound(final long seed, final int samples) {
+        if (pendingKeys.size() > Fn.pendingLimit(samples)) expand(seed, samples);
+        return this;
     }
 
     /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key). */
@@ -199,8 +212,8 @@ public final class MetricAccumulator implements Serializable {
             final int p = INT.decode(in);
             for (int i = 0; i < p; i++) {
                 a.pendingKeys.add(STRING.decode(in));
-                final double[] slots = new double[SLOTS];
-                for (int s = 0; s < SLOTS; s++) slots[s] = DOUBLE.decode(in);
+                final double[] slots = new double[BOOT_SLOTS];
+                for (int s = 0; s < BOOT_SLOTS; s++) slots[s] = DOUBLE.decode(in);
                 a.pendingSlots.add(slots);
             }
             return a;
@@ -209,12 +222,23 @@ public final class MetricAccumulator implements Serializable {
 
     /**
      * The Combine of the accumulators (input = accumulator = output). Pending contributions are expanded once
-     * they exceed {@link #PENDING_MAX} in a merge, and always on extraction, so a merged accumulator's size is
-     * bounded by the expanded form plus {@code PENDING_MAX} contributions.
+     * they exceed {@link #pendingLimit} in a merge, and always on extraction, so a merged accumulator's size is
+     * bounded by the expanded form plus {@code pendingLimit} contributions.
      */
     public static class Fn extends Combine.CombineFn<MetricAccumulator, MetricAccumulator, MetricAccumulator> {
-        /** the expanded form (7 × samples doubles) is the break-even of about this many pending contributions at 1000 samples */
+        /**
+         * the most pending contributions a key keeps: 32 × (7 doubles + a key) is a few KB, far below the
+         * expanded form at the default 1000 samples (56 KB, the break-even of several hundred contributions)
+         */
         public static final int PENDING_MAX = 32;
+
+        /**
+         * The pending bound at {@code samples}: {@link #PENDING_MAX}, lowered to {@code samples / 2} so a few
+         * samples (the expanded form 56 × samples bytes) never keep more pending bytes than the expanded form.
+         */
+        public static int pendingLimit(final int samples) {
+            return Math.max(1, Math.min(PENDING_MAX, samples / 2));
+        }
 
         private final long seed;
         private final int samples;
@@ -231,24 +255,19 @@ public final class MetricAccumulator implements Serializable {
 
         @Override
         public MetricAccumulator addInput(final MetricAccumulator accumulator, final MetricAccumulator input) {
-            return bounded(accumulator.merge(input));
+            return accumulator.merge(input).bound(seed, samples);
         }
 
         @Override
         public MetricAccumulator mergeAccumulators(final Iterable<MetricAccumulator> accumulators) {
             final MetricAccumulator merged = new MetricAccumulator();
-            for (final MetricAccumulator a : accumulators) bounded(merged.merge(a));
+            for (final MetricAccumulator a : accumulators) merged.merge(a).bound(seed, samples);
             return merged;
         }
 
         @Override
         public MetricAccumulator extractOutput(final MetricAccumulator accumulator) {
             accumulator.expand(seed, samples);
-            return accumulator;
-        }
-
-        private MetricAccumulator bounded(final MetricAccumulator accumulator) {
-            if (accumulator.pending() > PENDING_MAX) accumulator.expand(seed, samples);
             return accumulator;
         }
 

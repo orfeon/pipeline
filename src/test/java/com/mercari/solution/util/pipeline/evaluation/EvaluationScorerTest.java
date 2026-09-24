@@ -90,14 +90,14 @@ public class EvaluationScorerTest {
 
     @Test
     public void testPoissonWeightsAreDeterministicAndMeanOne() {
-        final double[] a = EvaluationScorer.poissonWeights(7, "unit-1", 2000);
-        final double[] b = EvaluationScorer.poissonWeights(7, "unit-1", 2000);
+        final double[] a = MetricAccumulator.poissonWeights(7, "unit-1", 2000);
+        final double[] b = MetricAccumulator.poissonWeights(7, "unit-1", 2000);
         Assertions.assertArrayEquals(a, b);
         double sum = 0;
         for (final double w : a) sum += w;
         Assertions.assertEquals(1d, sum / a.length, 0.08);
-        Assertions.assertFalse(java.util.Arrays.equals(a, EvaluationScorer.poissonWeights(8, "unit-1", 2000)));
-        Assertions.assertFalse(java.util.Arrays.equals(a, EvaluationScorer.poissonWeights(7, "unit-2", 2000)));
+        Assertions.assertFalse(java.util.Arrays.equals(a, MetricAccumulator.poissonWeights(8, "unit-1", 2000)));
+        Assertions.assertFalse(java.util.Arrays.equals(a, MetricAccumulator.poissonWeights(7, "unit-2", 2000)));
     }
 
     @Test
@@ -651,9 +651,12 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(0, decoded.pending());
         Assertions.assertArrayEquals(eager.getTotal(), decoded.getTotal(), 1e-12);
         Assertions.assertArrayEquals(eager.getBoot(), decoded.getBoot(), 1e-9);
-        // the Combine: one-contribution inputs merge unexpanded up to PENDING_MAX, then expand; extraction expands
+        // the Combine: one-contribution inputs merge unexpanded up to the pending limit, then expand; extraction expands
         final MetricAccumulator.Fn fn = new MetricAccumulator.Fn(seed, samples);
+        final int limit = MetricAccumulator.Fn.pendingLimit(samples);
+        Assertions.assertTrue(limit >= 1 && limit <= MetricAccumulator.Fn.PENDING_MAX && limit <= samples / 2);
         MetricAccumulator acc = fn.createAccumulator();
+        final List<MetricAccumulator> ones = new java.util.ArrayList<>();
         for (int u = 0; u < 40; u++) {
             final MetricAccumulator one = new MetricAccumulator();
             final double[] slots = new double[MetricAccumulator.SLOTS];
@@ -662,13 +665,25 @@ public class EvaluationScorerTest {
             slots[MetricAccumulator.LOG] = -0.1 * u;
             slots[MetricAccumulator.UTILITY] = u;
             one.contribute(slots, "u" + u);
+            ones.add(one);
             acc = fn.addInput(acc, one);
-            Assertions.assertTrue(acc.pending() <= MetricAccumulator.Fn.PENDING_MAX);
+            Assertions.assertTrue(acc.pending() <= limit);
         }
         Assertions.assertTrue(acc.samples() > 0);   // expanded once past the bound
-        final MetricAccumulator out = fn.extractOutput(fn.mergeAccumulators(List.of(acc, fn.createAccumulator())));
+        Assertions.assertTrue(acc.pending() > 0);   // and pending again since
+        // an expanded accumulator with pending contributions round-trips through the coder
+        final java.io.ByteArrayOutputStream mixed = new java.io.ByteArrayOutputStream();
+        MetricAccumulator.CODER.encode(acc, mixed);
+        final MetricAccumulator mixedDecoded = MetricAccumulator.CODER.decode(new java.io.ByteArrayInputStream(mixed.toByteArray()));
+        Assertions.assertEquals(acc.pending(), mixedDecoded.pending());
+        Assertions.assertArrayEquals(acc.getBoot(), mixedDecoded.getBoot(), 0d);
+        final MetricAccumulator out = fn.extractOutput(fn.mergeAccumulators(List.of(mixedDecoded, fn.createAccumulator())));
         Assertions.assertEquals(0, out.pending());
         Assertions.assertArrayEquals(eager.getBoot(), out.getBoot(), 1e-9);
+        // mergeAccumulators bounds the pending count too
+        final MetricAccumulator merged = fn.mergeAccumulators(ones);
+        Assertions.assertTrue(merged.pending() <= limit);
+        Assertions.assertArrayEquals(eager.getBoot(), fn.extractOutput(merged).getBoot(), 1e-9);
         // without bootstrap a contribution carries no key and nothing expands
         final MetricAccumulator none = new MetricAccumulator();
         none.contribute(new double[MetricAccumulator.SLOTS], null);

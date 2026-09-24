@@ -735,12 +735,8 @@ public final class EvaluationStages {
             }
             scorer.derive(unit, c.sideInput(fitView));
             final EvaluationScorer.Metrics m = scorer.score(unit);
+            // the keys the unit touches bound their pending contributions (EvaluationScorer#add)
             scorer.accumulate(unit, m, partials);
-            // a large bundle expands its keys' replicate sums here (bounded memory, the shuffle carries the expanded form
-            // at most once per key per bundle); a one-unit bundle ships the contribution unexpanded
-            for (final MetricAccumulator acc : partials.values()) {
-                if (acc.pending() > MetricAccumulator.Fn.PENDING_MAX) acc.expand(spec.bootstrapSeed, spec.bootstrapSamples);
-            }
             if (spec.hasDiscovery()) {
                 if (edges == null) {
                     edges = new HashMap<>();
