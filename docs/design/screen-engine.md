@@ -20,7 +20,8 @@ feature transform does (engine doc §1.2):
 | `ScreenRow` | the prepared sample (unit key, identity, time, period, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, the rows `baseline.invalid: dropRow` rejects removed and counted, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms, the family's contribution into `ScoreAccumulator`s | no |
 | `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period, min / max time; the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
-| `ConditioningScorer` | per-unit conditioning computations: `moments`, `initialTheta`, `design`, `fitted` and `evaluate` (`[n, ll, g, G]`, both delegating to `GlmFit`), `partial` (`[s, b, a]`, plus the gaussian variance sums) | no |
+| `ConditioningScorer` | per-unit conditioning computations: `moments`, `initialTheta`, `design`, `fitted` and `evaluate` (`[n, ll, g, G]`, both delegating to `GlmFit`), `partial` (`[s, b, a]` per column, per period too, plus the gaussian variance sums and the fit's `[n, g, G]` per period under `FIT_PERIOD_KEY`) | no |
+| `PartialAccumulator` | one variable-length vector for the window plus the same per period (the partial pass's shape); custom coder; `Fn` | coder + CombineFn |
 | `glm.FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
 | `glm.VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
 | `ScreenReport` | `stats` per slot array, `gammas` + `partial` (the orthogonalisation), `build` (records + summary), `selection` (the pass list), the output schemas, `describe` | no |
@@ -112,12 +113,16 @@ Gather ─ Finalize [side: state_max, partial map] ─ records / summary / selec
   columns only; `ConditioningScorer` takes the F offset (0
   for projected rows, `spec.conditioningOffset()` for full rows). The moments and partial passes read the
   full rows.
-- **Partial pass** (one pass): at the fitted p̂, `[s, b, a]` per column × transform into a bundle-local map
-  (plus the gaussian variance sums under `SIGMA_KEY`), then `Combine.perKey` and a map view. The
-  orthogonalisation and the partial test collapse into this one pass because both are bilinear in x: with the
-  fit's (g, G), `ScreenReport.gammas` solves γ for every column at once (one Cholesky of G, a
-  multi-right-hand-side `solveGram`; a column with no information or a non-finite right-hand side stays out
-  and is reported degenerate) and `partial` reads S⊥, H⊥ and r²_F in closed form.
+- **Partial pass** (one pass): at the fitted p̂, `[s, b, a]` per column × transform into a bundle-local map of
+  `PartialAccumulator`s — the window total and, with `periods`, the unit's (grouped) or each row's (row
+  families, bucketed once per unit) period — plus the gaussian variance sums under `SIGMA_KEY` and the fitted
+  model's `[n, g, G]` per period under `FIT_PERIOD_KEY` (one `GlmFit.evaluate` per grouped unit, the per-row
+  sums for the row families; the Gram is carried up to k = 100, `ConditioningScorer.PERIOD_GRAM_MAX_K`), then
+  `Combine.perKey` and a map view. The orthogonalisation and the partial test collapse into this one pass
+  because both are bilinear in x: with the fit's (g, G), `ScreenReport.gammas` solves γ for every column at
+  once (one Cholesky of G, a multi-right-hand-side `solveGram`; a column with no information or a non-finite
+  right-hand side stays out and is reported degenerate), `partial` reads S⊥, H⊥ and r²_F in closed form and
+  `partialPeriod` the same per bucket with the window's γ (DSL doc §8.2).
 
 Total: `maxIter + 2` passes at most, each a global Combine, independent of the data. The gaussian fit is
 least squares at σ² = 1 (one Newton step); the report divides the partial statistics and the gain by the
@@ -145,7 +150,8 @@ never on direct (the feature engine doc §9.5 records the same finding for keyed
 **Dataflow.** The marginal path is one shuffle (the GroupByKey) plus small Combines; conditioning re-reads
 the materialised units `maxIter + 1` times through the projection. Accumulator sizes: per (column,
 transform) key periods × 9 doubles; per Newton pass `2 + k + k²` doubles (k ≤ 500 enforced); per partial key
-`2 + k`. Nothing is data-dependent in size except the number of period buckets.
+`(2 + k) × (1 + periods)`, plus one `FIT_PERIOD_KEY` entry of `(1 + k + k²) × (1 + periods)` doubles up to
+k = 100 (`(1 + k) × (1 + periods)` beyond). Nothing is data-dependent in size except the number of period buckets.
 
 ## 7. Tests
 

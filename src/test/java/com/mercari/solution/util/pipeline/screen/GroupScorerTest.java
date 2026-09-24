@@ -245,6 +245,51 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testPassRuleMinPeriodsAgree() {
+        // x separates the positive in 2025 and (more weakly) the other way in 2024: the window z is positive, one of
+        // the two periods agrees; the placebo cut alone passes it, a full period agreement does not
+        for (final String pass : new String[]{"", ", pass: {minPeriodsAgree: 0.5}", ", pass: {minPeriodsAgree: 1.0}", ", pass: {minPeriodsAgree: 2}"}) {
+            final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, periods: year" + pass + "}");
+            final GroupScorer scorer = new GroupScorer(spec);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (int g = 0; g < 30; g++) {
+                scorer.score(List.of(
+                        new ScreenRow("g" + g, "p", g, "2025", 1, Double.NaN, 1, new double[]{3}),
+                        new ScreenRow("g" + g, "q", g, "2025", 0, Double.NaN, 1, new double[]{1}),
+                        new ScreenRow("g" + g, "r", g, "2025", 0, Double.NaN, 1, new double[]{2})), "g" + g, acc);
+            }
+            for (int g = 0; g < 8; g++) {
+                scorer.score(List.of(
+                        new ScreenRow("h" + g, "p", g, "2024", 0, Double.NaN, 1, new double[]{3}),
+                        new ScreenRow("h" + g, "q", g, "2024", 1, Double.NaN, 1, new double[]{1}),
+                        new ScreenRow("h" + g, "r", g, "2024", 0, Double.NaN, 1, new double[]{2})), "h" + g, acc);
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, acc);
+            final Map<String, Object> xRaw = result.records().get(0);
+            Assertions.assertTrue((Double) xRaw.get("z") > 0);
+            Assertions.assertTrue((Double) xRaw.get("est_gain") > (Double) xRaw.get("threshold"));
+            Assertions.assertEquals(2L, xRaw.get("n_periods"));
+            Assertions.assertEquals(1L, xRaw.get("periods_agree"));
+            final boolean expected = pass.isEmpty() || pass.contains("0.5");
+            Assertions.assertEquals(expected, xRaw.get("passed"), pass);
+            Assertions.assertEquals(expected ? List.of("x") : List.of(), result.summary().get("passedColumns"), pass);
+            final String rule = (String) result.summary().get("passRule");
+            Assertions.assertTrue(rule.startsWith("est_gain > threshold"), rule);
+            Assertions.assertEquals(!pass.isEmpty(), rule.contains("periods_agree"), rule);
+            final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+            Assertions.assertEquals(rule, selection.get("passRule").getAsString());
+            if (expected) {
+                Assertions.assertEquals(1L, selection.getAsJsonArray("passed").get(0).getAsJsonObject().get("periods_agree").getAsLong());
+                Assertions.assertEquals(2L, selection.getAsJsonArray("passed").get(0).getAsJsonObject().get("n_periods").getAsLong());
+            }
+        }
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minPeriodsAgree: 0.5}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], periods: year, pass: {minPeriodsAgree: 0}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], periods: year, pass: {minPeriodsAgree: 1.5}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], periods: year, pass: 0.5}"));
+    }
+
+    @Test
     public void testSpecValidation() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: gamma, label: y, candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, transforms: [rank], candidates: [x]}"));

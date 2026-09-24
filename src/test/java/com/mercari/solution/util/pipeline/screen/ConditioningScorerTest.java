@@ -134,14 +134,14 @@ public class ConditioningScorerTest {
             state.advance(eval.getValues(), 0d, 1e-10);
         }
         Assertions.assertTrue(state.hasBest);
-        final Map<Integer, double[]> partials = new HashMap<>();
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
         final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
         for (final List<ScreenRow> rows : unitsRows) {
             final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).group);
             scorer.partial(unit, groups.columns(unit), state.bestTheta, moments, partials);
             groups.score(rows, rows.get(0).group, marginal);
         }
-        final double[] vec = partials.get(s.key(0, 0));
+        final double[] vec = partials.get(s.key(0, 0)).getTotal();
         // the sums at p̂: a = F̃'Wx = b / std when x = F (F̃ = F / std, std² = 6 / 9)
         Assertions.assertEquals(vec[1] / Math.sqrt(6d / 9), vec[2], 1e-9);
         final Map<Integer, double[]> gammas = ScreenReport.gammas(partials, state, 0d);
@@ -161,6 +161,73 @@ public class ConditioningScorerTest {
         Assertions.assertEquals(1L, result.summary().get("conditioningK"));
         Assertions.assertEquals(Boolean.TRUE, result.summary().get("conditioningConverged"));
         Assertions.assertEquals(List.of("f"), result.summary().get("conditioningFields"));
+    }
+
+    /** x layout: [x (candidate), f (conditioning)], with a period bucket. */
+    private static ScreenRow row(final String g, final int i, final String period, final double y, final double x, final double f) {
+        return new ScreenRow(g, g + ":" + i, 1, period, y, Double.NaN, 1d, new double[]{x, f});
+    }
+
+    @Test
+    public void testPartialPeriodSlicesDecomposeTheWindow() {
+        // two periods of groups; the per-period partial S / H (window gamma, per-period gradient / Gram) sum to the
+        // window's partial S / H - exactly with the per-period Gram, and still for S (and for H, whose approximation
+        // shares the window's quadratic form by unit mass) without it
+        final ScreenSpec s = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, periods: year, conditioning: {fields: [f], l2: 0}}");
+        final GroupScorer groups = new GroupScorer(s);
+        final List<List<ScreenRow>> unitsRows = List.of(
+                List.of(row("a", 0, "2024", 1, 2, 1), row("a", 1, "2024", 0, 0, 0), row("a", 2, "2024", 0, -1, -1)),
+                List.of(row("b", 0, "2024", 0, 1, 1), row("b", 1, "2024", 1, 3, 0), row("b", 2, "2024", 0, -2, -1)),
+                List.of(row("c", 0, "2025", 1, 0, 1), row("c", 1, "2025", 0, -1, -1), row("c", 2, "2025", 0, 2, 0)),
+                List.of(row("d", 0, "2025", 0, 1, 1), row("d", 1, "2025", 0, 2, 0), row("d", 2, "2025", 1, 3, -1)));
+        final double[] moments = {12, 0, 8};
+        for (final boolean gram : new boolean[]{true, false}) {
+            final ConditioningScorer scorer = new ConditioningScorer(s, s.conditioningOffset(), gram);
+            FitState state = FitState.initial(1);
+            for (int it = 0; it < 10 && !state.converged; it++) {
+                final VectorAccumulator eval = new VectorAccumulator();
+                for (final List<ScreenRow> rows : unitsRows) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).group), state.proposal, moments));
+                state.advance(eval.getValues(), 0d, 1e-10);
+            }
+            Assertions.assertTrue(state.hasBest);
+            final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+            final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+            for (final List<ScreenRow> rows : unitsRows) {
+                final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).group);
+                scorer.partial(unit, groups.columns(unit), state.bestTheta, moments, partials);
+                groups.score(rows, rows.get(0).group, marginal);
+            }
+            final PartialAccumulator fitPeriods = partials.get(ConditioningScorer.FIT_PERIOD_KEY);
+            Assertions.assertEquals(gram ? 1 + 1 + 1 : 1 + 1, fitPeriods.getTotal().length);
+            Assertions.assertEquals(2, fitPeriods.getPeriods().size());
+            // the fit's period slices sum to the fit's own gradient / Gram (the same units, the same theta)
+            Assertions.assertEquals(state.nUnits, fitPeriods.getTotal()[0], 1e-12);
+            Assertions.assertEquals(state.bestGrad[0], fitPeriods.getTotal()[1], 1e-9);
+            if (gram) Assertions.assertEquals(state.bestG[0][0], fitPeriods.getTotal()[2], 1e-9);
+
+            final ScreenReport.Result result = ScreenReport.build(s, marginal, partials, state);
+            final Map<String, Object> record = result.records().get(0);
+            final double sTotal = (Double) record.get("partial_S");
+            final double hTotal = (Double) record.get("partial_H");
+            Assertions.assertFalse(Double.isNaN((Double) record.get("partial_z")));
+            @SuppressWarnings("unchecked") final List<Map<String, Object>> periods = (List<Map<String, Object>>) record.get("partial_period_z");
+            Assertions.assertEquals(2, periods.size());
+            double sSum = 0, hSum = 0;
+            for (final Map<String, Object> p : periods) {
+                sSum += (Double) p.get("S");
+                hSum += (Double) p.get("H");
+                Assertions.assertNotNull(p.get("z"));
+            }
+            Assertions.assertEquals(sTotal, sSum, 1e-9 * Math.max(1, Math.abs(sTotal)), "gram=" + gram);
+            Assertions.assertEquals(hTotal, hSum, 1e-9 * Math.max(1, Math.abs(hTotal)), "gram=" + gram);
+            Assertions.assertEquals(2L, record.get("partial_n_periods"));
+            Assertions.assertEquals(2L, record.get("n_periods"));
+            // the marginal period records are still the marginal ones
+            @SuppressWarnings("unchecked") final List<Map<String, Object>> marginalPeriods = (List<Map<String, Object>>) record.get("period_z");
+            Assertions.assertEquals(2, marginalPeriods.size());
+            @SuppressWarnings("unchecked") final List<String> notes = (List<String>) result.summary().get("notes");
+            Assertions.assertEquals(gram ? 0 : 1, notes.stream().filter(n -> n.contains("approximate")).count(), "gram=" + gram + " " + notes);
+        }
     }
 
     @Test

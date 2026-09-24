@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -76,6 +76,15 @@ statistics); independent rows support `raw` only in this version.
 
 - `periods` computes S and z per calendar bucket of a time field; `periods_agree / n_periods` counts the buckets
   whose sign matches the overall sign, and `period_z` lists them — the material for reading a decaying effect.
+  With [conditioning](#conditioning-partial-test) the partial test is sliced the same way
+  (`partial_period_z`, `partial_periods_agree / partial_n_periods`): the marginal slices and the partial slices
+  can disagree — a suppressor (marginal ≈ 0, partial strong) has noise for marginal period signs and a
+  consistent partial one — so read the agreement of the test that decided `passed`.
+- `pass.minPeriodsAgree` makes the period agreement part of the cut: `passed` then requires the effective
+  test's `periods_agree ≥ minPeriodsAgree × n_periods` (a share up to 1) or `≥ minPeriodsAgree` (a count above
+  1) on top of the placebo threshold; a candidate without a usable period never passes. It is a stability
+  filter on top of the calibrated cut, not calibrated by the placebo columns itself; the rule as applied is
+  reported as `passRule` in the summary and the pass list.
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
@@ -95,7 +104,11 @@ value) by Newton's method with an L2 penalty on the
 model and reads the score test of what is left:
 
 - `r2_F = 1 − x⊥'Wx⊥ / x'Wx` — how much of the candidate F already explains (1 = fully redundant);
-- `partial_S`, `partial_H`, `partial_chi2`, `partial_z`, `partial_gain`, `partial_pValue` — the score test of x⊥.
+- `partial_S`, `partial_H`, `partial_chi2`, `partial_z`, `partial_gain`, `partial_pValue` — the score test of x⊥;
+- with `periods`, `partial_period_z` / `partial_periods_agree` / `partial_n_periods` — the same test sliced by
+  period with the window's orthogonalisation (the slices add up to the window's partial S and H; the per-period
+  information is exact up to 100 conditioning columns and, beyond, the window's Gram term shared out by the
+  period's unit mass — a note says so; the per-period score and sign are always exact).
 
 With conditioning, `passed`, `threshold` and `qValue` refer to the **partial** test (the placebo columns take
 the same route, so the threshold is calibrated for it); the marginal statistics stay in the record. Reading the
@@ -171,6 +184,7 @@ is an assembly error.
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect`. Default: no flag. |
+| pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. Default: the placebo threshold alone. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol, missing}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit; `missing` (`mean` (default) \| `groupMean`) how a missing conditioning value enters the fit — the window mean, or the unit's baseline-weighted mean of its observed values (`groupedMultinomial` only). Needs the global window. |
 | output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
 
@@ -196,15 +210,18 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
+| partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
-| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), candidate columns only |
+| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
 | leakSuspect | BOOL | \|z\| > `flags.leakZ` |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
 
 ### Summary record
 
-`family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `threshold`, `thresholdTheoretical`,
+`family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -359,6 +376,7 @@ transforms:
   "version": 1,
   "columns": ["f_extra", "f_recent_bids"],
   "test": "partial",
+  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods", "minPeriodsAgree": 0.67,
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
@@ -366,14 +384,15 @@ transforms:
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
   "conditioningFields": ["model_a", "model_b"],
   "createdAt": "2026-09-05T10:00:00Z",
-  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "z": 8.95, "partial_gain": 0.00051, "partial_z": 7.1, "r2_F": 0.035, "leakSuspect": false}]
+  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "z": 8.95, "partial_gain": 0.00051, "partial_z": 7.1, "r2_F": 0.035, "periods_agree": 3, "n_periods": 3, "leakSuspect": false}]
 }
 ```
 
 - `columns` is what the feature transform's `output.include` reads (`{columns: [...]}` is one of its accepted
   shapes); the other members record how the list was produced.
 - `test` says which statistic the cut-off used (`partial` when the conditioning fit accepted a point — the same
-  rule as the summary's `test` — else `marginal`).
+  rule as the summary's `test` — else `marginal`); `passRule` spells the rule out, and with `periods` each passing
+  record carries its `periods_agree / n_periods` of that test.
 - `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
   (null otherwise); `screenHash` is the SHA-256 (16 hex characters, the width of the feature transform's hashes) of
   this step's canonical parameters without the file locations (`output`, `candidates.manifest`), so it is the same
@@ -393,7 +412,10 @@ transforms:
   false-discovery view over the candidate set.
 - A candidate with a high `raw` score is a direct linear effect; one that only scores under `absdev` is an
   "extremeness" effect; `rank` catches monotone non-linear effects and is robust to outliers.
-- `periods_agree` far below `n_periods` means an unstable effect: look at `period_z` for a decay over time.
+- `periods_agree` far below `n_periods` means an unstable effect: look at `period_z` for a decay over time. With
+  conditioning read `partial_periods_agree` / `partial_period_z` (the test that decided `passed`); an operating
+  rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.67}`, so the pass list
+  applies it too.
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome.
 - `output.selection` writes the pass list in the format the feature transform's `output.include` reads, so

@@ -190,7 +190,12 @@ Default: all three with `group`, `raw` without; an explicit list is never widene
 - **Periods.** `periods: {field, bucket}` (year / quarter / month / week / day, UTC; `field` defaults to
   `time.field`, with its own type) accumulates the same sums per bucket. The record reports each bucket's S,
   H, z and observed rows (`period_z`), the buckets with usable information (`n_periods`) and how many agree
-  with the overall sign (`periods_agree`) — the material for reading a decaying effect.
+  with the overall sign (`periods_agree`) — the material for reading a decaying effect. Under conditioning the
+  partial test is sliced the same way (§8.2: `partial_period_z`, `partial_periods_agree`, `partial_n_periods`),
+  since the marginal and the partial period signs can disagree (a suppressor).
+- **Pass rule.** `pass: {minPeriodsAgree}` adds the period agreement of the effective test to the cut: a share
+  (≤ 1) of its usable periods or a count (> 1); no usable period never passes. It tightens the placebo cut and
+  is not itself placebo-calibrated; the summary and the pass list report the rule as applied (`passRule`).
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
   (`nRowsTimeFiltered`). Screening the evaluation period leaks the evaluation into the selection.
 - **Leak flag.** `flags.leakZ` marks a candidate with |z| above it as `leakSuspect` — a flag, never a
@@ -237,6 +242,19 @@ r2_F = 1 − H⊥ / b                    (how much of x F already explains)
 divides S⊥ and H⊥ by the residual variance at the fitted model. A column with H⊥ ≈ 0 is fully explained by
 F: degenerate with `r2_F = 1`.
 
+With `periods` the same sums are kept per bucket (s_p, b_p, a_p per column; the fit's own n_p, g_p, G_p per
+bucket under one key) and sliced with the window's γ:
+
+```
+S⊥_p = s_p − γ'g_p
+H⊥_p = b_p − 2 γ'a_p + γ'G_pγ        (Σ_p S⊥_p = S⊥, Σ_p H⊥_p = H⊥)
+```
+
+so `partial_period_z` decomposes the partial statistic by period and `partial_periods_agree` counts the
+buckets whose S⊥_p has the sign of S⊥. The per-period Gram costs periods × k² doubles in one accumulator, so
+it is carried up to k = 100; beyond, γ'G_pγ is taken as the window's γ'Gγ times the bucket's share of the
+unit mass (S⊥_p and the sign stay exact, H⊥_p is approximate, the sums still match) and a note says so.
+
 ### 8.3 Reading marginal and partial together
 
 marginal high × partial high = new information; marginal high × partial ≈ 0 (high `r2_F`) = redundant with
@@ -265,14 +283,15 @@ sanity check that the conditioning set is informative.
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
 (`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; block tests will use it),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
-(array of {period, z, S, H, n}), `r2_F`, `partial_S / H / chi2 / z / gain / pValue` (null without
-conditioning), `threshold`, `passed`, `leakSuspect`, `placebo`, `degenerate`. Field names follow the
+(array of {period, z, S, H, n}), `r2_F`, `partial_S / H / chi2 / z / gain / pValue`,
+`partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without conditioning), `threshold`,
+`passed`, `leakSuspect`, `placebo`, `degenerate`. Field names follow the
 proposal that introduced the transform so its reference implementation compares directly.
 
 ### 9.2 Summary (`<name>.summary`)
 
-One record per run (per window under a windowing strategy): the spec's roles, `test`, the thresholds and the
-quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
+One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
+`minPeriodsAgree`, the thresholds and the quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
@@ -281,8 +300,8 @@ gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fall
 ### 9.3 The pass list (`output.selection`)
 
 One JSON document written at the end of the run, in the shape the feature transform's `output.include`
-reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, family / method,
-thresholds, quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
+reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule`, family /
+method, thresholds, quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
 `createdAt`, and the passing records' statistics. Non-finite thresholds are written as null; an empty pass
@@ -301,7 +320,7 @@ valid for the family; `groupedMultinomial` without `group`; `rank` / `absdev` / 
 without `group`; a role or candidate field missing from the input schema, or a non-numeric shuffle
 reference; a lineage selector without lineage; no candidate left; a conditioning pattern matching nothing
 or naming a role / the baseline, or more than 500 columns; `time.from` / `time.to` without `time.field`; an
-empty `conditioning`; a triggered input (every Combine would fire per pane); a non-global window with
+empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
