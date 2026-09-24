@@ -82,17 +82,20 @@ report derives the reference (also per replicate, so the excess interval is righ
 
 ```
 units ─ Temperature<i> (grid log scores per bundle, selection split only) ─ Combine.globally ─ singleton view ─┐
-Create(base) ─ Blend<i>_<base>_Init (θ = (1, 1|0[, 0]): the set as declared) ─ view = state₀                 │
+Create(base) ─ Blend<i>_<base>_Init (θ = the free part of (1, 1|0[, 0]): the set as declared) ─ view = state₀ │
 for it in 1..maxIter: units ─ Blend<i>_<base>_Fit<it> [side: state_{it-1}] ─ Combine.globally ─ Advance ─ view │
 Create(0) ─ Fits_Collect [side: every fit view] ─ FitResults singleton ─► Align (derive), Finalize (summary, JSON)
 ```
 
 Every fit pass reads the GroupByKey output and keeps the units of `fitOn` only (the unit key carries the
 split); a temperature fit is one pass whatever the grid, a blend fit is the screen transform's unrolled
-Newton chain (`FitState` cloned and advanced per pass, converged passes read nothing). `Fits_Collect` picks
-the grid argmax (flagging a boundary optimum) and the blend's best point with its standard errors from the
-inverse of the Fisher information, and `Align` derives the sets before scoring — so the derived sets are
-ordinary sets for everything downstream. Without fits the collect step still runs (an empty result).
+Newton chain (`FitState` cloned and advanced per pass, converged passes read nothing) over the fit's free
+coefficients — a `fix`ed coefficient's column enters the linear predictor at its value and carries no
+gradient, so the state, the information and the standard errors are those of the reduced problem.
+`Fits_Collect` picks the grid argmax (flagging a boundary optimum) and the blend's best point with its
+standard errors from the inverse of the Fisher information, re-inserts the fixed coefficients into the full
+vector (`blendRecord`), and `Align` derives the sets before scoring — so the derived sets are ordinary sets
+for everything downstream. Without fits the collect step still runs (an empty result).
 
 ## 2.4 Slice discovery
 

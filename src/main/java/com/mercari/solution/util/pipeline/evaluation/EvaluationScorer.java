@@ -270,13 +270,14 @@ public final class EvaluationScorer implements Serializable {
         if (d.offsetField == null) return true;
         final double offset = x[d.offset + 1];
         if (Double.isNaN(offset)) return false;
-        return EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale) || offset >= 0;
+        return d.offsetLog() || (d.offsetInverse() ? offset > 0 : offset >= 0);
     }
 
     /**
-     * Grouped softmax of a score set: q_i ∝ w_i · exp(score_i / T), w the offset value (prob scale) or exp(offset)
-     * (log scale), 1 without an offset. A null score or offset makes the unit invalid; a non-positive prob-scale
-     * offset gives q_i = 0.
+     * Grouped softmax of a score set: q_i ∝ w_i · exp(score_i / T), w the offset value (form prob), exp(offset)
+     * (logProb) or 1 / offset (inverseShare), 1 without an offset. A null score or offset makes the unit invalid, as
+     * does a negative prob offset or a non-positive inverseShare one (the baseline's rule); a zero prob offset gives
+     * q_i = 0.
      */
     private static boolean softmax(final List<EvaluationRow> rows, final EvaluationSpec.Prediction d, final double[] out) {
         final int n = rows.size();
@@ -289,8 +290,11 @@ public final class EvaluationScorer implements Serializable {
             if (d.offsetField != null) {
                 final double offset = x[d.offset + 1];
                 if (Double.isNaN(offset)) return false;
-                if (EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale)) {
+                if (d.offsetLog()) {
                     e += offset;
+                } else if (d.offsetInverse()) {
+                    if (!(offset > 0)) return false;
+                    e -= Math.log(offset);
                 } else {
                     if (offset < 0) return false;
                     e += offset > 0 ? Math.log(offset) : Double.NEGATIVE_INFINITY;
@@ -321,7 +325,7 @@ public final class EvaluationScorer implements Serializable {
                 f[i] = x[d.offset] / d.temperature;
                 if (d.offsetField != null) {
                     final double offset = x[d.offset + 1];
-                    o[i] = EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale) ? offset : Math.log(Math.max(offset, LOG_FLOOR));
+                    o[i] = d.offsetLog() ? offset : d.offsetInverse() ? -Math.log(offset) : Math.log(Math.max(offset, LOG_FLOOR));
                 } else {
                     o[i] = link(unit.means[0][i]);
                 }
@@ -415,6 +419,31 @@ public final class EvaluationScorer implements Serializable {
         return family.isGrouped() ? 2 : 3;
     }
 
+    /** The positions (in {@link #blendK} order) of the coefficients a blend fit estimates: those its {@code fix} does not hold. */
+    public int[] blendFree(final int fitIndex) {
+        final EvaluationSpec.Fit fit = spec.fits.get(fitIndex);
+        final int kk = blendK();
+        int free = 0;
+        for (int c = 0; c < kk; c++) if (!fit.fixes(EvaluationSpec.BLEND_COEFFICIENTS.get(c))) free++;
+        final int[] out = new int[free];
+        int i = 0;
+        for (int c = 0; c < kk; c++) if (!fit.fixes(EvaluationSpec.BLEND_COEFFICIENTS.get(c))) out[i++] = c;
+        return out;
+    }
+
+    /** The full coefficient vector {@code [a, b(, intercept)]} of a blend fit from its free part: the fixed ones at their values. */
+    public double[] blendFull(final int fitIndex, final double[] free) {
+        final EvaluationSpec.Fit fit = spec.fits.get(fitIndex);
+        final int kk = blendK();
+        final double[] theta = new double[kk];
+        int i = 0;
+        for (int c = 0; c < kk; c++) {
+            final Double fixed = fit.fix.get(EvaluationSpec.BLEND_COEFFICIENTS.get(c));
+            theta[c] = fixed != null ? fixed : free[i++];
+        }
+        return theta;
+    }
+
     /** The blend design of a unit: rows {@code [f, o]} (+ 1). */
     public double[][] blendDesign(final Unit unit, final int base) {
         final double[][] fo = fitInputs(unit, base);
@@ -430,28 +459,41 @@ public final class EvaluationScorer implements Serializable {
     }
 
     /**
-     * One Newton pass evaluation of a unit for a blend fit of the base set at θ: {@code [n, ll, g, G]} via the
-     * shared offset GLM (the grouped family at the uniform share, so the design carries the whole predictor).
+     * One Newton pass evaluation of a unit for a blend fit of the base set at the free coefficients {@code theta}:
+     * {@code [n, ll, g, G]} over the free columns of the design (the fixed coefficients' columns enter the linear
+     * predictor at their values and carry no gradient), via the shared offset GLM (the grouped family's softmax
+     * of the whole predictor, no separate offset).
      */
-    public double[] blendEvaluate(final Unit unit, final int base, final double[] theta) {
-        final double[][] f = blendDesign(unit, base);
+    public double[] blendEvaluate(final Unit unit, final int base, final int fitIndex, final double[] theta) {
+        final double[][] design = blendDesign(unit, base);
+        final double[] full = blendFull(fitIndex, theta);
+        final int[] free = blendFree(fitIndex);
         final int n = unit.size();
-        final double[] uniform = new double[n];
-        Arrays.fill(uniform, 1d / n);
-        final double[] mu = GlmFit.fitted(family, true, uniform, f, theta);
-        return GlmFit.evaluate(family, unit.y, mu, unit.w, unit.unitWeight, f, theta.length);
+        final double[] eta = new double[n];
+        final double[][] f = new double[n][free.length];
+        for (int r = 0; r < n; r++) {
+            eta[r] = MatrixOps.dot(design[r], full);
+            for (int i = 0; i < free.length; i++) f[r][i] = design[r][free[i]];
+        }
+        final double[] mu = GlmFit.means(family, eta);
+        return GlmFit.evaluate(family, unit.y, mu, unit.w, unit.unitWeight, f, free.length);
     }
 
     /**
-     * The starting point of a blend of a base set: the set as declared, so the fit's identity log score is the
-     * declared set's — a = 1; b = 1 for a score set with its own offset (η = f + o), b = 0 otherwise (a
-     * probability set's log share / logit, or a score set without an offset, is the whole predictor and the
-     * baseline enters only through the fit); intercept 0.
+     * The starting point of a blend of a base set, over the fit's free coefficients: the set as declared, so the
+     * fit's identity log score is the declared set's — a = 1; b = 1 for a score set with its own offset
+     * (η = f + o), b = 0 otherwise (a probability set's log share / logit, or a score set without an offset, is
+     * the whole predictor and the baseline enters only through the fit); intercept 0. A fixed coefficient is
+     * not part of it (its value enters through {@link #blendFull}), so with a fix the identity is the declared set
+     * at the fixed values.
      */
-    public double[] blendStart(final int base) {
-        final double[] theta = new double[blendK()];
-        theta[0] = 1d;
-        theta[1] = ownOffset(base) ? 1d : 0d;
+    public double[] blendStart(final int base, final int fitIndex) {
+        final double[] full = new double[blendK()];
+        full[0] = 1d;
+        full[1] = ownOffset(base) ? 1d : 0d;
+        final int[] free = blendFree(fitIndex);
+        final double[] theta = new double[free.length];
+        for (int i = 0; i < free.length; i++) theta[i] = full[free[i]];
         return theta;
     }
 

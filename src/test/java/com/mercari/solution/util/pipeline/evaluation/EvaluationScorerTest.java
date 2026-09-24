@@ -405,20 +405,21 @@ public class EvaluationScorerTest {
         final EvaluationScorer scorer = new EvaluationScorer(spec);
         Assertions.assertEquals(2, scorer.blendK());
         // the start is the declared set: a score set without its own offset is the score alone (b = 0)
-        Assertions.assertArrayEquals(new double[]{1, 0}, scorer.blendStart(0), 0d);
+        Assertions.assertArrayEquals(new double[]{1, 0}, scorer.blendStart(0, 0), 0d);
+        Assertions.assertArrayEquals(new int[]{0, 1}, scorer.blendFree(0));
         final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", "g1", 1, 0.5, null, 1.0), row("valid", "g1", 0, 0.3, null, 0.0), row("valid", "g1", 0, 0.2, null, -1.0)), "g1");
         final double[][] fo = scorer.fitInputs(unit, 0);
         Assertions.assertArrayEquals(new double[]{1, 0, -1}, fo[0], 1e-12);
         Assertions.assertArrayEquals(new double[]{Math.log(0.5), Math.log(0.3), Math.log(0.2)}, fo[1], 1e-12);
-        final double[] eval = scorer.blendEvaluate(unit, 0, new double[]{0, 1});
+        final double[] eval = scorer.blendEvaluate(unit, 0, 0, new double[]{0, 1});
         Assertions.assertEquals(1d, eval[0], 0d);
         Assertions.assertEquals(Math.log(0.5), eval[1], 1e-12);
         final double pf = 0.5 * 1 + 0.3 * 0 + 0.2 * -1;
         Assertions.assertEquals(1 - pf, eval[2], 1e-12);                       // g_a = Σ (ỹ − p) f
         Assertions.assertEquals(0.5 + 0.2 - pf * pf, eval[4], 1e-12);          // G_aa = Σ p f² − (Σ p f)²
         // a Newton chain on this one unit moves a upward (the winner has the largest score)
-        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart(0));
-        for (int it = 0; it < 6; it++) state = state.advance(scorer.blendEvaluate(unit, 0, state.proposal), 1e-4, 1e-10);
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart(0, 0));
+        for (int it = 0; it < 6; it++) state = state.advance(scorer.blendEvaluate(unit, 0, 0, state.proposal), 1e-4, 1e-10);
         Assertions.assertTrue(state.hasBest);
         Assertions.assertTrue(state.bestTheta[0] > 1d, "a: " + state.bestTheta[0]);
         final double[] se = EvaluationScorer.standardErrors(state);
@@ -430,6 +431,98 @@ public class EvaluationScorerTest {
         scorer.derive(unit, fits);
         final double z = 0.5 * Math.E + 0.3 + 0.2 / Math.E;
         Assertions.assertEquals(0.5 * Math.E / z, unit.means[2][0], 1e-12);
+    }
+
+    @Test
+    public void testBlendWithAFixedCoefficient() {
+        // fix b = 1: the offset (here the baseline's log share) enters at its value and only a is estimated —
+        // the settlement-reference reading, η = a·f + log p_final
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: S, score: s}], " + SPLITS
+                + ", bootstrap: false, calibration: [{type: blend, fitOn: valid, fix: {b: 1}, as: rebase}, {type: blend, fitOn: valid}]}");
+        Assertions.assertEquals(List.of("baseline", "S", "S@rebase", "S@blend"), spec.predictionNames());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        Assertions.assertEquals(2, scorer.blendK());
+        Assertions.assertArrayEquals(new int[]{0}, scorer.blendFree(0));
+        Assertions.assertArrayEquals(new int[]{0, 1}, scorer.blendFree(1));
+        Assertions.assertArrayEquals(new double[]{1}, scorer.blendStart(0, 0), 0d);
+        Assertions.assertArrayEquals(new double[]{0.7, 1}, scorer.blendFull(0, new double[]{0.7}), 0d);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", "g1", 1, 0.5, null, 1.0), row("valid", "g1", 0, 0.3, null, 0.0), row("valid", "g1", 0, 0.2, null, -1.0)), "g1");
+        // the reduced evaluation at a = 0.7 is the a-part of the full evaluation at (0.7, 1)
+        final double[] reduced = scorer.blendEvaluate(unit, 0, 0, new double[]{0.7});
+        final double[] full = scorer.blendEvaluate(unit, 0, 1, new double[]{0.7, 1});
+        Assertions.assertEquals(2 + 1 + 1, reduced.length);
+        Assertions.assertEquals(full[0], reduced[0], 0d);
+        Assertions.assertEquals(full[1], reduced[1], 1e-12);
+        Assertions.assertEquals(full[2], reduced[2], 1e-12);            // g_a
+        Assertions.assertEquals(full[4], reduced[3], 1e-12);            // G_aa
+        // the one-parameter Newton chain converges to the same a as the two-parameter chain constrained by hand: the
+        // MLE of a at b = 1 solves Σ (ỹ − q(a)) f = 0 with q ∝ p · exp(a f)
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(1, scorer.blendStart(0, 0));
+        for (int it = 0; it < 20; it++) state = state.advance(scorer.blendEvaluate(unit, 0, 0, state.proposal), 0, 1e-12);
+        Assertions.assertTrue(state.hasBest);
+        final double a = state.bestTheta[0];
+        final double z = 0.5 * Math.exp(a) + 0.3 + 0.2 * Math.exp(-a);
+        final double grad = 1 - (0.5 * Math.exp(a) - 0.2 * Math.exp(-a)) / z;
+        Assertions.assertEquals(0d, grad, 1e-6, "score equation at a = " + a);
+        // the record: the free coefficient with its standard error, the fixed one at its value without one
+        final Map<String, Object> r = new java.util.LinkedHashMap<>();
+        final double[] theta = EvaluationStages.CollectFitsDoFn.blendRecord(spec, 0, spec.derived.get(0), state, r);
+        Assertions.assertArrayEquals(new double[]{a, 1}, theta, 0d);
+        Assertions.assertEquals("S@rebase", r.get("derived"));
+        Assertions.assertEquals(Boolean.TRUE, r.get("fitted"));
+        Assertions.assertEquals(a, (Double) r.get("a"), 0d);
+        Assertions.assertEquals(1d, (Double) r.get("b"), 0d);
+        Assertions.assertNotNull(r.get("se_a"));
+        Assertions.assertNull(r.get("se_b"));
+        Assertions.assertNotNull(r.get("z_a"));
+        Assertions.assertEquals("b=1.0", r.get("fixed"));
+        // deriving with the full vector: q ∝ p · exp(a f)
+        final FitResults fits = new FitResults();
+        fits.parameters.put("S@rebase", theta);
+        scorer.derive(unit, fits);
+        Assertions.assertEquals(0.5 * Math.exp(a) / z, unit.means[2][0], 1e-12);
+        Assertions.assertTrue(Double.isNaN(unit.means[3][0]), "the unfixed blend has no parameters yet");
+        // an unfixed record carries no fixed field
+        final Map<String, Object> plain = new java.util.LinkedHashMap<>();
+        EvaluationStages.CollectFitsDoFn.blendRecord(spec, 1, spec.derived.get(1), com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart(0, 1)), plain);
+        Assertions.assertNull(plain.get("fixed"));
+        Assertions.assertEquals(Boolean.FALSE, plain.get("fitted"));
+    }
+
+    @Test
+    public void testOffsetForms() {
+        // the same offset three ways: the odds under inverseShare, its reciprocal under prob, its negative log under logProb
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: ["
+                + "{name: I, score: s, offset: {field: u, form: inverseShare}}, {name: P, score: s, offset: qa}, {name: L, score: s, offset: {field: qb, form: logProb}}], "
+                + SPLITS + ", bootstrap: false, calibration: [{type: blend, fitOn: valid, of: [I]}]}");
+        Assertions.assertEquals("inverseShare", spec.predictions.get(0).offsetForm);
+        Assertions.assertEquals("prob", spec.predictions.get(1).offsetForm);
+        Assertions.assertEquals("logProb", spec.predictions.get(2).offsetForm);
+        Assertions.assertTrue(spec.predictions.get(0).describe().contains("u:inverseShare"));
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        // x = [s, u, s, qa, s, qb]: odds 2 / 4 / 4 -> shares .5 / .25 / .25
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(
+                row("valid", "g1", 1, 0.5, null, 1.0, 2, 1.0, 0.5, 1.0, Math.log(0.5)),
+                row("valid", "g1", 0, 0.3, null, 0.0, 4, 0.0, 0.25, 0.0, Math.log(0.25)),
+                row("valid", "g1", 0, 0.2, null, -1.0, 4, -1.0, 0.25, -1.0, Math.log(0.25))), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        final double z = 0.5 * Math.E + 0.25 + 0.25 / Math.E;
+        for (int j = 1; j <= 3; j++) {
+            Assertions.assertEquals(0.5 * Math.E / z, unit.means[j][0], 1e-12, "set " + j);
+            Assertions.assertEquals(0.25 / Math.E / z, unit.means[j][2], 1e-12, "set " + j);
+        }
+        // the fit input o of the inverseShare offset is −log odds
+        Assertions.assertArrayEquals(new double[]{-Math.log(2), -Math.log(4), -Math.log(4)}, scorer.fitInputs(unit, 0)[1], 1e-12);
+        // a null / 0 odds is invalid for the set (the baseline's rule), never a mass of 0
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, scorer.prepare(List.of(
+                row("valid", "g2", 1, 0.5, null, 1.0, 2, 1.0, 0.5, 1.0, 0), row("valid", "g2", 0, 0.5, null, 0.0, 0, 0.0, 0.5, 0.0, 0)), "g2").skip);
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, scorer.prepare(List.of(
+                row("valid", "g3", 1, 0.5, null, 1.0, 2, 1.0, 0.5, 1.0, 0), row("valid", "g3", 0, 0.5, null, 0.0, Double.NaN, 0.0, 0.5, 0.0, 0)), "g3").skip);
+        // with invalid: dropRow on that set the row leaves instead
+        final EvaluationSpec drop = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: I, score: s, offset: {field: u, form: inverseShare}, invalid: dropRow}], " + SPLITS + ", bootstrap: false}");
+        final EvaluationScorer.Unit kept = new EvaluationScorer(drop).prepare(List.of(row("valid", "g4", 1, 0.5, null, 1.0, 2), row("valid", "g4", 0, 0.5, null, 0.0, 0)), "g4");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, kept.skip);
+        Assertions.assertEquals(1, kept.dropped);
     }
 
     @Test

@@ -31,7 +31,7 @@ public class EvaluationSpecTest {
         Assertions.assertEquals(0, s.predictions.get(0).offset);
         Assertions.assertEquals(1, s.predictions.get(1).offset);
         Assertions.assertEquals(2d, s.predictions.get(1).temperature);
-        Assertions.assertEquals("log", s.predictions.get(1).offsetScale);
+        Assertions.assertEquals("logProb", s.predictions.get(1).offsetForm);
         Assertions.assertEquals(3, s.tables.get(1).fieldIndex);
         Assertions.assertEquals(3, s.utilityIndex);
         Assertions.assertEquals("region", s.bootstrapUnit);
@@ -93,7 +93,19 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: A, prob: qb}], " + EvaluationScorerTest.SPLITS + "}").contains("duplicated"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa, score: s}], " + EvaluationScorerTest.SPLITS + "}").contains("not both"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, temperature: 0}], " + EvaluationScorerTest.SPLITS + "}").contains("temperature must be > 0"));
-        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offsetScale: exp}], " + EvaluationScorerTest.SPLITS + "}").contains("offsetScale"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: qa, offsetScale: exp}], " + EvaluationScorerTest.SPLITS + "}").contains("offsetScale 'exp' is unknown"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offsetScale: log}], " + EvaluationScorerTest.SPLITS + "}").contains("offsetScale needs an offset"));
+        // offset as {field, form}: the probability forms; offsetScale is the legacy spelling of a field-name offset
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: {field: qa, form: rate}}], " + EvaluationScorerTest.SPLITS + "}").contains("offset.form 'rate' is not valid"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: {form: prob}}], " + EvaluationScorerTest.SPLITS + "}").contains("offset.field is required"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: {field: qa}, offsetScale: log}], " + EvaluationScorerTest.SPLITS + "}").contains("offsetScale applies to a field-name offset"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: [qa]}], " + EvaluationScorerTest.SPLITS + "}").contains("offset must be a field name or an object"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa, offsetScale: log}], " + EvaluationScorerTest.SPLITS + "}").contains("apply to a score set only"));
+        final EvaluationSpec forms = parse("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s, offset: {field: qa, form: inverseShare}}, {name: B, score: s, offset: qb, offsetScale: log}, {name: C, score: s, offset: {field: u}}], " + EvaluationScorerTest.SPLITS + "}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals("inverseShare", forms.predictions.get(0).offsetForm);
+        Assertions.assertEquals("logProb", forms.predictions.get(1).offsetForm);
+        Assertions.assertEquals("prob", forms.predictions.get(2).offsetForm);
+        Assertions.assertEquals("qa", forms.predictions.get(0).offsetField);
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, field: qa, form: rate}], " + EvaluationScorerTest.SPLITS + "}").contains("not valid for family"));
         Assertions.assertTrue(error("{family: gaussian, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("not supported"));
         Assertions.assertTrue(error("{family: groupedMultinomial, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("group is required"));
@@ -197,6 +209,23 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error("{group: g, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").contains("needs an offset"));
         final EvaluationSpec own = parse("{group: g, label: y, time: t, predictions: [{name: S, score: s, offset: qa, offsetScale: log}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").resolve(EvaluationScorerTest.SCHEMA, null);
         Assertions.assertEquals(List.of("baseline", "S", "S@blend"), own.predictionNames());
+        // fix: coefficients held at a value; as: the derived set's suffix (two blends of one set need distinct suffixes)
+        final EvaluationSpec fixed = parse(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {b: 1}, as: rebase}, {type: blend, fitOn: valid}, {type: temperature, fitOn: valid, as: temp}]}")).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(List.of("baseline", "A", "A@rebase", "A@blend", "A@temp"), fixed.predictionNames());
+        Assertions.assertEquals(1d, fixed.fits.get(0).fix.get("b"));
+        Assertions.assertTrue(fixed.fits.get(0).fixes("b"));
+        Assertions.assertFalse(fixed.fits.get(0).fixes("a"));
+        Assertions.assertTrue(EvaluationReport.describe(fixed).contains("fix b=1.0"));
+        Assertions.assertNotEquals(fixed.parametersHash, parse(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {b: 2}, as: rebase}, {type: blend, fitOn: valid}, {type: temperature, fitOn: valid, as: temp}]}")).parametersHash);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {c: 1}}]}")).contains("fix.c is not a blend coefficient"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {b: x}}]}")).contains("fix.b must be a finite number"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {a: 1, b: 1}}]}")).contains("holds every coefficient"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, fix: {intercept: 0}}]}")).contains("grouped blend has no intercept"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, fix: {b: 1}}]}")).contains("fix applies to type blend"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, as: 'x@y'}]}")).contains("as must be a non-blank suffix"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, as: T}, {type: temperature, fitOn: valid}]}")).contains("declared twice"));
+        final EvaluationSpec binomial = parse("{family: binomial, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid, fix: {intercept: 0, b: 1}}]}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(2, binomial.fits.get(0).fix.size());
     }
 
     @Test
