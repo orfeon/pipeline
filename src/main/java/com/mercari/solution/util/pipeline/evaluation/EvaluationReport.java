@@ -308,7 +308,7 @@ public final class EvaluationReport {
         if (fits != null) {
             for (final Map<String, Object> r : fits.records) {
                 fitRecords.add(new LinkedHashMap<>(r));
-                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
+                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " (" + r.get("derived") + ") produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
             }
         }
         s.put("fits", fitRecords);
@@ -759,6 +759,7 @@ public final class EvaluationReport {
                 .withField("se_b", Schema.FieldType.FLOAT64)
                 .withField("se_intercept", Schema.FieldType.FLOAT64)
                 .withField("z_a", Schema.FieldType.FLOAT64)
+                .withField("fixed", Schema.FieldType.STRING)
                 .withField("nUnits", Schema.FieldType.FLOAT64)
                 .withField("logScore", Schema.FieldType.FLOAT64)
                 .withField("logScoreAtIdentity", Schema.FieldType.FLOAT64)
@@ -838,6 +839,13 @@ public final class EvaluationReport {
                 .build();
     }
 
+    /** The fixed coefficients of a blend fit as {@code a=1, b=1}. */
+    public static String describeFix(final EvaluationSpec.Fit fit) {
+        final List<String> parts = new ArrayList<>();
+        for (final Map.Entry<String, Double> e : fit.fix.entrySet()) parts.add(e.getKey() + "=" + e.getValue());
+        return String.join(", ", parts);
+    }
+
     /** One-paragraph description of the resolved spec for the assembly log. */
     public static String describe(final EvaluationSpec spec) {
         final List<String> parts = new ArrayList<>();
@@ -862,7 +870,7 @@ public final class EvaluationReport {
                 final EvaluationSpec.Fit f = spec.fits.get(i);
                 final List<String> names = new ArrayList<>();
                 for (final int d : spec.derivedOf(i)) names.add(spec.derived.get(d - spec.predictions.size()).name);
-                fits.add(f.type + " on " + f.fitOn + " -> " + names + (f.isTemperature() ? " (grid " + f.gridSize + ", 1 pass)" : " (Newton, " + f.maxIter + " passes)"));
+                fits.add(f.type + " on " + f.fitOn + " -> " + names + (f.isTemperature() ? " (grid " + f.gridSize + ", 1 pass)" : " (Newton, " + f.maxIter + " passes" + (f.fix.isEmpty() ? "" : ", fix " + describeFix(f)) + ")"));
             }
             parts.add("fits=" + fits);
         }

@@ -43,11 +43,16 @@ public final class EvaluationSpec implements Serializable {
     /** the name under which the baseline's own metrics are reported; not available to a prediction set */
     public static final String BASELINE_NAME = "baseline";
 
+    /** the legacy {@code offsetScale} of a field-name offset: {@code prob} = form prob, {@code log} = form logProb */
     public static final String OFFSET_SCALE_PROB = "prob";
     /** field types a time / bucket field may have (a string is parsed as ISO-8601) */
     static final List<String> TIME_FIELD_TYPES = List.of("timestamp", "datetime", "date", "string");
     public static final String OFFSET_SCALE_LOG = "log";
     public static final List<String> OFFSET_SCALES = List.of(OFFSET_SCALE_PROB, OFFSET_SCALE_LOG);
+    /** the forms an offset accepts: the probability forms (a share within the group) */
+    public static final List<String> OFFSET_FORMS = Family.PROBABILITY_FORMS;
+    /** the blend coefficients in design order; {@code fix} names them */
+    public static final List<String> BLEND_COEFFICIENTS = List.of("a", "b", "intercept");
 
     public static final String TABLE_RELIABILITY = "reliability";
     public static final String TABLE_EDGE = "edge";
@@ -83,7 +88,8 @@ public final class EvaluationSpec implements Serializable {
         public String form;
         public String scoreField;
         public String offsetField;
-        public String offsetScale = OFFSET_SCALE_PROB;
+        /** the offset's form: {@code prob} (w = x), {@code logProb} (w = exp x), {@code inverseShare} (w = 1 / x) */
+        public String offsetForm = Family.FORM_PROB;
         public double temperature = 1d;
         /** what an invalid value of the set's column(s) does to the unit: skip it whole (default) or drop the row */
         public String invalid = Baselines.INVALID_SKIP_UNIT;
@@ -98,9 +104,17 @@ public final class EvaluationSpec implements Serializable {
             return Baselines.INVALID_DROP_ROW.equals(invalid);
         }
 
+        public boolean offsetLog() {
+            return Family.FORM_LOG_PROB.equals(offsetForm);
+        }
+
+        public boolean offsetInverse() {
+            return Family.FORM_INVERSE_SHARE.equals(offsetForm);
+        }
+
         public String describe() {
             return (isScore()
-                    ? name + "=softmax(" + scoreField + (offsetField != null ? " + " + offsetField + "[" + offsetScale + "]" : "") + (temperature != 1d ? " / T=" + temperature : "") + ")"
+                    ? name + "=softmax(" + scoreField + (offsetField != null ? " + " + offsetField + ":" + offsetForm : "") + (temperature != 1d ? " / T=" + temperature : "") + ")"
                     : name + "=" + field + ":" + form) + (dropsRows() ? "[dropRow]" : "");
         }
     }
@@ -180,6 +194,10 @@ public final class EvaluationSpec implements Serializable {
         public String fitOn;
         /** the prediction sets the fit applies to (names); empty = every declared set */
         public List<String> of = new ArrayList<>();
+        /** the derived set's suffix: {@code <name>@<as>}; default {@code T} / {@code blend} */
+        public String as;
+        /** blend: coefficients held at a value instead of estimated ({@code a}, {@code b}, {@code intercept}); the others are free */
+        public Map<String, Double> fix = new LinkedHashMap<>();
         /** temperature grid: min, max, count (linear) */
         public double gridMin = 0.25;
         public double gridMax = 4d;
@@ -196,6 +214,16 @@ public final class EvaluationSpec implements Serializable {
 
         public boolean isTemperature() {
             return FIT_TEMPERATURE.equals(type);
+        }
+
+        /** The derived set's suffix (after the {@code @}). */
+        public String suffix() {
+            return as != null ? as : isTemperature() ? SUFFIX_TEMPERATURE.substring(1) : SUFFIX_BLEND.substring(1);
+        }
+
+        /** Whether a blend coefficient is held fixed. */
+        public boolean fixes(final String coefficient) {
+            return fix.containsKey(coefficient);
         }
 
         /** The grid values (linear between min and max; {@code gridSize >= 2} by validation). */
@@ -321,6 +349,11 @@ public final class EvaluationSpec implements Serializable {
 
     public boolean isGrouped() {
         return Family.GROUPED_MULTINOMIAL.equals(family());
+    }
+
+    /** Number of blend coefficients: [a, b] for the grouped family, [a, b, intercept] for binomial ({@link #BLEND_COEFFICIENTS} order). */
+    public int blendK() {
+        return isGrouped() ? 2 : 3;
     }
 
     public boolean hasBaseline() {
@@ -491,7 +524,7 @@ public final class EvaluationSpec implements Serializable {
         // predictions
         final JsonElement predictions = p.get("predictions");
         if (predictions == null || predictions.isJsonNull()) {
-            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset, offsetScale, temperature}, each with an optional invalid: skipUnit | dropRow)");
+            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset: <field> | {field, form}, temperature}, each with an optional invalid: skipUnit | dropRow)");
         } else if (!predictions.isJsonArray()) {
             errors.add("predictions must be a list of prediction sets");
         } else {
@@ -510,7 +543,33 @@ public final class EvaluationSpec implements Serializable {
                 else if (BASELINE_NAME.equals(d.name)) errors.add(at + ".name '" + BASELINE_NAME + "' is reserved for the baseline's own metrics");
                 else if (!names.add(d.name)) errors.add(at + ".name '" + d.name + "' is duplicated");
                 d.scoreField = string(o, "score");
-                d.offsetField = string(o, "offset");
+                final JsonElement offset = o.get("offset");
+                if (offset != null && !offset.isJsonNull()) {
+                    if (offset.isJsonPrimitive()) {
+                        d.offsetField = offset.getAsString();
+                        // the legacy offsetScale of a field-name offset: prob | log
+                        final String scale = string(o, "offsetScale");
+                        if (scale != null) {
+                            if (!OFFSET_SCALES.contains(scale)) errors.add(at + ".offsetScale '" + scale + "' is unknown (available: " + OFFSET_SCALES + "; or offset: {field, form})");
+                            else d.offsetForm = OFFSET_SCALE_LOG.equals(scale) ? Family.FORM_LOG_PROB : Family.FORM_PROB;
+                        }
+                    } else if (offset.isJsonObject()) {
+                        final JsonObject oo = offset.getAsJsonObject();
+                        d.offsetField = string(oo, "field");
+                        final String form = string(oo, "form");
+                        if (form != null) d.offsetForm = form;
+                        if (d.offsetField == null) errors.add(at + ".offset.field is required");
+                        if (!OFFSET_FORMS.contains(d.offsetForm)) errors.add(at + ".offset.form '" + d.offsetForm + "' is not valid (available: " + OFFSET_FORMS + ")");
+                        for (final String key : oo.keySet()) {
+                            if (!"field".equals(key) && !"form".equals(key)) errors.add(at + ".offset." + key + " is unknown (an offset is {field, form}; invalid is declared on the prediction set)");
+                        }
+                        if (declared(o, "offsetScale")) errors.add(at + ".offsetScale applies to a field-name offset; an offset object carries its form");
+                    } else {
+                        errors.add(at + ".offset must be a field name or an object {field, form}");
+                    }
+                } else if (declared(o, "offsetScale")) {
+                    errors.add(at + ".offsetScale needs an offset");
+                }
                 final String invalid = string(o, "invalid");
                 if (invalid != null) d.invalid = invalid;
                 if (!Baselines.INVALIDS.contains(d.invalid)) errors.add(at + ".invalid '" + d.invalid + "' is unknown (available: " + Baselines.INVALIDS + ")");
@@ -520,9 +579,6 @@ public final class EvaluationSpec implements Serializable {
                 d.form = prob != null ? Family.FORM_PROB : string(o, "form");
                 if (d.scoreField != null) {
                     if (d.field != null) errors.add(at + ": specify either a probability column (prob / field) or a score, not both");
-                    final String scale = string(o, "offsetScale");
-                    if (scale != null) d.offsetScale = scale;
-                    if (!OFFSET_SCALES.contains(d.offsetScale)) errors.add(at + ".offsetScale '" + d.offsetScale + "' is unknown (available: " + OFFSET_SCALES + ")");
                     final Double t = number(o, "temperature");
                     if (t != null) d.temperature = t;
                     if (!(d.temperature > 0)) errors.add(at + ".temperature must be > 0");
@@ -531,7 +587,7 @@ public final class EvaluationSpec implements Serializable {
                 } else {
                     if (d.form == null) d.form = forms.get(0);
                     if (!forms.contains(d.form)) errors.add(at + ".form '" + d.form + "' is not valid for family " + s.family + " (available: " + forms + ")");
-                    if (o.has("temperature") || o.has("offset")) errors.add(at + ": temperature / offset apply to a score set only");
+                    if (o.has("temperature") || o.has("offset") || declared(o, "offsetScale")) errors.add(at + ": temperature / offset apply to a score set only");
                 }
                 s.predictions.add(d);
             }
@@ -639,6 +695,28 @@ public final class EvaluationSpec implements Serializable {
                         f.fitOn = string(o, "fitOn");
                         if (f.fitOn == null) errors.add(at + ".fitOn is required for type " + type + " (the selection split the fit is estimated on)");
                         f.of = strings(o, "of", errors);
+                        f.as = string(o, "as");
+                        if (f.as != null && (f.as.isBlank() || f.as.contains("@"))) errors.add(at + ".as must be a non-blank suffix without '@' (the derived set is <name>@<as>)");
+                        final JsonElement fix = o.get("fix");
+                        if (fix != null && !fix.isJsonNull()) {
+                            if (f.isTemperature()) {
+                                errors.add(at + ".fix applies to type blend");
+                            } else if (!fix.isJsonObject()) {
+                                errors.add(at + ".fix must be an object {a, b, intercept} of the coefficients to hold fixed");
+                            } else {
+                                for (final Map.Entry<String, JsonElement> entry : fix.getAsJsonObject().entrySet()) {
+                                    final String coefficient = entry.getKey();
+                                    if (!BLEND_COEFFICIENTS.contains(coefficient)) {
+                                        errors.add(at + ".fix." + coefficient + " is not a blend coefficient (available: " + BLEND_COEFFICIENTS + ")");
+                                        continue;
+                                    }
+                                    final JsonElement value = entry.getValue();
+                                    final Double v = value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() ? value.getAsDouble() : null;
+                                    if (v == null || !Double.isFinite(v)) errors.add(at + ".fix." + coefficient + " must be a finite number");
+                                    else f.fix.put(coefficient, v);
+                                }
+                            }
+                        }
                         if (f.isTemperature()) {
                             final double[] grid = numbers(o, "grid", at + ".grid", errors);
                             if (grid != null) {
@@ -988,14 +1066,21 @@ public final class EvaluationSpec implements Serializable {
                     else bases.add(found);
                 }
             }
+            if (!f.isTemperature()) {
+                if (f.fixes("intercept") && isGrouped()) errors.add(at + ".fix.intercept: the grouped blend has no intercept (a per-group constant does not change a softmax)");
+                final int coefficients = blendK();
+                int fixed = 0;
+                for (int c = 0; c < coefficients; c++) if (f.fixes(BLEND_COEFFICIENTS.get(c))) fixed++;
+                if (fixed == coefficients) errors.add(at + ".fix holds every coefficient: nothing to estimate (declare the combination as a score set instead)");
+            }
             for (final int j : bases) {
                 final Prediction d = predictions.get(j);
                 if (!f.isTemperature() && !hasBaseline() && !(d.isScore() && d.offsetField != null)) {
                     errors.add(at + " on '" + d.name + "': a blend needs an offset (the set's own, or the baseline) as its second column");
                 }
-                final String name = d.name + (f.isTemperature() ? SUFFIX_TEMPERATURE : SUFFIX_BLEND);
+                final String name = d.name + "@" + f.suffix();
                 if (declaredNames.contains(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' collides with a declared prediction set of that name");
-                else if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one " + f.type + " fit per prediction set)");
+                else if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one fit per prediction set and suffix; name a second fit of the same type with as)");
                 derived.add(new Derived(name, j, i));
             }
         }

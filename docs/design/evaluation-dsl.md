@@ -70,16 +70,22 @@ direct upstream, or the manifest's `roles` / `timeField`).
 predictions:
   - {name: candidate, prob: p_candidate}                                   # a probability column
   - {name: raw, field: s_raw, form: logProb}                               # any baseline form
-  - {name: scored, score: f, offset: log_m, offsetScale: log, temperature: 1.0}   # grouped softmax
+  - {name: scored, score: f, offset: {field: log_m, form: logProb}, temperature: 1.0}   # grouped softmax
+  - {name: rebased, score: f, offset: {field: odds_final, form: inverseShare}}         # on top of odds
 ```
 
 - `name` (required, unique; `baseline` is reserved — the baseline is reported under that name).
 - `prob: <field>` — a probability (`form: prob`); `field` + `form` accepts every form of the family
   (`prob` / `logProb` / `inverseShare`); a grouped set is normalised within the group like the baseline.
 - `score` + optional `offset` + `temperature` (grouped family only): p ∝ w · exp(score / T) within the group,
-  with w the offset value (`offsetScale: prob`, default) or exp(offset) (`offsetScale: log`). This is the
-  feature transform's `softmax` context op; a model that outputs a raw score to be combined with the
-  baseline's log share reads as `score: f, offset: log_m, offsetScale: log`.
+  with w the offset read in its form — a field name or `{field, form}` with the probability forms: `prob`
+  (default, w = the value), `logProb` (w = exp of the value), `inverseShare` (w = 1 / the value: odds, prices).
+  The older `offsetScale: prob | log` of a bare field name maps to `prob` / `logProb`. This is the feature
+  transform's `softmax` context op; a model that outputs a raw score to be combined with the baseline's log
+  share reads as `offset: {field: log_m, form: logProb}`; a correction over the decision-time market laid
+  over the settlement odds reads as `offset: {field: odds_final, form: inverseShare}` (§7.1). An offset value
+  invalid for its form (a null or +∞; a negative `prob`; a non-positive or infinite `inverseShare`) makes the
+  unit invalid like the baseline's rule; a `prob` offset of 0 (a `logProb` of −∞) is a valid row of mass 0.
 
 A unit with a null / non-finite / invalid value in any set (or in the baseline) is skipped whole
 (`nUnitsSkipped`), never partially compared (the common unit set). Validity follows the form: `prob` accepts 0
@@ -236,14 +242,31 @@ edge records carry the threshold in `lower`.
 calibration:
   - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
   - {type: blend, fitOn: valid, of: [scored], l2: 0, maxIter: 10, tol: 1e-8}
+  - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}, as: rebase}
 output:
   calibration: gs://bucket/eval/${args.version}/calibration.json
 ```
 
 A fit is a small model, so the contract binds it: `fitOn` must name a `selection` split (a `report` split is
 an assembly error), and the fitted set enters the run as a **derived prediction set** — `<name>@T` /
-`<name>@blend` — compared on every split like a declared set (metrics, intervals, pairs, slices, calibration
-tables, units). `of` names the base sets (default: every declared set; one fit of each type per set).
+`<name>@blend`, or `<name>@<as>` when the fit declares its suffix — compared on every split like a declared
+set (metrics, intervals, pairs, slices, calibration tables, units). `of` names the base sets (default: every
+declared set); the derived names are unique, so a second fit of the same type on a set carries its own `as`.
+
+A blend may hold coefficients at a value: `fix: {b: 1}` (any of `a`, `b`, `intercept` — the latter binomial
+only; not all of them). The fixed columns enter the linear predictor at their values, the Newton chain runs
+over the free coefficients only (their standard errors from the reduced information), the record reports the
+full vector with `fixed: "b=1.0"` and no standard error on a fixed one, and the identity point is the
+declared set at the fixed values. The use: the **settlement-reference score** — where the return is settled
+at a price fixed after the decision (a closing price, a hammer price, the post-time odds), the correction
+f = log q_model − log p_decision laid over the settlement market and shrunk by a factor α the selection
+split estimates, η = α·f + log p_settlement, is a blend with b fixed at 1 of a score set whose offset is the
+settlement odds (`offset: {field, form: inverseShare}`) against the settlement baseline. Its excess log
+score on the report split is the log-growth bound a proportional stake can realise at settlement; the
+model's own probability and the decision-time market declared as two more *sets* give, through their pair
+record (model − decision market; not the rebased set, which is the correction over the settlement market),
+the decision-time Δ on the same units, and the ratio is the retained share. The settlement price is a
+yardstick, never a feature.
 
 Every base set has two fit inputs per row: f — a score set's score (over its declared temperature), a
 probability set's log share (grouped) / logit (binomial) — and o — the score set's own offset on the log
@@ -255,7 +278,7 @@ standard errors scale with the magnitude of the `weight` column.
 | type | model | estimation | record |
 |---|---|---|---|
 | `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram; a separable selection split — a small one the set ranks perfectly — is the other case for a positive `l2`: the unpenalised estimate grows without bound), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns, or of the free ones under `fix` | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram; a separable selection split — a small one the set ranks perfectly — is the other case for a positive `l2`: the unpenalised estimate grows without bound), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
 
 Reading a blend: a ≈ 1 and b at its start says the declared set is calibrated; a < 1 says the score needs
 shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter

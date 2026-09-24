@@ -89,13 +89,21 @@ groups) that the group bootstrap ignores.
 predictions:
   - {name: candidate, prob: p_candidate}                                   # a probability column
   - {name: raw, field: s_raw, form: logProb}                               # any form of the family
-  - {name: scored, score: f, offset: log_m, offsetScale: log, temperature: 1.0}   # grouped softmax
+  - {name: scored, score: f, offset: {field: log_m, form: logProb}, temperature: 1.0}   # grouped softmax
+  - {name: rebased, score: f, offset: {field: odds_final, form: inverseShare}}         # on top of odds
 ```
 
-A score set (grouped family only) is q ∝ w · exp(score / T) within the group, w the offset value
-(`offsetScale: prob`, default) or exp(offset) (`offsetScale: log`), 1 without an offset — a model that
-outputs a raw score to be combined with the baseline's log share reads as `score: f, offset: log_m,
-offsetScale: log`. `baseline` is a reserved name (the baseline's own metrics are reported under it).
+A score set (grouped family only) is q ∝ w · exp(score / T) within the group, w the offset read in its
+form — `prob` (default: w = the value), `logProb` (w = exp of the value), `inverseShare` (w = 1 / the value:
+odds, prices) — and 1 without an offset. A model that outputs a raw score to be combined with the baseline's
+log share reads as `offset: {field: log_m, form: logProb}`; a correction f = log q_model − log p_bet to be laid
+over the settlement odds reads as `offset: {field: odds_final, form: inverseShare}` (see [Scoring against the
+settlement reference](#scoring-against-the-settlement-reference)). A bare field name is `form: prob`; the
+older `offsetScale: prob | log` spelling of a bare offset is still accepted (`log` = `logProb`). An offset
+value invalid for its form (a null or +∞; a negative `prob`; a 0, negative or infinite `inverseShare`) makes
+the unit invalid, like the baseline; a `prob` offset of 0 (a `logProb` of −∞) is a valid row of mass 0.
+`invalid` is declared on the set, not inside the offset object. `baseline` is a reserved name
+(the baseline's own metrics are reported under it).
 
 ### Splits
 
@@ -154,25 +162,28 @@ open above. An `edge` group holds the rows with q strictly greater than threshol
 calibration:
   - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
   - {type: blend, fitOn: valid, of: [scored]}
+  - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}, as: rebase}    # estimate a only
 output:
   calibration: gs://bucket/eval/${args.version}/calibration.json
 ```
 
 A fit is a small model, so it is estimated on a `selection` split only (`fitOn`; a `report` split is an
-assembly error) and its result enters the run as a **derived prediction set** — `<name>@T` / `<name>@blend`
-— compared on every split like a declared set: metrics with intervals, pair records against its base set,
-slices, calibration tables, units. `of` names the base sets (default: every declared set).
+assembly error) and its result enters the run as a **derived prediction set** — `<name>@T` / `<name>@blend`,
+or `<name>@<as>` when the fit names its suffix — compared on every split like a declared set: metrics with
+intervals, pair records against its base set, slices, calibration tables, units. `of` names the base sets
+(default: every declared set); one derived name per set, so a second fit of the same type on a set needs
+its own `as`.
 
 Each base set has two fit inputs per row: f — a score set's score, a probability set's log share (grouped) /
 logit (binomial) — and o — the score set's own offset on the log scale, else the baseline's log share /
-logit. A row the base set gives mass 0 (a zero prob-scale offset, a zero share) enters the fit at the log
+logit. A row the base set gives mass 0 (a zero prob offset or a −∞ logProb one, a zero share) enters the fit at the log
 floor (log 1e-12) and keeps mass 0 in the derived set. `weight` acts as a frequency weight, so the fits'
 standard errors scale with its magnitude.
 
 | type | model | estimate | reading |
 |---|---|---|---|
 | `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear or the selection split is separable (a small split the set ranks perfectly: the unpenalised estimate grows without bound). The standard errors come from the unpenalised information whatever `l2`: null when f and o are exactly collinear, very large when nearly so | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `fix: {a, b, intercept}` holds the named coefficients at a value and estimates the rest (`fix: {b: 1}`: the offset enters as is and only the correction's scale a is fitted — its record has `fixed: "b=1.0"`, no `se_b`, and the identity is the declared set at the fixed values). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear or the selection split is separable (a small split the set ranks perfectly: the unpenalised estimate grows without bound). The standard errors come from the unpenalised information whatever `l2`: null when f and o are exactly collinear, very large when nearly so | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
 
 The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
 declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
@@ -199,6 +210,41 @@ to the market. The two regressions are on different scales, so the coefficients 
 reference computed on the other. The declared score set itself is softmax(logit_model + logit_market) — the
 blend's start, a = b = 1 — so its own metrics and the blend's `logScoreAtIdentity` / `gainPerUnit` are relative
 to that sum: read the blend's `a` and `b`.
+
+#### Scoring against the settlement reference
+
+Where the return is settled at a price fixed *after* the decision — the closing price of a market, the
+hammer price of an auction, the odds at post time — the reference the decision was made against (the
+market at decision time) and the reference the return is paid at (the settlement market) differ, and the
+market closes part of the gap on its own. Of an improvement Δ over the decision-time market, the part the
+settlement market has absorbed by itself earns nothing; the part that survives against the settlement
+market is the upper bound of the log growth a proportional stake can realise. So score the same prediction
+against both, and read the ratio (the retained share).
+
+The settlement-reference score of a model is its correction over the decision-time market, f = log q_model −
+log p_bet (a `select` upstream), laid over the settlement market and shrunk by a factor α that the selection
+split estimates — a blend with the offset held at 1:
+
+```yaml
+baseline: {field: odds_final, form: inverseShare, invalid: dropRow}   # the settlement market is the reference
+predictions:
+  - {name: rebased, score: f, offset: {field: odds_final, form: inverseShare}}   # f = log q_model − log p_bet
+  - {name: model, prob: q_model}                                                  # the model as it decided
+  - {name: bet, field: odds_bet, form: inverseShare}                              # the decision-time market, for the pair record
+calibration:
+  - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}}                       # a = α estimated, b = 1
+```
+
+On the report split, `rebased@blend`'s `excessLogScore` is the settlement-reference Δ at the fitted α (and
+`rebased`'s own is the same at α = 1: a set whose correction is over-confident goes negative there, which
+is what α repairs). With the model itself and the decision-time market declared as two more *sets*, the pair
+record `model − bet` is the decision-time Δ on the same units with a paired interval (not `rebased − bet`:
+`rebased` is the correction laid over the settlement market, not the model), so the retained share is the
+ratio of the two records; `utility` next to them turns the three-step reading — decision-time Δ,
+settlement Δ, realised return — into one run. The settlement price is a yardstick only: it is never a
+feature (a candidate must be observable at decision time). A prediction with a low retained share carries
+information the market absorbs late, or a re-encoding of the market level — useful to execution (when to
+place the order, what the settlement price will be), not to the probability model.
 
 ### Slice discovery
 
@@ -273,14 +319,14 @@ the time partition.
 | group | optional | String | Group key field. Required for `groupedMultinomial`. |
 | label | required | String or Object | Field name, or `{field}` / `{expr, normalizeTies}`. `expr` is a [Lucene expression](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) over numeric fields; `normalizeTies` (default true). |
 | baseline | optional | String or Object | Field name (form `prob`), or `{field, form, invalid}` with `prob` / `logProb` / `inverseShare` and `invalid`: `skipUnit` (default, an invalid value skips the unit) / `dropRow` (the row leaves the unit). Omitted: the prior. |
-| predictions | required | Array<Object\> | `{name, prob}`, `{name, field, form}` or `{name, score, offset, offsetScale, temperature}`, each with an optional `invalid` (`skipUnit` / `dropRow`, see [What it computes](#what-it-computes)). Names are unique; `baseline` is reserved. |
+| predictions | required | Array<Object\> | `{name, prob}`, `{name, field, form}` or `{name, score, offset, temperature}` with `offset` a field name (`form: prob`, or the older `offsetScale: prob \| log`) or `{field, form: prob \| logProb \| inverseShare}`, each with an optional `invalid` (`skipUnit` / `dropRow`, see [What it computes](#what-it-computes)). Names are unique; `baseline` is reserved. |
 | splits | required | Object | `{<name>: {from, to, role}}` on `time.field`, or `{field, roles: {<value>: role}}`; `role` is `selection` or `report` (at least one `report`). |
 | time | optional | String or Object | Field name or `{field}`. Required with time-range splits (or a feature time role). |
 | weight | optional | String or Object | Weight field. |
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
 | utility | optional | String or Object | The realised value of a positive row; the `utility` metric (metrics, units, `sliceDiscovery.metric`) and the calibration records' `utility`. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 7 × samples doubles. |
-| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}` (`l2` default 0). |
+| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid, as}`, `{type: blend, fitOn, of, fix, l2, maxIter, tol, as}` (`l2` default 0; `fix: {a, b, intercept}` holds coefficients at a value; `as` names the derived set's suffix, default `T` / `blend`). |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`, `utility` — the last needs `utility.field` and runs once, under the first compared set), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
 | rows | optional | Boolean or Object | `true` (the scored rows of the `selection` splits) or `{splits: [...]}` (the named splits) fills the `<name>.rows` output; needs `rowId`. Off by default (the output stays empty). |
@@ -361,7 +407,7 @@ split; the skipped units by reason (the rest had no positive label); `nRowsDupli
 `nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
 (in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value), `nRowsDropped`,
 `bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `fits` (ARRAY<STRUCT<prediction,
-derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, nUnits, logScore,
+derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, fixed, nUnits, logScore,
 logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>), `discovery`
 (ARRAY<STRUCT<prediction, metric, nCandidates, threshold, nPassed, nConfirmed, note\>\>), `slices`,
 `parametersHash` (the SHA-256, 16 hex characters, of the canonical parameters without `manifest` and
@@ -517,7 +563,8 @@ parameters:
 ## Limits
 
 - Δ is relative to the baseline: swapping the baseline (an odds snapshot at another time) changes its meaning;
-  the summary records which column and form the baseline was.
+  the summary records which column and form the baseline was. Where the return is settled at a later price,
+  score against that price too (see [Scoring against the settlement reference](#scoring-against-the-settlement-reference)).
 - The bootstrap interval assumes independent resampling units; correlated units need `bootstrap.unit`.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
 - Duplicate rows are counted, not removed: a row whose `rowId` appears twice in a grouped unit (at any time)
