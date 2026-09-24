@@ -110,6 +110,11 @@ public final class ScreenSpec implements Serializable {
         return group != null;
     }
 
+    /** Whether an invalid baseline value drops its row ({@code baseline.invalid: dropRow}) instead of skipping the unit. */
+    public boolean baselineDropsRows() {
+        return hasBaseline() && Baselines.INVALID_DROP_ROW.equals(baselineInvalid);
+    }
+
     /** The parsed family (null while unknown: parse reports the error). */
     public Family family() {
         if (resolvedFamily == null) resolvedFamily = Family.of(family);

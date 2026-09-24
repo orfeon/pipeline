@@ -21,6 +21,19 @@ public final class Baselines {
     public static final String INVALID_DROP_ROW = "dropRow";
     public static final java.util.List<String> INVALIDS = java.util.List.of(INVALID_SKIP_UNIT, INVALID_DROP_ROW);
 
+    /** The share of skipped units above which a summary notes them with their reasons (both supervised transforms). */
+    public static final double SKIP_SHARE_NOTE = 0.01;
+
+    /** Whether {@code skipped} of the {@code skipped + scored} units pass {@link #SKIP_SHARE_NOTE}. */
+    public static boolean skipShareNoted(final double skipped, final double scored) {
+        return skipped > SKIP_SHARE_NOTE * (skipped + scored);
+    }
+
+    /** {@code part / whole} as a percentage with one decimal ("12.5%"). */
+    public static String percent(final double part, final double whole) {
+        return String.format(java.util.Locale.ROOT, "%.1f%%", 100d * part / whole);
+    }
+
     /**
      * Whether one baseline value is usable in {@code form}: finite, and within the form's domain — a probability in
      * [0, 1] (0 is a valid share of 0), a log probability ≤ 0, a positive value under {@code inverseShare} / {@code

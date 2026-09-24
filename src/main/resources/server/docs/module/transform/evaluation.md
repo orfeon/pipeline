@@ -57,10 +57,11 @@ notes a split whose skipped share passes 1%.
 `invalid: dropRow`: the rows whose value the column rejects leave the unit before anything is scored, and the
 shares are taken over the remaining rows (the common *row* set: every set is compared on the same rows). A
 unit whose positive row was dropped is skipped for no positive label; a unit with no row left is skipped as
-invalid. Dropped rows do not appear in the calibration tables, the rows output or the counts of `nRows`; they
-are counted as `nRowsDropped` and noted. Right for a withdrawal (a scratched runner, a delisted item) whose
+invalid. Dropped rows do not appear in the calibration tables, the rows output or a split's `nRows` (the
+summary's `nRows` still counts them as rows read); they are counted as `nRowsDropped` and noted. Right for a withdrawal (a scratched runner, a delisted item) whose
 row should not exist; wrong for a value that is missing by accident, where the unit skip is the safer report.
-Under `binomial` a row is its own unit, so `dropRow` and `skipUnit` coincide.
+Under `binomial` a row is its own unit, so both policies leave out the same rows; `dropRow` also counts
+each of them in `nRowsDropped`.
 
 ```yaml
 baseline: {field: odds_final, form: inverseShare, invalid: dropRow}

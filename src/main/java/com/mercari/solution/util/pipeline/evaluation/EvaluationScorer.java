@@ -48,12 +48,15 @@ public final class EvaluationScorer implements Serializable {
     private final boolean[] unitPeriodSlices;
     /** per fit: the positions of the blend coefficients it estimates (null for a temperature fit), see {@link #blendFree} */
     private final int[][] blendFree;
+    /** a column declares {@code invalid: dropRow}: the rows it rejects leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
         this.sets = spec.setCount();
+        this.dropsRows = spec.dropsRows();
         this.unitPeriodSlices = new boolean[spec.slices.size()];
         for (int s = 0; s < unitPeriodSlices.length; s++) {
             final EvaluationSpec.Slice sl = spec.slices.get(s);
@@ -90,7 +93,10 @@ public final class EvaluationScorer implements Serializable {
         public final double unitWeight;
         /** rows whose identity repeats an earlier row's (the same row twice in the unit, at any time) */
         public final int duplicates;
-        /** rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}) */
+        /**
+         * rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}, except on a
+         * unit that lost every row: skipped, its rows are the dropped ones)
+         */
         public final int dropped;
         /**
          * per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is
@@ -165,7 +171,7 @@ public final class EvaluationScorer implements Serializable {
         sorted.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final List<EvaluationRow> rows;
         int dropped = 0;
-        if (spec.dropsRows()) {
+        if (dropsRows) {
             rows = new ArrayList<>(sorted.size());
             Skip emptied = Skip.NONE;
             for (final EvaluationRow r : sorted) {
