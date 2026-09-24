@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Evaluation Transform Module
-description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; slice discovery (candidate slices over declared dimensions up to a depth, scored against the random-subset null on a selection split and confirmed on another); the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
+description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; slice discovery (candidate slices over declared dimensions up to a depth, scored against the random-subset null on a selection split and confirmed on another); the per-unit loss decomposition and, opt-in, the scored rows with every prediction set's probability (derived sets included) as outputs. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
 tags: [transform, evaluation, machine-learning, statistics, calibration, bootstrap, slices, batch]
 timestamp: 2026-09-13T00:00:00Z
 ---
@@ -313,7 +313,8 @@ flat return, null without `utility.field`), `slices` (ARRAY<STRUCT<field STRING,
 
 `split`, `unit` (the group key, or the row identity), `rowId` (ARRAY<STRUCT<field STRING, value STRING\>\>:
 the declared `rowId` fields' values, the join key back to the input), `time`, `label` (as declared),
-`labelShare` (ỹ), `baseline` (the baseline's mean for the row, null in prior mode), `predictions`
+`labelShare` (ỹ), `baseline` (the baseline's mean for the row; without a baseline the uniform share 1 / n for
+`groupedMultinomial`, null for `binomial`), `predictions`
 (ARRAY<STRUCT<prediction STRING, p FLOAT64\>\>: every compared set's mean for the row — the declared sets and
 the derived `<name>@T` / `<name>@blend`, i.e. the calibrated probabilities the fits imply), `utility`. Only
 the units that were scored appear (a skipped unit's rows do not).

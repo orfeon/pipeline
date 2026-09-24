@@ -47,7 +47,7 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   bundles elements), emits the unit records straight away (no coder for a unit result type), when tables
   are declared the aligned rows, and when a `rows` output is declared the row records of the selected splits
   (`EvaluationScorer.rowRecords`: every compared set's mean per row; the `rowId` values ride `EvaluationRow`
-  only then). A skipped unit is counted on its split's bookkeeping key.
+  only for the selected splits' rows). A skipped unit is counted on its split's bookkeeping key.
 - **Keys** are `split  prediction index  slice index  slice value` (slice −1 = overall), the
   baseline being prediction 0. A unit adds (1 + k) × (1 + its non-null slice values) accumulators, each with
   the unit's replicate weights.

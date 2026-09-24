@@ -776,8 +776,11 @@ public final class EvaluationSpec implements Serializable {
                     s.rowSplits = new ArrayList<>();
                 }
             } else if (rows.isJsonObject()) {
-                final List<String> names = strings(rows.getAsJsonObject(), "splits", errors);
-                if (names == null || names.isEmpty()) errors.add("rows.splits must name the splits whose scored rows are output (or use rows: true for the selection splits)");
+                // the helper names the key only: prefix its errors so they do not read as the top-level splits
+                final List<String> splitErrors = new ArrayList<>();
+                final List<String> names = strings(rows.getAsJsonObject(), "splits", splitErrors);
+                for (final String e : splitErrors) errors.add("rows." + e);
+                if (names.isEmpty()) errors.add("rows.splits must name the splits whose scored rows are output (or use rows: true for the selection splits)");
                 else s.rowSplits = names;
             } else {
                 errors.add("rows must be true (the selection splits) or an object {splits: [<split names>]}");
@@ -956,6 +959,8 @@ public final class EvaluationSpec implements Serializable {
         // rows output: the selection splits, or the named ones
         if (rowSplits != null) {
             if (rowsSelection) {
+                // rebuilt, like every other resolved list, so a second resolve does not repeat the splits
+                rowSplits = new ArrayList<>();
                 for (final Split sp : splits) if (sp.isSelection()) rowSplits.add(sp.name);
                 if (rowSplits.isEmpty()) errors.add("rows: true selects the selection splits, and none is declared; name the splits with rows: {splits: [...]}");
             } else {

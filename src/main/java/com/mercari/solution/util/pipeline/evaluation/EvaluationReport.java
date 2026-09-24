@@ -627,11 +627,16 @@ public final class EvaluationReport {
                 .build();
     }
 
-    public static Schema unitsSchema() {
-        final Schema slice = Schema.builder()
+    /** The {@code {field, value}} struct of the units' slices and the rows' rowId. */
+    private static Schema fieldValueSchema() {
+        return Schema.builder()
                 .withField("field", Schema.FieldType.STRING)
                 .withField("value", Schema.FieldType.STRING)
                 .build();
+    }
+
+    public static Schema unitsSchema() {
+        final Schema slice = fieldValueSchema();
         return Schema.builder()
                 .withField("split", Schema.FieldType.STRING)
                 .withField("unit", Schema.FieldType.STRING)
@@ -650,10 +655,7 @@ public final class EvaluationReport {
     }
 
     public static Schema rowsSchema() {
-        final Schema id = Schema.builder()
-                .withField("field", Schema.FieldType.STRING)
-                .withField("value", Schema.FieldType.STRING)
-                .build();
+        final Schema id = fieldValueSchema();
         final Schema prediction = Schema.builder()
                 .withField("prediction", Schema.FieldType.STRING)
                 .withField("p", Schema.FieldType.FLOAT64)

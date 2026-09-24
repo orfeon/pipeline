@@ -688,12 +688,7 @@ public final class EvaluationScorer implements Serializable {
             r.put("split", unit.split);
             r.put("unit", unit.key);
             final List<Map<String, Object>> ids = new ArrayList<>(spec.rowId.size());
-            for (int f = 0; f < spec.rowId.size(); f++) {
-                final Map<String, Object> id = new LinkedHashMap<>();
-                id.put("field", spec.rowId.get(f));
-                id.put("value", f < row.ids.length ? row.ids[f] : null);
-                ids.add(id);
-            }
+            for (int f = 0; f < spec.rowId.size(); f++) ids.add(fieldValue(spec.rowId.get(f), f < row.ids.length ? row.ids[f] : null));
             r.put("rowId", ids);
             r.put("time", row.time == EvaluationRow.NO_TIME ? null : row.time * 1000L);
             r.put("label", row.label);
@@ -719,12 +714,7 @@ public final class EvaluationScorer implements Serializable {
         final List<String> names = spec.predictionNames();
         final List<Map<String, Object>> slices = new ArrayList<>();
         final String[] values = unit.slices();
-        for (int s = 0; s < values.length; s++) {
-            final Map<String, Object> sl = new LinkedHashMap<>();
-            sl.put("field", spec.slices.get(s).name());
-            sl.put("value", values[s]);
-            slices.add(sl);
-        }
+        for (int s = 0; s < values.length; s++) slices.add(fieldValue(spec.slices.get(s).name(), values[s]));
         final boolean priorBase = Double.isNaN(m.logScore[0]);
         for (int j = 0; j <= sets; j++) {
             final Map<String, Object> r = new LinkedHashMap<>();
@@ -744,6 +734,14 @@ public final class EvaluationScorer implements Serializable {
             records.add(r);
         }
         return records;
+    }
+
+    /** A {@code {field, value}} record: a unit's slice value, a row's rowId value. */
+    private static Map<String, Object> fieldValue(final String field, final String value) {
+        final Map<String, Object> m = new LinkedHashMap<>();
+        m.put("field", field);
+        m.put("value", value);
+        return m;
     }
 
 }

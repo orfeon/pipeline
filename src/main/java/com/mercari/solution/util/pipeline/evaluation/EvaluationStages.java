@@ -121,7 +121,7 @@ public final class EvaluationStages {
                 .withOutputTags(scoredTag, TupleTagList.of(unitRecordTag).and(alignedTag).and(rowRecordTag)));
         final PCollection<KV<String, MetricAccumulator>> scored = aligned.get(scoredTag).setCoder(accumulatorCoder);
         final PCollection<MElement> unitRecords = aligned.get(unitRecordTag);
-        final PCollection<MElement> rowRecords = aligned.get(rowRecordTag).setCoder(ElementCoder.of(EvaluationReport.rowsSchema()));
+        final PCollection<MElement> rowRecords = aligned.get(rowRecordTag);
         final PCollection<AlignedRow> alignedRows = aligned.get(alignedTag).setCoder(AlignedRow.CODER);
 
         final PCollection<KV<String, MetricAccumulator>> combined = PCollectionList.of(scored).and(bookkeeping)
@@ -616,8 +616,9 @@ public final class EvaluationStages {
                 for (int i = 0; i < dims.length; i++) dims[i] = text(values.get(spec.dimColumns.get(i)));
                 final String bootKey = spec.bootstrapUnit == null ? null : text(values.get(spec.bootstrapUnit));
                 final String identity = identity(values);
-                // the rowId values travel only for a rows output (the identity hash serves everything else)
-                final String[] ids = new String[spec.hasRows() ? spec.rowId.size() : 0];
+                // the rowId values travel only with the rows of a split the rows output selects (the identity hash
+                // serves everything else), so the other splits' rows do not carry them through the shuffle
+                final String[] ids = new String[spec.outputsRows(split) ? spec.rowId.size() : 0];
                 for (int i = 0; i < ids.length; i++) ids[i] = text(values.get(spec.rowId.get(i)));
                 final EvaluationRow row = new EvaluationRow(split, group, identity, time, bootKey, label, baseline == null ? Double.NaN : baseline, weight, slices, dims, x, ids);
                 c.output(rowTag, KV.of(split + SEP + (group == null ? identity : group), row));
@@ -675,7 +676,8 @@ public final class EvaluationStages {
 
     /**
      * Aligns and scores units into bundle-local accumulators (flushed once per bundle: a partial combine), and
-     * emits the unit records and the aligned rows (the latter only when calibration tables are declared).
+     * emits the unit records, the aligned rows (only when calibration tables are declared) and the row records
+     * (only for the splits a rows output selects).
      */
     static class AlignDoFn extends DoFn<KV<String, Iterable<EvaluationRow>>, KV<String, MetricAccumulator>> {
         private final EvaluationSpec spec;

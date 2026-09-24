@@ -358,10 +358,10 @@ warehouse, or feed it to the `attribution` transform to ask which slices Δ's to
 Declared by `rows: true` (the `selection` splits) or `rows: {splits: [...]}`; needs `rowId`. One record per
 scored row of the selected splits: `split`, `unit`, `rowId` (the declared fields' values as `{field, value}`
 records — the join key back to the input), `time`, `label` (as declared), `labelShare` (ỹ), `baseline` (the
-row's baseline mean, null in prior mode), `predictions` (`{prediction, p}` for every compared set, the derived
+row's baseline mean: the uniform share 1 / n in grouped prior mode, null in binomial prior mode), `predictions` (`{prediction, p}` for every compared set, the derived
 `@T` / `@blend` included: the calibrated probabilities a fit implies), `utility`. Emitted by the align step
-next to the unit records, so it costs no pass; the `rowId` values travel with the rows only when the output
-is declared. The purpose is the closed loop evaluation → selection: the calibrated row probabilities feed the
+next to the unit records, so it costs no pass; the `rowId` values travel only with the rows of the
+selected splits. The purpose is the closed loop evaluation → selection: the calibrated row probabilities feed the
 next screen without re-deriving them from the calibration JSON. Selection splits by default because the
 report split is for reporting, not for building the next rule on.
 

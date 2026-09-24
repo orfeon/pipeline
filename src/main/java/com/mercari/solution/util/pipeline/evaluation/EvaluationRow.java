@@ -37,7 +37,7 @@ public final class EvaluationRow implements Serializable {
     final String[] slices;
     final String[] dims;
     final double[] x;
-    /** the rowId fields' values as text (the rows output; empty unless a rows output is declared) */
+    /** the rowId fields' values as text (the rows output; empty unless the rows output selects the row's split) */
     final String[] ids;
 
     public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,

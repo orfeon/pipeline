@@ -116,6 +116,10 @@ public class EvaluationSpecTest {
         Assertions.assertNull(parse(OK.replace("}}}", "}}, rowId: [g], rows: false}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
         Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [later]}}")).contains("not a declared split"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: [valid]}")).contains("rows must be true"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [{name: valid}]}}")).contains("rows.splits must be a list of strings"));
+        // resolving twice keeps the selection splits once
+        final EvaluationSpec twice = parse(OK.replace("}}}", "}}, rowId: [g], rows: true}"));
+        Assertions.assertEquals(List.of("valid"), twice.resolve(EvaluationScorerTest.SCHEMA, null).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
         // the rows output does not change the parameters hash (an output selection, like output.calibration)
         Assertions.assertEquals(parse(OK.replace("}}}", "}}, rowId: [g]}")).parametersHash, parse(OK.replace("}}}", "}}, rowId: [g], rows: true}")).parametersHash);
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: region, bucket: decade}]}")).contains("bucket 'decade'"));
