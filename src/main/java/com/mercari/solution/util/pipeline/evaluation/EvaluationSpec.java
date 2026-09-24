@@ -135,6 +135,15 @@ public final class EvaluationSpec implements Serializable {
             return TABLE_EDGE.equals(type);
         }
 
+        /**
+         * Whether a value on a boundary falls in the bin above it: the declared closedness of a {@code by: field}
+         * table; quantile bins are right-closed at the sketch's boundaries (an inclusive-rank quantile is a value of
+         * the stream).
+         */
+        public boolean binsClosedLeft() {
+            return !isQuantile() && closedLeft;
+        }
+
         /** Number of bins: the quantile bins, the edge intervals (edges + 1), or the thresholds. */
         public int binCount() {
             if (isEdge()) return thresholds.length;
@@ -171,7 +180,8 @@ public final class EvaluationSpec implements Serializable {
         /**
          * L2 penalty on the average log likelihood (the screen transform's conditioning): 0 by default — a blend is
          * a 2-3 parameter MLE whose estimate and z-values should not be shrunk (the shrinkage of a penalty on the
-         * average grows with the unit count: ≈ l2 · N · se² · θ); a positive value only when the columns are collinear.
+         * average grows with the unit count: ≈ l2 · N · se² · θ); a positive value only when the columns are collinear
+         * or the selection split is separable (the unpenalised estimate then grows without bound).
          */
         public double l2 = 0d;
         public int maxIter = 10;
@@ -639,6 +649,8 @@ public final class EvaluationSpec implements Serializable {
                         t.thresholds = numbers(o, "thresholds", at + ".thresholds", errors);
                         if (t.thresholds == null || t.thresholds.length == 0) errors.add(at + ".thresholds is required for type edge (ratios p_model / p_baseline)");
                         else for (final double th : t.thresholds) if (!(th > 0)) errors.add(at + ".thresholds must be > 0");
+                        if (declared(o, "closed")) errors.add(at + ".closed applies to by: field only (an edge group holds the rows with q > threshold × p)");
+                        if (declared(o, "k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
                     } else {
                         t.by = string(o, "by");
                         if (t.by == null) t.by = BY_PREDICTION;
@@ -649,18 +661,19 @@ public final class EvaluationSpec implements Serializable {
                             t.edges = numbers(o, "edges", at + ".edges", errors);
                             if (t.edges == null || t.edges.length == 0) errors.add(at + ".edges is required for by: field (ascending bin boundaries)");
                             else for (int k = 1; k < t.edges.length; k++) if (!(t.edges[k] > t.edges[k - 1])) errors.add(at + ".edges must be strictly ascending");
-                            final String closed = string(o, "closed");
-                            if (closed != null) {
-                                if (!CLOSED.contains(closed)) errors.add(at + ".closed '" + closed + "' is unknown (available: " + CLOSED + ")");
+                            if (declared(o, "closed")) {
+                                // a non-string value reads as null: an error, not the default
+                                final String closed = string(o, "closed");
+                                if (closed == null || !CLOSED.contains(closed)) errors.add(at + ".closed '" + (closed != null ? closed : o.get("closed")) + "' is unknown (available: " + CLOSED + ")");
                                 t.closedLeft = !CLOSED_RIGHT.equals(closed);
                             }
-                            if (o.has("k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
+                            if (declared(o, "k")) errors.add(at + ".k applies to quantile tables only (by: prediction | divergence)");
                         } else {
                             final Integer bins = integer(o, "bins");
                             t.bins = bins == null ? 10 : bins;
                             if (t.bins < 2 || t.bins > 1000) errors.add(at + ".bins must be in [2, 1000]");
                             if (o.has("edges")) errors.add(at + ".edges apply to by: field only (quantile bins otherwise)");
-                            if (o.has("closed")) errors.add(at + ".closed applies to by: field only (quantile bins are right-closed at the sketch's boundaries)");
+                            if (declared(o, "closed")) errors.add(at + ".closed applies to by: field only (quantile bins are right-closed at the sketch's boundaries)");
                             final Integer k = integer(o, "k");
                             if (k != null) {
                                 t.k = k;
@@ -821,8 +834,13 @@ public final class EvaluationSpec implements Serializable {
         }
     }
 
+    /** Whether a key carries a value (an explicit null reads as absent, as the lenient readers treat it). */
+    private static boolean declared(final JsonObject o, final String key) {
+        return o.has(key) && !o.get(key).isJsonNull();
+    }
+
     private static double[] numbers(final JsonObject o, final String key, final String at, final List<String> errors) {
-        if (!o.has(key) || o.get(key).isJsonNull()) return null;
+        if (!declared(o, key)) return null;
         if (!o.get(key).isJsonArray()) {
             errors.add(at + " must be a list of numbers");
             return null;

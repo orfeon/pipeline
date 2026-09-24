@@ -895,9 +895,8 @@ public final class EvaluationStages {
                     } else {
                         bounds = table.edges;
                     }
-                    // quantile bins are right-closed at the sketch's boundaries (an inclusive-rank quantile is a value of
-                    // the stream); declared edges close on the side the table says
-                    add(row, q, EvaluationReport.binKey(row.split, 1 + j, t, EvaluationReport.bin(v, bounds, !table.isQuantile() && table.closedLeft)));
+                    // quantile bins are right-closed at the sketch's boundaries; declared edges close on the side the table says
+                    add(row, q, EvaluationReport.binKey(row.split, 1 + j, t, EvaluationReport.bin(v, bounds, table.binsClosedLeft())));
                 }
             }
         }

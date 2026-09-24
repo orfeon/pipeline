@@ -109,13 +109,16 @@ the same under the baseline, `brier = (q − y)²`; `hitAt1` is not defined (nul
 With `utility.field` (u, the realised value of a positive row) a unit also has
 
 ```
-utility = Σ_i u_i y_i / n            (y as declared, not ỹ; a null u counts 0)
+utility = Σ_i u_i y_i / n            (y as declared, not ỹ; a null u, and any u on a row with y = 0, counts 0)
 ```
 
 the flat return of taking every row of the unit at unit stake. It describes the outcomes, not a set: it is
 reported under every prediction set with the same value (and its own interval), is null in pair records, and
 is a `sliceDiscovery.metric` — the realised-return question ("where does taking every row pay?") under the
-same random-subset null as Δ. A set-dependent return (taking the set's top pick) is not this metric.
+same random-subset null as Δ. A set-dependent return (taking the set's top pick) is not this metric. Like
+every metric it is aggregated (§4.2) over the common scored unit set (§3): a group without a positive row is not
+scored, so where a group can end without one the aggregate is the return given a positive; and it is a mean
+of per-unit returns, not the per-row pooled return of the calibration tables (§7).
 
 ### 4.2 Aggregates
 
@@ -246,12 +249,13 @@ standard errors scale with the magnitude of the `weight` column.
 | type | model | estimation | record |
 |---|---|---|---|
 | `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram, with null standard errors), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram; a separable selection split — a small one the set ranks perfectly — is the other case for a positive `l2`: the unpenalised estimate grows without bound), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
 
 Reading a blend: a ≈ 1 and b at its start says the declared set is calibrated; a < 1 says the score needs
 shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter
-regression — reproduced exactly by a score set whose score and offset are the model's and the market's
-logits; a probability set's f is the log share, another scale). The records are the summary's `fits` and, with `output.calibration`, a JSON document
+regression: Benter's own, on log probabilities, is the grouped blend of a probability set against the market
+as baseline — f and o are log shares —; the variant on logits is reproduced by a score set whose score and
+offset are the model's and the market's logits). The records are the summary's `fits` and, with `output.calibration`, a JSON document
 (`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).
 Isotonic / Platt recalibration is out of scope: it breaks the within-group sum.
 

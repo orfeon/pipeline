@@ -59,7 +59,7 @@ public final class EvaluationReport {
         return mean * Math.log(mean) + (1 - mean) * Math.log(1 - mean);
     }
 
-    /** The replicate's sums in the slot layout (W .. BRIER from the replicate, the counts from the total). */
+    /** The replicate's sums in the slot layout (W .. UTILITY from the replicate; the counts stay 0). */
     static double[] replicate(final MetricAccumulator acc, final int b) {
         final double[] sums = new double[MetricAccumulator.SLOTS];
         final double[] boot = acc.getBoot();
@@ -464,7 +464,15 @@ public final class EvaluationReport {
         v[BIN_SHARE] += row.share;
         v[BIN_Q] += q;
         v[BIN_P] += row.baseline;
-        if (!Double.isNaN(row.utility)) v[BIN_UTILITY] += row.utility * row.label;
+        v[BIN_UTILITY] += payout(row.utility, row.label);
+    }
+
+    /**
+     * A row's realised return u·y (y as declared): 0 for a row that did not pay (y = 0) whatever its utility — an
+     * infinite payout on a losing row would otherwise turn the sum into NaN (∞·0) — and 0 for a null utility.
+     */
+    static double payout(final double utility, final double label) {
+        return label == 0d || Double.isNaN(utility) ? 0d : utility * label;
     }
 
     public static String tableKey(final String split, final int prediction, final int table) {
@@ -504,16 +512,17 @@ public final class EvaluationReport {
     /**
      * The bin of a value against ascending interior edges: left-closed {@code [edges[i-1], edges[i])} (an edge
      * belongs to the bin above it) or right-closed {@code (edges[i-1], edges[i]]}; the first bin is open below,
-     * the last open above.
+     * the last open above. A binary search for the count of edges below the value (non-decreasing edges: a
+     * quantile sketch may repeat a boundary); NaN falls in the first bin.
      */
     public static int bin(final double value, final double[] edges, final boolean closedLeft) {
-        int b = 0;
-        if (closedLeft) {
-            while (b < edges.length && value >= edges[b]) b++;
-        } else {
-            while (b < edges.length && value > edges[b]) b++;
+        int lo = 0, hi = edges.length;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (closedLeft ? value >= edges[mid] : value > edges[mid]) lo = mid + 1;
+            else hi = mid;
         }
-        return b;
+        return lo;
     }
 
     /** Wilson 95% interval of a rate. */

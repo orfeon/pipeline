@@ -208,6 +208,14 @@ public class EvaluationScorerTest {
         final SketchAccumulator merged = new SketchAccumulator.Fn().mergeAccumulators(List.of(new SketchAccumulator(), fine));
         Assertions.assertEquals(4000, merged.k());
         Assertions.assertEquals(500d, merged.edges(2)[0], 1.0);
+        final SketchAccumulator added = new SketchAccumulator.Fn().addInput(new SketchAccumulator.Fn().createAccumulator(), fine);
+        Assertions.assertEquals(4000, added.k());
+        Assertions.assertNotSame(fine, added, "an input is copied, never adopted by reference");
+        Assertions.assertEquals(500d, added.edges(2)[0], 1.0);
+        // a quantile sketch may repeat a boundary: the count of edges below the value either way
+        Assertions.assertEquals(1, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, false));
+        Assertions.assertEquals(3, EvaluationReport.bin(2, new double[]{1, 2, 2, 3}, true));
+        Assertions.assertEquals(0, EvaluationReport.bin(1, new double[0], true));
         // Wilson: 30 of 100 → [0.2189, 0.3985]
         final double[] ci = EvaluationReport.wilson(30, 100);
         Assertions.assertEquals(0.2189, ci[0], 5e-4);
@@ -228,7 +236,7 @@ public class EvaluationScorerTest {
         final Map<String, double[]> bins = new HashMap<>();
         for (int i = 0; i < 3; i++) {
             final AlignedRow r = aligned.get(i);
-            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges)), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
+            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges, spec.tables.get(0).binsClosedLeft())), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
             if (r.predictions[0] > 1.0 * r.baseline) EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 1, 0), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
         }
         Assertions.assertArrayEquals(new double[]{1, 1, 0.6, 0.5, 3.0, 1}, bins.get(EvaluationReport.binKey("test", 1, 0, 2)), 1e-12);
@@ -567,6 +575,27 @@ public class EvaluationScorerTest {
         final EvaluationSpec plain = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: {samples: 0}}");
         final String text = EvaluationReport.build(plain, new HashMap<>()).summary().get("notes").toString();
         Assertions.assertTrue(text.contains("split valid (selection) has no scored unit: nothing to report"), text);
+    }
+
+    @Test
+    public void testUtilityIgnoresTheLosingRowsPayout() {
+        // an infinite payout on a row that did not pay (u = 1/p with p = 0) is a zero return, not ∞·0 = NaN: the
+        // unit, the accumulated metric and the calibration bin stay finite
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 20, seed: 1}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 3.0), row("test", "g1", 0, 0.5, null, 0.4, Double.POSITIVE_INFINITY)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(1.5, m.utility, 1e-12);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        scorer.accumulate(unit, m, acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(spec, acc).records();
+        Assertions.assertEquals(1.5, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertNotNull(records.get(1).get("utility_lo"));
+        final double[] v = new double[EvaluationReport.BIN_SLOTS];
+        for (final AlignedRow r : scorer.aligned(unit)) EvaluationReport.addBin(v, r, r.predictions[0]);
+        Assertions.assertEquals(3d, v[EvaluationReport.BIN_UTILITY], 1e-12);
     }
 
     @Test

@@ -108,6 +108,12 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: prediction, closed: left}]}")).contains("closed applies to by: field"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], k: 500}]}")).contains("k applies to quantile"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: divergence, k: 4}]}")).contains("k must be in"));
+        Assertions.assertTrue(closed.tables.get(0).binsClosedLeft());
+        Assertions.assertFalse(closed.tables.get(2).binsClosedLeft(), "quantile bins are right-closed");
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], closed: [right]}]}")).contains("closed '[\"right\"]' is unknown"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge, thresholds: [1.5], closed: right}]}")).contains("closed applies to by: field"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge, thresholds: [1.5], k: 4000}]}")).contains("k applies to quantile"));
+        Assertions.assertEquals(SketchAccumulator.K, parse(OK.replace("}}}", "}}, calibration: [{by: prediction, closed: null}]}")).tables.get(0).k, "an explicit null reads as absent");
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge}]}")).contains("thresholds is required"));
         // rows output: needs rowId; true = the selection splits; named splits must exist
         Assertions.assertTrue(error(OK.replace("}}}", "}}, rows: true}")).contains("needs rowId"));
