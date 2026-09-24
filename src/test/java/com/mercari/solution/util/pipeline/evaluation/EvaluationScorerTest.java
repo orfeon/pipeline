@@ -262,6 +262,28 @@ public class EvaluationScorerTest {
             scorer.accumulate(unit, scorer.score(unit), again);
         }
         Assertions.assertEquals(overallA.get("excessLogScore_lo"), EvaluationReport.build(spec, again).records().get(1).get("excessLogScore_lo"));
+        // declared pairs: the direction as written, the baseline as a side, nothing else
+        final EvaluationSpec declared = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], "
+                + SPLITS + ", bootstrap: {samples: 200, seed: 3}, slices: [{field: region}], pairs: [{of: B, minus: A}, {of: A, minus: baseline}]}");
+        Assertions.assertArrayEquals(new int[]{2, 1}, EvaluationReport.pairs(declared, 2).get(0));
+        Assertions.assertArrayEquals(new int[]{1, 0}, EvaluationReport.pairs(declared, 2).get(1));
+        Assertions.assertEquals(1, EvaluationReport.pairs(spec, 2).size(), "the default: one unordered pair of the two sets");
+        Assertions.assertArrayEquals(new int[]{1, 2}, EvaluationReport.pairs(spec, 2).get(0));
+        final EvaluationReport.Result named = EvaluationReport.build(declared, acc);
+        // overall: baseline, A, B, B−A, A−baseline; east / west the same
+        Assertions.assertEquals(15, named.records().size());
+        final Map<String, Object> bMinusA = named.records().get(3);
+        Assertions.assertEquals("B", bMinusA.get("prediction"));
+        Assertions.assertEquals("A", bMinusA.get("pair"));
+        Assertions.assertEquals(0d, (Double) bMinusA.get("excessLogScore"), 1e-15);
+        final Map<String, Object> aMinusBaseline = named.records().get(4);
+        Assertions.assertEquals("A", aMinusBaseline.get("prediction"));
+        Assertions.assertEquals("baseline", aMinusBaseline.get("pair"));
+        Assertions.assertEquals(expected, (Double) aMinusBaseline.get("excessLogScore"), 1e-12);
+        Assertions.assertEquals((Double) overallA.get("logScore") - (Double) named.records().get(0).get("logScore"), (Double) aMinusBaseline.get("logScore"), 1e-12);
+        Assertions.assertEquals((Double) overallA.get("brier") - (Double) named.records().get(0).get("brier"), (Double) aMinusBaseline.get("brier"), 1e-12);
+        Assertions.assertNotNull(aMinusBaseline.get("brier_lo"));
+        Assertions.assertTrue(EvaluationReport.describe(declared).contains("pairs=[B-A, A-baseline]"));
     }
 
     @Test

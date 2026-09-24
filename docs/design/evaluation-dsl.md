@@ -58,6 +58,7 @@ the prediction columns. The `output.groupBy` parent / child form of the feature 
 | weight | `weight` | a sample-weight field: per row for `binomial`, the unit mean for the grouped family. |
 | identity | `rowId` | fields identifying a row (the sort tie-break within a unit, the bootstrap unit of independent rows). Default: every field value. |
 | utility | `utility` | `{field}`: the realised value of a positive row (a payoff per unit stake); the `utility` metric (§4.1) and the calibration tables' flat return per bin (§7). |
+| pairs | `pairs[]` | `{of, minus}`: the pair records to write (§4.3); names are compared sets (declared or derived) or `baseline`. Omitted: every unordered pair in declaration order. |
 | manifest | `manifest` | the upstream feature manifest URI, for the role defaults and the lineage selectors when the table came back through a sink. |
 
 **Defaults from the feature transform.** As for screen: `group` / `label` / `baseline` / `weight` and
@@ -147,10 +148,16 @@ logloss-best model is the one imitating the baseline (the measurement behind thi
 
 ### 4.3 Pair differences
 
-For every ordered pair of prediction sets (A, B) with A before B in the declaration, a record with
-`prediction: A, pair: B` carries the differences `A − B` of every metric over the same units, with the paired
-bootstrap CI (§6): the weights are drawn per unit, so Σ w (m_A − m_B) = Σ w m_A − Σ w m_B and the pair CI
-costs no accumulator of its own.
+For every unordered pair of compared sets (A, B) with A before B in the declaration (derived sets after the
+declared ones), one record with `prediction: A, pair: B` carries the differences `A − B` of every metric over
+the same units, with the paired bootstrap CI (§6): the weights are drawn per unit, so Σ w (m_A − m_B) =
+Σ w m_A − Σ w m_B and the pair CI costs no accumulator of its own. The record is one-directional: `B − A`
+is its negation and is not written. `pairs: [{of, minus}]` replaces the default with the named records —
+any two of the compared sets or `baseline` (against which `excessLogScore` already is the log-score
+difference; the pair record adds the other metrics' differences with their intervals) — in the direction
+declared, and writes only those: the direction a report wants to read (the new configuration minus the
+incumbent), a reference declared as a set (§7.1's settlement recipe), or a bound on the k(k−1)/2 records
+of a run with many sets.
 
 ### 4.4 Prior mode
 
@@ -345,7 +352,8 @@ reported number is the confirmation window's.
 ### 8.1 Metrics (the default output)
 
 One record per split × prediction set (the baseline included under `prediction: baseline`, Δ = 0) × slice
-value (the overall record has `slice` and `value` null), plus the pair records (§4.3):
+value (the overall record has `slice` and `value` null), plus the pair records (§4.3, the declared `pairs`
+or every unordered pair):
 `split`, `role`, `prediction`, `pair`, `slice`, `value`, `n_units`, `n_rows`, `positives`, `weight` (Σ w), and
 for each of `logScore`, `excessLogScore`, `hitAt1`, `brier`, `utility`: the value and `_lo` / `_hi` (null
 without bootstrap; `utility` null without `utility.field` and in pair records); `logloss` (= −logScore). Slices come from `slices[]`: `{field}` (one record per distinct value)

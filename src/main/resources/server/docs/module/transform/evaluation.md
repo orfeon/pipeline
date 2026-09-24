@@ -78,7 +78,13 @@ Units are resampled by the Poisson bootstrap in one pass: per resampling unit an
 derived from `bootstrap.seed` and the unit's key, so a rerun on any runner reproduces every interval. The
 2.5 / 97.5 percentiles of the replicate means are `<metric>_lo` / `<metric>_hi`. The weights are per unit, so
 the **pair records** (`prediction: A, pair: B`: the differences A − B of every metric over the same units)
-carry a paired interval at no extra cost. `bootstrap.unit` names a field whose value is the resampling unit —
+carry a paired interval at no extra cost. By default there is one pair record per unordered pair of compared
+sets, in declaration order (the earlier set minus the later; derived sets after the declared ones), so
+`prediction: A, pair: B` exists and `prediction: B, pair: A` does not. `pairs: [{of, minus}]` names the
+records instead — the direction you want to read (`of: candidate, minus: current`), a reference declared as
+a set, or `minus: baseline` (the difference of every metric against the baseline, where `excessLogScore`
+covers the log score only) — and only those are written, which also bounds the output of a run with many
+sets. `bootstrap.unit` names a field whose value is the resampling unit —
 `unit: event_date` makes a cluster bootstrap by day, the answer to correlated units (same-day, same-venue
 groups) that the group bootstrap ignores.
 
@@ -230,6 +236,9 @@ predictions:
   - {name: bet, field: odds_bet, form: inverseShare}                              # the decision-time market, for the pair record
 calibration:
   - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}}                       # a = α estimated, b = 1
+pairs:
+  - {of: rebased@blend, minus: bet}                                               # the decision-time Δ of the rebased set
+  - {of: rebased@blend, minus: rebased}                                           # what α bought
 ```
 
 On the report split, `rebased@blend`'s `excessLogScore` is the settlement-reference Δ at the fitted α (and
@@ -320,6 +329,7 @@ the time partition.
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
 | utility | optional | String or Object | The realised value of a positive row; the `utility` metric (metrics, units, `sliceDiscovery.metric`) and the calibration records' `utility`. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 7 × samples doubles. |
+| pairs | optional | Array<Object\> | `{of, minus}`: the pair records to write (`prediction: of, pair: minus`, values = of − minus); names are prediction sets, derived sets (`<name>@T`, `<name>@blend`, `<name>@<as>`) or `baseline`. Omitted: every unordered pair of compared sets in declaration order. See [Bootstrap intervals](#bootstrap-intervals). |
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins, k}` (default by `prediction`, 10 bins, sketch `k` 400), `{type: reliability, by: field, field, edges, closed}` (`closed`: `left` default = `[a, b)`, or `right`), `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid, as}`, `{type: blend, fitOn, of, fix, l2, maxIter, tol, as}` (`l2` default 0; `fix: {a, b, intercept}` holds coefficients at a value; `as` names the derived set's suffix, default `T` / `blend`). |
 | sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`, `utility` — the last needs `utility.field` and runs once, under the first compared set), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). Dimensions are group-level attributes for `groupedMultinomial` (a unit takes its first row's value; a field that varies within a unit is noted in the summary). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
@@ -331,7 +341,7 @@ the time partition.
 
 | output | content |
 |---|---|
-| `<name>` | the metrics: one record per split × prediction set (the baseline under `prediction: baseline`) × slice value (`slice` / `value` null for the overall record), plus one pair record per ordered pair of prediction sets (`pair` = the other set, values = differences) |
+| `<name>` | the metrics: one record per split × prediction set (the baseline under `prediction: baseline`) × slice value (`slice` / `value` null for the overall record), plus the pair records (`prediction` − `pair`): the declared `pairs`, else one per unordered pair of compared sets in declaration order |
 | `<name>.calibration` | one record per split × prediction set × table × bin |
 | `<name>.units` | the per-unit loss decomposition: one record per unit × prediction set (the baseline included) |
 | `<name>.slices` | the discovered slices: one record per candidate × set (`output: passed` keeps the passed ones) |
@@ -344,7 +354,7 @@ the time partition.
 |---|---|---|
 | split, role | STRING | the split and its role |
 | prediction | STRING | the prediction set (`baseline` for the baseline's own record) |
-| pair | STRING | pair records: the subtracted set (null otherwise) |
+| pair | STRING | pair records: the subtracted set (null otherwise); the record's values are `prediction` − `pair` |
 | slice, value | STRING | the slice (`<field>` or `<field>/<bucket>`) and its value; null for the overall record |
 | n_units, n_rows | INT64 | scored units (groups, or rows) and rows |
 | positives | FLOAT64 | Σ w ỹ (grouped: the weight mass of the units) |
@@ -546,7 +556,8 @@ parameters:
   is the one that chose the model. The two agreeing is the sanity check.
 - `hitAt1`, `logloss` and `brier` describe the prediction; they do not rank models against a strong baseline.
 - The pair records compare prediction sets on the same units with a paired interval: two sets whose
-  individual intervals overlap can still differ significantly.
+  individual intervals overlap can still differ significantly. A record is `prediction` − `pair`; declare
+  `pairs` to choose the direction and the pairs worth reading.
 - Reliability by `divergence`: where the model and the baseline disagree most, does the realised rate follow
   the model (information) or the baseline (over-confidence)? The `edge` groups ask the same per ratio
   threshold.

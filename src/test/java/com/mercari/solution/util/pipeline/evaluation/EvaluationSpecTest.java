@@ -65,6 +65,25 @@ public class EvaluationSpecTest {
     }
 
     @Test
+    public void testPairRules() {
+        final EvaluationSpec s = parse("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + EvaluationScorerTest.SPLITS
+                + ", calibration: [{type: blend, fitOn: valid, of: [A]}], pairs: [{of: 'A@blend', minus: A}, {of: B, minus: baseline}]}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(2, s.pairs.size());
+        Assertions.assertEquals(3, s.pairs.get(0).ofIndex);
+        Assertions.assertEquals(1, s.pairs.get(0).minusIndex);
+        Assertions.assertEquals(2, s.pairs.get(1).ofIndex);
+        Assertions.assertEquals(0, s.pairs.get(1).minusIndex);
+        Assertions.assertTrue(parse(OK).resolve(EvaluationScorerTest.SCHEMA, null).pairs.isEmpty());
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A, minus: Z}]}")).contains("pairs[0].minus 'Z' is not a compared set"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A, minus: A}]}")).contains("are the same set"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A}]}")).contains("of and minus are required"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: [{of: A, minus: baseline}, {of: A, minus: baseline}]}")).contains("declared twice"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, pairs: {of: A, minus: baseline}}")).contains("pairs must be a list"));
+        // resolving twice keeps the indices (the lists are rebuilt from the declaration)
+        Assertions.assertEquals(3, s.resolve(EvaluationScorerTest.SCHEMA, null).pairs.get(0).ofIndex);
+    }
+
+    @Test
     public void testSplitRules() {
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}]}").contains("splits is required"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], splits: {valid: {from: '2024-01-01', to: '2024-06-30', role: selection}}}").contains("role report"));
