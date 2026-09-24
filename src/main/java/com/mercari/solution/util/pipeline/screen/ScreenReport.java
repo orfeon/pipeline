@@ -223,6 +223,11 @@ public final class ScreenReport {
         } else if (fitted && !conditioned) {
             notes.add("conditioning: the gaussian residual variance at the fitted model is " + sigma2 + " (an exact fit or no weighted row); partial statistics are null and passed / threshold / qValue follow the marginal test");
         }
+        // the leak flag reads the partial z when asked to and the partial test is there; else the marginal z
+        final boolean leakOnPartial = spec.leakZ != null && ScreenSpec.LEAK_ON_PARTIAL.equals(spec.leakOn) && conditioned;
+        if (spec.leakZ != null && ScreenSpec.LEAK_ON_PARTIAL.equals(spec.leakOn) && !conditioned) {
+            notes.add("flags.leakZ.on partial: no partial statistics (see the conditioning note); the leak flag reads the marginal z");
+        }
         if (fitPeriods != null && !fitPeriods.isEmpty() && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k) {
             notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period partial information is approximate (the window's Gram scaled by the period's unit mass); the per-period partial score and sign are exact");
         }
@@ -380,8 +385,8 @@ public final class ScreenReport {
             final long[] agreement = effectiveAgree.get(i);
             final boolean passed = !placebo && !st.degenerate && !Double.isNaN(threshold) && st.estGain > threshold
                     && spec.periodsAgree(agreement[0], agreement[1]);
-            final double marginalZ = (Double) r.get("z");
-            final boolean leak = spec.leakZ != null && Math.abs(marginalZ) > spec.leakZ;
+            final double leakZ = leakOnPartial ? (Double) r.get("partial_z") : (Double) r.get("z");
+            final boolean leak = spec.leakZ != null && Math.abs(leakZ) > spec.leakZ;
             r.put("threshold", threshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);
@@ -423,6 +428,7 @@ public final class ScreenReport {
         summary.put("nPassed", nPassed);
         summary.put("nPlacebo", (long) placeboGains.size());
         summary.put("nLeakSuspect", nLeak);
+        summary.put("leakOn", spec.leakZ == null ? null : leakOnPartial ? ScreenSpec.LEAK_ON_PARTIAL : ScreenSpec.LEAK_ON_MARGINAL);
         summary.put("timeField", spec.timeField);
         summary.put("timeFrom", spec.timeFrom);
         summary.put("timeTo", spec.timeTo);
@@ -596,6 +602,7 @@ public final class ScreenReport {
                 .withField("nPassed", Schema.FieldType.INT64)
                 .withField("nPlacebo", Schema.FieldType.INT64)
                 .withField("nLeakSuspect", Schema.FieldType.INT64)
+                .withField("leakOn", Schema.FieldType.STRING)
                 .withField("timeField", Schema.FieldType.STRING)
                 .withField("timeFrom", Schema.FieldType.STRING)
                 .withField("timeTo", Schema.FieldType.STRING)
@@ -631,7 +638,7 @@ public final class ScreenReport {
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));
-        if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ);
+        if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ + (ScreenSpec.LEAK_ON_PARTIAL.equals(spec.leakOn) ? " on=partial" : ""));
         if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " missing=" + spec.conditioningMissing + " (" + spec.conditioningMaxIter + " + 2 passes)");
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
         return "screen " + String.join(" ", parts);

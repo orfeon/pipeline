@@ -81,6 +81,11 @@ public final class ScreenSpec implements Serializable {
     public double quantile = 0.99;
     public long seed = 0L;
     public Double leakZ;
+    /** flags.leakZ.on: the z the leak flag reads — {@link #LEAK_ON_MARGINAL} (default) or {@link #LEAK_ON_PARTIAL} (needs conditioning) */
+    public String leakOn = LEAK_ON_MARGINAL;
+    public static final String LEAK_ON_MARGINAL = "marginal";
+    public static final String LEAK_ON_PARTIAL = "partial";
+    public static final List<String> LEAK_ONS = List.of(LEAK_ON_MARGINAL, LEAK_ON_PARTIAL);
     /** conditioning.fields as written (names / globs); empty = no partial test */
     public List<String> conditioningPatterns = new ArrayList<>();
     public double conditioningL2 = 1e-4;
@@ -367,7 +372,21 @@ public final class ScreenSpec implements Serializable {
 
         final JsonElement flags = p.get("flags");
         if (flags != null && flags.isJsonObject()) {
-            s.leakZ = number(flags.getAsJsonObject(), "leakZ");
+            final JsonElement leak = flags.getAsJsonObject().get("leakZ");
+            if (leak != null && !leak.isJsonNull()) {
+                if (leak.isJsonPrimitive() && leak.getAsJsonPrimitive().isNumber()) {
+                    s.leakZ = leak.getAsDouble();
+                } else if (leak.isJsonObject()) {
+                    final JsonObject o = leak.getAsJsonObject();
+                    s.leakZ = number(o, "z");
+                    if (s.leakZ == null) errors.add("flags.leakZ.z is required (the |z| above which a candidate is a leak suspect)");
+                    final String on = string(o, "on");
+                    if (on != null) s.leakOn = on;
+                    if (!LEAK_ONS.contains(s.leakOn)) errors.add("flags.leakZ.on '" + s.leakOn + "' is unknown (available: " + LEAK_ONS + ")");
+                } else {
+                    errors.add("flags.leakZ must be a number or an object {z, on: marginal | partial}");
+                }
+            }
             if (s.leakZ != null && s.leakZ <= 0) errors.add("flags.leakZ must be > 0");
         }
 
@@ -401,6 +420,9 @@ public final class ScreenSpec implements Serializable {
             } else {
                 errors.add("conditioning must be an object {fields, l2, maxIter, tol, missing} or a list of field names");
             }
+        }
+        if (s.leakZ != null && LEAK_ON_PARTIAL.equals(s.leakOn) && s.conditioningPatterns.isEmpty()) {
+            errors.add("flags.leakZ.on partial needs conditioning (the flag reads the partial z)");
         }
         final JsonElement pass = p.get("pass");
         if (pass != null && !pass.isJsonNull()) {

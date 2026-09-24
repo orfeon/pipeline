@@ -88,7 +88,13 @@ statistics); independent rows support `raw` only in this version.
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
-  a factor of several over the healthy top). **It is a flag only, never a rejection.**
+  a factor of several over the healthy top). **It is a flag only, never a rejection.** A bare number reads the
+  marginal z; `{z, on: partial}` reads the partial z under [conditioning](#conditioning-partial-test) — a leak
+  is not explained by the conditioning set, so its partial z stays outsized, while a legitimate but strong
+  candidate that overlaps F (a rating that summarises the same history the model already uses) has a large
+  marginal z and a modest partial one. Prefer `on: partial` when the marginal top is legitimately far above
+  the placebo scale; without a partial test (the fit accepted no point) the flag falls back to the marginal z
+  and `notes` says so.
 
 ### Conditioning (partial test)
 
@@ -183,7 +189,7 @@ is an assembly error.
 | transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
-| flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect`. Default: no flag. |
+| flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
 | pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. Default: the placebo threshold alone. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol, missing}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit; `missing` (`mean` (default) \| `groupMean`) how a missing conditioning value enters the fit — the window mean, or the unit's baseline-weighted mean of its observed values (`groupedMultinomial` only). Needs the global window. |
 | output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
@@ -214,7 +220,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
 | passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
-| leakSuspect | BOOL | \|z\| > `flags.leakZ` |
+| leakSuspect | BOOL | \|z\| > `flags.leakZ` (\|partial_z\| under `flags.leakZ.on: partial`) |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
 
@@ -224,7 +230,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
-`nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
+`nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
 `maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `test` (the statistic
 that decided `passed` / `threshold`: `partial` when a conditioning fit accepted a point, else `marginal`), `passedColumns` (candidate
 names with a passing transform, best gain first — the list to feed back into the feature transform's
@@ -417,7 +423,9 @@ transforms:
   rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.67}`, so the pass list
   applies it too.
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
-  signature of a column computed after the outcome.
+  signature of a column computed after the outcome. When strong legitimate candidates trip the flag, read it on
+  the partial z (`flags: {leakZ: {z: 20, on: partial}}`): a leak survives the conditioning, a re-summary of what
+  the model knows does not.
 - `output.selection` writes the pass list in the format the feature transform's `output.include` reads, so
   the next feature run emits only the screened columns (see below); `passedColumns` in the summary is the same list.
 

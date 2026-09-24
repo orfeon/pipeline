@@ -327,6 +327,7 @@ public class ScreenTransformTest {
                       transforms: [raw, rank]
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
+                      flags: {leakZ: {z: 5, on: partial}}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
@@ -337,6 +338,9 @@ public class ScreenTransformTest {
             final MElement noise = records.get("f_noise:raw");
             // marginally f_known is the strongest column; conditioned on itself it vanishes
             Assertions.assertTrue(known.getAsDouble("z") > 5, "marginal z of f_known: " + known.getAsDouble("z"));
+            // the leak flag reads the partial z: f_known (marginal z above 5, partial ~ 0) is not a suspect, f_extra is
+            Assertions.assertEquals(Boolean.FALSE, known.getPrimitiveValue("leakSuspect"));
+            Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("leakSuspect"));
             // the L2 ridge leaves a residual of order l2 in the orthogonalisation: r2_F ≈ 1, partial gain ≈ 0
             Assertions.assertTrue(known.getAsDouble("r2_F") > 0.999, "r2_F of f_known: " + known.getAsDouble("r2_F"));
             Assertions.assertTrue(known.getAsDouble("partial_gain") < known.getAsDouble("threshold") / 100, "partial gain of f_known: " + known.getAsDouble("partial_gain"));
@@ -356,6 +360,8 @@ public class ScreenTransformTest {
         PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
             final MElement summary = rows.iterator().next();
             Assertions.assertEquals(List.of("f_known"), summary.getPrimitiveValue("conditioningFields"));
+            Assertions.assertEquals("partial", summary.getAsString("leakOn"));
+            Assertions.assertEquals(2L, summary.getAsLong("nLeakSuspect"));   // f_extra raw and rank: records, not candidates
             Assertions.assertEquals(1L, summary.getAsLong("conditioningK"));
             Assertions.assertEquals(Boolean.TRUE, summary.getPrimitiveValue("conditioningConverged"));
             Assertions.assertTrue(summary.getAsLong("conditioningIterations") <= 6);

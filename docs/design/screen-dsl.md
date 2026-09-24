@@ -199,7 +199,12 @@ Default: all three with `group`, `raw` without; an explicit list is never widene
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
   (`nRowsTimeFiltered`). Screening the evaluation period leaks the evaluation into the selection.
 - **Leak flag.** `flags.leakZ` marks a candidate with |z| above it as `leakSuspect` — a flag, never a
-  rejection: a leak's signature is a z several times the healthy top, and only lineage can tell.
+  rejection: a leak's signature is a z several times the healthy top, and only lineage can tell. The flag
+  reads the marginal z (a number) or, as `{z, on: partial}` under conditioning, the partial z: a leak is not
+  explained by F, so it keeps its outsized partial z, while a strong legitimate candidate that overlaps F
+  loses most of its z to the orthogonalisation. A relative threshold (a ratio to the conditioning set's own
+  marginal z) was considered and declined: F's columns are role columns, never scored, and the bound would
+  move with whatever F holds. Without an accepted fit the flag reads the marginal z and a note says so.
 - **q-values.** Benjamini–Hochberg over the candidate records' p-values (of the effective test, §8.5) gives
   the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`). Making `passed`
   follow the q-value is an extension position (§12).

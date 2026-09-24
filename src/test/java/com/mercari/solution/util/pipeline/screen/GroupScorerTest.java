@@ -290,6 +290,22 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testLeakZForms() {
+        final ScreenSpec number = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: 20}}");
+        Assertions.assertEquals(20d, number.leakZ);
+        Assertions.assertEquals(ScreenSpec.LEAK_ON_MARGINAL, number.leakOn);
+        final ScreenSpec object = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: [x2], flags: {leakZ: {z: 8, on: partial}}}");
+        Assertions.assertEquals(8d, object.leakZ);
+        Assertions.assertEquals(ScreenSpec.LEAK_ON_PARTIAL, object.leakOn);
+        Assertions.assertTrue(ScreenReport.describe(object).contains("leakZ=8.0 on=partial"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: 8, on: partial}}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {on: marginal}}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: 8, on: both}}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: -1}}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: partial}}"));
+    }
+
+    @Test
     public void testSpecValidation() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: gamma, label: y, candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, transforms: [rank], candidates: [x]}"));
