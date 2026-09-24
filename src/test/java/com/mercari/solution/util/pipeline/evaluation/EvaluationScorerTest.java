@@ -411,6 +411,7 @@ public class EvaluationScorerTest {
                 final EvaluationScorer.Unit unit = scorer.prepare(rows, "g" + i);
                 final EvaluationScorer.Metrics m = scorer.score(unit);
                 Assertions.assertEquals(east ? Math.log(1.6) : Math.log(0.6), scorer.discoveryValue(m, 0, "excessLogScore"), 1e-12);
+                Assertions.assertTrue(Double.isNaN(scorer.discoveryValue(m, 0, "utility")));
                 Assertions.assertArrayEquals(new String[]{east ? "east" : "west", u < 5 ? "q0" : "q1"}, scorer.dimensionValues(unit, edges));
                 scorer.accumulate(unit, m, acc);
                 scorer.accumulateDiscovery(unit, m, edges, cells);
@@ -482,6 +483,33 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(2d / 3, (Double) record.get("rate"), 1e-12);
         Assertions.assertEquals(2d, (Double) record.get("utility"), 1e-12);
         Assertions.assertEquals(1d, (Double) record.get("positivesShare"), 1e-12);
+        // the unit's utility metric: (2 + 4) / 3 rows, the same under the baseline and A, with its interval; null in the pair
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(2d, m.utility, 1e-12);
+        Assertions.assertEquals(2d, (Double) scorer.unitRecords(unit, m).get(1).get("utility"), 1e-12);
+        final EvaluationSpec two = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 50, seed: 1}}");
+        final EvaluationScorer scorer2 = new EvaluationScorer(two);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        final EvaluationScorer.Unit u1 = scorer2.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 0.6, 2.0), row("test", "g1", 0, 0.5, null, 0.4, 0.4, 9.0)), "g1");
+        final EvaluationScorer.Unit u2 = scorer2.prepare(List.of(row("test", "g2", 0, 0.5, null, 0.6, 0.6, 3.0), row("test", "g2", 1, 0.5, null, 0.4, 0.4, 3.0)), "g2");
+        scorer2.accumulate(u1, scorer2.score(u1), acc);
+        scorer2.accumulate(u2, scorer2.score(u2), acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(two, acc).records();
+        // units: 2/2 = 1 and 3/2 = 1.5 → mean 1.25 under every set
+        Assertions.assertEquals(1.25, (Double) records.get(0).get("utility"), 1e-12);
+        Assertions.assertEquals(1.25, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertTrue((Double) records.get(1).get("utility_lo") <= 1.25 && 1.25 <= (Double) records.get(1).get("utility_hi"));
+        Assertions.assertEquals("B", records.get(3).get("pair"));
+        Assertions.assertNull(records.get(3).get("utility"));
+        Assertions.assertNull(records.get(3).get("utility_lo"));
+        // without a utility field the metric is null
+        final EvaluationSpec none = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: false}");
+        final EvaluationScorer scorer3 = new EvaluationScorer(none);
+        final Map<String, MetricAccumulator> acc3 = new HashMap<>();
+        final EvaluationScorer.Unit u3 = scorer3.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6), row("test", "g1", 0, 0.5, null, 0.4)), "g1");
+        scorer3.accumulate(u3, scorer3.score(u3), acc3);
+        Assertions.assertNull(EvaluationReport.build(none, acc3).records().get(1).get("utility"));
     }
 
     @Test
@@ -521,5 +549,71 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(0L, ((Map<?, ?>) splits.get(0)).get("nRowsDuplicate"));
         // the duplicate row counted twice in the metrics: 4 rows in unit 1
         Assertions.assertEquals(6L, result.records().get(1).get("n_rows"));
+    }
+
+    @Test
+    public void testUtilityIgnoresTheLosingRowsPayout() {
+        // an infinite payout on a row that did not pay (u = 1/p with p = 0) is a zero return, not ∞·0 = NaN: the
+        // unit, the accumulated metric and the calibration bin stay finite
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: {field: u}, bootstrap: {samples: 20, seed: 1}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 3.0), row("test", "g1", 0, 0.5, null, 0.4, Double.POSITIVE_INFINITY)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(1.5, m.utility, 1e-12);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        scorer.accumulate(unit, m, acc);
+        final List<Map<String, Object>> records = EvaluationReport.build(spec, acc).records();
+        Assertions.assertEquals(1.5, (Double) records.get(1).get("utility"), 1e-12);
+        Assertions.assertNotNull(records.get(1).get("utility_lo"));
+        final double[] v = new double[EvaluationReport.BIN_SLOTS];
+        for (final AlignedRow r : scorer.aligned(unit)) EvaluationReport.addBin(v, r, r.predictions[0]);
+        Assertions.assertEquals(3d, v[EvaluationReport.BIN_UTILITY], 1e-12);
+    }
+
+    @Test
+    public void testSliceDiscoveryOnUtility() {
+        // twenty units per split, the positive row pays 4 in the east and 1 in the west: the east returns 2 per row,
+        // the west 0.5; both slices pass and are confirmed, reported once (the metric does not depend on the set)
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + SPLITS
+                + ", utility: u, bootstrap: false, sliceDiscovery: {dimensions: [region], minSupport: 4, discoverOn: valid, confirmOn: test, metric: utility}}");
+        Assertions.assertEquals(List.of(0), spec.discovery.sets);
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        final Map<String, double[]> cells = new HashMap<>();
+        for (final String split : List.of("valid", "test")) {
+            for (int i = 0; i < 20; i++) {
+                final boolean east = i < 10;
+                final double pay = east ? 4.0 : 1.0;
+                final List<EvaluationRow> rows = List.of(
+                        new EvaluationRow(split, "g" + i, "a", 1L, null, 1, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{0.6, 0.6, pay}),
+                        new EvaluationRow(split, "g" + i, "b", 1L, null, 0, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{0.4, 0.4, 7.0}));
+                final EvaluationScorer.Unit unit = scorer.prepare(rows, "g" + i);
+                Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+                final EvaluationScorer.Metrics m = scorer.score(unit);
+                Assertions.assertEquals(east ? 2.0 : 0.5, scorer.discoveryValue(m, 0, "utility"), 1e-12);
+                scorer.accumulate(unit, m, acc);
+                scorer.accumulateDiscovery(unit, m, Map.of(), cells);
+            }
+        }
+        for (final Map.Entry<String, double[]> e : cells.entrySet()) {
+            final MetricAccumulator a = new MetricAccumulator();
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            System.arraycopy(e.getValue(), 0, slots, 0, 3);
+            a.add(slots);
+            acc.put(EvaluationReport.DISCOVERY_PREFIX + e.getKey(), a);
+        }
+        final EvaluationReport.Result result = EvaluationReport.build(spec, acc);
+        Assertions.assertEquals(2, result.slices().size(), result.slices().toString());
+        for (final Map<String, Object> r : result.slices()) {
+            Assertions.assertEquals("A", r.get("prediction"));
+            Assertions.assertEquals("utility", r.get("metric"));
+            Assertions.assertEquals(Boolean.TRUE, r.get("confirmed"));
+            final boolean isEast = ((List<?>) r.get("values")).get(0).equals("east");
+            Assertions.assertEquals(isEast ? 2.0 : 0.5, (Double) r.get("mean_discover"), 1e-12);
+        }
+        Assertions.assertEquals(1.25, (Double) result.records().get(1).get("utility"), 1e-12);
+        Assertions.assertTrue(((List<?>) result.summary().get("notes")).toString().contains("runs once"));
     }
 }

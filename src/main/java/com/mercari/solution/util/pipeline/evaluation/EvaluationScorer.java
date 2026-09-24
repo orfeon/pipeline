@@ -102,16 +102,22 @@ public final class EvaluationScorer implements Serializable {
         }
     }
 
-    /** The loss decomposition of one unit: per set (index 0 = the baseline). */
+    /**
+     * The loss decomposition of one unit: per set (index 0 = the baseline), plus the unit's utility — the flat
+     * return Σ u·y / n over its rows (y as declared; a null utility is a zero return), NaN without a utility
+     * field. The utility is a property of the outcomes, the same under every set.
+     */
     public static final class Metrics {
         public final double[] logScore;
         public final double[] hitAt1;
         public final double[] brier;
+        public final double utility;
 
-        Metrics(final double[] logScore, final double[] hitAt1, final double[] brier) {
+        Metrics(final double[] logScore, final double[] hitAt1, final double[] brier, final double utility) {
             this.logScore = logScore;
             this.hitAt1 = hitAt1;
             this.brier = brier;
+            this.utility = utility;
         }
     }
 
@@ -433,7 +439,18 @@ public final class EvaluationScorer implements Serializable {
             logScore[j] = logScore(q, unit);
             brier[j] = br;
         }
-        return new Metrics(logScore, hit, brier);
+        return new Metrics(logScore, hit, brier, utility(unit));
+    }
+
+    /**
+     * The unit's flat return Σ u·y / n over its rows (the label as declared; a null utility and a losing row
+     * count 0, see {@link EvaluationReport#payout}); NaN without a utility field.
+     */
+    private double utility(final Unit unit) {
+        if (!spec.hasUtility()) return Double.NaN;
+        double sum = 0;
+        for (final EvaluationRow r : unit.rows) sum += EvaluationReport.payout(r.x[spec.utilityIndex], r.label);
+        return sum / unit.size();
     }
 
     /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key). */
@@ -489,6 +506,7 @@ public final class EvaluationScorer implements Serializable {
             slots[MetricAccumulator.LOG_BASE] = wu * m.logScore[0];
             slots[MetricAccumulator.HIT] = wu * m.hitAt1[j];
             slots[MetricAccumulator.BRIER] = wu * m.brier[j];
+            slots[MetricAccumulator.UTILITY] = spec.hasUtility() ? wu * m.utility : 0d;
             add(into, key(unit.split, j, -1, null), slots, boot);
             for (int s = 0; s < slices.length; s++) {
                 if (slices[s] != null) add(into, key(unit.split, j, s, slices[s]), slots, boot);
@@ -538,6 +556,7 @@ public final class EvaluationScorer implements Serializable {
             case "logScore" -> m.logScore[j];
             case "hitAt1" -> m.hitAt1[j];
             case "brier" -> m.brier[j];
+            case "utility" -> m.utility;
             default -> throw new IllegalArgumentException("unknown discovery metric " + metric);
         };
     }
@@ -680,6 +699,7 @@ public final class EvaluationScorer implements Serializable {
             r.put("excessLogScore", priorBase ? null : EvaluationReport.finiteOrNull(m.logScore[j] - m.logScore[0]));
             r.put("hitAt1", EvaluationReport.finiteOrNull(m.hitAt1[j]));
             r.put("brier", EvaluationReport.finiteOrNull(m.brier[j]));
+            r.put("utility", EvaluationReport.finiteOrNull(m.utility));
             r.put("slices", slices);
             records.add(r);
         }

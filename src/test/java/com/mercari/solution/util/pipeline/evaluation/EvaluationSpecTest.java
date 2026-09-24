@@ -187,6 +187,12 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: later}}")).contains("not a declared split"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {discoverOn: valid, confirmOn: test}}")).contains("dimensions is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [u], discoverOn: valid, confirmOn: test}}")).contains("give it bins"));
+        // the utility metric needs the utility field and runs once (it does not depend on the set)
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: utility}}")).contains("needs utility.field"));
+        final EvaluationSpec utility = parse("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + EvaluationScorerTest.SPLITS
+                + ", utility: u, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: utility}}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(List.of(0), utility.discovery.sets);
+        Assertions.assertTrue(utility.notes.toString().contains("runs once, reported under A"), utility.notes.toString());
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [{field: region, bins: 3}], discoverOn: valid, confirmOn: test}}")).contains("not numeric"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [missing], discoverOn: valid, confirmOn: test}}")).contains("not an input field"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, of: [Z]}}")).contains("not a compared prediction set"));

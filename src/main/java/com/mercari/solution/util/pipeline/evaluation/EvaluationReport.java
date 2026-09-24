@@ -21,7 +21,9 @@ public final class EvaluationReport {
     private EvaluationReport() {}
 
     private static final String SEP = MetricAccumulator.SEP;
-    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
+    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier", "utility");
+    /** the metrics that describe the outcomes, not a prediction set: the same under every set, no pair difference */
+    public static final List<String> SET_INDEPENDENT = List.of("utility");
     static final double Z95 = 1.959963984540054;
 
     /** Result of {@link #build}: the metrics records, the slice discovery records and the summary, as output-schema maps. */
@@ -44,6 +46,7 @@ public final class EvaluationReport {
             case "excessLogScore" -> sums[MetricAccumulator.LOG] / w - baselineLogScore(spec, sums);
             case "hitAt1" -> sums[MetricAccumulator.HIT] / w;
             case "brier" -> sums[MetricAccumulator.BRIER] / w;
+            case "utility" -> spec.hasUtility() ? sums[MetricAccumulator.UTILITY] / w : Double.NaN;
             default -> throw new IllegalArgumentException("unknown metric " + name);
         };
     }
@@ -56,7 +59,7 @@ public final class EvaluationReport {
         return mean * Math.log(mean) + (1 - mean) * Math.log(1 - mean);
     }
 
-    /** The replicate's sums in the slot layout (W .. BRIER from the replicate, the counts from the total). */
+    /** The replicate's sums in the slot layout (W .. UTILITY from the replicate; the counts stay 0). */
     static double[] replicate(final MetricAccumulator acc, final int b) {
         final double[] sums = new double[MetricAccumulator.SLOTS];
         final double[] boot = acc.getBoot();
@@ -167,6 +170,12 @@ public final class EvaluationReport {
                     r.put("value", sliceValue);
                     putCounts(r, byPrediction.get(a));
                     for (final String m : METRICS) {
+                        if (SET_INDEPENDENT.contains(m)) {
+                            r.put(m, null);
+                            r.put(m + "_lo", null);
+                            r.put(m + "_hi", null);
+                            continue;
+                        }
                         final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
                         final double[] diff = new double[va.length];
                         for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
@@ -447,7 +456,15 @@ public final class EvaluationReport {
         v[BIN_SHARE] += row.share;
         v[BIN_Q] += q;
         v[BIN_P] += row.baseline;
-        if (!Double.isNaN(row.utility)) v[BIN_UTILITY] += row.utility * row.label;
+        v[BIN_UTILITY] += payout(row.utility, row.label);
+    }
+
+    /**
+     * A row's realised return u·y (y as declared): 0 for a row that did not pay (y = 0) whatever its utility — an
+     * infinite payout on a losing row would otherwise turn the sum into NaN (∞·0) — and 0 for a null utility.
+     */
+    static double payout(final double utility, final double label) {
+        return label == 0d || Double.isNaN(utility) ? 0d : utility * label;
     }
 
     public static String tableKey(final String split, final int prediction, final int table) {
@@ -636,6 +653,7 @@ public final class EvaluationReport {
                 .withField("excessLogScore", Schema.FieldType.FLOAT64)
                 .withField("hitAt1", Schema.FieldType.FLOAT64)
                 .withField("brier", Schema.FieldType.FLOAT64)
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.element(slice)))
                 .build();
     }
