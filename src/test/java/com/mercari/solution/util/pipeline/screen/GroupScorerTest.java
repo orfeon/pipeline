@@ -123,7 +123,7 @@ public class GroupScorerTest {
         new GroupScorer(plain).score(List.of(row("a", 1, 1, 2, 1), row("a", 1, 0, 4, 0)), "a", plainAcc);
         Assertions.assertEquals(Baselines.Skip.INVALID_BASELINE, new GroupScorer(plain).score(List.of(row("b", 1, 1, 2, 1), row("b", 1, 0, 0, 0)), "b", plainAcc));
         final String plainNotes = ScreenReport.build(plain, plainAcc).summary().get("notes").toString();
-        Assertions.assertTrue(plainNotes.contains("1 of 2 units skipped (50.0%: invalid baseline 1, no positive label 0); a null or non-positive value under form inverseShare / rate skips the whole unit: declare baseline.invalid: dropRow"), plainNotes);
+        Assertions.assertTrue(plainNotes.contains("1 of 2 units skipped (50.0%: invalid baseline 1, no positive label 0); an invalid baseline value (a null, or a 0 / negative one under form inverseShare / rate) skips the whole unit: declare baseline.invalid: dropRow"), plainNotes);
         Assertions.assertEquals(0L, ScreenReport.build(plain, plainAcc).summary().get("nRowsDropped"));
         // an unknown policy is a spec error
         final String error = Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, baseline: {field: b, invalid: drop}, time: t, candidates: [x]}")).getMessage();

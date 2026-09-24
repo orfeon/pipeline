@@ -57,10 +57,11 @@ notes a split whose skipped share passes 1%.
 `invalid: dropRow`: the rows whose value the column rejects leave the unit before anything is scored, and the
 shares are taken over the remaining rows (the common *row* set: every set is compared on the same rows). A
 unit whose positive row was dropped is skipped for no positive label; a unit with no row left is skipped as
-invalid. Dropped rows do not appear in the calibration tables, the rows output or the counts of `nRows`; they
-are counted as `nRowsDropped` and noted. Right for a withdrawal (a scratched runner, a delisted item) whose
+invalid. Dropped rows do not appear in the calibration tables, the rows output or a split's `nRows` (the
+summary's `nRows` still counts them as rows read); they are counted as `nRowsDropped` and noted. Right for a withdrawal (a scratched runner, a delisted item) whose
 row should not exist; wrong for a value that is missing by accident, where the unit skip is the safer report.
-Under `binomial` a row is its own unit, so `dropRow` and `skipUnit` coincide.
+Under `binomial` a row is its own unit, so both policies leave out the same rows; `dropRow` also counts
+each of them in `nRowsDropped`.
 
 ```yaml
 baseline: {field: odds_final, form: inverseShare, invalid: dropRow}
@@ -105,8 +106,9 @@ log share reads as `offset: {field: log_m, form: logProb}`; a correction f = log
 over the settlement odds reads as `offset: {field: odds_final, form: inverseShare}` (see [Scoring against the
 settlement reference](#scoring-against-the-settlement-reference)). A bare field name is `form: prob`; the
 older `offsetScale: prob | log` spelling of a bare offset is still accepted (`log` = `logProb`). An offset
-value invalid for its form (a null; a negative `prob`; a null, 0 or negative `inverseShare`) makes the unit
-invalid, like the baseline; a `prob` offset of 0 is a valid row of mass 0. `baseline` is a reserved name
+value invalid for its form (a null or +∞; a negative `prob`; a 0, negative or infinite `inverseShare`) makes
+the unit invalid, like the baseline; a `prob` offset of 0 (a `logProb` of −∞) is a valid row of mass 0.
+`invalid` is declared on the set, not inside the offset object. `baseline` is a reserved name
 (the baseline's own metrics are reported under it).
 
 ### Splits
@@ -180,7 +182,7 @@ its own `as`.
 
 Each base set has two fit inputs per row: f — a score set's score, a probability set's log share (grouped) /
 logit (binomial) — and o — the score set's own offset on the log scale, else the baseline's log share /
-logit. A row the base set gives mass 0 (a zero prob-scale offset, a zero share) enters the fit at the log
+logit. A row the base set gives mass 0 (a zero prob offset or a −∞ logProb one, a zero share) enters the fit at the log
 floor (log 1e-12) and keeps mass 0 in the derived set. `weight` acts as a frequency weight, so the fits'
 standard errors scale with its magnitude.
 
@@ -233,6 +235,7 @@ split estimates — a blend with the offset held at 1:
 baseline: {field: odds_final, form: inverseShare, invalid: dropRow}   # the settlement market is the reference
 predictions:
   - {name: rebased, score: f, offset: {field: odds_final, form: inverseShare}}   # f = log q_model − log p_bet
+  - {name: model, prob: q_model}                                                  # the model as it decided
   - {name: bet, field: odds_bet, form: inverseShare}                              # the decision-time market, for the pair record
 calibration:
   - {type: blend, fitOn: valid, of: [rebased], fix: {b: 1}}                       # a = α estimated, b = 1
@@ -243,13 +246,16 @@ pairs:
 
 On the report split, `rebased@blend`'s `excessLogScore` is the settlement-reference Δ at the fitted α (and
 `rebased`'s own is the same at α = 1: a set whose correction is over-confident goes negative there, which
-is what α repairs). With the decision-time market declared as a second reference *set*, the pair record
-`rebased − bet` is the decision-time Δ on the same units with a paired interval, so the retained share is
-the ratio of the two records; `utility` next to them turns the three-step reading — decision-time Δ,
+is what α repairs). With the model itself and the decision-time market declared as two more *sets*, the pair
+record `model − bet` is the decision-time Δ on the same units with a paired interval (not `rebased − bet`:
+`rebased` is the correction laid over the settlement market, not the model), so the retained share is the
+ratio of the two records; `utility` next to them turns the three-step reading — decision-time Δ,
 settlement Δ, realised return — into one run. The settlement price is a yardstick only: it is never a
 feature (a candidate must be observable at decision time). A prediction with a low retained share carries
 information the market absorbs late, or a re-encoding of the market level — useful to execution (when to
 place the order, what the settlement price will be), not to the probability model.
+
+### Slice discovery
 
 ```yaml
 sliceDiscovery:

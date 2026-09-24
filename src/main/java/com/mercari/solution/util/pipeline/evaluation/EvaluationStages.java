@@ -192,10 +192,9 @@ public final class EvaluationStages {
             for (final int set : spec.derivedOf(i)) {
                 final EvaluationSpec.Derived dv = spec.derived.get(set - spec.predictions.size());
                 final String tag = "Blend" + i + "_" + dv.base;
-                final int fitIndex = i;
                 PCollectionView<FitState> state = input.getPipeline()
                         .apply(tag + "_Init", Create.of(dv.base))
-                        .apply(tag + "_State", ParDo.of(new BlendInitDoFn(spec, fitIndex)))
+                        .apply(tag + "_State", ParDo.of(new BlendInitDoFn(spec, i)))
                         .setCoder(SerializableCoder.of(FitState.class))
                         .apply(tag + "_InitView", View.asSingleton());
                 for (int it = 1; it <= fit.maxIter; it++) {

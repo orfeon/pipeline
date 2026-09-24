@@ -163,9 +163,6 @@ public final class ScreenReport {
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
      */
-    /** The share of skipped units above which the summary notes it. */
-    static final double SKIP_SHARE_NOTE = 0.01;
-
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                final Map<Integer, double[]> partials, final FitState fit) {
         final ScoreAccumulator book = accumulators.getOrDefault(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator());
@@ -193,12 +190,12 @@ public final class ScreenReport {
         final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
         final long skippedBaseline = (long) b[ScoreAccumulator.UNITS_SKIPPED_BASELINE];
         final long dropped = (long) b[ScoreAccumulator.ROWS_DROPPED];
-        if (skipped > 0 && skipped > SKIP_SHARE_NOTE * (nUnits + skipped)) {
-            notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + String.format(java.util.Locale.ROOT, "%.1f%%", 100d * skipped / (nUnits + skipped))
+        if (Baselines.skipShareNoted(skipped, nUnits)) {
+            notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + Baselines.percent(skipped, nUnits + skipped)
                     + ": invalid baseline " + skippedBaseline + ", no positive label " + (skipped - skippedBaseline) + ")"
-                    + (skippedBaseline > 0 && !Baselines.INVALID_DROP_ROW.equals(spec.baselineInvalid) ? "; a null or non-positive value under form inverseShare / rate skips the whole unit: declare baseline.invalid: dropRow to score its remaining rows" : ""));
+                    + (skippedBaseline > 0 && !spec.baselineDropsRows() ? "; an invalid baseline value (a null, or a 0 / negative one under form inverseShare / rate) skips the whole unit: declare baseline.invalid: dropRow to score its remaining rows" : ""));
         }
-        if (dropped > 0) notes.add(dropped + " rows dropped (baseline.invalid: dropRow); their units were scored on the remaining rows");
+        if (dropped > 0) notes.add(dropped + " rows dropped (baseline.invalid: dropRow); their units were scored on the remaining rows, a unit left without a row or a positive label is counted as skipped");
 
         // statistics per key
         final List<Map<String, Object>> records = new ArrayList<>();
@@ -526,7 +523,7 @@ public final class ScreenReport {
         parts.add("family=" + spec.family);
         if (spec.group != null) parts.add("group=" + spec.group);
         parts.add("label=" + (spec.labelExpr != null ? "expr(" + spec.labelExpr + ")" : spec.labelField));
-        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm + (Baselines.INVALID_DROP_ROW.equals(spec.baselineInvalid) ? "[dropRow]" : "") : "prior"));
+        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm + (spec.baselineDropsRows() ? "[dropRow]" : "") : "prior"));
         if (spec.timeField != null) parts.add("time=" + spec.timeField + (spec.timeFrom != null ? " from " + spec.timeFrom : "") + (spec.timeTo != null ? " to " + spec.timeTo : ""));
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);

@@ -33,6 +33,7 @@ public final class EvaluationScorer implements Serializable {
      * clamp {@link Baselines#means} applies, on purpose not GlmFit's 1e-300 optimizer guard (this is a reported metric's cap)
      */
     static final double LOG_FLOOR = Baselines.EPS;
+    private static final double LOG_LOG_FLOOR = Math.log(LOG_FLOOR);
 
     private final EvaluationSpec spec;
     private final Family family;
@@ -45,16 +46,29 @@ public final class EvaluationScorer implements Serializable {
      * row, as the unit's time is): a unit spanning two periods is not a row-level slice
      */
     private final boolean[] unitPeriodSlices;
+    /** per fit: the positions of the blend coefficients it estimates (null for a temperature fit), see {@link #blendFree} */
+    private final int[][] blendFree;
+    /** a column declares {@code invalid: dropRow}: the rows it rejects leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
         this.sets = spec.setCount();
+        this.dropsRows = spec.dropsRows();
         this.unitPeriodSlices = new boolean[spec.slices.size()];
         for (int s = 0; s < unitPeriodSlices.length; s++) {
             final EvaluationSpec.Slice sl = spec.slices.get(s);
             unitPeriodSlices[s] = sl.bucket != null && sl.field != null && sl.field.equals(spec.timeField);
+        }
+        this.blendFree = new int[spec.fits.size()][];
+        for (int f = 0; f < blendFree.length; f++) {
+            final EvaluationSpec.Fit fit = spec.fits.get(f);
+            if (fit.isTemperature()) continue;
+            final List<Integer> free = new ArrayList<>();
+            for (int c = 0; c < blendK(); c++) if (!fit.fixes(EvaluationSpec.BLEND_COEFFICIENTS.get(c))) free.add(c);
+            blendFree[f] = free.stream().mapToInt(Integer::intValue).toArray();
         }
     }
 
@@ -79,7 +93,10 @@ public final class EvaluationScorer implements Serializable {
         public final double unitWeight;
         /** rows whose identity repeats an earlier row's (the same row twice in the unit, at any time) */
         public final int duplicates;
-        /** rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}) */
+        /**
+         * rows removed before scoring by a column declared {@code invalid: dropRow} (not in {@link #rows}, except on a
+         * unit that lost every row: skipped, its rows are the dropped ones)
+         */
         public final int dropped;
         /**
          * per declared slice / discovery dimension: whether the unit's rows disagree on the value (the first row's is
@@ -154,7 +171,7 @@ public final class EvaluationScorer implements Serializable {
         sorted.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final List<EvaluationRow> rows;
         int dropped = 0;
-        if (spec.dropsRows()) {
+        if (dropsRows) {
             rows = new ArrayList<>(sorted.size());
             Skip emptied = Skip.NONE;
             for (final EvaluationRow r : sorted) {
@@ -250,8 +267,8 @@ public final class EvaluationScorer implements Serializable {
 
     /**
      * Why a row leaves its unit before scoring: the first column declared {@code invalid: dropRow} whose value the
-     * row fails ({@link Baselines#validRow} for the baseline and a probability set; a finite score and a non-null,
-     * non-negative prob-scale offset for a score set — the values {@link #softmax} would reject), {@link Skip#NONE}
+     * row fails ({@link Baselines#validRow} for the baseline and a probability set; a finite score and an offset
+     * valid for its form for a score set, {@link #offsetLogWeight} — the values {@link #softmax} would reject), {@link Skip#NONE}
      * when every dropping column accepts it.
      */
     private Skip dropReason(final EvaluationRow r) {
@@ -267,17 +284,29 @@ public final class EvaluationScorer implements Serializable {
         final double[] x = r.x;
         if (!d.isScore()) return Baselines.validRow(d.form, x[d.offset]);
         if (!Double.isFinite(x[d.offset])) return false;
-        if (d.offsetField == null) return true;
-        final double offset = x[d.offset + 1];
-        if (Double.isNaN(offset)) return false;
-        return d.offsetLog() || (d.offsetInverse() ? offset > 0 : offset >= 0);
+        return d.offsetField == null || !Double.isNaN(offsetLogWeight(d, x[d.offset + 1]));
+    }
+
+    /**
+     * The log weight log w of a score set's offset value in its form — log x ({@code prob}), x ({@code logProb}),
+     * −log x ({@code inverseShare}); −∞ for a {@code prob} of 0 or a {@code logProb} of −∞ (a valid row of mass 0) —
+     * or NaN when the value is invalid for its form: a null or a +∞ (no finite weight), a negative {@code prob}, a
+     * non-finite or non-positive {@code inverseShare} (the baseline's rule, {@link Baselines#validRow}). The drop
+     * rule ({@link #validValue}), {@link #softmax} and {@link #fitInputs} read an offset only through it, so a row
+     * the drop rule keeps is one the softmax accepts.
+     */
+    static double offsetLogWeight(final EvaluationSpec.Prediction d, final double offset) {
+        if (Double.isNaN(offset) || offset == Double.POSITIVE_INFINITY) return Double.NaN;
+        if (d.offsetLog()) return offset;
+        if (d.offsetInverse()) return Baselines.validRow(Family.FORM_INVERSE_SHARE, offset) ? -Math.log(offset) : Double.NaN;
+        if (offset < 0) return Double.NaN;
+        return offset > 0 ? Math.log(offset) : Double.NEGATIVE_INFINITY;
     }
 
     /**
      * Grouped softmax of a score set: q_i ∝ w_i · exp(score_i / T), w the offset value (form prob), exp(offset)
-     * (logProb) or 1 / offset (inverseShare), 1 without an offset. A null score or offset makes the unit invalid, as
-     * does a negative prob offset or a non-positive inverseShare one (the baseline's rule); a zero prob offset gives
-     * q_i = 0.
+     * (logProb) or 1 / offset (inverseShare), 1 without an offset. A null score or an offset invalid for its form
+     * ({@link #offsetLogWeight}) makes the unit invalid; a zero prob offset gives q_i = 0.
      */
     private static boolean softmax(final List<EvaluationRow> rows, final EvaluationSpec.Prediction d, final double[] out) {
         final int n = rows.size();
@@ -288,17 +317,9 @@ public final class EvaluationScorer implements Serializable {
             if (!Double.isFinite(score)) return false;
             double e = score / d.temperature;
             if (d.offsetField != null) {
-                final double offset = x[d.offset + 1];
-                if (Double.isNaN(offset)) return false;
-                if (d.offsetLog()) {
-                    e += offset;
-                } else if (d.offsetInverse()) {
-                    if (!(offset > 0)) return false;
-                    e -= Math.log(offset);
-                } else {
-                    if (offset < 0) return false;
-                    e += offset > 0 ? Math.log(offset) : Double.NEGATIVE_INFINITY;
-                }
+                final double logWeight = offsetLogWeight(d, x[d.offset + 1]);
+                if (Double.isNaN(logWeight)) return false;
+                e += logWeight;
             }
             eta[i] = e;
         }
@@ -324,8 +345,10 @@ public final class EvaluationScorer implements Serializable {
             if (d.isScore()) {
                 f[i] = x[d.offset] / d.temperature;
                 if (d.offsetField != null) {
-                    final double offset = x[d.offset + 1];
-                    o[i] = d.offsetLog() ? offset : d.offsetInverse() ? -Math.log(offset) : Math.log(Math.max(offset, LOG_FLOOR));
+                    // a row of mass 0 (a 0 prob offset, a −∞ logProb one) enters the fit at the log floor, as a zero
+                    // share does — a −∞ column would make the blend's gradient NaN; the prob form floors every value
+                    final double logWeight = offsetLogWeight(d, x[d.offset + 1]);
+                    o[i] = logWeight == Double.NEGATIVE_INFINITY || Family.FORM_PROB.equals(d.offsetForm) ? Math.max(logWeight, LOG_LOG_FLOOR) : logWeight;
                 } else {
                     o[i] = link(unit.means[0][i]);
                 }
@@ -416,19 +439,12 @@ public final class EvaluationScorer implements Serializable {
 
     /** Number of blend coefficients: [a, b] for the grouped family, [a, b, intercept] for binomial. */
     public int blendK() {
-        return family.isGrouped() ? 2 : 3;
+        return spec.blendK();
     }
 
-    /** The positions (in {@link #blendK} order) of the coefficients a blend fit estimates: those its {@code fix} does not hold. */
+    /** The positions (in {@link #blendK} order) of the coefficients a blend fit estimates: those its {@code fix} does not hold (shared, read only). */
     public int[] blendFree(final int fitIndex) {
-        final EvaluationSpec.Fit fit = spec.fits.get(fitIndex);
-        final int kk = blendK();
-        int free = 0;
-        for (int c = 0; c < kk; c++) if (!fit.fixes(EvaluationSpec.BLEND_COEFFICIENTS.get(c))) free++;
-        final int[] out = new int[free];
-        int i = 0;
-        for (int c = 0; c < kk; c++) if (!fit.fixes(EvaluationSpec.BLEND_COEFFICIENTS.get(c))) out[i++] = c;
-        return out;
+        return blendFree[fitIndex];
     }
 
     /** The full coefficient vector {@code [a, b(, intercept)]} of a blend fit from its free part: the fixed ones at their values. */

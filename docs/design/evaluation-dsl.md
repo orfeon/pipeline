@@ -85,8 +85,8 @@ predictions:
   transform's `softmax` context op; a model that outputs a raw score to be combined with the baseline's log
   share reads as `offset: {field: log_m, form: logProb}`; a correction over the decision-time market laid
   over the settlement odds reads as `offset: {field: odds_final, form: inverseShare}` (§7.1). An offset value
-  invalid for its form (a null; a negative `prob`; a non-positive `inverseShare`) makes the unit invalid like
-  the baseline's rule; a `prob` offset of 0 is a valid row of mass 0.
+  invalid for its form (a null or +∞; a negative `prob`; a non-positive or infinite `inverseShare`) makes the
+  unit invalid like the baseline's rule; a `prob` offset of 0 (a `logProb` of −∞) is a valid row of mass 0.
 
 A unit with a null / non-finite / invalid value in any set (or in the baseline) is skipped whole
 (`nUnitsSkipped`), never partially compared (the common unit set). Validity follows the form: `prob` accepts 0
@@ -270,9 +270,10 @@ f = log q_model − log p_decision laid over the settlement market and shrunk by
 split estimates, η = α·f + log p_settlement, is a blend with b fixed at 1 of a score set whose offset is the
 settlement odds (`offset: {field, form: inverseShare}`) against the settlement baseline. Its excess log
 score on the report split is the log-growth bound a proportional stake can realise at settlement; the
-decision-time market declared as a second reference *set* gives, through the pair record, the decision-time
-Δ on the same units, and the ratio is the retained share. The settlement price is a yardstick, never a
-feature.
+model's own probability and the decision-time market declared as two more *sets* give, through their pair
+record (model − decision market; not the rebased set, which is the correction over the settlement market),
+the decision-time Δ on the same units, and the ratio is the retained share. The settlement price is a
+yardstick, never a feature.
 
 Every base set has two fit inputs per row: f — a score set's score (over its declared temperature), a
 probability set's log share (grouped) / logit (binomial) — and o — the score set's own offset on the log

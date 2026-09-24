@@ -273,13 +273,13 @@ public final class EvaluationReport {
                 notes.add("split " + sp.name + ": " + duplicates + " duplicate rows (the same rowId twice within a unit); their units' metrics count them twice");
             }
             // skipped units past the share worth a look: which reason, and the way out of an invalid-column skip
-            if (skipped > 0 && skipped > SKIP_SHARE_NOTE * (units + skipped)) {
-                notes.add("split " + sp.name + ": " + skipped + " of " + (units + skipped) + " units skipped (" + percent(skipped, units + skipped)
+            if (Baselines.skipShareNoted(skipped, units)) {
+                notes.add("split " + sp.name + ": " + skipped + " of " + (units + skipped) + " units skipped (" + Baselines.percent(skipped, units + skipped)
                         + ": invalid baseline " + skippedBaseline + ", invalid prediction " + skippedPrediction + ", no positive label " + (skipped - skippedBaseline - skippedPrediction) + ")"
-                        + (skippedBaseline + skippedPrediction > 0 && !spec.dropsRows() ? "; a null or non-positive value under form inverseShare / rate skips the whole unit: declare invalid: dropRow on that column to score its remaining rows" : ""));
+                        + (skippedBaseline + skippedPrediction > 0 && !spec.dropsRows() ? "; an invalid value (a null, or a 0 / negative one under form inverseShare) skips the whole unit: declare invalid: dropRow on that column to score its remaining rows" : ""));
             }
             if (dropped > 0) {
-                notes.add("split " + sp.name + ": " + dropped + " rows dropped (invalid: dropRow); their units were scored on the remaining rows");
+                notes.add("split " + sp.name + ": " + dropped + " rows dropped (invalid: dropRow); their units were scored on the remaining rows, a unit left without a row or a positive label is counted as skipped");
             }
         }
         // a slice / dimension declared as a group-level attribute whose value the rows of a unit disagree on
@@ -321,7 +321,7 @@ public final class EvaluationReport {
         if (fits != null) {
             for (final Map<String, Object> r : fits.records) {
                 fitRecords.add(new LinkedHashMap<>(r));
-                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
+                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " (" + r.get("derived") + ") produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
             }
         }
         s.put("fits", fitRecords);
@@ -335,13 +335,6 @@ public final class EvaluationReport {
         s.put("outputHash", spec.manifestOutputHash);
         s.put("notes", notes);
         return s;
-    }
-
-    /** The share of skipped units in a split above which the summary notes it. */
-    static final double SKIP_SHARE_NOTE = 0.01;
-
-    private static String percent(final long part, final long whole) {
-        return String.format(java.util.Locale.ROOT, "%.1f%%", 100d * part / whole);
     }
 
     /** Whether a calibration fit is estimated on the split or the slice discovery reads it. */

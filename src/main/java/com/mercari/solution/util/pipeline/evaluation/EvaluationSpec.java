@@ -364,6 +364,11 @@ public final class EvaluationSpec implements Serializable {
         return Family.GROUPED_MULTINOMIAL.equals(family());
     }
 
+    /** Number of blend coefficients: [a, b] for the grouped family, [a, b, intercept] for binomial ({@link #BLEND_COEFFICIENTS} order). */
+    public int blendK() {
+        return isGrouped() ? 2 : 3;
+    }
+
     public boolean hasBaseline() {
         return baselineField != null;
     }
@@ -532,7 +537,7 @@ public final class EvaluationSpec implements Serializable {
         // predictions
         final JsonElement predictions = p.get("predictions");
         if (predictions == null || predictions.isJsonNull()) {
-            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset, offsetScale, temperature}, each with an optional invalid: skipUnit | dropRow)");
+            errors.add("predictions is required (a list of prediction sets: {name, prob} or {name, field, form} or {name, score, offset: <field> | {field, form}, temperature}, each with an optional invalid: skipUnit | dropRow)");
         } else if (!predictions.isJsonArray()) {
             errors.add("predictions must be a list of prediction sets");
         } else {
@@ -568,11 +573,14 @@ public final class EvaluationSpec implements Serializable {
                         if (form != null) d.offsetForm = form;
                         if (d.offsetField == null) errors.add(at + ".offset.field is required");
                         if (!OFFSET_FORMS.contains(d.offsetForm)) errors.add(at + ".offset.form '" + d.offsetForm + "' is not valid (available: " + OFFSET_FORMS + ")");
-                        if (o.has("offsetScale")) errors.add(at + ".offsetScale applies to a field-name offset; an offset object carries its form");
+                        for (final String key : oo.keySet()) {
+                            if (!"field".equals(key) && !"form".equals(key)) errors.add(at + ".offset." + key + " is unknown (an offset is {field, form}; invalid is declared on the prediction set)");
+                        }
+                        if (declared(o, "offsetScale")) errors.add(at + ".offsetScale applies to a field-name offset; an offset object carries its form");
                     } else {
                         errors.add(at + ".offset must be a field name or an object {field, form}");
                     }
-                } else if (o.has("offsetScale")) {
+                } else if (declared(o, "offsetScale")) {
                     errors.add(at + ".offsetScale needs an offset");
                 }
                 final String invalid = string(o, "invalid");
@@ -592,7 +600,7 @@ public final class EvaluationSpec implements Serializable {
                 } else {
                     if (d.form == null) d.form = forms.get(0);
                     if (!forms.contains(d.form)) errors.add(at + ".form '" + d.form + "' is not valid for family " + s.family + " (available: " + forms + ")");
-                    if (o.has("temperature") || o.has("offset") || o.has("offsetScale")) errors.add(at + ": temperature / offset apply to a score set only");
+                    if (o.has("temperature") || o.has("offset") || declared(o, "offsetScale")) errors.add(at + ": temperature / offset apply to a score set only");
                 }
                 s.predictions.add(d);
             }
@@ -1096,7 +1104,7 @@ public final class EvaluationSpec implements Serializable {
             }
             if (!f.isTemperature()) {
                 if (f.fixes("intercept") && isGrouped()) errors.add(at + ".fix.intercept: the grouped blend has no intercept (a per-group constant does not change a softmax)");
-                final int coefficients = isGrouped() ? 2 : 3;
+                final int coefficients = blendK();
                 int fixed = 0;
                 for (int c = 0; c < coefficients; c++) if (f.fixes(BLEND_COEFFICIENTS.get(c))) fixed++;
                 if (fixed == coefficients) errors.add(at + ".fix holds every coefficient: nothing to estimate (declare the combination as a score set instead)");

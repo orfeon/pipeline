@@ -161,6 +161,10 @@ public class EvaluationScorerTest {
         final EvaluationScorer.Unit emptied = scorer.prepare(List.of(row("test", "g3", 1, 0.5, null, 2.0, 1.0, 0.5)), "g3");
         Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, emptied.skip);
         Assertions.assertEquals(1, emptied.dropped);
+        // a +∞ prob-scale offset is dropped as well: kept, it would turn the whole unit's softmax into NaN
+        final EvaluationScorer.Unit infinite = scorer.prepare(List.of(row("test", "g4", 1, 0.5, null, 0.6, 1.0, 0.5), row("test", "g4", 0, 0.5, null, 0.4, 0.0, Double.POSITIVE_INFINITY)), "g4");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, infinite.skip);
+        Assertions.assertEquals(1, infinite.dropped);
         final Map<String, MetricAccumulator> acc = new HashMap<>();
         scorer.accumulate(u, scorer.score(u), acc);
         scorer.skipped(skippedUnit, acc);
@@ -177,7 +181,7 @@ public class EvaluationScorerTest {
         plainScorer.accumulate(ok, plainScorer.score(ok), plainAcc);
         plainScorer.skipped(plainScorer.prepare(List.of(row("test", "g2", 1, 2, null, 0.6), row("test", "g2", 0, 0, null, 0.4)), "g2"), plainAcc);
         final String notes = EvaluationReport.build(plain, plainAcc).summary().get("notes").toString();
-        Assertions.assertTrue(notes.contains("split test: 1 of 2 units skipped (50.0%: invalid baseline 1, invalid prediction 0, no positive label 0); a null or non-positive value under form inverseShare / rate skips the whole unit: declare invalid: dropRow"), notes);
+        Assertions.assertTrue(notes.contains("split test: 1 of 2 units skipped (50.0%: invalid baseline 1, invalid prediction 0, no positive label 0); an invalid value (a null, or a 0 / negative one under form inverseShare) skips the whole unit: declare invalid: dropRow"), notes);
         Assertions.assertFalse(notes.contains("rows dropped"), notes);
         // below the share: no note
         final Map<String, MetricAccumulator> quiet = new HashMap<>();
@@ -545,6 +549,26 @@ public class EvaluationScorerTest {
         final EvaluationScorer.Unit kept = new EvaluationScorer(drop).prepare(List.of(row("valid", "g4", 1, 0.5, null, 1.0, 2), row("valid", "g4", 0, 0.5, null, 0.0, 0)), "g4");
         Assertions.assertEquals(EvaluationScorer.Skip.NONE, kept.skip);
         Assertions.assertEquals(1, kept.dropped);
+        // an infinite odds is invalid (the baseline's rule), never a row of mass 0 whose −∞ fit input would poison the blend
+        Assertions.assertEquals(EvaluationScorer.Skip.INVALID_PREDICTION, scorer.prepare(List.of(
+                row("valid", "g5", 1, 0.5, null, 1.0, 2, 1.0, 0.5, 1.0, 0), row("valid", "g5", 0, 0.5, null, 0.0, Double.POSITIVE_INFINITY, 0.0, 0.5, 0.0, 0)), "g5").skip);
+        final EvaluationScorer.Unit droppedInf = new EvaluationScorer(drop).prepare(List.of(row("valid", "g6", 1, 0.5, null, 1.0, 2), row("valid", "g6", 0, 0.5, null, 0.0, Double.POSITIVE_INFINITY)), "g6");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, droppedInf.skip);
+        Assertions.assertEquals(1, droppedInf.dropped);
+        // the drop rule agrees with the softmax on a +∞ prob offset: the row leaves instead of the unit being skipped
+        final EvaluationSpec dropProb = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: P, score: s, offset: qa, invalid: dropRow}], " + SPLITS + ", bootstrap: false}");
+        final EvaluationScorer.Unit keptProb = new EvaluationScorer(dropProb).prepare(List.of(row("valid", "g7", 1, 0.5, null, 1.0, 0.5), row("valid", "g7", 0, 0.5, null, 0.0, Double.POSITIVE_INFINITY)), "g7");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, keptProb.skip);
+        Assertions.assertEquals(1, keptProb.dropped);
+        // a −∞ logProb offset is a row of mass 0: it enters the fit at the log floor, so a free blend's evaluation stays finite
+        final EvaluationSpec logProb = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: L, score: s, offset: {field: qb, form: logProb}}], "
+                + SPLITS + ", bootstrap: false, calibration: [{type: blend, fitOn: valid}]}");
+        final EvaluationScorer logScorer = new EvaluationScorer(logProb);
+        final EvaluationScorer.Unit zero = logScorer.prepare(List.of(row("valid", "g8", 1, 0.5, null, 1.0, Math.log(0.5)), row("valid", "g8", 0, 0.5, null, 0.0, Double.NEGATIVE_INFINITY)), "g8");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, zero.skip);
+        Assertions.assertEquals(0d, zero.means[1][1], 0d);
+        Assertions.assertEquals(Math.log(EvaluationScorer.LOG_FLOOR), logScorer.fitInputs(zero, 0)[1][1], 1e-12);
+        for (final double v : logScorer.blendEvaluate(zero, 0, 0, logScorer.blendStart(0, 0))) Assertions.assertTrue(Double.isFinite(v), "blend evaluation " + v);
     }
 
     @Test

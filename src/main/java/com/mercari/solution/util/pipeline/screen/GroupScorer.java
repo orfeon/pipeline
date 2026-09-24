@@ -28,12 +28,15 @@ public final class GroupScorer implements Serializable {
     private final int nCandidates;
     private final int nColumns;
     private final int shuffleRef;
+    /** {@code baseline.invalid: dropRow}: the invalid rows leave their unit before it is prepared */
+    private final boolean dropsRows;
 
     public GroupScorer(final ScreenSpec spec) {
         this.spec = spec;
         this.nCandidates = spec.candidates.size();
         this.nColumns = spec.columnCount();
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
+        this.dropsRows = spec.baselineDropsRows();
     }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
@@ -47,7 +50,7 @@ public final class GroupScorer implements Serializable {
         public final double[] w;
         /** unit weight (the row mean) for the grouped family */
         public final double unitWeight;
-        /** rows removed before scoring by {@code baseline.invalid: dropRow} (not in {@link #rows}) */
+        /** rows removed before scoring by {@code baseline.invalid: dropRow} (not in {@link #rows}, except on a unit that lost every row: skipped, its rows are the dropped ones) */
         public final int dropped;
 
         Unit(final List<ScreenRow> rows, final String key, final Skip skip, final double[] p, final double[] y, final double[] w, final double unitWeight, final int dropped) {
@@ -79,7 +82,7 @@ public final class GroupScorer implements Serializable {
         sorted.sort(Comparator.comparingLong(ScreenRow::getTime).thenComparing(ScreenRow::getIdentity));
         final List<ScreenRow> rows;
         int dropped = 0;
-        if (spec.hasBaseline() && Baselines.INVALID_DROP_ROW.equals(spec.baselineInvalid)) {
+        if (dropsRows) {
             rows = new ArrayList<>(sorted.size());
             for (final ScreenRow r : sorted) {
                 if (Baselines.validRow(spec.baselineForm, r.baseline)) rows.add(r);
