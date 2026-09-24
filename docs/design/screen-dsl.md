@@ -146,8 +146,11 @@ column, or one whose spread is below 1e-6 of its magnitude; centre such a column
 
 A bare field name takes the family's default form; a form not valid for the family is an assembly error.
 Binomial probabilities are clamped to [ε, 1 − ε]. A unit whose baseline is invalid for its form (a negative
-probability, a non-positive rate, a share that does not sum) is skipped whole and counted (`nUnitsSkipped`),
-never partially scored.
+probability, a non-positive rate or `inverseShare` value — `prob` accepts 0, `inverseShare` / `rate` reject a
+null, 0 or negative value — a share that does not sum) is skipped whole and counted (`nUnitsSkipped`,
+`nUnitsSkippedInvalidBaseline`), never partially scored. `baseline.invalid: dropRow` drops the invalid rows
+instead and scores the unit on the rest (`nRowsDropped`): for a withdrawal whose row should not exist, not for
+a value missing by accident. A skipped share above 1% is noted with the reasons.
 
 ## 5. Placebo calibration
 
@@ -303,7 +306,8 @@ conditioning or `output.selection`; an unreadable or malformed manifest; streami
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
 negative weight → `nRowsInvalid`; a null time → the failure output. Unit skips: no positive label
-(grouped), an invalid baseline → `nUnitsSkipped` (in the family's unit).
+(grouped), an invalid baseline → `nUnitsSkipped` (in the family's unit; the invalid-baseline part in
+`nUnitsSkippedInvalidBaseline`); rows `baseline.invalid: dropRow` removed → `nRowsDropped`.
 
 ## 11. Limits
 

@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.feature.FeatureLineage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 
@@ -55,6 +56,8 @@ public final class ScreenSpec implements Serializable {
     public boolean normalizeTies = true;
     public String baselineField;
     public String baselineForm;
+    /** what an invalid baseline value does to the unit: skip it whole (default) or drop the row */
+    public String baselineInvalid = Baselines.INVALID_SKIP_UNIT;
     public String timeField;
     public String timeFieldType;
     public String timeTo;
@@ -238,8 +241,11 @@ public final class ScreenSpec implements Serializable {
                 if (s.baselineForm == null) s.baselineForm = forms.get(0);
                 if (s.baselineField == null) errors.add("baseline.field is required when baseline is declared");
                 if (!forms.contains(s.baselineForm)) errors.add("baseline.form '" + s.baselineForm + "' is not valid for family " + s.family + " (available: " + forms + ")");
+                final String invalid = string(o, "invalid");
+                if (invalid != null) s.baselineInvalid = invalid;
+                if (!Baselines.INVALIDS.contains(s.baselineInvalid)) errors.add("baseline.invalid '" + s.baselineInvalid + "' is unknown (available: " + Baselines.INVALIDS + ")");
             } else {
-                errors.add("baseline must be a field name or an object {field, form}");
+                errors.add("baseline must be a field name or an object {field, form, invalid}");
             }
         }
 

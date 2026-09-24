@@ -37,7 +37,7 @@ import java.util.SplittableRandom;
  */
 public final class MetricAccumulator implements Serializable {
 
-    public static final int SLOTS = 9;
+    public static final int SLOTS = 10;
     public static final int N_UNITS = 0, N_ROWS = 1, W = 2, WY = 3, LOG = 4, LOG_BASE = 5, HIT = 6, BRIER = 7, UTILITY = 8;
     /** replicate layout: the seven weighted sums W .. UTILITY */
     public static final int BOOT_SLOTS = 7;
@@ -52,6 +52,8 @@ public final class MetricAccumulator implements Serializable {
     public static final String SLICE_VARIES_KEY_PREFIX = SEP + "sliceVaries" + SEP;
     public static final String DIMENSION_VARIES_KEY_PREFIX = SEP + "dimensionVaries" + SEP;
     public static final int ROWS_IN = 0, ROWS_INVALID = 1, ROWS_UNASSIGNED = 2, UNITS_SKIPPED = 3, UNITS = 4, ROWS = 5, ROWS_DUPLICATE = 6;
+    /** skipped units by reason (the rest of UNITS_SKIPPED had no positive label); rows a column with {@code invalid: dropRow} removed */
+    public static final int UNITS_SKIPPED_BASELINE = 7, UNITS_SKIPPED_PREDICTION = 8, ROWS_DROPPED = 9;
 
     final double[] total = new double[SLOTS];
     double[] boot;

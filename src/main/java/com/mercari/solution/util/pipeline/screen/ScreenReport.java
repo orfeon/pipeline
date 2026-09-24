@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.MatrixOps;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 
@@ -162,6 +163,9 @@ public final class ScreenReport {
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
      */
+    /** The share of skipped units above which the summary notes it. */
+    static final double SKIP_SHARE_NOTE = 0.01;
+
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                final Map<Integer, double[]> partials, final FitState fit) {
         final ScoreAccumulator book = accumulators.getOrDefault(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator());
@@ -185,6 +189,16 @@ public final class ScreenReport {
         } else if (fitted && !conditioned) {
             notes.add("conditioning: the gaussian residual variance at the fitted model is " + sigma2 + " (an exact fit or no weighted row); partial statistics are null and passed / threshold / qValue follow the marginal test");
         }
+        // skipped units past the share worth a look: which reason, and the way out of an invalid-baseline skip
+        final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
+        final long skippedBaseline = (long) b[ScoreAccumulator.UNITS_SKIPPED_BASELINE];
+        final long dropped = (long) b[ScoreAccumulator.ROWS_DROPPED];
+        if (skipped > 0 && skipped > SKIP_SHARE_NOTE * (nUnits + skipped)) {
+            notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + String.format(java.util.Locale.ROOT, "%.1f%%", 100d * skipped / (nUnits + skipped))
+                    + ": invalid baseline " + skippedBaseline + ", no positive label " + (skipped - skippedBaseline) + ")"
+                    + (skippedBaseline > 0 && !Baselines.INVALID_DROP_ROW.equals(spec.baselineInvalid) ? "; a null or non-positive value under form inverseShare / rate skips the whole unit: declare baseline.invalid: dropRow to score its remaining rows" : ""));
+        }
+        if (dropped > 0) notes.add(dropped + " rows dropped (baseline.invalid: dropRow); their units were scored on the remaining rows");
 
         // statistics per key
         final List<Map<String, Object>> records = new ArrayList<>();
@@ -324,7 +338,9 @@ public final class ScreenReport {
         summary.put("nRowsInvalid", (long) b[ScoreAccumulator.ROWS_INVALID]);
         summary.put("nRowsScored", (long) b[ScoreAccumulator.ROWS_SCORED]);
         summary.put("nUnits", (long) nUnits);
-        summary.put("nUnitsSkipped", (long) b[ScoreAccumulator.UNITS_SKIPPED]);
+        summary.put("nUnitsSkipped", skipped);
+        summary.put("nUnitsSkippedInvalidBaseline", skippedBaseline);
+        summary.put("nRowsDropped", dropped);
         summary.put("nCandidates", (long) spec.candidates.size());
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
@@ -475,6 +491,8 @@ public final class ScreenReport {
                 .withField("nRowsScored", Schema.FieldType.INT64)
                 .withField("nUnits", Schema.FieldType.INT64)
                 .withField("nUnitsSkipped", Schema.FieldType.INT64)
+                .withField("nUnitsSkippedInvalidBaseline", Schema.FieldType.INT64)
+                .withField("nRowsDropped", Schema.FieldType.INT64)
                 .withField("nCandidates", Schema.FieldType.INT64)
                 .withField("nTransforms", Schema.FieldType.INT64)
                 .withField("nScored", Schema.FieldType.INT64)
@@ -508,7 +526,7 @@ public final class ScreenReport {
         parts.add("family=" + spec.family);
         if (spec.group != null) parts.add("group=" + spec.group);
         parts.add("label=" + (spec.labelExpr != null ? "expr(" + spec.labelExpr + ")" : spec.labelField));
-        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm : "prior"));
+        parts.add("baseline=" + (spec.hasBaseline() ? spec.baselineField + ":" + spec.baselineForm + (Baselines.INVALID_DROP_ROW.equals(spec.baselineInvalid) ? "[dropRow]" : "") : "prior"));
         if (spec.timeField != null) parts.add("time=" + spec.timeField + (spec.timeFrom != null ? " from " + spec.timeFrom : "") + (spec.timeTo != null ? " to " + spec.timeTo : ""));
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);

@@ -119,7 +119,7 @@ Conditioning needs the global window (no `strategy` window) and, like every scre
 |---|---|
 | `group` (optional) | mutually exclusive samples of one unit (a query's candidates, a session's listings, a lot's bids). Required for `groupedMultinomial`. Omitted: every row is independent. |
 | `label` | the label field, or an expression over numeric fields (`{expr: "rank == 1 ? 1 : 0"}`). Several positives in a group are normalised (`normalizeTies: true`). |
-| `baseline` (optional) | the reference prediction. `groupedMultinomial` / `binomial`: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). `gaussian`: `form: value` (the predicted value). `poisson`: `form: rate` or `logRate`. Omitted: the prior (uniform share / prior rate / label mean). |
+| `baseline` (optional) | the reference prediction. `groupedMultinomial` / `binomial`: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). `gaussian`: `form: value` (the predicted value). `poisson`: `form: rate` or `logRate`. `invalid`: what an invalid value does to its unit — `skipUnit` (default: the unit is skipped whole) or `dropRow` (the row leaves the unit and the shares are taken over the rest; for a withdrawn candidate whose row should not exist). `prob` accepts 0, `inverseShare` / `rate` reject a null, 0 or negative value. Omitted: the prior (uniform share / prior rate / label mean). |
 | `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used (set the source's `timestampAttribute`; bounded sources otherwise carry the minimum timestamp, so `to` / `from` require `field`). |
 | `weight` (optional) | a sample-weight field. |
 | candidates | numeric input fields (`int32` / `int64` / `float32` / `float64` / `bool`) selected by name globs or lineage selectors; role fields are never candidates. |
@@ -162,7 +162,7 @@ is an assembly error.
 | family | optional | String | `groupedMultinomial` (default), `binomial`, `gaussian` or `poisson`. The row families (`binomial` / `gaussian` / `poisson`) accept `group` for the within-group transforms and shuffles; `groupedMultinomial` requires it. A negative label is an invalid row for `poisson`. |
 | group | optional | String | Group key field. Required for `groupedMultinomial`. |
 | label | required | String or Object | Field name, or `{field}` / `{expr, normalizeTies}`. `expr` is a [Lucene expression](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) over numeric fields; `normalizeTies` (default true) normalises the labels of a group to sum 1. |
-| baseline | optional | String or Object | Field name (the family's default form), or `{field, form}`: `prob` / `logProb` / `inverseShare` (groupedMultinomial, binomial), `value` (gaussian), `rate` / `logRate` (poisson). |
+| baseline | optional | String or Object | Field name (the family's default form), or `{field, form, invalid}`: `prob` / `logProb` / `inverseShare` (groupedMultinomial, binomial), `value` (gaussian), `rate` / `logRate` (poisson); `invalid`: `skipUnit` (default) / `dropRow`. |
 | time | optional | String or Object | Field name, or `{field, to, from}` with ISO-8601 instants. Rows after `to` / before `from` are not screened. |
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
 | rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
@@ -206,14 +206,14 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
-`nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nCandidates`,
+`nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
 `maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `test` (the statistic
 that decided `passed` / `threshold`: `partial` when a conditioning fit accepted a point, else `marginal`), `passedColumns` (candidate
 names with a passing transform, best gain first — the list to feed back into the feature transform's
 `output.include`), `conditioningFields`, `conditioningK`, `conditioningIterations`, `conditioningRejectedSteps`,
 `conditioningConverged`, `conditioningGain`, `conditioningL2` (null without conditioning), `notes` (role defaults
-applied, columns excluded by lineage).
+applied, columns excluded by lineage, a skipped share of units above 1% with its reasons, dropped rows).
 
 ## Examples
 
