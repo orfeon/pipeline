@@ -89,6 +89,12 @@ public final class ScreenSpec implements Serializable {
     /** conditioning.missing: how a missing conditioning value enters F̃ ({@link #MISSING_MEAN} / {@link #MISSING_GROUP_MEAN}) */
     public String conditioningMissing = MISSING_MEAN;
 
+    /**
+     * pass.minPeriodsAgree: how many of the usable period buckets of the effective test must agree with its overall
+     * sign for {@code passed} — a share in (0, 1] or a count above 1 (null = the placebo cut alone)
+     */
+    public Double minPeriodsAgree;
+
     /** output.selection: URI / path of the pass-list file (null = not written) */
     public String selectionUri;
     /** SHA-256 (16 hex, the feature plan hash width) of the canonical parameters without the file locations (output, candidates.manifest): the identity of this screen configuration */
@@ -200,6 +206,19 @@ public final class ScreenSpec implements Serializable {
     public int key(final int column, final int transform) {
         return column * transforms.size() + transform;
     }
+
+    /**
+     * Whether {@code agree} of {@code nPeriods} usable periods satisfy {@code pass.minPeriodsAgree}: always when
+     * it is not declared; otherwise a share (≤ 1) of the usable periods or a count (> 1), and never with no
+     * usable period.
+     */
+    public boolean periodsAgree(final long agree, final long nPeriods) {
+        if (minPeriodsAgree == null) return true;
+        if (nPeriods <= 0) return false;
+        final double required = minPeriodsAgree <= 1 ? minPeriodsAgree * nPeriods - 1e-9 : minPeriodsAgree;
+        return agree >= required;
+    }
+
 
     // ---- parsing -------------------------------------------------------------------------------------------
 
@@ -381,6 +400,20 @@ public final class ScreenSpec implements Serializable {
                 if (s.conditioningPatterns.isEmpty()) errors.add("conditioning must list at least one field (names or globs of the conditioning columns)");
             } else {
                 errors.add("conditioning must be an object {fields, l2, maxIter, tol, missing} or a list of field names");
+            }
+        }
+        final JsonElement pass = p.get("pass");
+        if (pass != null && !pass.isJsonNull()) {
+            if (pass.isJsonObject()) {
+                final JsonObject o = pass.getAsJsonObject();
+                s.minPeriodsAgree = number(o, "minPeriodsAgree");
+                if (s.minPeriodsAgree != null) {
+                    if (!(s.minPeriodsAgree > 0)) errors.add("pass.minPeriodsAgree must be > 0 (a share of the usable periods up to 1, or a count above 1)");
+                    else if (s.minPeriodsAgree > 1 && s.minPeriodsAgree != Math.rint(s.minPeriodsAgree)) errors.add("pass.minPeriodsAgree above 1 is a count of periods and must be an integer");
+                    if (s.periodsBucket == null) errors.add("pass.minPeriodsAgree needs periods (the sign agreement is read per period bucket)");
+                }
+            } else {
+                errors.add("pass must be an object {minPeriodsAgree}");
             }
         }
         final JsonElement output = p.get("output");

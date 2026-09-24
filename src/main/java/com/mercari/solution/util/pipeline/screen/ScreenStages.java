@@ -120,7 +120,7 @@ public final class ScreenStages {
 
         // conditioning: moments → unrolled Newton passes → partial pass (all global-window Combines)
         PCollectionView<FitState> fitView = null;
-        PCollectionView<Map<Integer, VectorAccumulator>> partialView = null;
+        PCollectionView<Map<Integer, PartialAccumulator>> partialView = null;
         final List<PCollectionView<?>> finalizeSideInputs = new ArrayList<>();
         if (spec.hasConditioning()) {
             final ConditioningScorer scorer = new ConditioningScorer(spec);
@@ -154,8 +154,8 @@ public final class ScreenStages {
             fitView = state;
             partialView = units
                     .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView)).withSideInputs(momentsView, fitView))
-                    .setCoder(KvCoder.of(VarIntCoder.of(), VectorAccumulator.CODER))
-                    .apply("ConditioningPartial_Combine", Combine.perKey(new VectorAccumulator.Fn()))
+                    .setCoder(KvCoder.of(VarIntCoder.of(), PartialAccumulator.CODER))
+                    .apply("ConditioningPartial_Combine", Combine.perKey(new PartialAccumulator.Fn()))
                     .apply("ConditioningPartial_View", View.asMap());
             finalizeSideInputs.add(fitView);
             finalizeSideInputs.add(partialView);
@@ -511,14 +511,14 @@ public final class ScreenStages {
         }
     }
 
-    /** The partial-test sums per (column, transform) at the fitted model, bundle-local like the score pass. */
-    static class PartialPassDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, VectorAccumulator>> {
+    /** The partial-test sums per (column, transform) at the fitted model (per period too), bundle-local like the score pass. */
+    static class PartialPassDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, PartialAccumulator>> {
         private final ScreenSpec spec;
         private final PCollectionView<VectorAccumulator> momentsView;
         private final PCollectionView<FitState> stateView;
         private transient GroupScorer groups;
         private transient ConditioningScorer scorer;
-        private transient Map<Integer, double[]> partial;
+        private transient Map<Integer, PartialAccumulator> partial;
 
         PartialPassDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView, final PCollectionView<FitState> stateView) {
             this.spec = spec;
@@ -552,8 +552,8 @@ public final class ScreenStages {
 
         @FinishBundle
         public void finishBundle(final FinishBundleContext c) {
-            for (final Map.Entry<Integer, double[]> e : partial.entrySet()) {
-                c.output(KV.of(e.getKey(), new VectorAccumulator(e.getValue())), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            for (final Map.Entry<Integer, PartialAccumulator> e : partial.entrySet()) {
+                c.output(KV.of(e.getKey(), e.getValue()), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
             }
             partial = new HashMap<>();
         }
@@ -565,10 +565,10 @@ public final class ScreenStages {
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
         private final PCollectionView<FitState> fitView;
-        private final PCollectionView<Map<Integer, VectorAccumulator>> partialView;
+        private final PCollectionView<Map<Integer, PartialAccumulator>> partialView;
 
         FinalizeDoFn(final ScreenSpec spec, final TupleTag<MElement> recordTag, final TupleTag<MElement> summaryTag,
-                     final PCollectionView<FitState> fitView, final PCollectionView<Map<Integer, VectorAccumulator>> partialView) {
+                     final PCollectionView<FitState> fitView, final PCollectionView<Map<Integer, PartialAccumulator>> partialView) {
             this.spec = spec;
             this.recordTag = recordTag;
             this.summaryTag = summaryTag;
@@ -583,14 +583,11 @@ public final class ScreenStages {
                 accumulators.merge(kv.getKey(), kv.getValue(), ScoreAccumulator::merge);
             }
             FitState fit = null;
-            Map<Integer, double[]> partials = null;
+            Map<Integer, PartialAccumulator> partials = null;
             if (fitView != null) {
                 fit = c.sideInput(fitView);
-                partials = new HashMap<>();
-                // Combine.perKey in the global window: exactly one vector per key
-                for (final Map.Entry<Integer, VectorAccumulator> e : c.sideInput(partialView).entrySet()) {
-                    partials.put(e.getKey(), e.getValue().getValues());
-                }
+                // Combine.perKey in the global window: exactly one accumulator per key
+                partials = new HashMap<>(c.sideInput(partialView));
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit);
             for (final Map<String, Object> record : result.records()) {

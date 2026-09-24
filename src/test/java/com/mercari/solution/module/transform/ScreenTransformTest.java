@@ -91,9 +91,13 @@ public class ScreenTransformTest {
                 final Random labels = new Random(seed * 1_000_003L + s * 131L + i);
                 final double value = 2 * extra[i] + labels.nextGaussian();
                 final long bids = Math.round(Math.exp(0.8 * extra[i] + 0.3 * labels.nextGaussian()));
+                // a suppressor: the extra signal minus the share of f_known that cancels its marginal covariance with
+                // the outcome (2/3 = 1.0 / 1.5), so the marginal test sees ~nothing and the partial test given f_known
+                // sees the extra signal (deterministic in the existing draws: the other tests' data is unchanged)
+                final double suppressor = extra[i] - known[i] * 2d / 3;
                 sb.append(String.format(Locale.ROOT,
-                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, f_noise: %.6f, start_price: %.2f, p_model: %.6f, sold: %d, v_price: %.6f, n_bids: %d, session_time: \"%s\"}\n",
-                        s, s, i, known[i], extra[i], noise[i], price[i], base[i], i == winner ? 1 : 0, value, bids, time));
+                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, f_noise: %.6f, s_supp: %.6f, start_price: %.2f, p_model: %.6f, sold: %d, v_price: %.6f, n_bids: %d, session_time: \"%s\"}\n",
+                        s, s, i, known[i], extra[i], noise[i], suppressor, price[i], base[i], i == winner ? 1 : 0, value, bids, time));
             }
         }
         sb.append("""
@@ -104,6 +108,7 @@ public class ScreenTransformTest {
                           - {name: f_known, type: float64}
                           - {name: f_extra, type: float64}
                           - {name: f_noise, type: float64}
+                          - {name: s_supp, type: float64}
                           - {name: start_price, type: float64}
                           - {name: p_model, type: float64}
                           - {name: sold, type: int32}
@@ -225,7 +230,7 @@ public class ScreenTransformTest {
                       family: binomial
                       label: {expr: "sold > 0 ? 1 : 0"}
                       time: {field: session_time, to: "2024-06-30T23:59:59Z"}
-                      candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids"]}
+                      candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids", "s_supp"]}
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
@@ -358,6 +363,62 @@ public class ScreenTransformTest {
             final List<?> passed = (List<?>) summary.getPrimitiveValue("passedColumns");
             Assertions.assertTrue(passed.contains("f_extra"), "passedColumns: " + passed);
             Assertions.assertFalse(passed.contains("f_known"), "passedColumns: " + passed);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testPartialPeriodsAndMinPeriodsAgree() throws Exception {
+        // a suppressor column: marginally ~0 (its period signs are noise), given f_known a strong positive effect in
+        // every month. The period agreement of the effective (partial) test is the one pass.minPeriodsAgree reads
+        final String config = sessionsConfig(100, 8, 42) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      time: {field: session_time}
+                      candidates: {include: [s_supp, f_noise]}
+                      transforms: [raw]
+                      periods: month
+                      placebo: {noise: 30, seed: 3}
+                      conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
+                      pass: {minPeriodsAgree: 1.0}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            Assertions.assertEquals(2 + 30, records.size());
+            final MElement supp = records.get("s_supp:raw");
+            final MElement noise = records.get("f_noise:raw");
+            // marginal: nothing to see; partial: the extra signal
+            Assertions.assertTrue(Math.abs(supp.getAsDouble("z")) < 2.5, "marginal z of s_supp: " + supp.getAsDouble("z"));
+            Assertions.assertTrue(supp.getAsDouble("partial_z") > 5, "partial z of s_supp: " + supp.getAsDouble("partial_z"));
+            // seven months (100 sessions two days apart from 2024-01-01); the partial sign agrees in every one of them
+            final long nPeriods = supp.getAsLong("partial_n_periods");
+            Assertions.assertEquals(7L, nPeriods);
+            Assertions.assertEquals(nPeriods, supp.getAsLong("n_periods"));
+            Assertions.assertEquals(nPeriods, supp.getAsLong("partial_periods_agree"), "partial_period_z: " + supp.getPrimitiveValue("partial_period_z"));
+            // the marginal signs are noise: fewer agree than the partial ones
+            Assertions.assertTrue(supp.getAsLong("periods_agree") < nPeriods, "periods_agree: " + supp.getAsLong("periods_agree") + " period_z: " + supp.getPrimitiveValue("period_z"));
+            final List<?> periods = (List<?>) supp.getPrimitiveValue("partial_period_z");
+            Assertions.assertEquals(7, periods.size());
+            Assertions.assertEquals(Boolean.TRUE, supp.getPrimitiveValue("passed"));
+            Assertions.assertEquals(Boolean.FALSE, noise.getPrimitiveValue("passed"));
+            // placebo columns carry the partial period statistics too
+            Assertions.assertEquals(7, ((List<?>) records.get("__noise_0:raw").getPrimitiveValue("partial_period_z")).size());
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals("partial", summary.getAsString("test"));
+            Assertions.assertEquals("partial_gain > threshold and partial_periods_agree >= 1.0 * partial_n_periods", summary.getAsString("passRule"));
+            Assertions.assertEquals(1.0, summary.getAsDouble("minPeriodsAgree"));
+            Assertions.assertEquals(List.of("s_supp"), summary.getPrimitiveValue("passedColumns"));
             return null;
         });
         pipeline.run();

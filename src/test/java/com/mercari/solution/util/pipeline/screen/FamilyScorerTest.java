@@ -193,7 +193,7 @@ public class FamilyScorerTest {
             state.advance(eval.getValues(), 0d, 1e-10);
         }
         Assertions.assertTrue(state.hasBest);
-        final Map<Integer, double[]> partials = new HashMap<>();
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
         final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
         for (int i = 0; i < data.length; i++) {
             final List<ScreenRow> rows = List.of(row(i, data[i][0], Double.NaN, data[i][1], data[i][1]));
@@ -201,7 +201,7 @@ public class FamilyScorerTest {
             scorer.partial(unit, groups.columns(unit), state.bestTheta, moments, partials);
             groups.score(rows, "r" + i, marginal);
         }
-        final double[] sig = partials.get(ConditioningScorer.SIGMA_KEY);
+        final double[] sig = partials.get(ConditioningScorer.SIGMA_KEY).getTotal();
         Assertions.assertNotNull(sig);
         Assertions.assertTrue(sig[0] > 0 && sig[1] == 5);
         final ScreenReport.Result result = ScreenReport.build(s, marginal, partials, state);

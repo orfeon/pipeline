@@ -6,6 +6,9 @@ import com.mercari.solution.util.pipeline.glm.GlmFit;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -37,12 +40,43 @@ public final class ConditioningScorer implements Serializable {
 
     /** @param offset position of the first conditioning column in {@link ScreenRow#x} (0 for the projected rows of the fit passes) */
     public ConditioningScorer(final ScreenSpec spec, final int offset) {
+        this(spec, offset, null);
+    }
+
+    /**
+     * @param periodGram whether the partial pass carries the fitted model's Gram matrix per period (exact per-period
+     *                   partial information); null = {@code k ≤ PERIOD_GRAM_MAX_K}
+     */
+    ConditioningScorer(final ScreenSpec spec, final int offset, final Boolean periodGram) {
         this.spec = spec;
         this.kF = spec.conditioningFields.size();
         this.intercept = !spec.isGroupedMultinomial();
         this.groupMeanFill = ScreenSpec.MISSING_GROUP_MEAN.equals(spec.conditioningMissing);
         this.k = kF + (intercept ? 1 : 0);
         this.offset = offset;
+        this.periodGram = periodGram != null ? periodGram : k <= PERIOD_GRAM_MAX_K;
+    }
+
+    /**
+     * Key of the fitted model's sums per period in the partial-pass map (never a column key): {@code [n, g(k), G(k*k)]}
+     * — the unit mass, gradient and Gram matrix at θ̂, whose period slices decompose the fit's {@code bestGrad} /
+     * {@code bestG} — or {@code [n, g(k)]} without the Gram (see {@link #PERIOD_GRAM_MAX_K}).
+     */
+    public static final int FIT_PERIOD_KEY = -3;
+
+    /**
+     * Conditioning size up to which the per-period Gram matrices are carried (periods × k² doubles in one accumulator).
+     * Beyond it the report scales the window's γ'Gγ by the period's share of the unit mass instead: the per-period
+     * partial score S⊥_p stays exact (it needs the gradient only), the per-period information is approximate.
+     */
+    public static final int PERIOD_GRAM_MAX_K = 100;
+
+    /** whether the partial pass carries the per-period Gram matrices (see {@link #PERIOD_GRAM_MAX_K}) */
+    private final boolean periodGram;
+
+    /** Length of the {@link #FIT_PERIOD_KEY} vector: {@code 1 + k} plus {@code k²} with the Gram. */
+    public int fitPeriodLength() {
+        return 1 + k + (periodGram ? k * k : 0);
     }
 
     /**
@@ -168,31 +202,35 @@ public final class ConditioningScorer implements Serializable {
     /**
      * Adds, for every column x transform, the sums at the fitted p̂: s = x̃'(ỹ − p̂), b = x̃'W x̃, a = F̃'W x̃ with the
      * Fisher metric W (grouped: block diagonal diag(p̂) − p̂p̂' with x̃ centred by p̂ within the unit; binomial:
-     * diag(p̂(1 − p̂)), the intercept column of F̃ doing the centring).
+     * diag(p̂(1 − p̂)), the intercept column of F̃ doing the centring). With {@code periods} the same sums go to the
+     * unit's period (grouped) or each row's period (row families), and the fitted model's own sums at θ̂ —
+     * {@code [n, g, G]} — go per period under {@link #FIT_PERIOD_KEY}, so the report can decompose the partial
+     * statistic by period with the window's orthogonalisation coefficients.
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
-                        final Map<Integer, double[]> into) {
+                        final Map<Integer, PartialAccumulator> into) {
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
         final int n = unit.size();
         final int nTransforms = spec.transforms.size();
-        final double[] pf = new double[k];
-        if (spec.isGroupedMultinomial()) {
-            for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
-        }
+        final boolean periods = spec.periodsBucket != null;
         if (spec.isGaussian()) {
             // residual variance at the fitted model: the report divides the partial S / H by it
-            final double[] sig = into.computeIfAbsent(SIGMA_KEY, key -> new double[partialLength()]);
+            final double[] sig = new double[partialLength()];
             for (int i = 0; i < n; i++) {
                 sig[0] += unit.w[i] * (unit.y[i] - p[i]) * (unit.y[i] - p[i]);
                 sig[1] += unit.w[i];
             }
+            into.computeIfAbsent(SIGMA_KEY, key -> new PartialAccumulator()).add(null, sig);
         }
-        for (int c = 0; c < cols.length; c++) {
-            for (int t = 0; t < nTransforms; t++) {
-                final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
-                final double[] acc = into.computeIfAbsent(spec.key(c, t), key -> new double[partialLength()]);
-                if (spec.isGroupedMultinomial()) {
+        if (spec.isGroupedMultinomial()) {
+            final String period = unit.period();
+            final double[] pf = new double[k];
+            for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
+            if (periods) into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).add(period, fitPeriodSums(unit, p, f, null));
+            for (int c = 0; c < cols.length; c++) {
+                for (int t = 0; t < nTransforms; t++) {
+                    final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
                     // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
                     final double pivot = GroupScorer.pivot(v);
                     double pm = 0, psum = 0;
@@ -213,11 +251,32 @@ public final class ConditioningScorer implements Serializable {
                         for (int j = 0; j < k; j++) a[j] += p[i] * xt * f[i][j];
                     }
                     final double w = unit.unitWeight;
-                    acc[0] += w * s;
-                    acc[1] += w * (b - px * px);
-                    for (int j = 0; j < k; j++) acc[2 + j] += w * (a[j] - px * pf[j]);
-                } else {
-                    for (int i = 0; i < n; i++) {
+                    final double[] acc = new double[partialLength()];
+                    acc[0] = w * s;
+                    acc[1] = w * (b - px * px);
+                    for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
+                    into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
+                }
+            }
+            return;
+        }
+        // row families: every row is its own period; the rows are bucketed once (one bucket without periods)
+        final Map<String, List<Integer>> buckets = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) buckets.computeIfAbsent(periods ? unit.rows.get(i).period : null, key -> new ArrayList<>()).add(i);
+        if (periods) {
+            final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
+            for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
+                fit.add(bucket.getKey(), fitPeriodSums(unit, p, f, buckets.size() == 1 ? null : bucket.getValue()));
+            }
+        }
+        for (int c = 0; c < cols.length; c++) {
+            for (int t = 0; t < nTransforms; t++) {
+                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
+                final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
+                final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
+                for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
+                    final double[] acc = new double[partialLength()];
+                    for (final int i : bucket.getValue()) {
                         if (!StatMath.isFinite(v[i])) continue;
                         final double w = unit.w[i];
                         final double vv = spec.fisherWeight(p[i]);
@@ -225,8 +284,55 @@ public final class ConditioningScorer implements Serializable {
                         acc[1] += w * vv * v[i] * v[i];
                         for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
                     }
+                    target.add(bucket.getKey(), acc);
                 }
             }
         }
+    }
+
+    /**
+     * The fitted model's {@code [n, g(k), G(k*k)?]} at θ̂ over {@code rows} of the unit (all rows when null; the
+     * grouped family always passes the whole unit): with the Gram, the pass evaluation itself ({@link GlmFit#evaluate},
+     * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
+     * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
+     */
+    private double[] fitPeriodSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final List<Integer> rows) {
+        final double[] y, mu, w;
+        final double[][] ff;
+        if (rows == null) {
+            y = unit.y;
+            mu = p;
+            w = unit.w;
+            ff = f;
+        } else {
+            final int size = rows.size();
+            y = new double[size];
+            mu = new double[size];
+            w = new double[size];
+            ff = new double[size][];
+            for (int r = 0; r < size; r++) {
+                final int i = rows.get(r);
+                y[r] = unit.y[i];
+                mu[r] = p[i];
+                w[r] = unit.w[i];
+                ff[r] = f[i];
+            }
+        }
+        final int m = ff.length;
+        final double[] out = new double[fitPeriodLength()];
+        if (periodGram) {
+            final double[] eval = GlmFit.evaluate(spec.family(), y, mu, w, unit.unitWeight, ff, k);
+            out[0] = eval[0];
+            System.arraycopy(eval, 2, out, 1, k + k * k);
+            return out;
+        }
+        final boolean grouped = spec.isGroupedMultinomial();
+        for (int r = 0; r < m; r++) {
+            final double wr = grouped ? unit.unitWeight : w[r];
+            if (!grouped) out[0] += wr;
+            for (int a = 0; a < k; a++) out[1 + a] += wr * (y[r] - mu[r]) * ff[r][a];
+        }
+        if (grouped) out[0] = unit.unitWeight;
+        return out;
     }
 }
