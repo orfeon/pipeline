@@ -1,7 +1,6 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
 import com.mercari.solution.util.domain.math.MatrixOps;
-import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
 import com.mercari.solution.util.pipeline.glm.FitState;
@@ -17,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.SplittableRandom;
 
 /**
  * The per-unit computations of the evaluation transform, pure and deterministic (design §4): {@link #prepare}
@@ -123,16 +121,22 @@ public final class EvaluationScorer implements Serializable {
         }
     }
 
-    /** The loss decomposition of one unit: per set (index 0 = the baseline). */
+    /**
+     * The loss decomposition of one unit: per set (index 0 = the baseline), plus the unit's utility — the flat
+     * return Σ u·y / n over its rows (y as declared; a null utility is a zero return), NaN without a utility
+     * field. The utility is a property of the outcomes, the same under every set.
+     */
     public static final class Metrics {
         public final double[] logScore;
         public final double[] hitAt1;
         public final double[] brier;
+        public final double utility;
 
-        Metrics(final double[] logScore, final double[] hitAt1, final double[] brier) {
+        Metrics(final double[] logScore, final double[] hitAt1, final double[] brier, final double utility) {
             this.logScore = logScore;
             this.hitAt1 = hitAt1;
             this.brier = brier;
+            this.utility = utility;
         }
     }
 
@@ -466,25 +470,18 @@ public final class EvaluationScorer implements Serializable {
             logScore[j] = logScore(q, unit);
             brier[j] = br;
         }
-        return new Metrics(logScore, hit, brier);
+        return new Metrics(logScore, hit, brier, utility(unit));
     }
 
-    /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key). */
-    public static double[] poissonWeights(final long seed, final String key, final int samples) {
-        final double[] w = new double[samples];
-        if (samples == 0) return w;
-        final SplittableRandom rng = FeatureValues.seededRandom(seed, key + SEP + "bootstrap");
-        final double limit = Math.exp(-1d);
-        for (int b = 0; b < samples; b++) {
-            int c = 0;
-            double p = 1d;
-            do {
-                c++;
-                p *= rng.nextDouble();
-            } while (p > limit);
-            w[b] = c - 1;
+    /** The unit's flat return Σ u·y / n over its rows (the label as declared; a null utility counts 0); NaN without a utility field. */
+    private double utility(final Unit unit) {
+        if (!spec.hasUtility()) return Double.NaN;
+        double sum = 0;
+        for (final EvaluationRow r : unit.rows) {
+            final double u = r.x[spec.utilityIndex];
+            if (!Double.isNaN(u)) sum += u * r.label;
         }
-        return w;
+        return sum / unit.size();
     }
 
     /** Accumulator key of (split, prediction index, slice index, slice value); slice −1 = the overall record. */
@@ -501,11 +498,13 @@ public final class EvaluationScorer implements Serializable {
 
     /**
      * Adds a scored unit into the accumulators: one key per set (the baseline first) for the overall record and
-     * for each of its slice values (a null slice value is skipped), with the unit's bootstrap weights; and the
+     * for each of its slice values (a null slice value is skipped), as a contribution under the unit's bootstrap
+     * key (the replicate sums are expanded once a key's pending contributions pass the bound, else by the
+     * Combine, see {@link MetricAccumulator#bound}); and the
      * split's bookkeeping (units, rows, time range).
      */
     public void accumulate(final Unit unit, final Metrics m, final Map<String, MetricAccumulator> into) {
-        final double[] boot = poissonWeights(spec.bootstrapSeed, unit.bootKey(), spec.bootstrapSamples);
+        final String boot = spec.bootstrapSamples > 0 ? unit.bootKey() : null;
         final int n = unit.size();
         double positives = 0;
         for (int i = 0; i < n; i++) positives += unit.w[i] * unit.y[i];
@@ -522,6 +521,7 @@ public final class EvaluationScorer implements Serializable {
             slots[MetricAccumulator.LOG_BASE] = wu * m.logScore[0];
             slots[MetricAccumulator.HIT] = wu * m.hitAt1[j];
             slots[MetricAccumulator.BRIER] = wu * m.brier[j];
+            slots[MetricAccumulator.UTILITY] = spec.hasUtility() ? wu * m.utility : 0d;
             add(into, key(unit.split, j, -1, null), slots, boot);
             for (int s = 0; s < slices.length; s++) {
                 if (slices[s] != null) add(into, key(unit.split, j, s, slices[s]), slots, boot);
@@ -553,10 +553,12 @@ public final class EvaluationScorer implements Serializable {
         into.computeIfAbsent(key, k -> new MetricAccumulator()).add(slots);
     }
 
-    private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final double[] boot) {
-        final MetricAccumulator acc = into.computeIfAbsent(key, x -> new MetricAccumulator(spec.bootstrapSamples));
-        acc.add(slots);
-        if (boot.length > 0) acc.addReplicates(slots, boot);
+    private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final String boot) {
+        final MetricAccumulator acc = into.computeIfAbsent(key, x -> new MetricAccumulator());
+        acc.contribute(slots, boot);
+        // a large bundle expands the key's replicate sums here (bounded memory; the shuffle carries the expanded
+        // form at most once per key per bundle); a one-unit bundle ships the contribution unexpanded
+        acc.bound(spec.bootstrapSeed, spec.bootstrapSamples);
     }
 
     // ---- slice discovery -----------------------------------------------------------------------------------
@@ -569,6 +571,7 @@ public final class EvaluationScorer implements Serializable {
             case "logScore" -> m.logScore[j];
             case "hitAt1" -> m.hitAt1[j];
             case "brier" -> m.brier[j];
+            case "utility" -> m.utility;
             default -> throw new IllegalArgumentException("unknown discovery metric " + metric);
         };
     }
@@ -685,18 +688,48 @@ public final class EvaluationScorer implements Serializable {
         return out;
     }
 
+    /**
+     * The unit's rows as the rows output carries them (design §8.6): one record per row with its identity
+     * (the rowId values), the label as declared and its share, the baseline mean, every compared set's mean
+     * (declared and derived, so the calibrated probabilities of `@T` / `@blend` are here) and the utility.
+     */
+    public List<Map<String, Object>> rowRecords(final Unit unit) {
+        final int n = unit.size();
+        final List<Map<String, Object>> records = new ArrayList<>(n);
+        final List<String> names = spec.predictionNames();
+        for (int i = 0; i < n; i++) {
+            final EvaluationRow row = unit.rows.get(i);
+            final Map<String, Object> r = new LinkedHashMap<>();
+            r.put("split", unit.split);
+            r.put("unit", unit.key);
+            final List<Map<String, Object>> ids = new ArrayList<>(spec.rowId.size());
+            for (int f = 0; f < spec.rowId.size(); f++) ids.add(fieldValue(spec.rowId.get(f), f < row.ids.length ? row.ids[f] : null));
+            r.put("rowId", ids);
+            r.put("time", row.time == EvaluationRow.NO_TIME ? null : row.time * 1000L);
+            r.put("label", row.label);
+            r.put("labelShare", unit.y[i]);
+            r.put("baseline", EvaluationReport.finiteOrNull(unit.means[0][i]));
+            final List<Map<String, Object>> predictions = new ArrayList<>(sets);
+            for (int j = 0; j < sets; j++) {
+                final Map<String, Object> p = new LinkedHashMap<>();
+                p.put("prediction", names.get(1 + j));
+                p.put("p", EvaluationReport.finiteOrNull(unit.means[1 + j][i]));
+                predictions.add(p);
+            }
+            r.put("predictions", predictions);
+            r.put("utility", spec.hasUtility() ? EvaluationReport.finiteOrNull(row.x[spec.utilityIndex]) : null);
+            records.add(r);
+        }
+        return records;
+    }
+
     /** The unit's output records (design §8.4): one per set, the baseline first. */
     public List<Map<String, Object>> unitRecords(final Unit unit, final Metrics m) {
         final List<Map<String, Object>> records = new ArrayList<>(1 + sets);
         final List<String> names = spec.predictionNames();
         final List<Map<String, Object>> slices = new ArrayList<>();
         final String[] values = unit.slices();
-        for (int s = 0; s < values.length; s++) {
-            final Map<String, Object> sl = new LinkedHashMap<>();
-            sl.put("field", spec.slices.get(s).name());
-            sl.put("value", values[s]);
-            slices.add(sl);
-        }
+        for (int s = 0; s < values.length; s++) slices.add(fieldValue(spec.slices.get(s).name(), values[s]));
         final boolean priorBase = Double.isNaN(m.logScore[0]);
         for (int j = 0; j <= sets; j++) {
             final Map<String, Object> r = new LinkedHashMap<>();
@@ -711,10 +744,19 @@ public final class EvaluationScorer implements Serializable {
             r.put("excessLogScore", priorBase ? null : EvaluationReport.finiteOrNull(m.logScore[j] - m.logScore[0]));
             r.put("hitAt1", EvaluationReport.finiteOrNull(m.hitAt1[j]));
             r.put("brier", EvaluationReport.finiteOrNull(m.brier[j]));
+            r.put("utility", EvaluationReport.finiteOrNull(m.utility));
             r.put("slices", slices);
             records.add(r);
         }
         return records;
+    }
+
+    /** A {@code {field, value}} record: a unit's slice value, a row's rowId value. */
+    private static Map<String, Object> fieldValue(final String field, final String value) {
+        final Map<String, Object> m = new LinkedHashMap<>();
+        m.put("field", field);
+        m.put("value", value);
+        return m;
     }
 
 }

@@ -98,7 +98,30 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field}]}")).contains("field is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [2, 1]}]}")).contains("strictly ascending"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: prediction, bins: 1}]}")).contains("bins must be"));
+        // edges close on the left by default, right on request; k belongs to quantile tables
+        final EvaluationSpec closed = parse(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1, 2]}, {by: field, field: u, edges: [1, 2], closed: right}, {by: prediction, k: 4000}]}")).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertTrue(closed.tables.get(0).closedLeft);
+        Assertions.assertFalse(closed.tables.get(1).closedLeft);
+        Assertions.assertEquals(SketchAccumulator.K, closed.tables.get(0).k);
+        Assertions.assertEquals(4000, closed.tables.get(2).k);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], closed: both}]}")).contains("closed 'both'"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: prediction, closed: left}]}")).contains("closed applies to by: field"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: field, field: u, edges: [1], k: 500}]}")).contains("k applies to quantile"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{by: divergence, k: 4}]}")).contains("k must be in"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge}]}")).contains("thresholds is required"));
+        // rows output: needs rowId; true = the selection splits; named splits must exist
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rows: true}")).contains("needs rowId"));
+        Assertions.assertEquals(List.of("valid"), parse(OK.replace("}}}", "}}, rowId: [g], rows: true}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertEquals(List.of("test"), parse(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [test]}}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertNull(parse(OK.replace("}}}", "}}, rowId: [g], rows: false}")).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [later]}}")).contains("not a declared split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: [valid]}")).contains("rows must be true"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, rowId: [g], rows: {splits: [{name: valid}]}}")).contains("rows.splits must be a list of strings"));
+        // resolving twice keeps the selection splits once
+        final EvaluationSpec twice = parse(OK.replace("}}}", "}}, rowId: [g], rows: true}"));
+        Assertions.assertEquals(List.of("valid"), twice.resolve(EvaluationScorerTest.SCHEMA, null).resolve(EvaluationScorerTest.SCHEMA, null).rowSplits);
+        // the rows output does not change the parameters hash (an output selection, like output.calibration)
+        Assertions.assertEquals(parse(OK.replace("}}}", "}}, rowId: [g]}")).parametersHash, parse(OK.replace("}}}", "}}, rowId: [g], rows: true}")).parametersHash);
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: region, bucket: decade}]}")).contains("bucket 'decade'"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: u, bucket: month}]}")).contains("needs a timestamp"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: y, bucket: month}]}")).contains("needs a timestamp"));   // int64 would read as micros
@@ -133,6 +156,7 @@ public class EvaluationSpecTest {
         Assertions.assertEquals(1, s.tables.size());
         Assertions.assertArrayEquals(new double[]{0.5, 1, 1.5, 2}, s.fits.get(0).grid(), 1e-12);
         Assertions.assertEquals(0.01, s.fits.get(1).l2);
+        Assertions.assertEquals(0d, parse(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid}]}")).fits.get(0).l2, "a blend is an unpenalised MLE by default");
         Assertions.assertEquals(List.of("baseline", "A", "A@T", "A@blend"), s.predictionNames());
         Assertions.assertEquals(List.of(1), s.derivedOf(0));
         Assertions.assertEquals(List.of(2), s.derivedOf(1));
@@ -170,6 +194,12 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: later}}")).contains("not a declared split"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {discoverOn: valid, confirmOn: test}}")).contains("dimensions is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [u], discoverOn: valid, confirmOn: test}}")).contains("give it bins"));
+        // the utility metric needs the utility field and runs once (it does not depend on the set)
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: utility}}")).contains("needs utility.field"));
+        final EvaluationSpec utility = parse("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: B, prob: qb}], " + EvaluationScorerTest.SPLITS
+                + ", utility: u, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: utility}}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(List.of(0), utility.discovery.sets);
+        Assertions.assertTrue(utility.notes.toString().contains("runs once, reported under A"), utility.notes.toString());
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [{field: region, bins: 3}], discoverOn: valid, confirmOn: test}}")).contains("not numeric"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [missing], discoverOn: valid, confirmOn: test}}")).contains("not an input field"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, of: [Z]}}")).contains("not a compared prediction set"));

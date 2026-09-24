@@ -57,7 +57,7 @@ the prediction columns. The `output.groupBy` parent / child form of the feature 
 | splits | `splits` | the time splits with their roles (§5). Required. |
 | weight | `weight` | a sample-weight field: per row for `binomial`, the unit mean for the grouped family. |
 | identity | `rowId` | fields identifying a row (the sort tie-break within a unit, the bootstrap unit of independent rows). Default: every field value. |
-| utility | `utility` | `{field}`: the realised value of a positive row (a payoff); the calibration tables report the flat return per bin (§7). |
+| utility | `utility` | `{field}`: the realised value of a positive row (a payoff per unit stake); the `utility` metric (§4.1) and the calibration tables' flat return per bin (§7). |
 | manifest | `manifest` | the upstream feature manifest URI, for the role defaults and the lineage selectors when the table came back through a sink. |
 
 **Defaults from the feature transform.** As for screen: `group` / `label` / `baseline` / `weight` and
@@ -106,12 +106,23 @@ first maximum (`idxmax`) differs by the tie count.
 For a `binomial` row with label y ∈ {0, 1} and probability q: `logScore = y log q + (1 − y) log(1 − q)`,
 the same under the baseline, `brier = (q − y)²`; `hitAt1` is not defined (null).
 
+With `utility.field` (u, the realised value of a positive row) a unit also has
+
+```
+utility = Σ_i u_i y_i / n            (y as declared, not ỹ; a null u counts 0)
+```
+
+the flat return of taking every row of the unit at unit stake. It describes the outcomes, not a set: it is
+reported under every prediction set with the same value (and its own interval), is null in pair records, and
+is a `sliceDiscovery.metric` — the realised-return question ("where does taking every row pay?") under the
+same random-subset null as Δ. A set-dependent return (taking the set's top pick) is not this metric.
+
 ### 4.2 Aggregates
 
 Over the units of a key (split × prediction set × slice value), weighted by the unit weight w:
 
 ```
-value(m) = Σ w_g m_g / Σ w_g          for m in logScore, logScoreBaseline, excessLogScore, hitAt1, brier
+value(m) = Σ w_g m_g / Σ w_g          for m in logScore, logScoreBaseline, excessLogScore, hitAt1, brier, utility
 logloss  = −logScore
 ```
 
@@ -183,7 +194,7 @@ differences (§4.3).
 calibration:
   - {type: reliability, by: prediction, bins: 10}
   - {type: reliability, by: divergence, bins: 10}
-  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100]}
+  - {type: reliability, by: field, field: price, edges: [1, 2, 3, 5, 10, 20, 50, 100], closed: left}
   - {type: edge, thresholds: [1.0, 1.1, 1.25, 1.5, 2.0]}
 ```
 
@@ -202,18 +213,20 @@ the Wilson interval, `positivesShare / n` the share `p_model` predicts.
 | `reliability` / `field` | fixed `edges` on a declared numeric field (a price band, an odds band) | rare-event bands |
 | `edge` | one group per threshold: the rows with q > threshold × p | if the rate exceeds `p_baseline` systematically, the divergence is information |
 
-Quantile bins are `bins` equal-rank intervals of the sketch (`k = 400`, an approximation of the boundaries
-within the sketch's rank error; the counts per bin are exact for the boundaries used); `edges` bins are
-exact and right-closed `(a, b]` (the first open below, the last open above). An `edge` group holds the rows
-with q > threshold × p (strict). Every bin record carries `lower` / `upper`; edge records carry the threshold
-in `lower`.
+Quantile bins are `bins` equal-rank intervals of the sketch (KLL, `k` 400 by default — rank error about
+0.8% —, raised per table with `k` up to 65535 when the bins must match an exact reference; the boundaries
+are values of the stream, so the bins are right-closed at them; the counts per bin are exact for the
+boundaries used). `edges` bins are exact and left-closed `[a, b)` by default — the convention of price and
+odds bands — or right-closed `(a, b]` with `closed: right`; the first bin is open below, the last open above.
+An `edge` group holds the rows with q > threshold × p (strict). Every bin record carries `lower` / `upper`;
+edge records carry the threshold in `lower`.
 
 ### 7.1 Calibration fits
 
 ```yaml
 calibration:
   - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
-  - {type: blend, fitOn: valid, of: [scored], l2: 1e-4, maxIter: 10, tol: 1e-8}
+  - {type: blend, fitOn: valid, of: [scored], l2: 0, maxIter: 10, tol: 1e-8}
 output:
   calibration: gs://bucket/eval/${args.version}/calibration.json
 ```
@@ -233,11 +246,12 @@ standard errors scale with the magnitude of the `weight` column.
 | type | model | estimation | record |
 |---|---|---|---|
 | `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, L2 on the average log likelihood, `maxIter` unrolled passes, a rejected step halves the step), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, `maxIter` unrolled passes, a rejected step halves the step; `l2` is a ridge on the *average* log likelihood and defaults to 0 — a 2-3 parameter MLE whose Fisher information is positive definite unless f and o are collinear, and a penalty on the average shrinks the estimate by ≈ l2 · N · se² relative, i.e. more on a larger split, which a monitoring regression must not do; the solver falls back to a pseudo-inverse on a singular Gram, with null standard errors), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
 
 Reading a blend: a ≈ 1 and b at its start says the declared set is calibrated; a < 1 says the score needs
 shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter
-regression). The records are the summary's `fits` and, with `output.calibration`, a JSON document
+regression — reproduced exactly by a score set whose score and offset are the model's and the market's
+logits; a probability set's f is the log share, another scale). The records are the summary's `fits` and, with `output.calibration`, a JSON document
 (`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).
 Isotonic / Platt recalibration is out of scope: it breaks the within-group sum.
 
@@ -266,8 +280,10 @@ reported number is the confirmation window's.
   units, `q0 … q<bins−1>`) that holds at least `minSupport` units of the discovery split and is a proper
   subset of it. `dimensions` may use any input field: categorical (string / bool / integer) as its text,
   numeric with `bins`. Above `maxCandidates` the best-supported candidates are kept and the summary says so.
-- **Statistic.** Per unit the `metric` (`excessLogScore` default, or `logScore` / `hitAt1` / `brier`; the
-  binomial prior mode has no per-unit excess, use `logScore`; `hitAt1` needs `groupedMultinomial`). The means
+- **Statistic.** Per unit the `metric` (`excessLogScore` default, or `logScore` / `hitAt1` / `brier` /
+  `utility`; the binomial prior mode has no per-unit excess, use `logScore`; `hitAt1` needs
+  `groupedMultinomial`; `utility` needs `utility.field` and, being set-independent, runs once under the first
+  compared set). The means
   are **unweighted** over units — the null is formulated in unit counts and `weight` (§4.2) does not enter — so
   a cell's `mean_discover` is not the weighted metric of the same cell declared under `slices`. For a
   candidate s with n units of the N in the split, under the **random-subset null** (the slice is an
@@ -299,8 +315,8 @@ reported number is the confirmation window's.
 One record per split × prediction set (the baseline included under `prediction: baseline`, Δ = 0) × slice
 value (the overall record has `slice` and `value` null), plus the pair records (§4.3):
 `split`, `role`, `prediction`, `pair`, `slice`, `value`, `n_units`, `n_rows`, `positives`, `weight` (Σ w), and
-for each of `logScore`, `excessLogScore`, `hitAt1`, `brier`: the value and `_lo` / `_hi` (null without
-bootstrap); `logloss` (= −logScore). Slices come from `slices[]`: `{field}` (one record per distinct value)
+for each of `logScore`, `excessLogScore`, `hitAt1`, `brier`, `utility`: the value and `_lo` / `_hi` (null
+without bootstrap; `utility` null without `utility.field` and in pair records); `logloss` (= −logScore). Slices come from `slices[]`: `{field}` (one record per distinct value)
 or `{field, bucket: year | quarter | month | week | day}` (the period buckets of a time field; `field`
 defaults to `time.field`). For `groupedMultinomial` a slice field is a group-level attribute (the same value
 on every row of the group); a unit takes the slice values of its earliest row. Slices are meant for
@@ -334,8 +350,20 @@ the passed and confirmed counts and a note.
 
 The intermediate representation: one record per unit × prediction set (the baseline included): `split`,
 `unit`, `time`, `prediction`, `n_rows`, `weight`, `logScore`, `logScoreBaseline`, `excessLogScore`,
-`hitAt1`, `brier` and `slices` (the unit's slice values as `{field, value}` records). Re-aggregate it in a
+`hitAt1`, `brier`, `utility` and `slices` (the unit's slice values as `{field, value}` records). Re-aggregate it in a
 warehouse, or feed it to the `attribution` transform to ask which slices Δ's total comes from.
+
+### 8.6 Rows (`<name>.rows`)
+
+Declared by `rows: true` (the `selection` splits) or `rows: {splits: [...]}`; needs `rowId`. One record per
+scored row of the selected splits: `split`, `unit`, `rowId` (the declared fields' values as `{field, value}`
+records — the join key back to the input), `time`, `label` (as declared), `labelShare` (ỹ), `baseline` (the
+row's baseline mean: the uniform share 1 / n in grouped prior mode, null in binomial prior mode), `predictions` (`{prediction, p}` for every compared set, the derived
+`@T` / `@blend` included: the calibrated probabilities a fit implies), `utility`. Emitted by the align step
+next to the unit records, so it costs no pass; the `rowId` values travel only with the rows of the
+selected splits. The purpose is the closed loop evaluation → selection: the calibrated row probabilities feed the
+next screen without re-deriving them from the calibration JSON. Selection splits by default because the
+report split is for reporting, not for building the next rule on.
 
 ## 9. Constraints and diagnostics
 
@@ -350,7 +378,8 @@ without a field or with an unknown bucket; `bootstrap.samples` outside [0, 10000
 non-global window or a triggered input (the calibration edges are a side input and the tables are one
 Combine each); a fit whose `fitOn` is missing, unknown or a `report` split, an `of` naming no declared set,
 two fits of one type on one set, a blend without an offset, a grid outside `[min > 0, max ≥ min, 2 ≤ count ≤
-10000]`, `maxIter` outside [1, 100]; a slice discovery without dimensions, with `discoverOn` = `confirmOn`,
+10000]`, `maxIter` outside [1, 100]; `rows` without `rowId`, naming an unknown split, or `rows: true` without
+a selection split; a slice discovery without dimensions, with `discoverOn` = `confirmOn`,
 `discoverOn` not a selection split, an unknown split or set, a numeric dimension without `bins` (or `bins`
 on a non-numeric one), `maxDepth` outside [1, 3], an unknown `metric`, `excessLogScore` in binomial prior mode.
 
@@ -377,7 +406,9 @@ Integrity notes (the summary's `notes`; the run completes, the numbers are repor
 
 - Δ is relative to the baseline: swapping the baseline (an odds snapshot at another time) changes its
   meaning; the summary records which column and form the baseline was.
-- The bootstrap CI assumes independent resampling units; correlated units need `bootstrap.unit`.
+- The bootstrap CI assumes independent resampling units; correlated units need `bootstrap.unit`. The slice
+  discovery's null ignores that correlation altogether: a `utility` discovery over `binomial` rows that come
+  from groups understates the null variance by the within-group correlation.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
 - Duplicate rows and row-level slices are noted, not rejected (§9).
 - Batch, global window only.

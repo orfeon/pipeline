@@ -21,7 +21,9 @@ public final class EvaluationReport {
     private EvaluationReport() {}
 
     private static final String SEP = MetricAccumulator.SEP;
-    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
+    public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier", "utility");
+    /** the metrics that describe the outcomes, not a prediction set: the same under every set, no pair difference */
+    public static final List<String> SET_INDEPENDENT = List.of("utility");
     static final double Z95 = 1.959963984540054;
 
     /** Result of {@link #build}: the metrics records, the slice discovery records and the summary, as output-schema maps. */
@@ -44,6 +46,7 @@ public final class EvaluationReport {
             case "excessLogScore" -> sums[MetricAccumulator.LOG] / w - baselineLogScore(spec, sums);
             case "hitAt1" -> sums[MetricAccumulator.HIT] / w;
             case "brier" -> sums[MetricAccumulator.BRIER] / w;
+            case "utility" -> spec.hasUtility() ? sums[MetricAccumulator.UTILITY] / w : Double.NaN;
             default -> throw new IllegalArgumentException("unknown metric " + name);
         };
     }
@@ -82,6 +85,8 @@ public final class EvaluationReport {
 
     /** @param fits the calibration fit results (null without fits): the summary's {@code fits} records */
     public static Result build(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
+        // contributions that never went through the Combine (the pure path) expand here; a no-op after it
+        for (final MetricAccumulator acc : accumulators.values()) acc.expand(spec.bootstrapSeed, spec.bootstrapSamples);
         final List<String> names = spec.predictionNames();
         final int k = spec.setCount();
         final Map<String, String> roles = spec.roles();
@@ -167,6 +172,12 @@ public final class EvaluationReport {
                     r.put("value", sliceValue);
                     putCounts(r, byPrediction.get(a));
                     for (final String m : METRICS) {
+                        if (SET_INDEPENDENT.contains(m)) {
+                            r.put(m, null);
+                            r.put(m + "_lo", null);
+                            r.put(m + "_hi", null);
+                            continue;
+                        }
                         final double[] va = series.get(a).get(m), vb = series.get(b).get(m);
                         final double[] diff = new double[va.length];
                         for (int i = 0; i < diff.length; i++) diff[i] = va[i] - vb[i];
@@ -485,10 +496,23 @@ public final class EvaluationReport {
         };
     }
 
-    /** The bin of a value against ascending interior edges: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
+    /** The bin of a value against ascending interior edges, right-closed: {@code (edges[i-1], edges[i]]}, the first bin open below, the last open above. */
     public static int bin(final double value, final double[] edges) {
+        return bin(value, edges, false);
+    }
+
+    /**
+     * The bin of a value against ascending interior edges: left-closed {@code [edges[i-1], edges[i])} (an edge
+     * belongs to the bin above it) or right-closed {@code (edges[i-1], edges[i]]}; the first bin is open below,
+     * the last open above.
+     */
+    public static int bin(final double value, final double[] edges, final boolean closedLeft) {
         int b = 0;
-        while (b < edges.length && value > edges[b]) b++;
+        if (closedLeft) {
+            while (b < edges.length && value >= edges[b]) b++;
+        } else {
+            while (b < edges.length && value > edges[b]) b++;
+        }
         return b;
     }
 
@@ -611,11 +635,16 @@ public final class EvaluationReport {
                 .build();
     }
 
-    public static Schema unitsSchema() {
-        final Schema slice = Schema.builder()
+    /** The {@code {field, value}} struct of the units' slices and the rows' rowId. */
+    private static Schema fieldValueSchema() {
+        return Schema.builder()
                 .withField("field", Schema.FieldType.STRING)
                 .withField("value", Schema.FieldType.STRING)
                 .build();
+    }
+
+    public static Schema unitsSchema() {
+        final Schema slice = fieldValueSchema();
         return Schema.builder()
                 .withField("split", Schema.FieldType.STRING)
                 .withField("unit", Schema.FieldType.STRING)
@@ -628,7 +657,27 @@ public final class EvaluationReport {
                 .withField("excessLogScore", Schema.FieldType.FLOAT64)
                 .withField("hitAt1", Schema.FieldType.FLOAT64)
                 .withField("brier", Schema.FieldType.FLOAT64)
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.element(slice)))
+                .build();
+    }
+
+    public static Schema rowsSchema() {
+        final Schema id = fieldValueSchema();
+        final Schema prediction = Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("p", Schema.FieldType.FLOAT64)
+                .build();
+        return Schema.builder()
+                .withField("split", Schema.FieldType.STRING)
+                .withField("unit", Schema.FieldType.STRING)
+                .withField("rowId", Schema.FieldType.array(Schema.FieldType.element(id)))
+                .withField("time", Schema.FieldType.TIMESTAMP)
+                .withField("label", Schema.FieldType.FLOAT64)
+                .withField("labelShare", Schema.FieldType.FLOAT64)
+                .withField("baseline", Schema.FieldType.FLOAT64)
+                .withField("predictions", Schema.FieldType.array(Schema.FieldType.element(prediction)))
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .build();
     }
 
@@ -774,6 +823,7 @@ public final class EvaluationReport {
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("bootstrap=" + spec.bootstrapSamples + " seed=" + spec.bootstrapSeed + (spec.bootstrapUnit != null ? " unit=" + spec.bootstrapUnit : ""));
         if (!spec.tables.isEmpty()) parts.add("calibration=" + spec.tables.size() + " tables" + (spec.hasQuantileTables() ? " (+1 sketch pass)" : ""));
+        if (spec.hasRows()) parts.add("rows=" + spec.rowSplits);
         if (spec.hasFits()) {
             final List<String> fits = new ArrayList<>();
             for (int i = 0; i < spec.fits.size(); i++) {
