@@ -341,6 +341,7 @@ public class ScreenTransformTest {
             // the leak flag reads the partial z: f_known (marginal z above 5, partial ~ 0) is not a suspect, f_extra is
             Assertions.assertEquals(Boolean.FALSE, known.getPrimitiveValue("leakSuspect"));
             Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("leakSuspect"));
+            Assertions.assertEquals(Boolean.TRUE, records.get("f_extra:rank").getPrimitiveValue("leakSuspect"));
             // the L2 ridge leaves a residual of order l2 in the orthogonalisation: r2_F ≈ 1, partial gain ≈ 0
             Assertions.assertTrue(known.getAsDouble("r2_F") > 0.999, "r2_F of f_known: " + known.getAsDouble("r2_F"));
             Assertions.assertTrue(known.getAsDouble("partial_gain") < known.getAsDouble("threshold") / 100, "partial gain of f_known: " + known.getAsDouble("partial_gain"));

@@ -303,6 +303,34 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: 8, on: both}}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: -1}}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: partial}}"));
+        // a quoted number is the number (as the scalar form always read it); NaN and a non-string `on` are rejected
+        Assertions.assertEquals(20d, spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: '20'}}").leakZ);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: 'NaN'}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: {z: abc}}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: [x2], flags: {leakZ: {z: 8, on: [partial]}}}"));
+    }
+
+    @Test
+    public void testLeakOnPartialFallsBackWithoutAFit() {
+        // on: partial with conditioning, but no accepted fit: the flag reads the marginal z and a note says so
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], conditioning: [x2], transforms: [raw], placebo: {noise: 0}, flags: {leakZ: {z: 1, on: partial}}}");
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (int g = 0; g < 20; g++) {
+            scorer.score(List.of(
+                    new ScreenRow("g" + g, "p", g, "2025", 1, Double.NaN, 1, new double[]{3, 1}),
+                    new ScreenRow("g" + g, "q", g, "2025", 0, Double.NaN, 1, new double[]{1, 1}),
+                    new ScreenRow("g" + g, "r", g, "2025", 0, Double.NaN, 1, new double[]{2, 1})), "g" + g, acc);
+        }
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        Assertions.assertEquals(Boolean.TRUE, result.records().get(0).get("leakSuspect"));   // marginal z = sqrt(30) > 1
+        Assertions.assertEquals(ScreenSpec.LEAK_ON_MARGINAL, result.summary().get("leakOn"));
+        Assertions.assertEquals(1L, result.summary().get("nLeakSuspect"));
+        final List<?> notes = (List<?>) result.summary().get("notes");
+        Assertions.assertTrue(notes.stream().anyMatch(n -> n.toString().startsWith("flags.leakZ.on partial")), "notes: " + notes);
+        final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+        Assertions.assertEquals(1d, selection.get("leakZ").getAsDouble());
+        Assertions.assertEquals(ScreenSpec.LEAK_ON_MARGINAL, selection.get("leakOn").getAsString());
     }
 
     @Test

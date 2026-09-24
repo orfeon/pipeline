@@ -93,8 +93,10 @@ statistics); independent rows support `raw` only in this version.
   is not explained by the conditioning set, so its partial z stays outsized, while a legitimate but strong
   candidate that overlaps F (a rating that summarises the same history the model already uses) has a large
   marginal z and a modest partial one. Prefer `on: partial` when the marginal top is legitimately far above
-  the placebo scale; without a partial test (the fit accepted no point) the flag falls back to the marginal z
-  and `notes` says so.
+  the placebo scale; without a partial test (the fit accepted no point, or a `gaussian` fit left no residual
+  variance) the flag falls back to the marginal z and `notes` says so. The partial flag assumes F itself does
+  not leak: a candidate F explains (r2_F near 1 — including a conditioning column that also matches
+  `candidates`) has a partial z near 0 and is never flagged, so vet F with the marginal flag first.
 
 ### Conditioning (partial test)
 
@@ -383,6 +385,7 @@ transforms:
   "columns": ["f_extra", "f_recent_bids"],
   "test": "partial",
   "passRule": "partial_gain > threshold and partial_periods_agree >= 0.67 * partial_n_periods", "minPeriodsAgree": 0.67,
+  "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
@@ -399,6 +402,8 @@ transforms:
 - `test` says which statistic the cut-off used (`partial` when the conditioning fit accepted a point — the same
   rule as the summary's `test` — else `marginal`); `passRule` spells the rule out, and with `periods` each passing
   record carries its `periods_agree / n_periods` of that test.
+- `leakZ` / `leakOn` are the flag the passing records' `leakSuspect` was read with (the threshold and the z it
+  read, as the summary's `leakOn`; null without `flags.leakZ`).
 - `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
   (null otherwise); `screenHash` is the SHA-256 (16 hex characters, the width of the feature transform's hashes) of
   this step's canonical parameters without the file locations (`output`, `candidates.manifest`), so it is the same
