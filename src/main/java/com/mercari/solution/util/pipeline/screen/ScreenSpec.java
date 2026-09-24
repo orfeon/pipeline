@@ -81,6 +81,11 @@ public final class ScreenSpec implements Serializable {
     public double quantile = 0.99;
     public long seed = 0L;
     public Double leakZ;
+    /** flags.leakZ.on: the z the leak flag reads — {@link #LEAK_ON_MARGINAL} (default) or {@link #LEAK_ON_PARTIAL} (needs conditioning) */
+    public String leakOn = LEAK_ON_MARGINAL;
+    public static final String LEAK_ON_MARGINAL = "marginal";
+    public static final String LEAK_ON_PARTIAL = "partial";
+    public static final List<String> LEAK_ONS = List.of(LEAK_ON_MARGINAL, LEAK_ON_PARTIAL);
     /** conditioning.fields as written (names / globs); empty = no partial test */
     public List<String> conditioningPatterns = new ArrayList<>();
     public double conditioningL2 = 1e-4;
@@ -166,6 +171,11 @@ public final class ScreenSpec implements Serializable {
 
     public boolean hasConditioning() {
         return !conditioningFields.isEmpty();
+    }
+
+    /** Whether the leak flag asks for the partial z ({@code flags.leakZ.on: partial}); the report falls back without a partial test. */
+    public boolean leakOnPartial() {
+        return leakZ != null && LEAK_ON_PARTIAL.equals(leakOn);
     }
 
     /** Position of the shuffle reference column in {@link ScreenRow#x} (after the candidates). */
@@ -367,8 +377,21 @@ public final class ScreenSpec implements Serializable {
 
         final JsonElement flags = p.get("flags");
         if (flags != null && flags.isJsonObject()) {
-            s.leakZ = number(flags.getAsJsonObject(), "leakZ");
-            if (s.leakZ != null && s.leakZ <= 0) errors.add("flags.leakZ must be > 0");
+            final JsonElement leak = flags.getAsJsonObject().get("leakZ");
+            if (leak != null && !leak.isJsonNull()) {
+                // a number (or a numeric string, as the scalar form always accepted) or {z, on}
+                s.leakZ = numeric(leak.isJsonObject() ? leak.getAsJsonObject().get("z") : leak);
+                if (leak.isJsonObject()) {
+                    if (s.leakZ == null) errors.add("flags.leakZ.z is required and must be a number (the |z| above which a candidate is a leak suspect)");
+                    final JsonElement on = leak.getAsJsonObject().get("on");
+                    if (on != null && !on.isJsonNull()) s.leakOn = on.isJsonPrimitive() ? on.getAsString() : on.toString();
+                    if (!LEAK_ONS.contains(s.leakOn)) errors.add("flags.leakZ.on '" + s.leakOn + "' is unknown (available: " + LEAK_ONS + ")");
+                } else if (s.leakZ == null) {
+                    errors.add("flags.leakZ must be a number or an object {z, on: marginal | partial}");
+                }
+            }
+            // NaN would never compare above a |z|: the flag would silently never fire
+            if (s.leakZ != null && !(s.leakZ > 0)) errors.add("flags.leakZ must be > 0");
         }
 
         final JsonElement conditioning = p.get("conditioning");
@@ -402,6 +425,9 @@ public final class ScreenSpec implements Serializable {
                 errors.add("conditioning must be an object {fields, l2, maxIter, tol, missing} or a list of field names");
             }
         }
+        if (s.leakOnPartial() && s.conditioningPatterns.isEmpty()) {
+            errors.add("flags.leakZ.on partial needs conditioning (the flag reads the partial z)");
+        }
         final JsonElement pass = p.get("pass");
         if (pass != null && !pass.isJsonNull()) {
             if (pass.isJsonObject()) {
@@ -432,6 +458,16 @@ public final class ScreenSpec implements Serializable {
         // rules that depend on group are checked in resolve (group may still come from the manifest roles)
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return s;
+    }
+
+    /** A JSON number or numeric string as a double; null for anything else (a non-numeric string, a boolean, an array / object). */
+    private static Double numeric(final JsonElement e) {
+        if (e == null || !e.isJsonPrimitive()) return null;
+        try {
+            return e.getAsDouble();
+        } catch (final NumberFormatException ex) {
+            return null;
+        }
     }
 
     // ---- resolution ----------------------------------------------------------------------------------------

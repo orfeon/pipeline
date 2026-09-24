@@ -199,7 +199,15 @@ Default: all three with `group`, `raw` without; an explicit list is never widene
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
   (`nRowsTimeFiltered`). Screening the evaluation period leaks the evaluation into the selection.
 - **Leak flag.** `flags.leakZ` marks a candidate with |z| above it as `leakSuspect` — a flag, never a
-  rejection: a leak's signature is a z several times the healthy top, and only lineage can tell.
+  rejection: a leak's signature is a z several times the healthy top, and only lineage can tell. The flag
+  reads the marginal z (a number) or, as `{z, on: partial}` under conditioning, the partial z: a leak is not
+  explained by F, so it keeps its outsized partial z, while a strong legitimate candidate that overlaps F
+  loses most of its z to the orthogonalisation. The partial flag assumes F does not leak: a candidate F explains
+  (r²_F ≈ 1, including a conditioning column that also matches `candidates`) has a partial z near 0 and is never
+  flagged. A relative threshold (a ratio to the conditioning set's own marginal z) was considered and declined:
+  F's columns are scored only when they also match `candidates`, so the ratio would need a marginal pass of
+  its own over F, and the bound would move with whatever F holds. Without a partial test (no accepted fit, or
+  a gaussian fit without residual variance) the flag reads the marginal z and a note says so.
 - **q-values.** Benjamini–Hochberg over the candidate records' p-values (of the effective test, §8.5) gives
   the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`). Making `passed`
   follow the q-value is an extension position (§12).
@@ -294,7 +302,7 @@ proposal that introduced the transform so its reference implementation compares 
 
 One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
 `minPeriodsAgree`, the thresholds and the quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
-transform / scored / passed / placebo / leak-suspect counts, the time field and window, the scored rows' time
+transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
 gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fallbacks).
@@ -302,7 +310,8 @@ gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fall
 ### 9.3 The pass list (`output.selection`)
 
 One JSON document written at the end of the run, in the shape the feature transform's `output.include`
-reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule`, family /
+reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule`, the leak
+flag (`leakZ` / `leakOn`), family /
 method, thresholds, quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
