@@ -126,7 +126,7 @@ public final class EvaluationStages {
 
         final PCollection<KV<String, MetricAccumulator>> combined = PCollectionList.of(scored).and(bookkeeping)
                 .apply("FlattenPartials", Flatten.pCollections())
-                .apply("Combine", Combine.perKey(new MetricAccumulator.Fn()))
+                .apply("Combine", Combine.perKey(new MetricAccumulator.Fn(spec.bootstrapSeed, spec.bootstrapSamples)))
                 .setCoder(accumulatorCoder);
         final TupleTag<MElement> metricsTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
@@ -166,12 +166,19 @@ public final class EvaluationStages {
      * Newton passes per base set (the screen transform's controller: {@link FitState} as a singleton view chained
      * pass to pass). One collect step turns every fit's result into the {@link FitResults} singleton.
      */
-    static PCollectionView<FitResults> fits(final PCollection<MElement> input, final PCollection<KV<String, Iterable<EvaluationRow>>> units, final EvaluationSpec spec) {
+    static PCollectionView<FitResults> fits(final PCollection<MElement> input, final PCollection<KV<String, Iterable<EvaluationRow>>> allUnits, final EvaluationSpec spec) {
         final List<PCollectionView<?>> views = new ArrayList<>();
         final Map<String, PCollectionView<VectorAccumulator>> temperatureViews = new HashMap<>();
         final Map<String, PCollectionView<FitState>> blendViews = new HashMap<>();
+        // every pass of a fit reads only its selection split's units: filtered once per split, so the unrolled
+        // passes (maxIter per blend, converged or not) decode the fit's units and nothing else
+        final Map<String, PCollection<KV<String, Iterable<EvaluationRow>>>> fitUnits = new HashMap<>();
         for (int i = 0; i < spec.fits.size(); i++) {
             final EvaluationSpec.Fit fit = spec.fits.get(i);
+            final PCollection<KV<String, Iterable<EvaluationRow>>> units = fitUnits.computeIfAbsent(fit.fitOn, split -> {
+                final String prefix = split + SEP;
+                return allUnits.apply("FitUnits_" + split, Filter.by(kv -> kv.getKey().startsWith(prefix)));
+            });
             if (fit.isTemperature()) {
                 final PCollectionView<VectorAccumulator> view = units
                         .apply("Temperature" + i, ParDo.of(new TemperaturePassDoFn(spec, i)))
@@ -730,6 +737,7 @@ public final class EvaluationStages {
             }
             scorer.derive(unit, c.sideInput(fitView));
             final EvaluationScorer.Metrics m = scorer.score(unit);
+            // the keys the unit touches bound their pending contributions (EvaluationScorer#add)
             scorer.accumulate(unit, m, partials);
             if (spec.hasDiscovery()) {
                 if (edges == null) {

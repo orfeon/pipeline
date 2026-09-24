@@ -499,10 +499,10 @@ parameters:
 - Slices and discovery dimensions are group-level attributes under `groupedMultinomial`: a row-level field
   (a rank within the group, a per-candidate ratio) is read from the unit's first row — an arbitrary row — and
   noted in the summary. A row-level slice is a `binomial` evaluation.
-- On the DirectRunner a run with the default bootstrap is slow: the runner hands every grouped unit to the
-  align step as its own bundle, so the bundle-local accumulators (7 × `bootstrap.samples` doubles per split
-  × set × slice value) are encoded once per unit, and every blend pass re-reads the units. Validate locally
-  with `bootstrap: false` (or a few samples) and a small input; run the real evaluation on Dataflow.
+- The DirectRunner is for validation, not for the real run: every blend pass re-reads the selection split's
+  units and every Combine is single-machine. A unit's bootstrap contribution travels as a few dozen bytes and
+  is expanded into the replicate sums only where many units meet, so the default `bootstrap.samples` no
+  longer dominates a local run; still, validate locally on a small input and run the evaluation on Dataflow.
 - Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
   accumulators of 7 × `bootstrap.samples` doubles (about 56 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a

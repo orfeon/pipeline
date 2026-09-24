@@ -1,7 +1,6 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
 import com.mercari.solution.util.domain.math.MatrixOps;
-import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
 import com.mercari.solution.util.pipeline.glm.FitState;
@@ -14,7 +13,6 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.SplittableRandom;
 
 /**
  * The per-unit computations of the evaluation transform, pure and deterministic (design §4): {@link #prepare}
@@ -453,24 +451,6 @@ public final class EvaluationScorer implements Serializable {
         return sum / unit.size();
     }
 
-    /** Poisson(1) replicate weights of a resampling unit: a pure function of (seed, key). */
-    public static double[] poissonWeights(final long seed, final String key, final int samples) {
-        final double[] w = new double[samples];
-        if (samples == 0) return w;
-        final SplittableRandom rng = FeatureValues.seededRandom(seed, key + SEP + "bootstrap");
-        final double limit = Math.exp(-1d);
-        for (int b = 0; b < samples; b++) {
-            int c = 0;
-            double p = 1d;
-            do {
-                c++;
-                p *= rng.nextDouble();
-            } while (p > limit);
-            w[b] = c - 1;
-        }
-        return w;
-    }
-
     /** Accumulator key of (split, prediction index, slice index, slice value); slice −1 = the overall record. */
     public static String key(final String split, final int prediction, final int slice, final String value) {
         return split + SEP + prediction + SEP + slice + SEP + (value == null ? "" : value);
@@ -485,11 +465,13 @@ public final class EvaluationScorer implements Serializable {
 
     /**
      * Adds a scored unit into the accumulators: one key per set (the baseline first) for the overall record and
-     * for each of its slice values (a null slice value is skipped), with the unit's bootstrap weights; and the
+     * for each of its slice values (a null slice value is skipped), as a contribution under the unit's bootstrap
+     * key (the replicate sums are expanded once a key's pending contributions pass the bound, else by the
+     * Combine, see {@link MetricAccumulator#bound}); and the
      * split's bookkeeping (units, rows, time range).
      */
     public void accumulate(final Unit unit, final Metrics m, final Map<String, MetricAccumulator> into) {
-        final double[] boot = poissonWeights(spec.bootstrapSeed, unit.bootKey(), spec.bootstrapSamples);
+        final String boot = spec.bootstrapSamples > 0 ? unit.bootKey() : null;
         final int n = unit.size();
         double positives = 0;
         for (int i = 0; i < n; i++) positives += unit.w[i] * unit.y[i];
@@ -540,10 +522,12 @@ public final class EvaluationScorer implements Serializable {
         into.computeIfAbsent(key, k -> new MetricAccumulator()).add(slots);
     }
 
-    private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final double[] boot) {
-        final MetricAccumulator acc = into.computeIfAbsent(key, x -> new MetricAccumulator(spec.bootstrapSamples));
-        acc.add(slots);
-        if (boot.length > 0) acc.addReplicates(slots, boot);
+    private void add(final Map<String, MetricAccumulator> into, final String key, final double[] slots, final String boot) {
+        final MetricAccumulator acc = into.computeIfAbsent(key, x -> new MetricAccumulator());
+        acc.contribute(slots, boot);
+        // a large bundle expands the key's replicate sums here (bounded memory; the shuffle carries the expanded
+        // form at most once per key per bundle); a one-unit bundle ships the contribution unexpanded
+        acc.bound(spec.bootstrapSeed, spec.bootstrapSamples);
     }
 
     // ---- slice discovery -----------------------------------------------------------------------------------
