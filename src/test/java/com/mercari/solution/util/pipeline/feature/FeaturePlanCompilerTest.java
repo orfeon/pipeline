@@ -3478,6 +3478,51 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(16, output.get("includeHash").getAsString().length());
     }
 
+    private static List<String> includeNames(final JsonObject output) {
+        final List<String> names = new java.util.ArrayList<>();
+        output.getAsJsonArray("include").forEach(e -> names.add(e.getAsString()));
+        return names;
+    }
+
+    @Test
+    public void testIncludeFromSeveralFiles() {
+        final String bet = "data:" + java.util.Base64.getEncoder().encodeToString("{\"columns\": [\"a\", \"b\", \"c\"]}".getBytes());
+        final String settle = "data:" + java.util.Base64.getEncoder().encodeToString("c\nd\na\n".getBytes());
+        final java.util.function.Function<String, JsonObject> resolve = includeJson -> {
+            final JsonObject parameters = new JsonObject();
+            final JsonObject output = new JsonObject();
+            output.add("include", com.google.gson.JsonParser.parseString(includeJson));
+            parameters.add("output", output);
+            FeaturePlanService.resolveInclude(parameters, null);
+            return output;
+        };
+        // union (the default): every name in first-appearance order; the source names the mode and the files
+        JsonObject output = resolve.apply("{\"from\": [\"" + bet + "\", \"" + settle + "\"]}");
+        Assertions.assertEquals(List.of("a", "b", "c", "d"), includeNames(output));
+        Assertions.assertEquals("union(" + bet + ", " + settle + ")", output.get("includeSource").getAsString());
+        Assertions.assertEquals(16, output.get("includeHash").getAsString().length());
+        // intersection: the first file's names present in the second, in the first file's order
+        output = resolve.apply("{\"from\": [\"" + bet + "\", \"" + settle + "\"], \"mode\": \"intersection\"}");
+        Assertions.assertEquals(List.of("a", "c"), includeNames(output));
+        Assertions.assertTrue(output.get("includeSource").getAsString().startsWith("intersection("));
+        // a single file in the object form reads like the string form
+        output = resolve.apply("{\"from\": \"" + settle + "\"}");
+        Assertions.assertEquals(List.of("c", "d", "a"), includeNames(output));
+        Assertions.assertEquals(settle, output.get("includeSource").getAsString());
+        // the same list gives the same hash whatever the form
+        Assertions.assertEquals(resolve.apply("\"" + settle + "\"").get("includeHash"), output.get("includeHash"));
+        // a plain list of names is left alone
+        output = resolve.apply("[\"x\", \"y\"]");
+        Assertions.assertEquals(List.of("x", "y"), includeNames(output));
+        Assertions.assertFalse(output.has("includeSource"));
+        // rejections
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": []}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"mode\": \"union\"}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + bet + "\"], \"mode\": \"all\"}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + bet + "\"], \"uri\": 1}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [{\"uri\": 1}]}"));
+    }
+
     private static List<Schema.Field> inputFields(final boolean withSnapshotTime) {
         final List<Schema.Field> fields = new java.util.ArrayList<>(List.of(
                 Schema.Field.of("session_id", Schema.FieldType.STRING), Schema.Field.of("seller_id", Schema.FieldType.STRING),
