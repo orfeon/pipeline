@@ -209,13 +209,20 @@ public class EvaluationScorerTest {
         final List<AlignedRow> aligned = scorer.aligned(unit);
         Assertions.assertEquals(3, aligned.size());
         Assertions.assertEquals(3.0, aligned.get(0).utility);
+        Assertions.assertEquals(1d, aligned.get(0).label);
+        Assertions.assertEquals(1d, aligned.get(0).share);
         Assertions.assertEquals(3.0, EvaluationReport.tableValue(spec.tables.get(0), 0, aligned.get(0), 0));
         // bins as the engine fills them: u = 3.0 → bin 2 (above 2), 1.5 → bin 1, 0.5 → bin 0; edge: q/p = 1.2, 0.67, 1.0 → only row 0 exceeds 1.0, none exceeds 2.0
         final Map<String, double[]> bins = new HashMap<>();
-        bins.put(EvaluationReport.binKey("test", 1, 0, 2), new double[]{1, 1, 0.6, 0.5, 3.0});
-        bins.put(EvaluationReport.binKey("test", 1, 0, 1), new double[]{1, 0, 0.2, 0.3, 0});
-        bins.put(EvaluationReport.binKey("test", 1, 0, 0), new double[]{1, 0, 0.2, 0.2, 0});
-        bins.put(EvaluationReport.binKey("test", 1, 1, 0), new double[]{1, 1, 0.6, 0.5, 3.0});
+        for (int i = 0; i < 3; i++) {
+            final AlignedRow r = aligned.get(i);
+            EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 0, EvaluationReport.bin(r.utility, spec.tables.get(0).edges)), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
+            if (r.predictions[0] > 1.0 * r.baseline) EvaluationReport.addBin(bins.computeIfAbsent(EvaluationReport.binKey("test", 1, 1, 0), k -> new double[EvaluationReport.BIN_SLOTS]), r, r.predictions[0]);
+        }
+        Assertions.assertArrayEquals(new double[]{1, 1, 0.6, 0.5, 3.0, 1}, bins.get(EvaluationReport.binKey("test", 1, 0, 2)), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 0, 0.2, 0.3, 0, 0}, bins.get(EvaluationReport.binKey("test", 1, 0, 1)), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 0, 0.2, 0.2, 0, 0}, bins.get(EvaluationReport.binKey("test", 1, 0, 0)), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 0.6, 0.5, 3.0, 1}, bins.get(EvaluationReport.binKey("test", 1, 1, 0)), 1e-12);
         final List<Map<String, Object>> records = EvaluationReport.calibration(spec, bins, Map.of());
         // 2 splits x 1 prediction x (3 + 2) bins
         Assertions.assertEquals(10, records.size());
@@ -224,6 +231,8 @@ public class EvaluationScorerTest {
         Assertions.assertNull(top.get("upper"));
         Assertions.assertEquals(1L, top.get("n"));
         Assertions.assertEquals(1d, top.get("rate"));
+        Assertions.assertEquals(1d, top.get("positives"));
+        Assertions.assertEquals(1d, top.get("positivesShare"));
         Assertions.assertEquals(3d, top.get("utility"));
         Assertions.assertEquals(0.6, top.get("p_model"));
         final Map<String, Object> edge2 = records.stream().filter(r -> "test".equals(r.get("split")) && (Long) r.get("table") == 1 && (Long) r.get("bin") == 1).findFirst().orElseThrow();
@@ -430,5 +439,93 @@ public class EvaluationScorerTest {
         // max-of-8 threshold (2.96), so only the two region cells pass and are confirmed
         Assertions.assertEquals(2L, ds.get("nPassed"));
         Assertions.assertEquals(2L, ds.get("nConfirmed"));
+    }
+
+    @Test
+    public void testCalibrationCountsTiedPositivesWhole() {
+        // a dead heat: y = [1, 1, 0] gives ỹ = [0.5, 0.5, 0]; the tables count each positive whole (positives 2, the
+        // utility at its face value), the share column keeps Σỹ = 1; the log score still uses ỹ
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", utility: {field: u}, calibration: [{type: reliability, by: field, field: u, edges: [10]}]}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("test", "g1", 1, 0.5, null, 0.6, 2.0), row("test", "g1", 1, 0.3, null, 0.2, 4.0), row("test", "g1", 0, 0.2, null, 0.2, 0.0)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        Assertions.assertEquals(0.5 * Math.log(0.6) + 0.5 * Math.log(0.2), scorer.score(unit).logScore[1], 1e-12);
+        final double[] v = new double[EvaluationReport.BIN_SLOTS];
+        for (final AlignedRow r : scorer.aligned(unit)) EvaluationReport.addBin(v, r, r.predictions[0]);
+        Assertions.assertEquals(3d, v[EvaluationReport.BIN_N]);
+        Assertions.assertEquals(2d, v[EvaluationReport.BIN_POSITIVES]);
+        Assertions.assertEquals(1d, v[EvaluationReport.BIN_SHARE], 1e-12);
+        Assertions.assertEquals(6d, v[EvaluationReport.BIN_UTILITY], 1e-12);
+        final Map<String, Object> record = EvaluationReport.calibration(spec, Map.of(EvaluationReport.binKey("test", 1, 0, 0), v), Map.of()).stream()
+                .filter(r -> "test".equals(r.get("split")) && (Long) r.get("bin") == 0).findFirst().orElseThrow();
+        Assertions.assertEquals(2d / 3, (Double) record.get("rate"), 1e-12);
+        Assertions.assertEquals(2d, (Double) record.get("utility"), 1e-12);
+        Assertions.assertEquals(1d, (Double) record.get("positivesShare"), 1e-12);
+    }
+
+    @Test
+    public void testIntegrityNotesDuplicatesNonConstantSlicesAndEmptySplits() {
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", bootstrap: {samples: 0}, slices: [{field: region}], sliceDiscovery: {dimensions: [region, {field: u, bins: 2}], discoverOn: valid, confirmOn: test, minSupport: 2}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        // unit 1: a row twice (the same identity at the same time) and a slice / dimension the rows disagree on
+        final EvaluationScorer.Unit u1 = scorer.prepare(List.of(
+                new EvaluationRow("test", "g1", "r1", 1L, null, 1, 0.5, 1d, new String[]{"east"}, new String[]{"east"}, new double[]{0.6, 1.0}),
+                new EvaluationRow("test", "g1", "r1", 1L, null, 1, 0.5, 1d, new String[]{"east"}, new String[]{"east"}, new double[]{0.6, 1.0}),
+                new EvaluationRow("test", "g1", "r2", 1L, null, 0, 0.3, 1d, new String[]{"west"}, new String[]{"west"}, new double[]{0.2, 3.0}),
+                new EvaluationRow("test", "g1", "r3", 1L, null, 0, 0.2, 1d, new String[]{"east"}, new String[]{"east"}, new double[]{0.2, 1.0})), "g1");
+        Assertions.assertEquals(1, u1.duplicates);
+        Assertions.assertArrayEquals(new boolean[]{true}, u1.sliceVaries);
+        Assertions.assertArrayEquals(new boolean[]{true, true}, u1.dimensionVaries);
+        scorer.accumulate(u1, scorer.score(u1), acc);
+        // unit 2: clean
+        final EvaluationScorer.Unit u2 = scorer.prepare(List.of(
+                new EvaluationRow("test", "g2", "r4", 1L, null, 1, 0.5, 1d, new String[]{"east"}, new String[]{"east"}, new double[]{0.6, 1.0}),
+                new EvaluationRow("test", "g2", "r5", 1L, null, 0, 0.5, 1d, new String[]{"east"}, new String[]{"east"}, new double[]{0.4, 1.0})), "g2");
+        Assertions.assertEquals(0, u2.duplicates);
+        Assertions.assertArrayEquals(new boolean[]{false}, u2.sliceVaries);
+        scorer.accumulate(u2, scorer.score(u2), acc);
+        final EvaluationReport.Result result = EvaluationReport.build(spec, acc);
+        final List<?> notes = (List<?>) result.summary().get("notes");
+        final String text = notes.toString();
+        Assertions.assertTrue(text.contains("split test: 1 duplicate rows"), text);
+        Assertions.assertTrue(text.contains("slice region is not constant within a unit (1 units"), text);
+        Assertions.assertTrue(text.contains("sliceDiscovery dimension region is not constant within a unit (1 units"), text);
+        Assertions.assertTrue(text.contains("sliceDiscovery dimension u is not constant within a unit (1 units"), text);
+        Assertions.assertTrue(text.contains("split valid (selection) has no scored unit"), text);
+        Assertions.assertFalse(text.contains("split test (report) has no scored unit"), text);
+        final List<?> splits = (List<?>) result.summary().get("splits");
+        Assertions.assertEquals(1L, ((Map<?, ?>) splits.get(1)).get("nRowsDuplicate"));
+        Assertions.assertEquals(0L, ((Map<?, ?>) splits.get(0)).get("nRowsDuplicate"));
+        // the duplicate row counted twice in the metrics: 4 rows in unit 1
+        Assertions.assertEquals(6L, result.records().get(1).get("n_rows"));
+    }
+
+    @Test
+    public void testIntegrityDuplicatesAtAnyTimeAndUnitLevelValues() {
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", bootstrap: {samples: 0}, slices: [{field: t, bucket: month}, {field: region}], sliceDiscovery: {dimensions: [region, {field: u, bins: 2}], discoverOn: valid, confirmOn: test, minSupport: 2}}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        // the same rowId at two times is the same row twice; a unit spanning two months keeps its earliest month (the
+        // unit's own period, not a row-level slice); 0.0 and -0.0 are one value
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(
+                new EvaluationRow("test", "g1", "r1", 1L, null, 1, 0.5, 1d, new String[]{"2024-07", "east"}, new String[]{"east"}, new double[]{0.6, 0.0}),
+                new EvaluationRow("test", "g1", "r2", 2L, null, 0, 0.3, 1d, new String[]{"2024-08", "east"}, new String[]{"east"}, new double[]{0.4, -0.0}),
+                new EvaluationRow("test", "g1", "r1", 3L, null, 1, 0.5, 1d, new String[]{"2024-08", "east"}, new String[]{"east"}, new double[]{0.6, 0.0})), "g1");
+        Assertions.assertEquals(1, unit.duplicates);
+        Assertions.assertArrayEquals(new boolean[]{false, false}, unit.sliceVaries);
+        Assertions.assertArrayEquals(new boolean[]{false, false}, unit.dimensionVaries);
+        // outside the discovery splits the dimensions are not read, the slices are
+        final EvaluationScorer.Unit outside = scorer.prepare(List.of(
+                new EvaluationRow("other", "g2", "r3", 1L, null, 1, 0.5, 1d, new String[]{"2024-07", "east"}, new String[]{"east"}, new double[]{0.6, 1.0}),
+                new EvaluationRow("other", "g2", "r4", 1L, null, 0, 0.5, 1d, new String[]{"2024-07", "west"}, new String[]{"west"}, new double[]{0.4, 2.0})), "g2");
+        Assertions.assertArrayEquals(new boolean[]{false, true}, outside.sliceVaries);
+        Assertions.assertArrayEquals(new boolean[]{false, false}, outside.dimensionVaries);
+        // a selection split no fit or discovery reads has nothing to report, not missing fit data
+        final EvaluationSpec plain = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS + ", bootstrap: {samples: 0}}");
+        final String text = EvaluationReport.build(plain, new HashMap<>()).summary().get("notes").toString();
+        Assertions.assertTrue(text.contains("split valid (selection) has no scored unit: nothing to report"), text);
     }
 }

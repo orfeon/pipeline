@@ -880,12 +880,7 @@ public final class EvaluationStages {
         }
 
         private void add(final AlignedRow row, final double q, final String key) {
-            final double[] v = partials.computeIfAbsent(key, k -> new double[EvaluationReport.BIN_SLOTS]);
-            v[EvaluationReport.BIN_N] += 1;
-            v[EvaluationReport.BIN_POSITIVES] += row.label;
-            v[EvaluationReport.BIN_Q] += q;
-            v[EvaluationReport.BIN_P] += row.baseline;
-            if (!Double.isNaN(row.utility)) v[EvaluationReport.BIN_UTILITY] += row.utility * row.label;
+            EvaluationReport.addBin(partials.computeIfAbsent(key, k -> new double[EvaluationReport.BIN_SLOTS]), row, q);
         }
 
         @FinishBundle
