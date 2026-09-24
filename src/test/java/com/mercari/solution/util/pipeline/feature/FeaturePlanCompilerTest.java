@@ -3478,6 +3478,61 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(16, output.get("includeHash").getAsString().length());
     }
 
+    private static List<String> includeNames(final JsonObject output) {
+        final List<String> names = new java.util.ArrayList<>();
+        output.getAsJsonArray("include").forEach(e -> names.add(e.getAsString()));
+        return names;
+    }
+
+    @Test
+    public void testIncludeFromSeveralFiles() {
+        final String first = "data:" + java.util.Base64.getEncoder().encodeToString("{\"columns\": [\"a\", \"b\", \"c\"]}".getBytes());
+        final String second = "data:" + java.util.Base64.getEncoder().encodeToString("c\nd\na\n".getBytes());
+        final java.util.function.Function<String, JsonObject> resolve = includeJson -> {
+            final JsonObject parameters = new JsonObject();
+            final JsonObject output = new JsonObject();
+            output.add("include", com.google.gson.JsonParser.parseString(includeJson));
+            parameters.add("output", output);
+            FeaturePlanService.resolveInclude(parameters, null);
+            return output;
+        };
+        // union (the default): every name in first-appearance order; the source names the mode and the files
+        JsonObject output = resolve.apply("{\"from\": [\"" + first + "\", \"" + second + "\"]}");
+        Assertions.assertEquals(List.of("a", "b", "c", "d"), includeNames(output));
+        Assertions.assertEquals("union(" + first + ", " + second + ")", output.get("includeSource").getAsString());
+        Assertions.assertEquals(16, output.get("includeHash").getAsString().length());
+        // intersection: the first file's names present in the second, in the first file's order
+        output = resolve.apply("{\"from\": [\"" + first + "\", \"" + second + "\"], \"mode\": \"intersection\"}");
+        Assertions.assertEquals(List.of("a", "c"), includeNames(output));
+        Assertions.assertTrue(output.get("includeSource").getAsString().startsWith("intersection("));
+        // a single file in the object form reads like the string form
+        output = resolve.apply("{\"from\": \"" + second + "\"}");
+        Assertions.assertEquals(List.of("c", "d", "a"), includeNames(output));
+        Assertions.assertEquals(second, output.get("includeSource").getAsString());
+        // the same list gives the same hash whatever the form
+        Assertions.assertEquals(resolve.apply("\"" + second + "\"").get("includeHash"), output.get("includeHash"));
+        // a plain list of names is left alone
+        output = resolve.apply("[\"x\", \"y\"]");
+        Assertions.assertEquals(List.of("x", "y"), includeNames(output));
+        Assertions.assertFalse(output.has("includeSource"));
+        // rejections
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": []}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"mode\": \"union\"}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + first + "\"], \"mode\": \"all\"}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + first + "\"], \"uri\": 1}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [{\"uri\": 1}]}"));
+        // a non-string entry or mode is rejected, not coerced (a one-element array would read as its element)
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [1]}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + first + "\"], \"mode\": [\"intersection\"]}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + first + "\"], \"mode\": {}}"));
+        // a from entry that is no readable file is an error, not a one-name list merged into the others
+        Assertions.assertThrows(IllegalArgumentException.class, () -> resolve.apply("{\"from\": [\"" + first + "\", \"no/such/passed.json\"]}"));
+        // three files: union in first-appearance order, intersection of all of them
+        final String third = "data:" + java.util.Base64.getEncoder().encodeToString("[\"e\", \"a\"]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Assertions.assertEquals(List.of("a", "b", "c", "d", "e"), includeNames(resolve.apply("{\"from\": [\"" + first + "\", \"" + second + "\", \"" + third + "\"]}")));
+        Assertions.assertEquals(List.of("a"), includeNames(resolve.apply("{\"from\": [\"" + first + "\", \"" + second + "\", \"" + third + "\"], \"mode\": \"intersection\"}")));
+    }
+
     private static List<Schema.Field> inputFields(final boolean withSnapshotTime) {
         final List<Schema.Field> fields = new java.util.ArrayList<>(List.of(
                 Schema.Field.of("session_id", Schema.FieldType.STRING), Schema.Field.of("seller_id", Schema.FieldType.STRING),

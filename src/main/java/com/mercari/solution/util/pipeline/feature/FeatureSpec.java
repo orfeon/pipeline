@@ -840,7 +840,7 @@ public class FeatureSpec implements Serializable {
                     spec.output.include = Json.strings(out, "include");
                 } else {
                     // a URI is resolved by FeaturePlanService.resolve before the compiler sees the parameters
-                    diagnostics.error("output.include.unresolved", "output", "output.include must be a list of column names (a URI is resolved before compile): " + out.get("include"));
+                    diagnostics.error("output.include.unresolved", "output", "output.include must be a list of column names (a URI, or {from: [uri, ...], mode}, is resolved before compile): " + out.get("include"));
                 }
             }
             spec.output.includeSource = Json.string(out, "includeSource");

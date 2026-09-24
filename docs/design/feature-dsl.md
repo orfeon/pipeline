@@ -1490,8 +1490,9 @@ market-derived columns are identifiable from the lineage.
 **Output contract**: `output.roles` (`group` / `time` / `entity` / `label` / `baseline` / `weight`)
 declares which output columns are the consumer's keys, ordering, label and baseline rather than
 features — the rule "a role column is never a feature" becomes mechanical for the training, screening
-and evaluation steps that share the table. `output.include` is the projection (a list or a URI to a
-screening step's pass list; it replaces `exclude` when declared, unknown names are a warning). The
+and evaluation steps that share the table. `output.include` is the projection (a list, a URI to a
+screening step's pass list, or `{from: [uri, ...], mode: union | intersection}` combining several pass
+lists at assembly; it replaces `exclude` when declared, unknown names are a warning). The
 projection never removes a role column: a pass list holds candidates, and a role column (a baseline's
 emitted copy, a label derived as a column) was never one, so it stays emitted and the report says so
 (`output.include.role`) — otherwise the closed loop screen → include would leave the next table's
