@@ -284,6 +284,9 @@ public final class EvaluationSpec implements Serializable {
     public List<Derived> derived = new ArrayList<>();
     /** output.calibration: URI / path of the fitted-parameters JSON (null = not written) */
     public String calibrationUri;
+    /** rows: the splits whose scored rows go to the {@code rows} output (null = the output stays empty); {@code true} = the selection splits */
+    public List<String> rowSplits;
+    private boolean rowsSelection;
     /** sliceDiscovery (null = none) */
     public Discovery discovery;
     /** the categorical discovery dimensions carried in {@link EvaluationRow#dims}, in order */
@@ -367,6 +370,15 @@ public final class EvaluationSpec implements Serializable {
 
     public boolean hasFits() {
         return !fits.isEmpty();
+    }
+
+    /** Whether the scored rows of a split go to the rows output. */
+    public boolean outputsRows(final String split) {
+        return rowSplits != null && rowSplits.contains(split);
+    }
+
+    public boolean hasRows() {
+        return rowSplits != null && !rowSplits.isEmpty();
     }
 
     public boolean hasDiscovery() {
@@ -768,9 +780,31 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        // rows output: true = the selection splits (fixed by resolve), or the named splits
+        final JsonElement rows = p.get("rows");
+        if (rows != null && !rows.isJsonNull()) {
+            if (rows.isJsonPrimitive() && rows.getAsJsonPrimitive().isBoolean()) {
+                if (rows.getAsBoolean()) {
+                    s.rowsSelection = true;
+                    s.rowSplits = new ArrayList<>();
+                }
+            } else if (rows.isJsonObject()) {
+                // the helper names the key only: prefix its errors so they do not read as the top-level splits
+                final List<String> splitErrors = new ArrayList<>();
+                final List<String> names = strings(rows.getAsJsonObject(), "splits", splitErrors);
+                for (final String e : splitErrors) errors.add("rows." + e);
+                if (names.isEmpty()) errors.add("rows.splits must name the splits whose scored rows are output (or use rows: true for the selection splits)");
+                else s.rowSplits = names;
+            } else {
+                errors.add("rows must be true (the selection splits) or an object {splits: [<split names>]}");
+            }
+            if (s.rowSplits != null && s.rowId.isEmpty()) errors.add("rows output needs rowId: the fields that identify a row, so the rows can be joined back");
+        }
+
         final JsonObject canonical = p.deepCopy();
         canonical.remove("manifest");
         canonical.remove("output");
+        canonical.remove("rows");
         s.parametersHash = FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(canonical));
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return s;
@@ -937,6 +971,18 @@ public final class EvaluationSpec implements Serializable {
                 if (declaredNames.contains(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' collides with a declared prediction set of that name");
                 else if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one " + f.type + " fit per prediction set)");
                 derived.add(new Derived(name, j, i));
+            }
+        }
+
+        // rows output: the selection splits, or the named ones
+        if (rowSplits != null) {
+            if (rowsSelection) {
+                // rebuilt, like every other resolved list, so a second resolve does not repeat the splits
+                rowSplits = new ArrayList<>();
+                for (final Split sp : splits) if (sp.isSelection()) rowSplits.add(sp.name);
+                if (rowSplits.isEmpty()) errors.add("rows: true selects the selection splits, and none is declared; name the splits with rows: {splits: [...]}");
+            } else {
+                for (final String name : rowSplits) if (split(name) == null) errors.add("rows.splits '" + name + "' is not a declared split (available: " + splitNames() + ")");
             }
         }
 

@@ -68,7 +68,7 @@ public final class EvaluationStages {
     private static final String SEP = MetricAccumulator.SEP;
 
     public record Outputs(PCollection<MElement> metrics, PCollection<MElement> calibration, PCollection<MElement> units,
-                          PCollection<MElement> slices, PCollection<MElement> summary, PCollection<BadRecord> failures) {}
+                          PCollection<MElement> slices, PCollection<MElement> summary, PCollection<MElement> rows, PCollection<BadRecord> failures) {}
 
     /** Engine rejections that only the input can tell (called by the module before wiring). */
     public static List<String> engineConstraints(final PCollection<MElement> input) {
@@ -114,12 +114,14 @@ public final class EvaluationStages {
         final TupleTag<KV<String, MetricAccumulator>> scoredTag = new TupleTag<>() {};
         final TupleTag<MElement> unitRecordTag = new TupleTag<>() {};
         final TupleTag<AlignedRow> alignedTag = new TupleTag<>() {};
+        final TupleTag<MElement> rowRecordTag = new TupleTag<>() {};
         final PCollectionTuple aligned = units.apply("Align", ParDo
-                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag, fitView, dimensionView))
+                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag, rowRecordTag, fitView, dimensionView))
                 .withSideInputs(fitView, dimensionView)
-                .withOutputTags(scoredTag, TupleTagList.of(unitRecordTag).and(alignedTag)));
+                .withOutputTags(scoredTag, TupleTagList.of(unitRecordTag).and(alignedTag).and(rowRecordTag)));
         final PCollection<KV<String, MetricAccumulator>> scored = aligned.get(scoredTag).setCoder(accumulatorCoder);
         final PCollection<MElement> unitRecords = aligned.get(unitRecordTag);
+        final PCollection<MElement> rowRecords = aligned.get(rowRecordTag);
         final PCollection<AlignedRow> alignedRows = aligned.get(alignedTag).setCoder(AlignedRow.CODER);
 
         final PCollection<KV<String, MetricAccumulator>> combined = PCollectionList.of(scored).and(bookkeeping)
@@ -155,7 +157,7 @@ public final class EvaluationStages {
                     .apply("Bins_Gather", Combine.globally(new GatherFn<>(binCoder)))
                     .apply("Bins_Finalize", ParDo.of(new CalibrationDoFn(spec, sketchView)).withSideInputs(sketchView));
         }
-        return new Outputs(finalized.get(metricsTag), calibration, unitRecords, finalized.get(slicesTag), finalized.get(summaryTag), prepared.get(failureTag));
+        return new Outputs(finalized.get(metricsTag), calibration, unitRecords, finalized.get(slicesTag), finalized.get(summaryTag), rowRecords, prepared.get(failureTag));
     }
 
     /**
@@ -614,7 +616,11 @@ public final class EvaluationStages {
                 for (int i = 0; i < dims.length; i++) dims[i] = text(values.get(spec.dimColumns.get(i)));
                 final String bootKey = spec.bootstrapUnit == null ? null : text(values.get(spec.bootstrapUnit));
                 final String identity = identity(values);
-                final EvaluationRow row = new EvaluationRow(split, group, identity, time, bootKey, label, baseline == null ? Double.NaN : baseline, weight, slices, dims, x);
+                // the rowId values travel only with the rows of a split the rows output selects (the identity hash
+                // serves everything else), so the other splits' rows do not carry them through the shuffle
+                final String[] ids = new String[spec.outputsRows(split) ? spec.rowId.size() : 0];
+                for (int i = 0; i < ids.length; i++) ids[i] = text(values.get(spec.rowId.get(i)));
+                final EvaluationRow row = new EvaluationRow(split, group, identity, time, bootKey, label, baseline == null ? Double.NaN : baseline, weight, slices, dims, x, ids);
                 c.output(rowTag, KV.of(split + SEP + (group == null ? identity : group), row));
                 book.add(slots);
             } catch (final Throwable e) {
@@ -670,13 +676,15 @@ public final class EvaluationStages {
 
     /**
      * Aligns and scores units into bundle-local accumulators (flushed once per bundle: a partial combine), and
-     * emits the unit records and the aligned rows (the latter only when calibration tables are declared).
+     * emits the unit records, the aligned rows (only when calibration tables are declared) and the row records
+     * (only for the splits a rows output selects).
      */
     static class AlignDoFn extends DoFn<KV<String, Iterable<EvaluationRow>>, KV<String, MetricAccumulator>> {
         private final EvaluationSpec spec;
         private final TupleTag<KV<String, MetricAccumulator>> scoredTag;
         private final TupleTag<MElement> unitRecordTag;
         private final TupleTag<AlignedRow> alignedTag;
+        private final TupleTag<MElement> rowRecordTag;
         private final PCollectionView<FitResults> fitView;
         private final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView;
         private transient EvaluationScorer scorer;
@@ -685,11 +693,13 @@ public final class EvaluationStages {
         private transient Map<Integer, double[]> edges;
 
         AlignDoFn(final EvaluationSpec spec, final TupleTag<KV<String, MetricAccumulator>> scoredTag, final TupleTag<MElement> unitRecordTag,
-                  final TupleTag<AlignedRow> alignedTag, final PCollectionView<FitResults> fitView, final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView) {
+                  final TupleTag<AlignedRow> alignedTag, final TupleTag<MElement> rowRecordTag,
+                  final PCollectionView<FitResults> fitView, final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView) {
             this.spec = spec;
             this.scoredTag = scoredTag;
             this.unitRecordTag = unitRecordTag;
             this.alignedTag = alignedTag;
+            this.rowRecordTag = rowRecordTag;
             this.fitView = fitView;
             this.dimensionView = dimensionView;
         }
@@ -735,6 +745,9 @@ public final class EvaluationStages {
             }
             if (!spec.tables.isEmpty()) {
                 for (final AlignedRow row : scorer.aligned(unit)) c.output(alignedTag, row);
+            }
+            if (spec.outputsRows(unit.split)) {
+                for (final Map<String, Object> record : scorer.rowRecords(unit)) c.output(rowRecordTag, MElement.of(record, c.timestamp()));
             }
         }
 

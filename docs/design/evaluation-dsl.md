@@ -357,6 +357,18 @@ The intermediate representation: one record per unit × prediction set (the base
 `hitAt1`, `brier`, `utility` and `slices` (the unit's slice values as `{field, value}` records). Re-aggregate it in a
 warehouse, or feed it to the `attribution` transform to ask which slices Δ's total comes from.
 
+### 8.6 Rows (`<name>.rows`)
+
+Declared by `rows: true` (the `selection` splits) or `rows: {splits: [...]}`; needs `rowId`. One record per
+scored row of the selected splits: `split`, `unit`, `rowId` (the declared fields' values as `{field, value}`
+records — the join key back to the input), `time`, `label` (as declared), `labelShare` (ỹ), `baseline` (the
+row's baseline mean: the uniform share 1 / n in grouped prior mode, null in binomial prior mode), `predictions` (`{prediction, p}` for every compared set, the derived
+`@T` / `@blend` included: the calibrated probabilities a fit implies), `utility`. Emitted by the align step
+next to the unit records, so it costs no pass; the `rowId` values travel only with the rows of the
+selected splits. The purpose is the closed loop evaluation → selection: the calibrated row probabilities feed the
+next screen without re-deriving them from the calibration JSON. Selection splits by default because the
+report split is for reporting, not for building the next rule on.
+
 ## 9. Constraints and diagnostics
 
 Assembly errors (every message names the parameter): an unknown family or form; `groupedMultinomial`
@@ -370,7 +382,8 @@ without a field or with an unknown bucket; `bootstrap.samples` outside [0, 10000
 non-global window or a triggered input (the calibration edges are a side input and the tables are one
 Combine each); a fit whose `fitOn` is missing, unknown or a `report` split, an `of` naming no declared set,
 two fits of one type on one set, a blend without an offset, a grid outside `[min > 0, max ≥ min, 2 ≤ count ≤
-10000]`, `maxIter` outside [1, 100]; a slice discovery without dimensions, with `discoverOn` = `confirmOn`,
+10000]`, `maxIter` outside [1, 100]; `rows` without `rowId`, naming an unknown split, or `rows: true` without
+a selection split; a slice discovery without dimensions, with `discoverOn` = `confirmOn`,
 `discoverOn` not a selection split, an unknown split or set, a numeric dimension without `bins` (or `bins`
 on a non-numeric one), `maxDepth` outside [1, 3], an unknown `metric`, `excessLogScore` in binomial prior mode.
 

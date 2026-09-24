@@ -154,12 +154,15 @@ public class EvaluationTransformTest {
                         - {field: session_time, bucket: quarter}
                       utility: {field: payoff}
                       output: {calibration: target/evaluation-test/calibration.json}
+                      rowId: [session_id, listing_id]
+                      rows: true
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         Assertions.assertNotNull(outputs.get("eval"));
         Assertions.assertNotNull(outputs.get("eval.calibration"));
         Assertions.assertNotNull(outputs.get("eval.units"));
         Assertions.assertNotNull(outputs.get("eval.summary"));
+        Assertions.assertNotNull(outputs.get("eval.rows"));
         // sessions two days apart from 2024-01-01: 183 in 2024, 183 in 2025 (leap year), 34 in 2026 (unassigned)
         final long validUnits = 183, testUnits = 183;
 
@@ -266,6 +269,27 @@ public class EvaluationTransformTest {
             Assertions.assertEquals(one.getAsDouble("logScore") - one.getAsDouble("logScoreBaseline"), one.getAsDouble("excessLogScore"), 1e-12);
             final List<?> slices = (List<?>) one.getPrimitiveValue("slices");
             Assertions.assertEquals(2, slices.size());
+            return null;
+        });
+        PAssert.that(outputs.get("eval.rows").getCollection()).satisfies(rows -> {
+            final List<MElement> list = new ArrayList<>();
+            rows.forEach(list::add);
+            // rows: true = the selection split's rows, every compared set (4 declared + 3 derived) per row
+            Assertions.assertEquals(validUnits * LISTINGS, list.size());
+            double sold = 0;
+            for (final MElement r : list) {
+                Assertions.assertEquals("valid", r.getAsString("split"));
+                sold += r.getAsDouble("label");
+                final List<?> predictions = (List<?>) r.getPrimitiveValue("predictions");
+                Assertions.assertEquals(7, predictions.size(), predictions.toString());
+                final List<?> ids = (List<?>) r.getPrimitiveValue("rowId");
+                Assertions.assertEquals(2, ids.size());
+                Assertions.assertEquals("session_id", ((Map<?, ?>) ids.get(0)).get("field"));
+                Assertions.assertEquals(r.getAsString("unit"), ((Map<?, ?>) ids.get(0)).get("value"));
+                Assertions.assertNotNull(r.getPrimitiveValue("baseline"));
+                Assertions.assertNotNull(r.getPrimitiveValue("utility"));
+            }
+            Assertions.assertEquals(validUnits, sold, 1e-9);
             return null;
         });
         PAssert.that(outputs.get("eval.summary").getCollection()).satisfies(rows -> {

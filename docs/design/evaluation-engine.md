@@ -27,6 +27,7 @@ live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen 
 ```
 input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) or Units (one row each) ─ Align ─┬─ scored KV<key, MetricAccumulator> ─┐
                  └─ bookkeeping KV<rows, MetricAccumulator> (one per bundle) ────────────────────┼─ units MElement                     ├─ Flatten
+                                                                                                      ├─ rows MElement (rows output)         │
                                                                                                       └─ AlignedRow (calibration, §3)        │
                      ─ Combine.perKey(MetricAccumulator.Fn) ─ Gather (Combine.globally, list) ─ Finalize ─┬─ metrics ◄────────────────────────┘
                                                                                                           └─ summary
@@ -43,8 +44,10 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   after the sort — and whether each slice / dimension varies over its rows; `accumulate` writes them into the
   split bookkeeping and the `sliceVaries` / `dimensionVaries` counters) / `score` / `accumulate` per unit into a bundle-local
   `Map<String, MetricAccumulator>` flushed at `@FinishBundle` (a partial combine: the shuffle carries keys ×
-  bundles elements), emits the unit records straight away (no coder for a unit result type) and, when tables
-  are declared, the aligned rows. A skipped unit is counted on its split's bookkeeping key.
+  bundles elements), emits the unit records straight away (no coder for a unit result type), when tables
+  are declared the aligned rows, and when a `rows` output is declared the row records of the selected splits
+  (`EvaluationScorer.rowRecords`: every compared set's mean per row; the `rowId` values ride `EvaluationRow`
+  only for the selected splits' rows). A skipped unit is counted on its split's bookkeeping key.
 - **Keys** are `split  prediction index  slice index  slice value` (slice −1 = overall), the
   baseline being prediction 0. A unit adds (1 + k) × (1 + its non-null slice values) accumulators, each with
   the unit's replicate weights.

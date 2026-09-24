@@ -636,11 +636,16 @@ public final class EvaluationReport {
                 .build();
     }
 
-    public static Schema unitsSchema() {
-        final Schema slice = Schema.builder()
+    /** The {@code {field, value}} struct of the units' slices and the rows' rowId. */
+    private static Schema fieldValueSchema() {
+        return Schema.builder()
                 .withField("field", Schema.FieldType.STRING)
                 .withField("value", Schema.FieldType.STRING)
                 .build();
+    }
+
+    public static Schema unitsSchema() {
+        final Schema slice = fieldValueSchema();
         return Schema.builder()
                 .withField("split", Schema.FieldType.STRING)
                 .withField("unit", Schema.FieldType.STRING)
@@ -655,6 +660,25 @@ public final class EvaluationReport {
                 .withField("brier", Schema.FieldType.FLOAT64)
                 .withField("utility", Schema.FieldType.FLOAT64)
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.element(slice)))
+                .build();
+    }
+
+    public static Schema rowsSchema() {
+        final Schema id = fieldValueSchema();
+        final Schema prediction = Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("p", Schema.FieldType.FLOAT64)
+                .build();
+        return Schema.builder()
+                .withField("split", Schema.FieldType.STRING)
+                .withField("unit", Schema.FieldType.STRING)
+                .withField("rowId", Schema.FieldType.array(Schema.FieldType.element(id)))
+                .withField("time", Schema.FieldType.TIMESTAMP)
+                .withField("label", Schema.FieldType.FLOAT64)
+                .withField("labelShare", Schema.FieldType.FLOAT64)
+                .withField("baseline", Schema.FieldType.FLOAT64)
+                .withField("predictions", Schema.FieldType.array(Schema.FieldType.element(prediction)))
+                .withField("utility", Schema.FieldType.FLOAT64)
                 .build();
     }
 
@@ -800,6 +824,7 @@ public final class EvaluationReport {
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("bootstrap=" + spec.bootstrapSamples + " seed=" + spec.bootstrapSeed + (spec.bootstrapUnit != null ? " unit=" + spec.bootstrapUnit : ""));
         if (!spec.tables.isEmpty()) parts.add("calibration=" + spec.tables.size() + " tables" + (spec.hasQuantileTables() ? " (+1 sketch pass)" : ""));
+        if (spec.hasRows()) parts.add("rows=" + spec.rowSplits);
         if (spec.hasFits()) {
             final List<String> fits = new ArrayList<>();
             for (int i = 0; i < spec.fits.size(); i++) {
