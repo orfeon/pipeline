@@ -150,7 +150,7 @@ standard errors scale with its magnitude.
 | type | model | estimate | reading |
 |---|---|---|---|
 | `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear (the standard errors then come out null) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`maxIter` default 10, `tol` 1e-8), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline). `l2` (default 0) is a ridge penalty on the *average* log likelihood, so a positive value shrinks the estimate by about l2 · N · se² relative — leave it at 0 unless f and o are collinear or the selection split is separable (a small split the set ranks perfectly: the unpenalised estimate grows without bound). The standard errors come from the unpenalised information whatever `l2`: null when f and o are exactly collinear, very large when nearly so | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
 
 The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
 declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
@@ -158,8 +158,11 @@ with a note) are the summary's `fits`; `output.calibration` also writes them as 
 
 #### Reproducing a Benter-style regression
 
-The classic check of a model against a market — the conditional logit of the outcome on the model's and the
-market's logits, α · logit(p_model) + β · logit(p_market) — is a `blend` on a **score set** whose score and
+Benter's combined model — the conditional logit of the winner on the model's and the market's *log*
+probabilities within the group, α · log p_model + β · log p_market — is a `groupedMultinomial` `blend` on a
+**probability set** with the market as the `baseline`: f is the set's log share and o the baseline's (a
+per-group constant does not change a softmax, so log shares and log probabilities give the same fit). The
+variant on the logits, α · logit(p_model) + β · logit(p_market), is a `blend` on a **score set** whose score and
 offset are those logits (computed upstream, e.g. in a `select`):
 
 ```yaml
@@ -170,8 +173,10 @@ calibration:
 ```
 
 `a` is α and `b` is β with their standard errors; `z_a` tests whether the model adds information orthogonal
-to the market. A blend on a **probability set** is a different regression: its f is the log share within the
-group (the softmax's natural scale), not the logit, so its coefficients do not match a logit-based reference.
+to the market. The two regressions are on different scales, so the coefficients of one do not match a
+reference computed on the other. The declared score set itself is softmax(logit_model + logit_market) — the
+blend's start, a = b = 1 — so its own metrics and the blend's `logScoreAtIdentity` / `gainPerUnit` are relative
+to that sum: read the blend's `a` and `b`.
 
 ### Slice discovery
 
