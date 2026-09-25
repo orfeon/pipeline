@@ -19,14 +19,14 @@ feature transform does (engine doc §1.2):
 | `glm.SpecJson` | the lenient parameter readers (`string` / `number` / `strings` / `parseInstant`, …) the specs share | no |
 | `glm.SketchAccumulator` | one mergeable KLL quantile sketch (k = 400) with `rank` (mid-rank fraction), `quantile`, `edges`; coder + `Fn`; shared with the evaluation transform's calibration tables | coder + CombineFn |
 | `WindowQuantiles` | the window's sketches, one per candidate (`rank` / `median` / `quantile` / `edges` by column): the rank / absdev reference of independent rows and the value-bin edges of DSL §12.1; coder + `Fn` (input = accumulator = output) | coder + CombineFn |
-| `ScreenRow` | the prepared sample (unit key, identity, time, period, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
+| `ScreenRow` | the prepared sample (unit key, identity, time, period, the heterogeneity modifier's level, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, the rows `baseline.invalid: dropRow` rejects removed and counted, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms (within the unit, or against the window sketches), the family's contribution into `ScoreAccumulator`s; the binned block's bin assignment (`bins`: value edges cached per column from the sketches, exact normal quantiles for a noise placebo, position bins from the within-unit rank) and its per-bin sums (`binnedRowContribution` / `binnedGroupedContribution`) | no |
-| `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period, min / max time, and a variable-length `extra` vector for the window (the binned block's per-bin sums, DSL §6.1: row families `[Σ w, Σ w r, Σ w v]` per bin + the totals, grouped `[S_b, P_b, (P P')_bb']`); the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
+| `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period — and per heterogeneity level, kept in the period map under `LEVEL_PREFIX` and fed by `addSlice` (no total), so merge and coder are unchanged — min / max time, and a variable-length `extra` vector for the window (the binned block's per-bin sums, DSL §6.1: row families `[Σ w, Σ w r, Σ w v]` per bin + the totals, grouped `[S_b, P_b, (P P')_bb']`); the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
 | `ConditioningScorer` | per-unit conditioning computations: `moments`, `initialTheta`, `design`, `fitted` and `evaluate` (`[n, ll, g, G]`, both delegating to `GlmFit`), `partial` (`[s, b, a]` per column, per period too, plus the gaussian variance sums and the fit's `[n, g, G]` per period under `FIT_PERIOD_KEY`; for the binned block `[s (B), H (B² / B), A (B × k)]` without period slices) | no |
-| `PartialAccumulator` | one variable-length vector for the window plus the same per period (the partial pass's shape); custom coder; `Fn` | coder + CombineFn |
+| `PartialAccumulator` | one variable-length vector for the window plus the same per period and per heterogeneity level (`addSlice` under `LEVEL_PREFIX`, as the score accumulator) — the partial pass's shape; custom coder; `Fn` | coder + CombineFn |
 | `glm.FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
 | `glm.VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
-| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `build` (records + summary, the placebo cut per statistic kind), `selection` (the pass list), the output schemas, `describe` | no |
+| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `heterogeneity` (the level slices' Σ S_l² / H_l − (Σ S_l)² / Σ H_l, marginal from the score slices and partial from the partial slices), `build` (records + summary, the placebo cut per statistic kind — df1 / binned / het), `selection` (the pass list), the output schemas, `describe` | no |
 | `ScreenStages` | the graph (§2–§4) and its DoFns | yes |
 | `ScreenTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, two outputs | module |
 
@@ -141,7 +141,10 @@ Gather ─ Finalize [side: state_max, partial map] ─ records / summary / selec
   `partialPeriod` the same per bucket with the window's γ (DSL doc §8.2). A binned block's key carries
   `[s (B), H, A (B × k)]` instead (`ConditioningScorer.binnedPartial`, no period slices), and
   `ScreenReport.blockPartial` solves its Γ (k × B) by the same multi-right-hand-side `solveGram`, forms S⊥ /
-  H⊥ and takes χ² = S⊥' H⊥⁺ S⊥ over the bins the marginal block kept (DSL doc §6.1).
+  H⊥ and takes χ² = S⊥' H⊥⁺ S⊥ over the bins the marginal block kept (DSL doc §6.1). With a heterogeneity
+  modifier the pass also keeps the `[s, b, a]` sums and the fit's `[n, g, G]` per modifier level (a slice
+  under `LEVEL_PREFIX`, the grouped family's per unit, the row families' per row bucket), so the partial
+  heterogeneity test reads the level slices exactly as the period decomposition does (DSL doc §7.1).
 
 Total: `maxIter + 2` passes at most, each a global Combine, independent of the data. The gaussian fit is
 least squares at σ² = 1 (one Newton step); the report divides the partial statistics and the gain by the
@@ -205,7 +208,8 @@ Implemented: everything in the DSL document's §1–§11. Deferred, with the des
 document §12: block tests for declared column groups (`df > 1`; the binned block test is built and is the
 machinery: `ScreenReport.blockChi2` / `blockPartial` take any one-hot or vector block), `passRule: fdr`,
 precision weights, a windowed marginal screen under a trigger, declared interaction probes, the rest of the
-in-screen expansion (categorical score tests, heterogeneity across a modifier, pairwise products on the
+in-screen expansion (categorical score tests, a built-in baseline-bin modifier for the heterogeneity test —
+the test itself is built over the period buckets and a declared field — pairwise products on the
 conditioning fit's p̂, pHd), pruning between passes against the `pass.minGain` floor (the floor itself is
 built: `ScreenSpec.gainCut`, one comparison in the report), derivation suggestions (a `<name>.suggestions`
 output) — in the step order of DSL §12.4. Engine-side

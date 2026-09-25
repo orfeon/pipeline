@@ -267,6 +267,36 @@ partial-residual curve the derivation suggestions of §12.3 read.
   the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`). Making `passed`
   follow the q-value is an extension position (§12).
 
+### 7.1 Heterogeneity across a modifier
+
+`heterogeneity: periods` or `heterogeneity: {field: <name>}` asks, per df = 1 record, whether the candidate's
+effect *differs* across the levels of a modifier — the period buckets, or a declared field's values (read
+per row for the row families; per unit, its first row's value, for the grouped family, whose likelihood has
+one term per unit; a null value is its own level `(null)`; the field is reserved, never a candidate). From
+the levels' own score tests (each centred within its level, the same S_l / H_l the period slices already
+carry, so the periods modifier costs nothing) the total Σ S_l² / H_l (df L) splits into the common effect
+(Σ S_l)² / Σ H_l (df 1) and the heterogeneity
+
+```
+het_chi2 = Σ S_l² / H_l − (Σ S_l)² / Σ H_l      (χ²(L − 1), L the usable levels)
+```
+
+which catches a candidate whose effect flips sign across the levels — invisible to the marginal test,
+whose window sum cancels. The record reports `het_chi2`, `het_df`, `het_pValue`, `het_gain` (= het_chi2 /
+2N), `het_levels`, and for a field modifier `level_z` (per level: z, S, H, n; for `periods` the slices are
+`period_z`). Under conditioning the same decomposition runs on the partial slices S⊥_l / H⊥_l of §8.2 —
+per level exactly as per period, with the fit's per-level [n, g, G] — as `partial_het_*`, and the
+effective test decides as for the main statistic.
+
+**Its own flag.** The heterogeneity test is a df = L − 1 statistic with its own placebo kind (`het`, §5):
+`het_passed` = effective het gain above `max(thresholds.het, pass.minGain)`. It is never folded into
+`passed` — a candidate passes on its main effect — and the summary / pass list list the flagged columns
+apart (`hetPassedColumns`, `nHetPassed`): the reading is "cross this candidate with the modifier
+upstream" (§12.3), not "select it". A stable effect leaves nothing to the heterogeneity test; a decaying
+one shows both a low `periods_agree` and a het signal over the period modifier. Bins of the baseline as a
+modifier ("does the effect depend on the predicted level") are the same test on a field discretised
+upstream; a built-in `baselineBins` modifier stays an extension position (§12.1).
+
 ## 8. Conditioning: the partial test
 
 `conditioning.fields` names an existing feature set F (globs; the role fields and the baseline cannot be
@@ -348,10 +378,12 @@ sanity check that the conditioning set is informative.
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
 (`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; the block test's active bins − 1),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
-(array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `r2_F`,
-`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_periods_agree`,
-`partial_n_periods`, `partial_period_z` (null without conditioning), `threshold` (the record's kind's cut),
-`passed`, `leakSuspect`, `placebo`, `degenerate`. A block record leaves the signed fields null (`S`, `H`,
+(array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `het_chi2 / df /
+pValue / gain / levels` and `level_z` (array of {level, z, S, H, n}; §7.1, null without a modifier), `r2_F`,
+`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
+gain / levels`, `partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without
+conditioning), `threshold` (the record's kind's cut), `passed`, `leakSuspect`, `het_passed`, `placebo`,
+`degenerate`. A block record leaves the signed fields null (`S`, `H`,
 `beta`, `z`, the period fields, `partial_S / H / z`). Field names follow the
 proposal that introduced the transform so its reference implementation compares directly.
 
@@ -359,7 +391,8 @@ proposal that introduced the transform so its reference implementation compares 
 
 One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
 `minPeriodsAgree` / `minGain`, the thresholds and the quantile (`threshold` / `thresholdTheoretical` = the
-df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
+df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test;
+`heterogeneity` = the modifier, `nHetPassed` / `hetPassedColumns` = the heterogeneity flag's count and columns), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
@@ -370,7 +403,8 @@ gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fall
 One JSON document written at the end of the run, in the shape the feature transform's `output.include`
 reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule` (with
 `minPeriodsAgree` / `minGain`), the leak flag (`leakZ` / `leakOn`), family /
-method, thresholds (the df = 1 scalar and the `thresholds` map per kind, `bins`), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
+method, thresholds (the df = 1 scalar and the `thresholds` map per kind, `bins`), the heterogeneity modifier and
+its flagged columns (`heterogeneity`, `hetPassedColumns` — apart from `columns`), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
 `createdAt`, and the passing records' statistics. Non-finite thresholds are written as null; an empty pass
@@ -391,7 +425,8 @@ reference; a lineage selector without lineage; no candidate left; a conditioning
 or naming a role / the baseline, or more than 500 columns; `time.from` / `time.to` without `time.field`; an
 empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a
 `bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
-`bins.edges: rank` without `group`; a triggered input (every Combine would fire per pane); a non-global window with
+`bins.edges: rank` without `group`; `heterogeneity: periods` without `periods`, an unknown `heterogeneity.by`,
+`by: field` without a field, or a modifier field missing from the input schema; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
@@ -477,14 +512,9 @@ its pseudo-inverse). Missing is a bin of its own (informative missingness), not 
   best single cut point (a max-type statistic), the full k − 1 test. It subsumes `rank` / `absdev` and the
   one-hot case of the block tests.
 
-**Heterogeneity across a modifier** (candidate × declared field). Per candidate and modifier level l,
-accumulate S_l and H_l (centred within the level). The total Σ S_l² / H_l (df k) splits into the common
-effect (Σ S_l)² / Σ H_l (df 1) and the heterogeneity Σ S_l² / H_l − (Σ S_l)² / Σ H_l (df k − 1); the latter
-catches a candidate whose effect flips sign across levels, invisible to the marginal test. State
-O(m · k). Modifiers: a declared categorical field, the `periods` buckets (their per-bucket S and H are
-already accumulated, so the time heterogeneity test is nearly free — and under conditioning the partial
-slices S⊥_p / H⊥_p of §8.2 are too, so the partial heterogeneity comes at the same price; *review*), or bins
-of the baseline itself (does the effect depend on the predicted level).
+**Heterogeneity across a modifier** — built (§7.1: the `periods` buckets and a declared field, marginal and
+partial, its own placebo kind and flag). Still open: bins of the baseline itself as a built-in modifier
+(does the effect depend on the predicted level) — today a field discretised upstream does it.
 
 **Pairwise products** among m candidates. The product z = x̃_i x̃_j is tested with the main effects as
 nuisance: the efficient score S_z − H_zm H_mm⁻¹ S_m with variance H_zz − H_zm H_mm⁻¹ H_mz, per pair from
@@ -640,8 +670,9 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
 1. **KLL pre-pass** — built for independent-row `rank` / `absdev` (§6, engine doc §2); the value-bin edges
    of §12.1 read the same sketches, extended to the grouped family with step 2.
 2. **Binned score test** — built (§6.1: per-kind thresholds, the missing bin, `bins: {edges, k}`, the
-   block partial test). Still to come from the same position: the **heterogeneity test** (`by: periods |
-   <field> | baselineBins`, marginal and partial) and the edges in the pass list.
+   block partial test); the **heterogeneity test** — built (§7.1: `periods` and a declared field,
+   marginal and partial). Still open from this position: the edges in the pass list, a built-in baseline-bin
+   modifier.
 3. **One-candidate suggestions** with the discovery / confirmation split and the `<name>.suggestions` output.
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.

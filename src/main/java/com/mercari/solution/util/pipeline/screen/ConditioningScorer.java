@@ -285,7 +285,13 @@ public final class ConditioningScorer implements Serializable {
             final String period = unit.period();
             final double[] pf = new double[k];
             for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
-            if (periods) into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).add(period, fitPeriodSums(unit, p, f, null));
+            final String level = unit.level();
+            if (periods || level != null) {
+                final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
+                final double[] sums = fitPeriodSums(unit, p, f, null);
+                fit.add(periods ? period : null, sums);
+                if (level != null) fit.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, sums);
+            }
             for (int c = 0; c < cols.length; c++) {
                 for (int t = 0; t < nTransforms; t++) {
                     if (ScreenSpec.isBinned(spec.transforms.get(t))) {
@@ -318,7 +324,8 @@ public final class ConditioningScorer implements Serializable {
                     acc[0] = w * s;
                     acc[1] = w * (b - px * px);
                     for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
-                    into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
+                    final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
+                    if (level != null) target.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, acc);
                 }
             }
             return;
@@ -326,10 +333,19 @@ public final class ConditioningScorer implements Serializable {
         // row families: every row is its own period; the rows are bucketed once (one bucket without periods)
         final Map<String, List<Integer>> buckets = new LinkedHashMap<>();
         for (int i = 0; i < n; i++) buckets.computeIfAbsent(periods ? unit.rows.get(i).period : null, key -> new ArrayList<>()).add(i);
-        if (periods) {
+        // the heterogeneity modifier's levels: the same sums per level as slices (the total holds the rows once)
+        final Map<String, List<Integer>> levelBuckets = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            final String level = unit.rows.get(i).level;
+            if (level != null) levelBuckets.computeIfAbsent(level, key -> new ArrayList<>()).add(i);
+        }
+        if (periods || !levelBuckets.isEmpty()) {
             final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
             for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
                 fit.add(bucket.getKey(), fitPeriodSums(unit, p, f, buckets.size() == 1 ? null : bucket.getValue()));
+            }
+            for (final Map.Entry<String, List<Integer>> bucket : levelBuckets.entrySet()) {
+                fit.addSlice(ScoreAccumulator.LEVEL_PREFIX + bucket.getKey(), fitPeriodSums(unit, p, f, bucket.getValue()));
             }
         }
         for (int c = 0; c < cols.length; c++) {
@@ -342,16 +358,10 @@ public final class ConditioningScorer implements Serializable {
                 final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
                 for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
-                    final double[] acc = new double[partialLength()];
-                    for (final int i : bucket.getValue()) {
-                        if (!StatMath.isFinite(v[i])) continue;
-                        final double w = unit.w[i];
-                        final double vv = spec.fisherWeight(p[i]);
-                        acc[0] += w * v[i] * (unit.y[i] - p[i]);
-                        acc[1] += w * vv * v[i] * v[i];
-                        for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
-                    }
-                    target.add(bucket.getKey(), acc);
+                    target.add(bucket.getKey(), rowPartialSums(unit, p, f, v, bucket.getValue()));
+                }
+                for (final Map.Entry<String, List<Integer>> bucket : levelBuckets.entrySet()) {
+                    target.addSlice(ScoreAccumulator.LEVEL_PREFIX + bucket.getKey(), rowPartialSums(unit, p, f, v, bucket.getValue()));
                 }
             }
         }
@@ -363,6 +373,20 @@ public final class ConditioningScorer implements Serializable {
      * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
      * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
      */
+    /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (a period or a modifier level). */
+    private double[] rowPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] v, final List<Integer> rows) {
+        final double[] acc = new double[partialLength()];
+        for (final int i : rows) {
+            if (!StatMath.isFinite(v[i])) continue;
+            final double w = unit.w[i];
+            final double vv = spec.fisherWeight(p[i]);
+            acc[0] += w * v[i] * (unit.y[i] - p[i]);
+            acc[1] += w * vv * v[i] * v[i];
+            for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
+        }
+        return acc;
+    }
+
     private double[] fitPeriodSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final List<Integer> rows) {
         final double[] y, mu, w;
         final double[][] ff;

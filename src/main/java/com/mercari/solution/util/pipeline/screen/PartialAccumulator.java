@@ -49,6 +49,12 @@ public final class PartialAccumulator implements Serializable {
         return total.length == 0;
     }
 
+    /** Adds one contribution to a slice only (a modifier level under {@link ScoreAccumulator#LEVEL_PREFIX}; the total already holds it). */
+    public PartialAccumulator addSlice(final String key, final double[] contribution) {
+        addPeriod(key, contribution);
+        return this;
+    }
+
     /** Adds one contribution to the total and, when {@code period} is non-null, to that period. */
     public PartialAccumulator add(final String period, final double[] contribution) {
         total = sum(total, contribution);

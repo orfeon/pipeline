@@ -286,7 +286,13 @@ public final class ScreenStages {
                     if (periodMillis != null) period = StatMath.periodBucket(periodMillis, spec.periodsBucket);
                 }
                 final String identity = identity(values);
-                final ScreenRow row = new ScreenRow(group, identity, time, period, label, baseline == null ? Double.NaN : baseline, weight, x);
+                // the heterogeneity modifier's level: the declared field's value as text (a null value is its own level)
+                String level = null;
+                if (spec.heterogeneityField != null) {
+                    final Object v = values.get(spec.heterogeneityField);
+                    level = v == null ? ScreenSpec.LEVEL_NULL : String.valueOf(v);
+                }
+                final ScreenRow row = new ScreenRow(group, identity, time, period, level, label, baseline == null ? Double.NaN : baseline, weight, x);
                 c.output(rowTag, KV.of(group == null ? identity : group, row));
                 count(window, book);
             } catch (final Throwable e) {

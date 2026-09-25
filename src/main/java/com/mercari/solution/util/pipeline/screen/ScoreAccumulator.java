@@ -83,6 +83,27 @@ public final class ScoreAccumulator implements Serializable {
         return minTime;
     }
 
+    /**
+     * Key prefix of the heterogeneity modifier's level slices, kept in the period map (same shape, same merge and
+     * coder) and told apart by this prefix (a period bucket never starts with it).
+     */
+    public static final String LEVEL_PREFIX = "\u0001level:";
+
+    public static boolean isLevel(final String key) {
+        return key.startsWith(LEVEL_PREFIX);
+    }
+
+    public static String levelName(final String key) {
+        return key.substring(LEVEL_PREFIX.length());
+    }
+
+    /** Adds one contribution to a slice only (a modifier level: the total already holds the row). */
+    public ScoreAccumulator addSlice(final String key, final double[] contribution) {
+        final double[] slot = periods.computeIfAbsent(key, k -> new double[SLOTS]);
+        for (int i = 0; i < SLOTS; i++) slot[i] += contribution[i];
+        return this;
+    }
+
     /** Adds one contribution to the total and, when {@code period} is non-null, to that period. */
     public ScoreAccumulator add(final String period, final double[] contribution) {
         for (int i = 0; i < SLOTS; i++) total[i] += contribution[i];

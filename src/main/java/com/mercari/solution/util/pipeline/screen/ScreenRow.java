@@ -34,16 +34,29 @@ public final class ScreenRow implements Serializable {
     final double weight;
     final double[] x;
 
+    /** the heterogeneity modifier's level (DSL doc §7.1; null = none declared, or a period modifier) */
+    final String level;
+
     public ScreenRow(final String group, final String identity, final long time, final String period,
+                     final double label, final double baseline, final double weight, final double[] x) {
+        this(group, identity, time, period, null, label, baseline, weight, x);
+    }
+
+    public ScreenRow(final String group, final String identity, final long time, final String period, final String level,
                      final double label, final double baseline, final double weight, final double[] x) {
         this.group = group;
         this.identity = identity;
         this.time = time;
         this.period = period;
+        this.level = level;
         this.label = label;
         this.baseline = baseline;
         this.weight = weight;
         this.x = x;
+    }
+
+    public String getLevel() {
+        return level;
     }
 
     /**
@@ -85,6 +98,7 @@ public final class ScreenRow implements Serializable {
             STRING.encode(value.identity, out);
             LONG.encode(value.time, out);
             NULLABLE_STRING.encode(value.period, out);
+            NULLABLE_STRING.encode(value.level, out);
             DOUBLE.encode(value.label, out);
             DOUBLE.encode(value.baseline, out);
             DOUBLE.encode(value.weight, out);
@@ -98,13 +112,14 @@ public final class ScreenRow implements Serializable {
             final String identity = STRING.decode(in);
             final long time = LONG.decode(in);
             final String period = NULLABLE_STRING.decode(in);
+            final String level = NULLABLE_STRING.decode(in);
             final double label = DOUBLE.decode(in);
             final double baseline = DOUBLE.decode(in);
             final double weight = DOUBLE.decode(in);
             final int n = INT.decode(in);
             final double[] x = new double[n];
             for (int i = 0; i < n; i++) x[i] = DOUBLE.decode(in);
-            return new ScreenRow(group, identity, time, period, label, baseline, weight, x);
+            return new ScreenRow(group, identity, time, period, level, label, baseline, weight, x);
         }
     }
 }

@@ -425,6 +425,83 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testHeterogeneityAcrossModifier() throws Exception {
+        // independent binomial rows in two segments (the modifier field g, not a candidate): x pushes the label up
+        // in segment A and down in segment B, so the window effect cancels (|z| small) while the heterogeneity
+        // test (df 1 over two levels) is large and the level slices carry opposite signs
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], heterogeneity: {field: g}, placebo: {noise: 0}}");
+        Assertions.assertTrue(spec.hasHeterogeneity() && !spec.heterogeneityByPeriods());
+        Assertions.assertEquals("field:g", spec.heterogeneityLabel());
+        Assertions.assertEquals(List.of("x"), spec.candidates);   // g is reserved
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (int i = 1; i <= 40; i++) {
+            final ScreenRow a = new ScreenRow("a" + i, "a" + i, i, null, "A", i > 20 ? 1 : 0, Double.NaN, 1, new double[]{i});
+            final ScreenRow b = new ScreenRow("b" + i, "b" + i, i, null, "B", i > 20 ? 0 : 1, Double.NaN, 1, new double[]{i});
+            scorer.score(List.of(a), a.getIdentity(), acc);
+            scorer.score(List.of(b), b.getIdentity(), acc);
+        }
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        final Map<String, Object> r = result.records().get(0);
+        Assertions.assertTrue(Math.abs((Double) r.get("z")) < 1, "window z " + r.get("z"));
+        Assertions.assertEquals(1L, r.get("het_df"));
+        Assertions.assertEquals(2L, r.get("het_levels"));
+        Assertions.assertTrue((Double) r.get("het_chi2") > 20, "het chi2 " + r.get("het_chi2"));
+        Assertions.assertTrue((Double) r.get("het_pValue") < 1e-4);
+        Assertions.assertEquals((Double) r.get("het_chi2") / 160, (Double) r.get("het_gain"), 1e-12);
+        Assertions.assertEquals(Boolean.TRUE, r.get("het_passed"));
+        Assertions.assertEquals(Boolean.FALSE, r.get("passed"));
+        Assertions.assertNull(r.get("partial_het_chi2"));
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> levels = (List<Map<String, Object>>) r.get("level_z");
+        Assertions.assertEquals(2, levels.size());
+        Assertions.assertEquals("A", levels.get(0).get("level"));
+        Assertions.assertTrue((Double) levels.get(0).get("z") > 3 && (Double) levels.get(1).get("z") < -3, levels.toString());
+        Assertions.assertEquals(40L, levels.get(0).get("n"));
+        // the het test's own theoretical cut: chi2(1) over 2N, next to the df1 cut
+        @SuppressWarnings("unchecked") final Map<String, Double> thresholds = (Map<String, Double>) result.summary().get("thresholds");
+        Assertions.assertEquals(StatMath.chiSquare1Quantile(0.99) / 160, thresholds.get("het"), 1e-12);
+        Assertions.assertEquals("field:g", result.summary().get("heterogeneity"));
+        Assertions.assertEquals(1L, result.summary().get("nHetPassed"));
+        Assertions.assertEquals(List.of("x"), result.summary().get("hetPassedColumns"));
+        Assertions.assertEquals(List.of(), result.summary().get("passedColumns"));
+        final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+        Assertions.assertEquals("field:g", selection.get("heterogeneity").getAsString());
+        Assertions.assertEquals(1, selection.getAsJsonArray("hetPassedColumns").size());
+        Assertions.assertEquals(0, selection.getAsJsonArray("columns").size());
+        Assertions.assertTrue(ScreenReport.describe(spec).contains("heterogeneity=field:g"));
+
+        // by periods: the data of testPassRuleMinPeriodsAgree (2025 positive, 2024 the other way) — the period
+        // slices are the levels, so level_z stays null and period_z holds them
+        final ScreenSpec byPeriods = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, periods: year, heterogeneity: periods}");
+        Assertions.assertTrue(byPeriods.heterogeneityByPeriods());
+        final GroupScorer gs = new GroupScorer(byPeriods);
+        final Map<Integer, ScoreAccumulator> gacc = new HashMap<>();
+        for (int g = 0; g < 30; g++) {
+            gs.score(List.of(
+                    new ScreenRow("g" + g, "p", g, "2025", 1, Double.NaN, 1, new double[]{3}),
+                    new ScreenRow("g" + g, "q", g, "2025", 0, Double.NaN, 1, new double[]{1}),
+                    new ScreenRow("g" + g, "r", g, "2025", 0, Double.NaN, 1, new double[]{2})), "g" + g, gacc);
+        }
+        for (int g = 0; g < 8; g++) {
+            gs.score(List.of(
+                    new ScreenRow("h" + g, "p", g, "2024", 0, Double.NaN, 1, new double[]{3}),
+                    new ScreenRow("h" + g, "q", g, "2024", 1, Double.NaN, 1, new double[]{1}),
+                    new ScreenRow("h" + g, "r", g, "2024", 0, Double.NaN, 1, new double[]{2})), "h" + g, gacc);
+        }
+        final Map<String, Object> pr = ScreenReport.build(byPeriods, gacc).records().get(0);
+        Assertions.assertEquals(1L, pr.get("het_df"));
+        Assertions.assertTrue((Double) pr.get("het_chi2") > 0, "het chi2 by periods " + pr.get("het_chi2"));
+        Assertions.assertNull(pr.get("level_z"));
+        Assertions.assertEquals(2L, pr.get("n_periods"));
+
+        // validation
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: periods}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: segment}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {field: nope}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: field}}"));
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

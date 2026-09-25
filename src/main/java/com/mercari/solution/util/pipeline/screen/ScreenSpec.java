@@ -54,6 +54,13 @@ public final class ScreenSpec implements Serializable {
     public static final String KIND_BINNED = "binned";
     public static final int BINS_DEFAULT = 10;
     public static final int BINS_MAX = 100;
+    /** heterogeneity.by: the period buckets, or a declared field's levels (DSL doc §7.1) */
+    public static final String HET_PERIODS = "periods";
+    public static final String HET_FIELD = "field";
+    /** the level a null modifier value takes */
+    public static final String LEVEL_NULL = "(null)";
+    /** the heterogeneity test's own placebo kind */
+    public static final String KIND_HET = "het";
 
     public static final String NOISE_PREFIX = "__noise_";
     public static final String SHUFFLE_PREFIX = "__shuffle_";
@@ -90,6 +97,23 @@ public final class ScreenSpec implements Serializable {
     public String binsEdges = EDGES_VALUE;
     /** True when the config declares a {@code bins} block (which needs the binned transform). */
     public boolean binsExplicit;
+    /** heterogeneity.by: {@link #HET_PERIODS} / {@link #HET_FIELD} (null = no heterogeneity test) */
+    public String heterogeneityBy;
+    /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its first row) for the grouped family */
+    public String heterogeneityField;
+
+    public boolean hasHeterogeneity() {
+        return heterogeneityBy != null;
+    }
+
+    public boolean heterogeneityByPeriods() {
+        return HET_PERIODS.equals(heterogeneityBy);
+    }
+
+    /** The modifier as the summary names it: {@code periods} or {@code field:<name>}. */
+    public String heterogeneityLabel() {
+        return heterogeneityBy == null ? null : heterogeneityByPeriods() ? HET_PERIODS : HET_FIELD + ":" + heterogeneityField;
+    }
     public String periodsField;
     public String periodsFieldType;
     public String periodsBucket;
@@ -420,6 +444,40 @@ public final class ScreenSpec implements Serializable {
             }
             if (!s.transforms.contains(TRANSFORM_BINNED)) errors.add("bins needs the binned transform (transforms: [..., binned])");
         }
+        final JsonElement het = p.get("heterogeneity");
+        if (het != null && !het.isJsonNull()) {
+            if (het.isJsonPrimitive() && het.getAsJsonPrimitive().isString()) {
+                // "periods", or a field name
+                final String v = het.getAsString();
+                if (HET_PERIODS.equals(v)) s.heterogeneityBy = HET_PERIODS;
+                else {
+                    s.heterogeneityBy = HET_FIELD;
+                    s.heterogeneityField = v;
+                }
+            } else if (het.isJsonObject()) {
+                final JsonObject o = het.getAsJsonObject();
+                final String by = string(o, "by");
+                final String field = string(o, "field");
+                if (by == null) {
+                    if (field != null) {
+                        s.heterogeneityBy = HET_FIELD;
+                        s.heterogeneityField = field;
+                    } else {
+                        errors.add("heterogeneity must name a modifier: periods, or {field: <name>}");
+                    }
+                } else if (HET_PERIODS.equals(by)) {
+                    s.heterogeneityBy = HET_PERIODS;
+                } else if (HET_FIELD.equals(by)) {
+                    if (field == null) errors.add("heterogeneity.by field needs heterogeneity.field");
+                    s.heterogeneityBy = HET_FIELD;
+                    s.heterogeneityField = field;
+                } else {
+                    errors.add("heterogeneity.by must be periods or field");
+                }
+            } else {
+                errors.add("heterogeneity must be periods, a field name, or an object {by, field}");
+            }
+        }
         s.transformsExplicit = !s.transforms.isEmpty();
         if (s.transforms.isEmpty()) {
             s.transforms = s.group != null ? new ArrayList<>(TRANSFORMS) : new ArrayList<>(List.of(TRANSFORM_RAW));
@@ -614,11 +672,16 @@ public final class ScreenSpec implements Serializable {
             if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
         }
         if (periodsBucket != null && periodsField == null) errors.add("periods needs a field (periods.field or time.field)");
+        if (heterogeneityByPeriods() && periodsBucket == null) errors.add("heterogeneity: periods needs periods (the levels are the period buckets)");
+        if (HET_FIELD.equals(heterogeneityBy) && heterogeneityField != null && isGroupedMultinomial()) {
+            notes.add("heterogeneity by " + heterogeneityField + ": the grouped family reads the modifier per unit (the value of the unit's first row)");
+        }
 
         final Map<String, Schema.Field> fields = new HashMap<>();
         if (inputSchema != null) for (final Schema.Field f : inputSchema.getFields()) fields.put(f.getName(), f);
         for (final String[] ref : new String[][]{{"group", group}, {"label.field", labelField}, {"baseline.field", baselineField},
-                {"time.field", timeField}, {"weight.field", weightField}, {"periods.field", periodsField}, {"placebo.shuffle.field", shuffleField}}) {
+                {"time.field", timeField}, {"weight.field", weightField}, {"periods.field", periodsField}, {"placebo.shuffle.field", shuffleField},
+                {"heterogeneity.field", heterogeneityField}}) {
             if (ref[1] != null && !fields.containsKey(ref[1])) errors.add(ref[0] + " '" + ref[1] + "' is not an input field");
         }
         for (final String id : rowId) if (!fields.containsKey(id)) errors.add("rowId '" + id + "' is not an input field");
@@ -629,7 +692,7 @@ public final class ScreenSpec implements Serializable {
         }
 
         final Set<String> reserved = new HashSet<>();
-        for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) reserved.add(r);
+        for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField, heterogeneityField}) if (r != null) reserved.add(r);
         reserved.addAll(rowId);
         // every label column of the upstream feature transform (a direction: future block has several), not only the
         // selected one: a post-event label is never a candidate feature
