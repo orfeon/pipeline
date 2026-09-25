@@ -93,6 +93,17 @@ public class ContextEvaluatorTest {
         Assertions.assertFalse(FeatureValues.matchesDeclared(0.0d, "1"));
         Assertions.assertFalse(FeatureValues.matchesDeclared(1.0d, "good"));
         Assertions.assertFalse(FeatureValues.matchesDeclared(null, "1"));
+        // a float32 value in its own precision (its text "0.1" matched before), NaN as NaN, a long against a decimal
+        Assertions.assertTrue(FeatureValues.matchesDeclared(0.1f, "0.1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.0f, "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(0.1f, "0.2"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(Double.NaN, "NaN"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(Double.NaN, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(2L, "2.0"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(-3, "-3"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(1L, "yes"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared("2", "2.00"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("electronics", "toys"));
         // texts: verbatim, or the integral decimal of a float64 category key ("1.0" in a distribution map)
         Assertions.assertTrue(FeatureValues.matchesDeclared("good", "good"));
         Assertions.assertTrue(FeatureValues.matchesDeclared("1.0", "1"));

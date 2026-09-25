@@ -58,26 +58,48 @@ public final class FeatureValues {
      * Whether a row value equals a declared one (a {@code value:} / {@code values:} scalar, kept as text): a number
      * compares as a number — a row expression is always float64, so {@code value: 1} must match 1.0 —, anything else
      * by its text, with integral decimals normalised on both sides as {@link ContextEvaluator#valueKey} writes the key
-     * of a counted map ({@code "1.0"} = {@code "1"}; {@code "01"} stays a text of its own). False for null.
+     * of a counted map ({@code "1.0"} = {@code "1"}; {@code "01"} stays a text of its own). A float32 value compares in
+     * its own precision (0.1f is the declared 0.1, as its text was), and NaN matches a declared NaN. False for null.
      */
     static boolean matchesDeclared(final Object value, final String declared) {
         if (value == null || declared == null) return false;
         if (value instanceof Number n) {
-            if (value instanceof Long || value instanceof Integer) {
+            if ((value instanceof Long || value instanceof Integer) && isIntegerText(declared)) {
                 try {
                     return n.longValue() == Long.parseLong(declared);
-                } catch (final NumberFormatException ignored) {
-                    // a decimal or non-numeric declaration: compared as a double below
+                } catch (final NumberFormatException beyondLong) {
+                    // more digits than a long holds: compared as a double below
                 }
             }
             try {
-                return n.doubleValue() == Double.parseDouble(declared);
+                if (value instanceof Float f) {
+                    final float g = Float.parseFloat(declared);
+                    return f == g || (Float.isNaN(f) && Float.isNaN(g));
+                }
+                final double x = n.doubleValue();
+                final double d = Double.parseDouble(declared);
+                return x == d || (Double.isNaN(x) && Double.isNaN(d));
             } catch (final NumberFormatException e) {
                 return false;
             }
         }
         final String text = value.toString();
-        return text.equals(declared) || ContextEvaluator.valueKey(text).equals(ContextEvaluator.valueKey(declared));
+        if (text.equals(declared)) return true;
+        // valueKey only rewrites a text holding a decimal point: without one on either side the texts differ (and no
+        // per-row parse attempt — an exception for every plain category — is needed to say so)
+        if (text.indexOf('.') < 0 && declared.indexOf('.') < 0) return false;
+        return ContextEvaluator.valueKey(text).equals(ContextEvaluator.valueKey(declared));
+    }
+
+    /** An optional sign then ASCII digits: the only declarations tried as a long (a decimal would throw per row). */
+    private static boolean isIntegerText(final String s) {
+        final int start = !s.isEmpty() && (s.charAt(0) == '-' || s.charAt(0) == '+') ? 1 : 0;
+        if (start >= s.length()) return false;
+        for (int i = start; i < s.length(); i++) {
+            final char ch = s.charAt(i);
+            if (ch < '0' || ch > '9') return false;
+        }
+        return true;
     }
 
     /**

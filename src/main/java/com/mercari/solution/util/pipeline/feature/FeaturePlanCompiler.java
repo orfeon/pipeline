@@ -1014,7 +1014,9 @@ public final class FeaturePlanCompiler {
      */
     private void warnNeverMatches(final String code, final String loc, final String field, final Ref ref, final String value) {
         if (ref == null || !OperatorCatalog.isNumeric(ref.type()) || FeatureValues.toDouble(value) != null) return;
-        diagnostics.warning(code, loc, "'" + value + "' is not a number, and '" + field + "' is " + ref.type().getType()
+        // an op's inline expr is an anonymous column (<block>__e<n>): name the expression the user wrote instead
+        final String label = ref.column() != null && ref.column().anonymous ? "expr \"" + ref.column().coordinates.get("expr") + "\"" : "'" + field + "'";
+        diagnostics.warning(code, loc, "'" + value + "' is not a number, and " + label + " is " + ref.type().getType()
                 + ": the value never matches");
     }
 
