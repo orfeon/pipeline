@@ -642,6 +642,7 @@ public class GroupScorerTest {
         Assertions.assertEquals(1L, result.summary().get("nPairsPassed"));
         Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
         Assertions.assertEquals(List.of(), result.summary().get("passedColumns"));   // a pair is never a column
+        Assertions.assertEquals(0L, result.summary().get("nPassed"));                // nor counted in nPassed
         final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
         Assertions.assertEquals(0, selection.getAsJsonArray("columns").size());
         Assertions.assertEquals("x", selection.getAsJsonArray("passedPairs").get(0).getAsJsonObject().get("a").getAsString());
@@ -657,6 +658,58 @@ public class GroupScorerTest {
         final ScreenSpec among = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: ['x*'], placebo: 0}}");
         Assertions.assertEquals(1, among.pairs.size());
         Assertions.assertEquals(1, among.pairCount());
+        // among resolving to a single field tests nothing: an error, not a silent no-op
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: [x2]}}"));
+        // a null / object member is a configuration error (not an escaping UnsupportedOperationException)
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, null]]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: 'x', among: ['x*']}}"));
+    }
+
+    @Test
+    public void testPairPlacebosAreDistinct() {
+        // b is the first member of two pairs: its placebo pairs take different noise columns, so no record name repeats
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], placebo: {noise: 4}, "
+                + "conditioning: {fields: [b, x, x2]}, pairs: {among: [b, 'x*'], placebo: 2}}");
+        Assertions.assertEquals(3, spec.pairs.size());
+        Assertions.assertEquals(3 + 6, spec.pairCount());
+        final java.util.Set<String> names = new java.util.HashSet<>();
+        for (int q = 0; q < spec.pairCount(); q++) names.add(spec.pairName(q));
+        Assertions.assertEquals(spec.pairCount(), names.size(), names.toString());
+        // saturated: a member already paired with every noise column brings no further placebo (never a repeat)
+        final ScreenSpec saturated = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], placebo: {noise: 2}, "
+                + "conditioning: {fields: [b, x, x2]}, pairs: {among: [b, 'x*'], placebo: 2}}");
+        final java.util.Set<String> saturatedNames = new java.util.HashSet<>();
+        for (int q = 0; q < saturated.pairCount(); q++) saturatedNames.add(saturated.pairName(q));
+        Assertions.assertEquals(saturated.pairCount(), saturatedNames.size(), saturatedNames.toString());
+        Assertions.assertEquals(3 + 4, saturated.pairCount());
+    }
+
+    @Test
+    public void testPairColumnMissingMember() {
+        // a row missing a member is missing for the product (the recipe a * b is null there), not the fill's product
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], placebo: {noise: 1}, "
+                + "conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], placebo: 1}}");
+        final List<ScreenRow> rows = List.of(
+                new ScreenRow("g0", "g0:0", 0, null, 1, Double.NaN, 1, new double[]{1.0, 1.0, 2.0}),
+                new ScreenRow("g0", "g0:1", 1, null, 0, Double.NaN, 1, new double[]{-1.0, -1.0, Double.NaN}),
+                new ScreenRow("g0", "g0:2", 2, null, 0, Double.NaN, 1, new double[]{Double.NaN, Double.NaN, 0.5}),
+                new ScreenRow("g0", "g0:3", 3, null, 0, Double.NaN, 1, new double[]{0.5, 0.5, -1.0}));
+        final GroupScorer groups = new GroupScorer(spec);
+        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        final GroupScorer.Unit unit = groups.prepare(rows, "g0");
+        final double[][] f = scorer.design(unit, moments.getValues());
+        final double[][] cols = groups.columns(unit);
+        final double[] product = scorer.pairColumn(0, unit, f, cols);
+        Assertions.assertEquals(f[0][0] * f[0][1], product[0], 1e-12);
+        Assertions.assertTrue(Double.isNaN(product[1]), "x2 missing");
+        Assertions.assertTrue(Double.isNaN(product[2]), "x missing");
+        Assertions.assertEquals(f[3][0] * f[3][1], product[3], 1e-12);
+        // the placebo pair (x × noise) is missing only where x is
+        final double[] placebo = scorer.pairColumn(1, unit, f, cols);
+        Assertions.assertFalse(Double.isNaN(placebo[1]));
+        Assertions.assertTrue(Double.isNaN(placebo[2]));
     }
 
     @Test

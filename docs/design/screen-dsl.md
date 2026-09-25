@@ -385,10 +385,15 @@ both, orthogonalised against the whole of F by the same γ solve as any column (
 A pair record (`candidate: a*b`, `transform: product`) carries the partial statistics only (`partial_z`,
 `partial_gain`, `r2_F`, …; the marginal fields are null), no period slices, and its own placebo kind
 (`pair`): each pair brings `pairs.placebo` (default 5) placebo pairs — its first member times a noise
-placebo column, a standard normal draw independent of everything, which keeps the member's marginal —
-whose partial gains give the kind's cut. A pair passes on `partial_gain > max(thresholds.pair, minGain)`;
+placebo column, a standard normal draw independent of everything, which keeps the member's marginal; pairs
+sharing a member take different noise columns, so no placebo column repeats —
+whose partial gains give the kind's cut. A row missing either member is missing for the product (it
+contributes nothing, as a missing candidate value does): the recipe `a * b` is null there, and the product of
+the design's fill would carry the members' missingness as a spurious interaction the placebos do not see.
+A pair passes on `partial_gain > max(thresholds.pair, minGain)`;
 a passing pair is a recipe, never a column of the pass list: the summary and the pass list carry
-`passedPairs` apart (`{a, b, fragment}`, the fragment `{scope: row, expr: "a * b"}`). Without an
+`passedPairs` apart (`{a, b, fragment}`, the fragment `{scope: row, expr: "a * b"}`; counted in
+`nPairsPassed`, not `nPassed`). Without an
 accepted fit the pair records are degenerate (a note says so). `among` expands a set into every pair
 (the members of a pure interaction have no marginal effect, so a ranking-based pre-selection would miss
 exactly them: declare the set, or read the pHd loadings of §12.1 once built).
@@ -485,7 +490,8 @@ empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or
 `bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
 `bins.edges: rank` without `group`; `heterogeneity: periods` without `periods`, an unknown `heterogeneity.by`,
 `by: field` without a field, or a modifier field missing from the input schema; `pairs` without
-`conditioning`, a pair member that is not a conditioning field, a pair of one field, more pairs than
+`conditioning`, a pair member that is not a conditioning field, a pair of one field, `among` resolving to no
+pair (fewer than two matching fields), more pairs than
 `pairs.maxPairs`, `pairs.placebo` above `placebo.noise`, `suggestions` without the `binned` transform; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 

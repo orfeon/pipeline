@@ -1142,10 +1142,14 @@ public final class ScreenReport {
             r.put("leakSuspect", leak);
             final boolean pair = ScreenSpec.TRANSFORM_PRODUCT.equals(r.get("transform"));
             if (passed) {
-                nPassed++;
-                // a passing pair is a recipe (a product to build upstream), never one of the pass list's columns
-                if (pair) passedPairs.add((String) r.get("candidate"));
-                else passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
+                // a passing pair is a recipe (a product to build upstream), never one of the pass list's columns: it
+                // counts in nPairsPassed, not nPassed (nPassed > 0 keeps meaning the pass list has a column)
+                if (pair) {
+                    passedPairs.add((String) r.get("candidate"));
+                } else {
+                    nPassed++;
+                    passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
+                }
             }
             if (leak && !placebo) nLeak++;
             // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
@@ -1271,13 +1275,17 @@ public final class ScreenReport {
         }
         // the passing pairs (a product to build upstream: {scope: row, expr: "a * b"}), apart from columns
         if (summary.get("passedPairs") != null) {
+            // the members from the spec (not split from the record name: a field name may hold the separator)
+            final Map<String, String[]> members = new HashMap<>();
+            for (int q = 0; q < spec.pairs.size(); q++) members.put(spec.pairName(q), spec.pairFieldNames(q));
             final JsonArray pairs = new JsonArray();
             for (final Object name : (List<?>) summary.get("passedPairs")) {
+                final String[] ab = members.get((String) name);
+                if (ab == null) continue;
                 final JsonObject pair = new JsonObject();
-                final String[] members = ((String) name).split("\\*", 2);
-                pair.addProperty("a", members[0]);
-                pair.addProperty("b", members.length > 1 ? members[1] : null);
-                pair.addProperty("fragment", "{scope: row, expr: \"" + members[0] + " * " + (members.length > 1 ? members[1] : "") + "\"}");
+                pair.addProperty("a", ab[0]);
+                pair.addProperty("b", ab[1]);
+                pair.addProperty("fragment", "{scope: row, expr: \"" + ab[0] + " * " + ab[1] + "\"}");
                 pairs.add(pair);
             }
             o.add("passedPairs", pairs);
@@ -1486,7 +1494,7 @@ public final class ScreenReport {
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
-        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebo + " placebo each)");
+        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebos.size() + " placebo pairs)");
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

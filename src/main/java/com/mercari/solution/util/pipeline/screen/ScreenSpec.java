@@ -113,6 +113,11 @@ public final class ScreenSpec implements Serializable {
     public int pairPlacebo = PAIR_PLACEBO_DEFAULT;
     /** the resolved pairs as indices into {@link #conditioningFields} (DSL doc §8.6) */
     public List<int[]> pairs = new ArrayList<>();
+    /**
+     * the resolved placebo pairs {@code [member, noise column]}: up to {@code pairPlacebo} per pair, its first member
+     * times a noise column that member is not already paired with (pairs sharing a member never repeat a placebo)
+     */
+    public List<int[]> pairPlacebos = new ArrayList<>();
 
     public static final int PAIRS_MAX_DEFAULT = 200;
     public static final int PAIR_PLACEBO_DEFAULT = 5;
@@ -124,16 +129,21 @@ public final class ScreenSpec implements Serializable {
         return !pairs.isEmpty();
     }
 
-    /** The pair's record name: {@code a*b}; a placebo pair {@code a*__noise_<r>}. */
-    public String pairName(final int pair) {
-        if (pair < pairs.size()) return conditioningFields.get(pairs.get(pair)[0]) + "*" + conditioningFields.get(pairs.get(pair)[1]);
-        final int q = pair - pairs.size();
-        return conditioningFields.get(pairs.get(q / pairPlacebo)[0]) + "*" + NOISE_PREFIX + (q % pairPlacebo);
+    /** The member field names {@code [a, b]} of a (real) pair. */
+    public String[] pairFieldNames(final int pair) {
+        return new String[]{conditioningFields.get(pairs.get(pair)[0]), conditioningFields.get(pairs.get(pair)[1])};
     }
 
-    /** The real pairs, then {@code pairPlacebo} placebo pairs per real pair (its first member × a noise column). */
+    /** The pair's record name: {@code a*b}; a placebo pair {@code a*__noise_<r>}. */
+    public String pairName(final int pair) {
+        if (pair < pairs.size()) return String.join("*", pairFieldNames(pair));
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return conditioningFields.get(placebo[0]) + "*" + NOISE_PREFIX + placebo[1];
+    }
+
+    /** The real pairs, then the placebo pairs ({@link #pairPlacebos}: a first member × a noise column). */
     public int pairCount() {
-        return pairs.size() * (1 + pairPlacebo);
+        return pairs.size() + pairPlacebos.size();
     }
 
     public boolean isPlaceboPair(final int pair) {
@@ -148,8 +158,8 @@ public final class ScreenSpec implements Serializable {
     /** The conditioning-field indices of a pair's members; for a placebo pair the first member and the noise column index (as the second value, negative: −1 − r). */
     public int[] pairMembers(final int pair) {
         if (pair < pairs.size()) return pairs.get(pair);
-        final int q = pair - pairs.size();
-        return new int[]{pairs.get(q / pairPlacebo)[0], -1 - (q % pairPlacebo)};
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return new int[]{placebo[0], -1 - placebo[1]};
     }
 
     public boolean hasHeterogeneity() {
@@ -546,9 +556,14 @@ public final class ScreenSpec implements Serializable {
         if (pairs != null && !pairs.isJsonNull()) {
             if (pairs.isJsonObject()) {
                 final JsonObject o = pairs.getAsJsonObject();
-                if (o.has("fields") && o.get("fields").isJsonArray()) {
-                    for (final JsonElement e : o.getAsJsonArray("fields")) {
-                        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2) {
+                final JsonElement fields = o.get("fields");
+                if (fields != null && !fields.isJsonNull() && !fields.isJsonArray()) {
+                    errors.add("pairs.fields must be a list of [a, b] pairs of field names");
+                } else if (fields != null && fields.isJsonArray()) {
+                    for (final JsonElement e : fields.getAsJsonArray()) {
+                        // both members field names (a null / object member would throw from getAsString)
+                        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2
+                                || !e.getAsJsonArray().get(0).isJsonPrimitive() || !e.getAsJsonArray().get(1).isJsonPrimitive()) {
                             errors.add("pairs.fields must be a list of [a, b] pairs of field names");
                             continue;
                         }
@@ -853,7 +868,9 @@ public final class ScreenSpec implements Serializable {
         // pairs: every member is a conditioning field (the product is tested at the fitted means of a model holding
         // its members), declared as pairs or as a set whose every pair is tested, within the bound
         pairs = new ArrayList<>();
+        pairPlacebos = new ArrayList<>();
         if (!pairFields.isEmpty() || !pairAmong.isEmpty()) {
+            final int pairErrors = errors.size();
             if (conditioningFields.isEmpty()) errors.add("pairs need conditioning: a product is tested at the fitted means of a model holding both members (declare them in conditioning.fields)");
             // the placebo block may follow pairs in the parameters: checked once both are read
             if (pairPlacebo > noise) errors.add("pairs.placebo (" + pairPlacebo + ") exceeds placebo.noise (" + noise + "): a placebo pair is a member times a noise column");
@@ -882,7 +899,28 @@ public final class ScreenSpec implements Serializable {
                     if (seen.add(a + ":" + b)) pairs.add(new int[]{a, b});
                 }
             }
+            // among matching a single field (and no declared pair) would silently test nothing
+            if (pairs.isEmpty() && errors.size() == pairErrors) errors.add("pairs resolved to no pair: among needs at least two matching conditioning fields (" + conditioningFields + ")");
             if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key; declare fewer members or raise the bound)");
+            // the placebo pairs: each pair's first member times a noise column it is not already paired with, spread
+            // over the noise columns, so pairs sharing a member never repeat a placebo (an identical column would
+            // duplicate a record name and a calibration sample); a member already paired with every noise column
+            // brings no further placebo
+            if (pairPlacebo <= noise) {
+                final Set<Long> used = new HashSet<>();
+                for (int i = 0; i < pairs.size(); i++) {
+                    final int member = pairs.get(i)[0];
+                    for (int j = 0; j < pairPlacebo; j++) {
+                        for (int step = 0; step < noise; step++) {
+                            final int r = (int) (((long) i * pairPlacebo + j + step) % noise);
+                            if (used.add((long) member * noise + r)) {
+                                pairPlacebos.add(new int[]{member, r});
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;

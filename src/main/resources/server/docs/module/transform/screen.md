@@ -224,10 +224,13 @@ must be in `conditioning.fields`: a product is meaningful only at the fitted mea
 its main effects (at the baseline alone, an unmodelled main effect leaves curvature the product would pick
 up as a spurious interaction). The pair record (`candidate: a*b`, `transform: product`) carries the partial
 statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null), has its own placebo
-kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column, whose gains give
-`thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A
+kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column (pairs sharing a
+member take different noise columns, so no placebo repeats), whose gains give
+`thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A row
+missing either member is missing for the product (as the fragment `a * b` would be null there), not the
+product of the conditioning fill. A
 passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
-apart, each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
+apart (counted in `nPairsPassed`, not `nPassed`), each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
 doubles per partial key (times `1 + placebo`); `maxPairs` bounds a run. The members of a pure interaction
 have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect.
 
@@ -502,7 +505,7 @@ transforms:
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null,
-  "heterogeneity": null, "passedPairs": [], "quantile": 0.99,
+  "heterogeneity": null, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
   "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",

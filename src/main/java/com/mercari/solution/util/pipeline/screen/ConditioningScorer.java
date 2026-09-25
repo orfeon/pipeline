@@ -308,7 +308,7 @@ public final class ConditioningScorer implements Serializable {
             // the declared pairs: the product of two standardised conditioning columns (a placebo pair: a member
             // times a noise column) as one more column of the partial pass, no period slices (DSL doc §8.6)
             for (int q = 0; q < spec.pairCount(); q++) {
-                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, f, cols)));
+                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, unit, f, cols)));
             }
             return;
         }
@@ -347,30 +347,29 @@ public final class ConditioningScorer implements Serializable {
                 }
             }
         }
-        // the declared pairs (DSL doc §8.6): one more column each, no period slices
-        if (spec.hasPairs()) {
-            final List<Integer> all = new ArrayList<>(n);
-            for (int i = 0; i < n; i++) all.add(i);
-            for (int q = 0; q < spec.pairCount(); q++) {
-                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, f, cols), all));
-            }
+        // the declared pairs (DSL doc §8.6): one more column each over every row, no period slices
+        for (int q = 0; q < spec.pairCount(); q++) {
+            into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, unit, f, cols), null));
         }
     }
 
     /**
-     * A pair's column: the product of its members' standardised conditioning columns (the design's, missing
-     * values filled), or for a placebo pair the first member times a noise placebo column (a standard normal
-     * draw independent of everything, the calibration of the pair kind).
+     * A pair's column: the product of its members' standardised conditioning columns, or for a placebo pair the
+     * first member times a noise placebo column (a standard normal draw independent of everything, the
+     * calibration of the pair kind). A row missing a member is missing (NaN: it contributes nothing, as a missing
+     * candidate value does), not the product of the design's fill — the recipe {@code a * b} is null there, and a
+     * filled product would carry the members' missingness (0 where the observed products average their
+     * correlation) as a spurious interaction the member × noise placebos do not calibrate.
      */
-    private double[] pairColumn(final int pair, final double[][] f, final double[][] cols) {
+    double[] pairColumn(final int pair, final GroupScorer.Unit unit, final double[][] f, final double[][] cols) {
         final int[] members = spec.pairMembers(pair);
         final int n = f.length;
         final double[] z = new double[n];
-        if (members[1] >= 0) {
-            for (int i = 0; i < n; i++) z[i] = f[i][members[0]] * f[i][members[1]];
-        } else {
-            final double[] noise = cols[spec.candidates.size() + (-1 - members[1])];
-            for (int i = 0; i < n; i++) z[i] = f[i][members[0]] * noise[i];
+        final double[] noise = members[1] >= 0 ? null : cols[spec.candidates.size() + (-1 - members[1])];
+        for (int i = 0; i < n; i++) {
+            final double[] x = unit.rows.get(i).x;
+            final boolean missing = !StatMath.isFinite(x[offset + members[0]]) || (noise == null && !StatMath.isFinite(x[offset + members[1]]));
+            z[i] = missing ? Double.NaN : f[i][members[0]] * (noise == null ? f[i][members[1]] : noise[i]);
         }
         return z;
     }
@@ -408,10 +407,12 @@ public final class ConditioningScorer implements Serializable {
         return acc;
     }
 
-    /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (a period or a modifier level). */
+    /** A row family's {@code [s, b, a]} over {@code rows} of the unit (all rows when null) at the fitted p̂ (a period or a modifier level). */
     private double[] rowPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] v, final List<Integer> rows) {
         final double[] acc = new double[partialLength()];
-        for (final int i : rows) {
+        final int m = rows == null ? unit.size() : rows.size();
+        for (int r = 0; r < m; r++) {
+            final int i = rows == null ? r : rows.get(r);
             if (!StatMath.isFinite(v[i])) continue;
             final double w = unit.w[i];
             final double vv = spec.fisherWeight(p[i]);
