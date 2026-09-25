@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a practical gain floor (pass.minGain), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -87,11 +87,14 @@ statistics); independent rows support `raw` only in this version.
   reported as `passRule` in the summary and the pass list.
 - `pass.minGain` is a practical floor on the gain: `passed` then requires the effective test's gain above
   `max(threshold, minGain)`. The placebo threshold answers "is it distinguishable from noise" and shrinks with
-  the data (≈ 3.3 / N on the χ²(1) scale at q99); on a large window it lets through columns whose gain is real
-  but too small to matter for training. `minGain` is in the unit of `est_gain` — the average log-likelihood
-  improvement per unit, the scale a trained model's excess log score is reported on — so the same value means
-  the same thing whatever N. The record's `threshold` stays the placebo cut (the calibration check); `passRule`
-  names the floor (`est_gain > max(threshold, 1.0E-5)`).
+  the data (the χ²(1) quantile over 2N: ≈ 6.6 / 2N ≈ 3.3 / N on the gain scale at q99); on a large window it lets
+  through columns whose gain is real but too small to matter for training. `minGain` is in the unit of
+  `est_gain` — the average log-likelihood improvement per unit, the scale a trained model's excess log score is
+  reported on — so the same value means the same thing whatever N. With `weight` the gain is weight-scaled (the
+  weights multiply S and H, the gain divides by the unit count), so the floor is compared with the mean weight
+  times the per-unit gain: normalise the weights to mean 1, or scale `minGain` by the mean weight. The record's
+  `threshold` stays the placebo cut (the calibration check); `passRule` names the floor
+  (`est_gain > max(threshold, 1.0E-5)`).
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
