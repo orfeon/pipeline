@@ -726,7 +726,7 @@ is a fold:
   out, so two rows of one key differ only by the outcomes of their excluded ranges — and a row's own outcome
   is in its excluded range. Within a key the value therefore moves *against* the row's own outcome: the
   leave-one-out target-encoding leak, which the purge does not remove (it widens the excluded range, the own
-  row stays in it). It is strongest for keys whose total barely moves over the input (many rows, a stable
+  row stays in it). It is strongest for keys whose mean barely moves over the input (many rows, a stable
   rate), where the within-key variation is little but this reflection, and it is there with hash folds too.
   A model that identifies the key through other columns can learn it on the training rows and pay for it on
   rows that lack it. Under `until` that is exactly the split: the training rows are cross-fit, the
@@ -1160,12 +1160,15 @@ window and target, and the composition is a per-row formula: `est(level) = est(p
 est(parent))` from the global level down to the key, on the declared scale. `share` is
 `n_key / n_global` over strictly-past rows. With `leaveNodeOut` (the default) the rows of the leaf are taken out of every
 ancestor before it is shrunk toward them (an ancestor contains them, so it would otherwise pull the leaf toward
-itself) — in every fit mode alike: the expanding replay subtracts the key's past rows from the global past, a
-`static` / `fold` / `forward` lookup the key's statistics from the ancestors' (the out-of-fold or forward ones), so on
-the identity scale a reproduction reads the root as `(Σ_root − Σ_key) / (n_root − n_key)` (on logit / log the same
-subtraction applies to `S` and `V`). In a chain lattice the leaf is the **deepest level that has rows**: a row whose declared leaf is
-empty — a key never seen, or a null key component — backs off to a coarser level, and it is that level's rows
-that leave the ancestors, so the row reads exactly what the lattice declared from that level reads. A lattice
+itself) — in every fit mode alike: the expanding replay subtracts the key's past rows from every ancestor's past, a
+`static` / `fold` / `forward` lookup the key's statistics from the ancestors' (the whole-input, out-of-fold or forward
+ones), so on the identity scale a reproduction reads the root as `(Σ_root − Σ_key) / (n_root − n_key)` — on logit / log
+that same mean mapped by the scale, and under an `offset` on logit / log the score term `(S_root − S_key) / (V_root −
+V_key)`. In a chain lattice the leaf is the **deepest level that has rows**: a row whose declared leaf is
+empty — a key never seen, a null key component, or under `fit.mode: forward` a key with fewer than `minBlocks`
+readable blocks of its own (its level reads null) — backs off to a coarser level, and it is that level's rows
+that leave the ancestors (a forward key below `minBlocks` stays inside the ancestors it reads), so the row reads
+exactly what the lattice declared from that level reads. A lattice
 with `additive` (`structure: cross`) keeps the declared cell instead: the main-effect chains take out the cell
 they generalise, and an empty cell has nothing to take out.
 
@@ -1312,18 +1315,20 @@ event and weighs it by how similar it is to the current row instead:
   are part of the spec, so renaming changes the plan hash like any other rename of an output. One window name
   is one window: two windows of a block named the same must select the same rows (same `maxAge` / `maxEvents` /
   `clock` / `filter`), since the statistics behind the name are shared (`window.as`).
-- **Window edges.** A sequence window (and an expanding keySet window) reads the key's rows with event time in
+- **Window edges.** A past sequence window (and an expanding keySet window) reads the key's rows with event time in
   `[t − maxAge, t − shift]`, both edges included (on a calendar clock the far edge is the tick rule of *Calendar
   clocks*), where `t` is the row's `time.field` and `shift` its `windowShift` (0 without one) — `maxAge` is
   measured from `t`, not from the shifted near edge, so a shifted window spans `maxAge − shift`. A row sharing `t`
   is never read whatever the tie-break (`orderTieBreak` orders rows, it does not make them visible to each other),
   so two events at exactly the same time never see each other, while an event exactly `maxAge` before `t` is in.
-  A `filter` then selects among those rows, and `maxEvents` keeps the last `n` of what is left.
+  A `filter` then selects among those rows, and `maxEvents` keeps the last `n` of what is left. A `direction: future`
+  window is the mirror image: `(t, t + maxAge]`, never shifted, `maxEvents` keeping the *nearest* `n` (see *Labels
+  over the future*).
 - **Ties in context ops.** `rank` is the competition rank — 1 + the number of rows of the group with a strictly
   larger value, so tied rows share the best rank and the next rank skips (1, 1, 3) —, and `percentile` is the share
   of the group's rows whose value is at most the row's own, ties included (a group whose rows all tie reads 1.0 on
   every row). Both compare with the group's rows that have a value (a row without one reads null), and `excludeSelf` takes
-  the row itself out of that set.
+  the row itself out of that set — so under `excludeSelf` a row whose group has no other row with a value reads null.
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
   `values` when the output goes to a sink such as BigQuery or straight into a model. An encoding target's

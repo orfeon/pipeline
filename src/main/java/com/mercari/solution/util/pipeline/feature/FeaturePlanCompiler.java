@@ -3758,7 +3758,7 @@ public final class FeaturePlanCompiler {
             if (fitSpec.untilMillis != null) {
                 diagnostics.info("fit.fold.until.crossFit", loc, "fit.fold.until gives the training rows cross-fit values and the later rows forward values:"
                         + " within a key a cross-fit value varies only by the outcomes of the blocks the row leaves out - its own among them - so it moves"
-                        + " against the row's own outcome (the leave-one-out encoding leak, strongest for keys whose total barely changes), which the forward"
+                        + " against the row's own outcome (the leave-one-out encoding leak, strongest for keys with many rows and a stable rate), which the forward"
                         + " rows do not have; a model trained on the training rows and evaluated on the later ones sees two distributions."
                         + " Use fit.mode forward when the column must behave the same on every row");
             }
