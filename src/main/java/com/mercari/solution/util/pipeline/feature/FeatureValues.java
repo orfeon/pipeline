@@ -57,9 +57,8 @@ public final class FeatureValues {
     /**
      * Whether a row value equals a declared one (a {@code value:} / {@code values:} scalar, kept as text): a number
      * compares as a number — a row expression is always float64, so {@code value: 1} must match 1.0 —, anything else
-     * by its text, with integral decimals normalised on both sides as {@link ContextEvaluator#valueKey} writes the key
-     * of a counted map ({@code "1.0"} = {@code "1"}; {@code "01"} stays a text of its own). A float32 value compares in
-     * its own precision (0.1f is the declared 0.1, as its text was), and NaN matches a declared NaN. False for null.
+     * by its exact text (a string category {@code "2.0"} is not {@code "2"}). A float32 value compares in its own
+     * precision (0.1f is the declared 0.1, as its text was), and NaN matches a declared NaN. False for null.
      */
     static boolean matchesDeclared(final Object value, final String declared) {
         if (value == null || declared == null) return false;
@@ -83,12 +82,7 @@ public final class FeatureValues {
                 return false;
             }
         }
-        final String text = value.toString();
-        if (text.equals(declared)) return true;
-        // valueKey only rewrites a text holding a decimal point: without one on either side the texts differ (and no
-        // per-row parse attempt — an exception for every plain category — is needed to say so)
-        if (text.indexOf('.') < 0 && declared.indexOf('.') < 0) return false;
-        return ContextEvaluator.valueKey(text).equals(ContextEvaluator.valueKey(declared));
+        return value.toString().equals(declared);
     }
 
     /** An optional sign then ASCII digits: the only declarations tried as a long (a decimal would throw per row). */

@@ -4072,7 +4072,7 @@ public final class FeaturePlanCompiler {
                         final OutputColumn c = newColumn(def.name, Scope.population, "encoding", canonical, s.output(), computeAt);
                         populationColumn(c, ks, window, target.reference, stat, offsetColumn, mode, def, fitSpec);
                         register(c);
-                        if ("distribution".equals(stat)) expandDistributionValues(def, target.values, c, computeAt);
+                        if ("distribution".equals(stat)) expandDistributionValues(def, target.values, target.reference, c, computeAt);
                         produced++;
                         continue;
                     }
@@ -4122,7 +4122,7 @@ public final class FeaturePlanCompiler {
                         composeCoordinates(c, ks, target, stat, encoded, shrinkage, levels);
                         c.coordinates.put("family", family.name());
                         finishComposed(c, def);
-                        if (distribution) expandDistributionValues(def, target.values, c, computeAt);
+                        if (distribution) expandDistributionValues(def, target.values, target.reference, c, computeAt);
                         produced++;
                     }
                     if (shrinkage.emits("deviations") && distribution) {
@@ -4224,14 +4224,18 @@ public final class FeaturePlanCompiler {
      * {@code targets[].values} on stat {@code distribution}: the map column becomes an intermediate and one FLOAT64
      * column per listed category reads its share from it ({@code <map column>_<value>}, 0 when the category has no
      * mass, null when the map is null), like {@code countByValue} with {@code values} — a sink such as BigQuery
-     * and a model consume flat numeric columns, not a map.
+     * and a model consume flat numeric columns, not a map. Over a numeric target a value matches its category by
+     * number ({@code 1} finds the float64 key {@code "1.0"}); over any other it matches the exact text.
      */
-    private void expandDistributionValues(final FeatureDef def, final List<String> values, final OutputColumn map, final AvailableAt computeAt) {
+    private void expandDistributionValues(final FeatureDef def, final List<String> values, final String targetReference, final OutputColumn map, final AvailableAt computeAt) {
         if (values.isEmpty() || !columnsByCanonical.containsKey(map.canonicalName)) return;
         map.intermediate = true;
+        final Ref target = resolve(targetReference);
+        final boolean numeric = target != null && OperatorCatalog.isNumeric(target.type());
         for (final String value : values) {
             final OutputColumn c = newColumn(def.name, Scope.row, "mapValue", map.canonicalName + "_" + value, Schema.FieldType.FLOAT64, computeAt);
             c.coordinates.put("value", value);
+            if (numeric) c.coordinates.put("numeric", "true");
             c.fitted = map.fitted;
             addSelfInput(c, map.canonicalName);
             finishRow(c, def);

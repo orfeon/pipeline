@@ -102,11 +102,11 @@ public class ContextEvaluatorTest {
         Assertions.assertTrue(FeatureValues.matchesDeclared(2L, "2.0"));
         Assertions.assertTrue(FeatureValues.matchesDeclared(-3, "-3"));
         Assertions.assertFalse(FeatureValues.matchesDeclared(1L, "yes"));
-        Assertions.assertTrue(FeatureValues.matchesDeclared("2", "2.00"));
         Assertions.assertFalse(FeatureValues.matchesDeclared("electronics", "toys"));
-        // texts: verbatim, or the integral decimal of a float64 category key ("1.0" in a distribution map)
+        // a text (a string field) only by its exact text: "2.0" and "2" are distinct categories
         Assertions.assertTrue(FeatureValues.matchesDeclared("good", "good"));
-        Assertions.assertTrue(FeatureValues.matchesDeclared("1.0", "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("2", "2.00"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("1.0", "1"));
         Assertions.assertFalse(FeatureValues.matchesDeclared("01", "1"));
         Assertions.assertTrue(FeatureValues.matchesDeclared(true, "true"));
     }

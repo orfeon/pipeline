@@ -2823,6 +2823,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(expected.getDiagnostics().hasErrors(), expected::describe);
         Assertions.assertEquals("mapReadout", column(expected, "grade_next_expected").getOperator());
         Assertions.assertNotNull(expected.getColumn("grade_next_to_1"));
+        // a value over a numeric field matches its category by number ("1" finds a float64 key "1.0"), over a string
+        // field by its exact text
+        Assertions.assertEquals("true", column(expected, "grade_next_to_1").getCoordinates().get("numeric"));
+        Assertions.assertNull(column(compile(SOURCES, withEncoding(TRANSITION_BLOCK)), "grade_next_to_good").getCoordinates().get("numeric"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [ownValueProb, entropy]\n        maxFeatures: 1"))), "transitionStats.maxFeatures"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("{toValueProb: fair}", "perplexity"))), "transitionStats.parameters"));
     }
