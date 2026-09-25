@@ -143,7 +143,8 @@ Gather ─ Finalize [side: state_max, partial map] ─ records / summary / selec
   `ScreenReport.blockPartial` solves its Γ (k × B) by the same multi-right-hand-side `solveGram`, forms S⊥ /
   H⊥ and takes χ² = S⊥' H⊥⁺ S⊥ over the bins the marginal block kept (DSL doc §6.1). With a heterogeneity
   modifier the pass also keeps the `[s, b, a]` sums and the fit's `[n, g, G]` per modifier level (a slice
-  under `LEVEL_PREFIX`, the grouped family's per unit, the row families' per row bucket), so the partial
+  under `LEVEL_PREFIX`, the grouped family's per unit; the row families bucket a unit's rows once into
+  (period, level) cells and add each cell's sums to its period and its level), so the partial
   heterogeneity test reads the level slices exactly as the period decomposition does (DSL doc §7.1).
 
 Total: `maxIter + 2` passes at most, each a global Combine, independent of the data. The gaussian fit is

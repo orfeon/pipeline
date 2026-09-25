@@ -263,7 +263,8 @@ public final class ConditioningScorer implements Serializable {
      * diag(p̂(1 − p̂)), the intercept column of F̃ doing the centring). With {@code periods} the same sums go to the
      * unit's period (grouped) or each row's period (row families), and the fitted model's own sums at θ̂ —
      * {@code [n, g, G]} — go per period under {@link #FIT_PERIOD_KEY}, so the report can decompose the partial
-     * statistic by period with the window's orthogonalisation coefficients.
+     * statistic by period with the window's orthogonalisation coefficients. A heterogeneity modifier's level gets the
+     * same sums as a slice under {@link ScoreAccumulator#LEVEL_PREFIX} (DSL doc §7.1).
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
                         final Map<Integer, PartialAccumulator> into) {
@@ -282,15 +283,12 @@ public final class ConditioningScorer implements Serializable {
             into.computeIfAbsent(SIGMA_KEY, key -> new PartialAccumulator()).add(null, sig);
         }
         if (spec.isGroupedMultinomial()) {
-            final String period = unit.period();
             final double[] pf = new double[k];
             for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
-            final String level = unit.level();
-            if (periods || level != null) {
-                final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
-                final double[] sums = fitPeriodSums(unit, p, f, null);
-                fit.add(periods ? period : null, sums);
-                if (level != null) fit.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, sums);
+            // the unit's own (period, level) cell: the modifier is a unit-level field for the grouped family
+            final Cell cell = new Cell(periods ? unit.period() : null, unit.level());
+            if (periods || cell.level() != null) {
+                cell.addTo(into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()), fitPeriodSums(unit, p, f, null));
             }
             for (int c = 0; c < cols.length; c++) {
                 for (int t = 0; t < nTransforms; t++) {
@@ -324,28 +322,25 @@ public final class ConditioningScorer implements Serializable {
                     acc[0] = w * s;
                     acc[1] = w * (b - px * px);
                     for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
-                    final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
-                    if (level != null) target.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, acc);
+                    cell.addTo(into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()), acc);
                 }
             }
             return;
         }
-        // row families: every row is its own period; the rows are bucketed once (one bucket without periods)
-        final Map<String, List<Integer>> buckets = new LinkedHashMap<>();
-        for (int i = 0; i < n; i++) buckets.computeIfAbsent(periods ? unit.rows.get(i).period : null, key -> new ArrayList<>()).add(i);
-        // the heterogeneity modifier's levels: the same sums per level as slices (the total holds the rows once)
-        final Map<String, List<Integer>> levelBuckets = new LinkedHashMap<>();
+        // row families: every row is its own period and modifier level; the rows are bucketed once into (period, level)
+        // cells (one cell without periods or a modifier) and each cell's sums, computed once, go to the total, its
+        // period and — as a slice — its level (the total holds the rows once)
+        final Map<Cell, List<Integer>> cells = new LinkedHashMap<>();
+        boolean levels = false;
         for (int i = 0; i < n; i++) {
-            final String level = unit.rows.get(i).level;
-            if (level != null) levelBuckets.computeIfAbsent(level, key -> new ArrayList<>()).add(i);
+            final ScreenRow row = unit.rows.get(i);
+            levels |= row.level != null;
+            cells.computeIfAbsent(new Cell(periods ? row.period : null, row.level), key -> new ArrayList<>()).add(i);
         }
-        if (periods || !levelBuckets.isEmpty()) {
+        if (periods || levels) {
             final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
-            for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
-                fit.add(bucket.getKey(), fitPeriodSums(unit, p, f, buckets.size() == 1 ? null : bucket.getValue()));
-            }
-            for (final Map.Entry<String, List<Integer>> bucket : levelBuckets.entrySet()) {
-                fit.addSlice(ScoreAccumulator.LEVEL_PREFIX + bucket.getKey(), fitPeriodSums(unit, p, f, bucket.getValue()));
+            for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
+                cell.getKey().addTo(fit, fitPeriodSums(unit, p, f, cells.size() == 1 ? null : cell.getValue()));
             }
         }
         for (int c = 0; c < cols.length; c++) {
@@ -354,26 +349,26 @@ public final class ConditioningScorer implements Serializable {
                     into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(null, binnedPartial(unit, bins(c, cols[c]), f, p));
                     continue;
                 }
-                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
+                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per cell
                 final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
-                for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
-                    target.add(bucket.getKey(), rowPartialSums(unit, p, f, v, bucket.getValue()));
-                }
-                for (final Map.Entry<String, List<Integer>> bucket : levelBuckets.entrySet()) {
-                    target.addSlice(ScoreAccumulator.LEVEL_PREFIX + bucket.getKey(), rowPartialSums(unit, p, f, v, bucket.getValue()));
+                for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
+                    cell.getKey().addTo(target, rowPartialSums(unit, p, f, v, cell.getValue()));
                 }
             }
         }
     }
 
-    /**
-     * The fitted model's {@code [n, g(k), G(k*k)?]} at θ̂ over {@code rows} of the unit (all rows when null; the
-     * grouped family always passes the whole unit): with the Gram, the pass evaluation itself ({@link GlmFit#evaluate},
-     * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
-     * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
-     */
-    /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (a period or a modifier level). */
+    /** A bucket of the partial pass (a grouped unit, or rows of a row-family unit): a period (null without periods) and a modifier level (null without one). */
+    private record Cell(String period, String level) {
+        /** Adds the cell's sums to the total and its period, and to its level as a slice (the accumulator copies them). */
+        void addTo(final PartialAccumulator into, final double[] sums) {
+            into.add(period, sums);
+            if (level != null) into.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, sums);
+        }
+    }
+
+    /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (one (period, level) cell). */
     private double[] rowPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] v, final List<Integer> rows) {
         final double[] acc = new double[partialLength()];
         for (final int i : rows) {
@@ -387,6 +382,12 @@ public final class ConditioningScorer implements Serializable {
         return acc;
     }
 
+    /**
+     * The fitted model's {@code [n, g(k), G(k*k)?]} at θ̂ over {@code rows} of the unit (all rows when null; the
+     * grouped family always passes the whole unit): with the Gram, the pass evaluation itself ({@link GlmFit#evaluate},
+     * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
+     * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
+     */
     private double[] fitPeriodSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final List<Integer> rows) {
         final double[] y, mu, w;
         final double[][] ff;

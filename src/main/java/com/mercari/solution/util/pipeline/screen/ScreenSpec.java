@@ -466,6 +466,7 @@ public final class ScreenSpec implements Serializable {
                         errors.add("heterogeneity must name a modifier: periods, or {field: <name>}");
                     }
                 } else if (HET_PERIODS.equals(by)) {
+                    if (field != null) errors.add("heterogeneity.field is read with by: field only (by: periods takes the period buckets as the levels)");
                     s.heterogeneityBy = HET_PERIODS;
                 } else if (HET_FIELD.equals(by)) {
                     if (field == null) errors.add("heterogeneity.by field needs heterogeneity.field");
@@ -673,6 +674,9 @@ public final class ScreenSpec implements Serializable {
         }
         if (periodsBucket != null && periodsField == null) errors.add("periods needs a field (periods.field or time.field)");
         if (heterogeneityByPeriods() && periodsBucket == null) errors.add("heterogeneity: periods needs periods (the levels are the period buckets)");
+        if (hasHeterogeneity() && transforms.stream().allMatch(ScreenSpec::isBinned)) {
+            errors.add("heterogeneity needs a raw / rank / absdev transform (the binned block test has no direction to differ across the levels)");
+        }
         if (HET_FIELD.equals(heterogeneityBy) && heterogeneityField != null && isGroupedMultinomial()) {
             notes.add("heterogeneity by " + heterogeneityField + ": the grouped family reads the modifier per unit (the value of the unit's first row)");
         }

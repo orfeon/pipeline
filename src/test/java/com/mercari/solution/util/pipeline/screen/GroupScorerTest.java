@@ -499,6 +499,21 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: segment}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {field: nope}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: field}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, time: t, candidates: [x], periods: year, heterogeneity: {by: periods, field: g}}"));
+        // the block test has no direction: a modifier with binned alone would test nothing
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], heterogeneity: {field: g}}"));
+
+        // with noise placebos a df = 1 placebo record feeds two placebo kinds (df1 and het) but counts once
+        final ScreenSpec withNoise = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], heterogeneity: {field: g}, placebo: {noise: 3}}");
+        final GroupScorer ns = new GroupScorer(withNoise);
+        final Map<Integer, ScoreAccumulator> nacc = new HashMap<>();
+        for (int i = 1; i <= 40; i++) {
+            final ScreenRow a = new ScreenRow("a" + i, "a" + i, i, null, "A", i > 20 ? 1 : 0, Double.NaN, 1, new double[]{i});
+            ns.score(List.of(a), a.getIdentity(), nacc);
+        }
+        final ScreenReport.Result nr = ScreenReport.build(withNoise, nacc);
+        Assertions.assertEquals(3L, nr.summary().get("nPlacebo"));
+        Assertions.assertEquals(4, nr.records().size());
     }
 
     @Test

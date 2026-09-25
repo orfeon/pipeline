@@ -381,6 +381,17 @@ public final class ScreenReport {
         return new Het(chi2, df, StatMath.chiSquareUpperTail(chi2, df), nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, usable, false);
     }
 
+    /** One slice's entry of {@code period_z} / {@code partial_period_z} / {@code level_z}: its name, z (null when degenerate), S, H, n. */
+    private static Map<String, Object> sliceRecord(final String nameField, final String name, final Stats ps, final long n) {
+        final Map<String, Object> r = new LinkedHashMap<>();
+        r.put(nameField, name);
+        r.put("z", ps.degenerate ? null : ps.z);
+        r.put("S", ps.s);
+        r.put("H", ps.h);
+        r.put("n", n);
+        return r;
+    }
+
     private static void putHet(final Map<String, Object> r, final String prefix, final Het het) {
         r.put(prefix + "het_chi2", het == null ? null : het.chi2);
         r.put(prefix + "het_df", het == null ? null : (long) het.df);
@@ -428,7 +439,9 @@ public final class ScreenReport {
             notes.add("flags.leakZ.on partial: no partial statistics (see the conditioning note); the leak flag reads the marginal z");
         }
         if (fitPeriods != null && !fitPeriods.isEmpty() && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k) {
-            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period partial information is approximate (the window's Gram scaled by the period's unit mass); the per-period partial score and sign are exact");
+            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period"
+                    + (spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? " / per-level" : "")
+                    + " partial information is approximate (the window's Gram scaled by the slice's unit mass); the partial score and sign per slice are exact");
         }
         // skipped units past the share worth a look: which reason, and the way out of an invalid-baseline skip
         final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
@@ -553,24 +566,12 @@ public final class ScreenReport {
                 for (final Map.Entry<String, double[]> e : acc.getPeriods().entrySet()) {
                     final Stats ps = stats(spec, e.getValue(), nUnits);
                     if (ScoreAccumulator.isLevel(e.getKey())) {
-                        final Map<String, Object> lr = new LinkedHashMap<>();
-                        lr.put("level", ScoreAccumulator.levelName(e.getKey()));
-                        lr.put("z", ps.degenerate ? null : ps.z);
-                        lr.put("S", ps.s);
-                        lr.put("H", ps.h);
-                        lr.put("n", ps.nObs);
-                        levelRecords.add(lr);
+                        levelRecords.add(sliceRecord("level", ScoreAccumulator.levelName(e.getKey()), ps, ps.nObs));
                         levelStats.add(ps);
                         if (!ps.degenerate) scorableLevels.add(e.getKey());
                         continue;
                     }
-                    final Map<String, Object> pr = new LinkedHashMap<>();
-                    pr.put("period", e.getKey());
-                    pr.put("z", ps.degenerate ? null : ps.z);
-                    pr.put("S", ps.s);
-                    pr.put("H", ps.h);
-                    pr.put("n", ps.nObs);
-                    periodRecords.add(pr);
+                    periodRecords.add(sliceRecord("period", e.getKey(), ps, ps.nObs));
                     periodStats.add(ps);
                     if (!ps.degenerate) {
                         scorablePeriods.add(e.getKey());
@@ -583,7 +584,7 @@ public final class ScreenReport {
                 r.put("period_z", periodRecords);
                 r.put("bin_stats", null);
                 // the heterogeneity test across the modifier's levels (marginal; the partial one follows the partial slices)
-                final Het het = !spec.hasHeterogeneity() || st.degenerate ? (spec.hasHeterogeneity() ? Het.degenerate(0) : null)
+                final Het het = !spec.hasHeterogeneity() ? null : st.degenerate ? Het.degenerate(0)
                         : heterogeneity(spec.heterogeneityByPeriods() ? periodStats : levelStats, nUnits);
                 putHet(r, "", het);
                 r.put("level_z", spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? levelRecords : null);
@@ -634,13 +635,7 @@ public final class ScreenReport {
                             final Stats ps = scorablePeriods.contains(e.getKey())
                                     ? partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma, windowGGg)
                                     : Stats.degenerate(pObs);
-                            final Map<String, Object> pr = new LinkedHashMap<>();
-                            pr.put("period", e.getKey());
-                            pr.put("z", ps.degenerate ? null : ps.z);
-                            pr.put("S", ps.s);
-                            pr.put("H", ps.h);
-                            pr.put("n", pObs);
-                            partialPeriods.add(pr);
+                            partialPeriods.add(sliceRecord("period", e.getKey(), ps, pObs));
                             partialPeriodStats.add(ps);
                             if (!ps.degenerate) {
                                 pPeriods++;
@@ -790,7 +785,8 @@ public final class ScreenReport {
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
         summary.put("nPassed", nPassed);
-        summary.put("nPlacebo", placeboGains.values().stream().mapToLong(List::size).sum());
+        // placebo records (not the placebo gains: a df = 1 placebo record feeds both the df1 and the het kind)
+        summary.put("nPlacebo", (long) (records.size() - candidateRecords.size()));
         summary.put("nLeakSuspect", nLeak);
         summary.put("nHetPassed", spec.hasHeterogeneity() ? nHetPassed : null);
         summary.put("hetPassedColumns", spec.hasHeterogeneity() ? hetPassedColumns : null);

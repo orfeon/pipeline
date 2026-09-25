@@ -426,7 +426,8 @@ or naming a role / the baseline, or more than 500 columns; `time.from` / `time.t
 empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a
 `bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
 `bins.edges: rank` without `group`; `heterogeneity: periods` without `periods`, an unknown `heterogeneity.by`,
-`by: field` without a field, or a modifier field missing from the input schema; a triggered input (every Combine would fire per pane); a non-global window with
+`by: field` without a field, a `field` with `by: periods`, a modifier field missing from the input schema, or
+a heterogeneity modifier whose transforms are all `binned` (the block has no direction); a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
