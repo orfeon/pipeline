@@ -205,7 +205,56 @@ public final class ConditioningScorer implements Serializable {
     /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
     public ConditioningScorer withWindowQuantiles(final WindowQuantiles quantiles) {
         this.quantiles = quantiles;
+        if (binner != null) binner.withWindowQuantiles(quantiles);
         return this;
+    }
+
+    /** the binned test's bin assignment (the marginal scorer's rule and edge cache) */
+    private transient GroupScorer binner;
+
+    private int[] bins(final int column, final double[] v) {
+        if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        return binner.bins(column, v);
+    }
+
+    /**
+     * The binned block's partial sums at the fitted p̂ (DSL doc §12.1, the generalisation of {@code [s, b, a]} to a
+     * one-hot block of B bins): {@code [s (B), H (B² grouped / B diagonal for the row families), A (B × k)]}. Grouped:
+     * s_b = w Σ_{i in b} (ỹ_i − p̂_i), H = w (diag(P̂) − P̂ P̂'), A_bj = w (Σ_{i in b} p̂_i f_ij − P̂_b Σ_i p̂_i f_ij); row
+     * families: s_b = Σ_{i in b} w_i (y_i − p̂_i), H_bb = Σ_{i in b} w_i v̂_i, A_bj = Σ_{i in b} w_i v̂_i f_ij.
+     */
+    private double[] binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p) {
+        final int nb = spec.binCount();
+        final int n = unit.size();
+        if (spec.isGroupedMultinomial()) {
+            final double[] out = new double[nb + nb * nb + nb * k];
+            final double[] pb = new double[nb];
+            final double[] pf = new double[k];
+            for (int i = 0; i < n; i++) {
+                out[bins[i]] += unit.y[i] - p[i];
+                pb[bins[i]] += p[i];
+                for (int j = 0; j < k; j++) {
+                    pf[j] += p[i] * f[i][j];
+                    out[nb + nb * nb + bins[i] * k + j] += p[i] * f[i][j];
+                }
+            }
+            final double w = unit.unitWeight;
+            for (int b = 0; b < nb; b++) {
+                out[b] *= w;
+                for (int c = 0; c < nb; c++) out[nb + b * nb + c] = w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
+                for (int j = 0; j < k; j++) out[nb + nb * nb + b * k + j] = w * (out[nb + nb * nb + b * k + j] - pb[b] * pf[j]);
+            }
+            return out;
+        }
+        final double[] out = new double[nb + nb + nb * k];
+        for (int i = 0; i < n; i++) {
+            final double w = unit.w[i];
+            final double vv = spec.fisherWeight(p[i]);
+            out[bins[i]] += w * (unit.y[i] - p[i]);
+            out[nb + bins[i]] += w * vv;
+            for (int j = 0; j < k; j++) out[2 * nb + bins[i] * k + j] += w * vv * f[i][j];
+        }
+        return out;
     }
 
     /**
@@ -239,6 +288,11 @@ public final class ConditioningScorer implements Serializable {
             if (periods) into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).add(period, fitPeriodSums(unit, p, f, null));
             for (int c = 0; c < cols.length; c++) {
                 for (int t = 0; t < nTransforms; t++) {
+                    if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                        // the block's sums carry no period slices (the binned test has no sign to agree on)
+                        into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(null, binnedPartial(unit, bins(c, cols[c]), f, p));
+                        continue;
+                    }
                     final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                     // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
                     final double pivot = GroupScorer.pivot(v);
@@ -280,6 +334,10 @@ public final class ConditioningScorer implements Serializable {
         }
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
+                if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                    into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(null, binnedPartial(unit, bins(c, cols[c]), f, p));
+                    continue;
+                }
                 // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
                 final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());

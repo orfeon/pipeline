@@ -53,10 +53,11 @@ nothing to a tree model (false positive). See [Limits](#limits).
 threshold applies**. The transform adds placebo columns to the same pipeline — `placebo.noise` standard-normal
 columns (`__noise_<i>`) and `placebo.shuffle.n` within-group permutations of a reference column
 (`__shuffle_<i>`, marginal distribution kept, alignment broken) — and takes the `placebo.quantile` quantile
-of their `est_gain` (over every transform variant) as the pass threshold. The default q99 (not q95) accounts for
-the candidate × transform multiplicity. Without placebo columns (`noise: 0`, no shuffle) the theoretical χ²(1)
-quantile / 2N is used; it is always reported as `thresholdTheoretical` in the summary — the two agree when the
-statistic is well calibrated.
+of their `est_gain` (pooled over the transform variants of the same statistic kind: `raw` / `rank` / `absdev`
+share one cut, the [binned block test](#binned-block-test) has its own) as the pass threshold. The default q99
+(not q95) accounts for the candidate × transform multiplicity. Without placebo columns (`noise: 0`, no shuffle)
+the theoretical χ²(df) quantile / 2N is used; it is always reported as `thresholdTheoretical` in the summary —
+the two agree when the statistic is well calibrated.
 
 The placebo random numbers are derived from `placebo.seed` and the unit key (the group key, or the row identity
 for independent rows), so a re-run reproduces the same columns.
@@ -77,6 +78,30 @@ included) / n`, in (0, 1) — and `absdev` is `|x − window median|`. Noise pla
 construction and take the exact normal cdf / `|x|`; the summary's `notes` says the sketch was used. The
 default without `group` stays `raw` (the pre-pass reads the input once more): list the transforms to get
 `rank` / `absdev`.
+
+### Binned block test
+
+`transforms: [raw, binned]` with `bins: {k: 10, edges: value}` tests a candidate as a one-hot block of `k`
+bins plus a missing bin (a missing value is a bin of its own, so informative missingness scores), which
+catches any univariate shape at bin resolution — a band, a threshold, a U — where the linear probe of `raw`
+sees nothing. The record is one χ²(df) statistic without a sign: `chi2`, `df` (active bins − 1), `pValue`,
+`est_gain = chi2 / (2N)` on the same scale as the other transforms, and `bin_stats` (per bin: score `S`,
+information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z`, the
+period fields and the leak flag do not apply (null / false). Under conditioning the block gets its own
+partial test (`partial_chi2`, `partial_df`, `partial_gain`, `partial_pValue`, `r2_F` = the share of the
+block's information F explains).
+
+- `edges: value` bins by the window's value quantiles (the same sketch pre-pass as the independent-row
+  `rank`, run for grouped input too when the block test asks for it); bin i holds `(edge_{i−1}, edge_i]`.
+  `edges: rank` (needs `group`) bins by the row's rank within its group — a *position* bin ("does the
+  standing within the group matter"), a different question from the value bins ("does the level matter").
+- **Its own threshold.** A df = k − 1 gain is not comparable with a df = 1 gain, so the placebo cut is taken
+  per statistic kind: `raw` / `rank` / `absdev` share one, `binned` has its own; each record's `threshold` is
+  its kind's cut and the summary / pass list carry the `thresholds` map (`df1`, `binned`), the scalar
+  `threshold` staying the df = 1 cut. `pass.minGain` applies to both; `pass.minPeriodsAgree` is a df = 1 rule
+  and does not bar the block.
+- **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
+  `raw` first; keep `binned` for the shapes `raw` and `rank` miss, and keep `k` small (10 is plenty).
 
 ### Periods, time window and leak flags
 
@@ -202,7 +227,8 @@ is an assembly error.
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
 | rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
-| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). |
+| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`, `binned`. Default: the first three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). `binned` (the block test, see [Binned block test](#binned-block-test)) is never in the default list. |
+| bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -224,12 +250,13 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | method | STRING | `scoreTest` |
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
-| df | INT64 | degrees of freedom (1) |
+| df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
 | pValue, qValue | FLOAT64 | χ²(1) upper tail; Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
 | n_obs | INT64 | rows whose transformed value is finite |
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
+| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms. Under conditioning the block's partial test adds `partial_df` (INT64) |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
@@ -243,7 +270,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical`,
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, and `binned` with the block test), `bins` (`edges/k` of the block test, else null),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -401,7 +428,7 @@ transforms:
   "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66, "minGain": null,
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
-  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
+  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
   "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",

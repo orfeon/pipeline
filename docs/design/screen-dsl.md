@@ -162,8 +162,9 @@ applies. The transform adds placebo columns that go through exactly the same pip
   distribution is kept, the alignment with the label is broken (needs `group`).
 
 The pass threshold is the `placebo.quantile` quantile (default 0.99) of the placebo columns' `est_gain`, **pooled
-over every transform variant**: the multiplicity the threshold must absorb is candidates × transforms, and the
-default q99 (not q95) reflects it. Without any placebo column the theoretical χ²(1) quantile / 2N is the
+over every transform variant of the same statistic kind** — the df = 1 transforms (`raw` / `rank` / `absdev`)
+share one cut, the binned block test (§6.1) has its own: the multiplicity the threshold must absorb is
+candidates × transforms, and the default q99 (not q95) reflects it. Without any placebo column the theoretical χ²(1) quantile / 2N is the
 threshold; it is always reported as `thresholdTheoretical` next to the empirical one, and the two agreeing is
 the calibration check (on a 50k-group dataset the proposal measured 0.000063 against 0.000067).
 
@@ -189,8 +190,49 @@ count — (values below + half the values equal, itself included) / n, in (0, 1)
 distance to the window median. A noise placebo is standard normal by construction, so its rank is the exact
 normal cdf and its absdev |x|: the sketch's approximation touches only the candidates, as a slightly
 perturbed monotone re-encoding that creates no alignment with the label, and the placebo calibration holds.
-The sketches are the value-bin edges of §12.1 too. Default: all three with `group`, `raw` without (the
-pre-pass is one more read of the input); an explicit list is never widened.
+The sketches are the value-bin edges of §6.1 too. Default: all three with `group`, `raw` without (the
+pre-pass is one more read of the input); an explicit list is never widened. A fourth, explicit-only
+transform is the binned block test (§6.1).
+
+### 6.1 The binned block test
+
+`transforms: [..., binned]` with `bins: {k, edges}` (default k = 10, `edges: value`) tests the candidate
+as a one-hot block of k bins plus a missing bin (informative missingness is a bin of its own, never a
+zero), so any univariate shape scores at bin resolution — a band, a threshold, a U — where the linear
+probe of `raw` sees nothing. The record is one χ²(df) statistic without a sign (`z`, `S`, `H`, `beta` null;
+`df` = active bins − 1, an active bin holding information) with `est_gain = chi2 / (2N)` on the same scale
+as the df = 1 tests, plus `bin_stats` (per bin: score S_b, information H_bb, weight mass n) — the one-step
+partial-residual curve the derivation suggestions of §12.3 read.
+
+- **Edges — two kinds, declared.** `edges: value` bins by the window's value quantiles (the sketch pre-pass
+  of §6, run for the grouped family too when the block test asks for it; a noise placebo takes the exact
+  normal quantiles, a shuffle placebo its reference column's edges); bin i holds (edge_{i−1}, edge_i], a
+  value equal to an edge falls below it. `edges: rank` (grouped only) bins by the within-unit rank — a
+  *position* bin, the row's standing within its unit, k capped by the unit size — which answers a different
+  question from the value bins (does the level matter / does the standing within the unit matter).
+- **Statistic.** Row families: S_b = Σ_b w (y − μ), H_b = Σ_b w v with the intercept profiled out,
+  `chi2 = Σ S_b² / H_b − (Σ S_b)² / Σ H_b`, O(k) state; prior mode centres by the window's label mean and
+  weights by the prior's Fisher weight (gaussian: the label variance), as §3.3. Grouped: the k × k block
+  H = Σ_g w_g [diag(P_g) − P_g P_g'] (P_g,b the baseline share of bin b in unit g), S_b = Σ_g w_g Σ_{i∈b}
+  (ỹ_i − p_i); the block has rank k − 1 (the shares sum to one within the unit), so one active bin is the
+  reference and the reduced system is solved by Cholesky — the same rank drop the intercept produces for
+  the row families, hence one rule: df = active bins − 1.
+- **Calibration per kind.** A df = k − 1 gain is not comparable with a df = 1 gain, so the placebo cut is
+  pooled per *statistic kind* (§5): the three df = 1 transforms share one cut, the block test has its own,
+  from the placebo columns' block gains (their bins are exact, so their df is the nominal k − 1). Each record
+  carries its kind's `threshold`; the summary and the pass list carry the `thresholds` map, the scalar
+  `threshold` staying the df = 1 cut. Without placebo columns the theoretical χ²(df) quantile / 2N applies
+  with the nominal df.
+- **Conditioning.** The partial test generalises to the block: with a_b = F̃'W φ_b per bin the sums
+  `[s (B), H (B × B), A (B × |F|)]` give Γ = (G + l2·n·I)⁻¹ A, S⊥ = s − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ and
+  `partial_chi2 = S⊥' H⊥⁺ S⊥` over the bins the marginal block kept (`partial_df`), `r2_F = 1 − tr(H⊥) /
+  tr(H)`. State per column B × (1 + B + |F|) (row families: B × (2 + |F|), the block is diagonal).
+- **No sign, no periods.** The block has no direction, so `period_z`, `periods_agree` and the leak flag do
+  not apply to it (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are
+  no per-period block sums.
+- **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
+  `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
+  list.
 
 ## 7. Periods, time window, flags, q-values
 
@@ -304,17 +346,20 @@ sanity check that the conditioning set is informative.
 ### 9.1 Scoring records (the default output)
 
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
-(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; block tests will use it),
+(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; the block test's active bins − 1),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
-(array of {period, z, S, H, n}), `r2_F`, `partial_S / H / chi2 / z / gain / pValue`,
-`partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without conditioning), `threshold`,
-`passed`, `leakSuspect`, `placebo`, `degenerate`. Field names follow the
+(array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `r2_F`,
+`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_periods_agree`,
+`partial_n_periods`, `partial_period_z` (null without conditioning), `threshold` (the record's kind's cut),
+`passed`, `leakSuspect`, `placebo`, `degenerate`. A block record leaves the signed fields null (`S`, `H`,
+`beta`, `z`, the period fields, `partial_S / H / z`). Field names follow the
 proposal that introduced the transform so its reference implementation compares directly.
 
 ### 9.2 Summary (`<name>.summary`)
 
 One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
-`minPeriodsAgree` / `minGain`, the thresholds and the quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
+`minPeriodsAgree` / `minGain`, the thresholds and the quantile (`threshold` / `thresholdTheoretical` = the
+df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
@@ -325,7 +370,7 @@ gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fall
 One JSON document written at the end of the run, in the shape the feature transform's `output.include`
 reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule` (with
 `minPeriodsAgree` / `minGain`), the leak flag (`leakZ` / `leakOn`), family /
-method, thresholds, quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
+method, thresholds (the df = 1 scalar and the `thresholds` map per kind, `bins`), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
 `createdAt`, and the passing records' statistics. Non-finite thresholds are written as null; an empty pass
@@ -344,7 +389,9 @@ valid for the family; `groupedMultinomial` without `group`; `rank` / `absdev` / 
 without `group`; a role or candidate field missing from the input schema, or a non-numeric shuffle
 reference; a lineage selector without lineage; no candidate left; a conditioning pattern matching nothing
 or naming a role / the baseline, or more than 500 columns; `time.from` / `time.to` without `time.field`; an
-empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a triggered input (every Combine would fire per pane); a non-global window with
+empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a
+`bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
+`bins.edges: rank` without `group`; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
@@ -414,13 +461,12 @@ in O(k) state; the grouped family needs the k × k matrix H = Σ_g [diag(P_g) �
 share of bin b in unit g, the one-hot rows summing to 1 within the unit, so H has rank k − 1 and the test uses
 its pseudo-inverse). Missing is a bin of its own (informative missingness), not a zero.
 
-- *Edges — two kinds, declared* (*review*). Value bins need edges over the window: the quantile pre-pass of
-  §6 (one pass shared by every candidate, today run for independent rows only), for the grouped family too. The grouped family can also bin by the
-  within-unit `rank` (exact, no pre-pass), but that is a *position* bin — the unit's ordinal position, k
-  capped by the unit size (a unit of 5 rows fills 5 bins) — not a value bin, and the two answer different
-  questions (does the column's level matter / does its standing within the unit matter). `bins: {edges:
-  value | rank, k}` names which; the pass list records the edges (value) or the rank cut points (position) so
-  the feature transform reproduces the survivor.
+- *Built* (§6.1): the row-family closed form and the grouped k × k block, value bins from the sketch pre-pass
+  and position bins from the within-unit rank (*review*: declared as two kinds, since they answer different
+  questions), the missing bin, per-kind calibration, the block partial test, `bin_stats` in the record.
+- *Open*: the pass list records `bin_stats`, not the edges; writing the value edges (or the rank cut points)
+  into it so the feature transform reproduces a surviving block as a row `bin` op is the closing-the-loop
+  step below.
 - *Categorical candidates* read natively: a level → (S, H) map instead of one-hot or target encoding upstream.
   Exact up to a `maxLevels` cap, beyond it a deterministic seeded hash into buckets (collisions dilute, the
   result stays reproducible); a top-K cut needs a prior counting pass. (*review*: the candidates are numeric
@@ -593,8 +639,9 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
 
 1. **KLL pre-pass** — built for independent-row `rank` / `absdev` (§6, engine doc §2); the value-bin edges
    of §12.1 read the same sketches, extended to the grouped family with step 2.
-2. **Binned score test** with per-kind thresholds, the missing bin, `bins: {edges, k}`, and the
-   heterogeneity test (`by: periods | <field> | baselineBins`, marginal and partial).
+2. **Binned score test** — built (§6.1: per-kind thresholds, the missing bin, `bins: {edges, k}`, the
+   block partial test). Still to come from the same position: the **heterogeneity test** (`by: periods |
+   <field> | baselineBins`, marginal and partial) and the edges in the pass list.
 3. **One-candidate suggestions** with the discovery / confirmation split and the `<name>.suggestions` output.
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.

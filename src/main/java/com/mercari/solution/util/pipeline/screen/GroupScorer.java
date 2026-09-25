@@ -32,6 +32,8 @@ public final class GroupScorer implements Serializable {
     private final boolean dropsRows;
     /** the window's quantile sketches (independent rows with rank / absdev): the transforms' reference, set per bundle from the side input */
     private transient WindowQuantiles quantiles;
+    /** the binned test's value edges per column, derived once from the sketches (reset with them) */
+    private transient double[][] edgesCache;
 
     public GroupScorer(final ScreenSpec spec) {
         this.spec = spec;
@@ -43,6 +45,7 @@ public final class GroupScorer implements Serializable {
 
     /** Sets the window's quantile sketches (the rank / absdev reference of independent rows); null = within-unit transforms. */
     public GroupScorer withWindowQuantiles(final WindowQuantiles quantiles) {
+        if (this.quantiles != quantiles) edgesCache = null;
         this.quantiles = quantiles;
         return this;
     }
@@ -148,8 +151,19 @@ public final class GroupScorer implements Serializable {
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
         for (int c = 0; c < nColumns; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                final double[] v = transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
+                if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                    // the binned block test: per-bin sums in the accumulator's variable-length vector
+                    final int[] bins = bins(c, cols[c]);
+                    Arrays.fill(contribution, 0d);
+                    contribution[ScoreAccumulator.N_OBS] = observed(cols[c]);
+                    acc.add(unitPeriod, contribution);
+                    acc.addExtra(spec.isGroupedMultinomial()
+                            ? binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight)
+                            : binnedRowContribution(bins, unit.y, unit.p, unit.w, prior));
+                    continue;
+                }
+                final double[] v = transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 if (spec.isGroupedMultinomial()) {
                     groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
                     acc.add(unitPeriod, contribution);
@@ -279,6 +293,102 @@ public final class GroupScorer implements Serializable {
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
+    }
+
+    /** Finite values of a column (the binned test's n_obs). */
+    static int observed(final double[] v) {
+        int n = 0;
+        for (final double x : v) if (StatMath.isFinite(x)) n++;
+        return n;
+    }
+
+    /**
+     * The bin of every value of column {@code column} (DSL doc §12.1): value bins from the window's quantile
+     * edges (a candidate or the shuffle reference's sketch; a noise placebo takes the exact normal quantiles),
+     * or position bins from the within-unit rank ({@code bins.edges: rank}); a missing value goes to the missing
+     * bin (the last index). Bin i holds the values in (edge_{i−1}, edge_i]: a value equal to an edge falls below it.
+     */
+    int[] bins(final int column, final double[] v) {
+        final int k = spec.binsK;
+        final int[] out = new int[v.length];
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            final double[] rank = percentileRank(v);
+            for (int i = 0; i < v.length; i++) out[i] = StatMath.isFinite(rank[i]) ? Math.min(k - 1, (int) Math.floor(rank[i] * k)) : spec.missingBin();
+            return out;
+        }
+        final double[] edges = edges(column);
+        for (int i = 0; i < v.length; i++) {
+            if (!StatMath.isFinite(v[i]) || edges == null) {
+                out[i] = spec.missingBin();
+                continue;
+            }
+            int b = 0;
+            while (b < edges.length && edges[b] < v[i]) b++;
+            out[i] = b;
+        }
+        return out;
+    }
+
+    /** The k − 1 interior value edges of a column, cached per column while the sketches are set; null without a sketch value. */
+    private double[] edges(final int column) {
+        if (edgesCache == null) edgesCache = new double[nColumns][];
+        double[] edges = edgesCache[column];
+        if (edges != null) return edges;
+        final int k = spec.binsK;
+        if (column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise)) {
+            final int sketch = column < nCandidates ? column : shuffleRef;
+            if (quantiles == null || sketch >= quantiles.columns() || quantiles.count(sketch) == 0) return null;
+            edges = quantiles.edges(sketch, k);
+        } else {
+            edges = new double[k - 1];
+            for (int i = 1; i < k; i++) edges[i - 1] = StatMath.inverseNormal((double) i / k);
+        }
+        edgesCache[column] = edges;
+        return edges;
+    }
+
+    /**
+     * Grouped (conditional logit) binned sums, scaled by the unit weight: {@code [S_b (B), P_b (B), (P P')_bb' (B²)]}
+     * with S_b = Σ_{i in b} (ỹ_i − p_i) and P_b = Σ_{i in b} p_i — the score of the one-hot block and the pieces of
+     * its Fisher block diag(P) − P P' (DSL doc §12.1).
+     */
+    double[] binnedGroupedContribution(final int[] bins, final double[] y, final double[] p, final double weight) {
+        final int nb = spec.binCount();
+        final double[] s = new double[nb];
+        final double[] pb = new double[nb];
+        for (int i = 0; i < bins.length; i++) {
+            s[bins[i]] += y[i] - p[i];
+            pb[bins[i]] += p[i];
+        }
+        final double[] out = new double[2 * nb + nb * nb];
+        for (int b = 0; b < nb; b++) {
+            out[b] = weight * s[b];
+            out[nb + b] = weight * pb[b];
+            for (int c = 0; c < nb; c++) out[2 * nb + b * nb + c] = weight * pb[b] * pb[c];
+        }
+        return out;
+    }
+
+    /**
+     * Row-family binned sums: per bin {@code [Σ w, Σ w r, Σ w v]} (r = y − μ and v the Fisher weight in offset mode; r = y
+     * and v unused in prior mode, where the report supplies the prior weight) and the window totals
+     * {@code [Σ w, Σ w r, Σ w r²]} after the bins (the prior mean and the gaussian variance).
+     */
+    double[] binnedRowContribution(final int[] bins, final double[] y, final double[] mu, final double[] w, final boolean prior) {
+        final int nb = spec.binCount();
+        final double[] out = new double[3 * nb + 3];
+        for (int i = 0; i < bins.length; i++) {
+            final double r = prior ? y[i] : y[i] - mu[i];
+            final double v = prior ? 0d : spec.fisherWeight(mu[i]);
+            final int o = 3 * bins[i];
+            out[o] += w[i];
+            out[o + 1] += w[i] * r;
+            out[o + 2] += w[i] * v;
+            out[3 * nb] += w[i];
+            out[3 * nb + 1] += w[i] * r;
+            out[3 * nb + 2] += w[i] * r * r;
+        }
+        return out;
     }
 
     /**

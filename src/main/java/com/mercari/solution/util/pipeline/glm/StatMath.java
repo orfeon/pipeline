@@ -44,6 +44,75 @@ public final class StatMath {
         return z * z;
     }
 
+    /**
+     * Upper tail probability of a chi-square statistic with {@code df} degrees of freedom: the regularized
+     * upper incomplete gamma Q(df / 2, chi2 / 2) (series below a + 1, continued fraction above); df = 1 takes
+     * the erfc form.
+     */
+    public static double chiSquareUpperTail(final double chi2, final int df) {
+        if (df <= 1) return chiSquare1UpperTail(chi2);
+        if (Double.isNaN(chi2)) return Double.NaN;
+        if (chi2 <= 0) return 1d;
+        return regularizedGammaQ(df / 2d, chi2 / 2d);
+    }
+
+    /** Quantile of a chi-square(df) distribution by bisection on the upper tail (df = 1 in closed form). */
+    public static double chiSquareQuantile(final double q, final int df) {
+        if (df <= 1) return chiSquare1Quantile(q);
+        if (!(q > 0 && q < 1)) return Double.NaN;
+        double lo = 0, hi = Math.max(10d, df + 10 * Math.sqrt(2d * df));
+        while (chiSquareUpperTail(hi, df) > 1 - q) hi *= 2;
+        for (int i = 0; i < 200 && hi - lo > 1e-12 * hi; i++) {
+            final double mid = 0.5 * (lo + hi);
+            if (chiSquareUpperTail(mid, df) > 1 - q) lo = mid; else hi = mid;
+        }
+        return 0.5 * (lo + hi);
+    }
+
+    /** Regularized upper incomplete gamma Q(a, x) = Γ(a, x) / Γ(a) (Numerical Recipes gammq). */
+    static double regularizedGammaQ(final double a, final double x) {
+        if (x <= 0) return 1d;
+        if (x < a + 1) {
+            // series for P(a, x)
+            double ap = a, sum = 1d / a, del = sum;
+            for (int n = 1; n < 1000; n++) {
+                ap += 1;
+                del *= x / ap;
+                sum += del;
+                if (Math.abs(del) < Math.abs(sum) * 1e-15) break;
+            }
+            return 1d - sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
+        }
+        // continued fraction for Q(a, x) (modified Lentz)
+        final double tiny = 1e-300;
+        double b = x + 1 - a, c = 1 / tiny, d = 1 / b, h = d;
+        for (int i = 1; i < 1000; i++) {
+            final double an = -i * (i - a);
+            b += 2;
+            d = an * d + b;
+            if (Math.abs(d) < tiny) d = tiny;
+            c = b + an / c;
+            if (Math.abs(c) < tiny) c = tiny;
+            d = 1 / d;
+            final double del = d * c;
+            h *= del;
+            if (Math.abs(del - 1) < 1e-15) break;
+        }
+        return Math.exp(-x + a * Math.log(x) - logGamma(a)) * h;
+    }
+
+    /** ln Γ(x) for x > 0 (Lanczos, g = 7). */
+    static double logGamma(final double x) {
+        final double[] g = {0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313,
+                -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7};
+        if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - logGamma(1 - x);
+        final double xx = x - 1;
+        double a = g[0];
+        final double t = xx + 7.5;
+        for (int i = 1; i < 9; i++) a += g[i] / (xx + i);
+        return 0.5 * Math.log(2 * Math.PI) + (xx + 0.5) * Math.log(t) - t + Math.log(a);
+    }
+
     /** Type-7 (linear interpolation) sample quantile of a sorted array; NaN for an empty array. */
     public static double quantile(final double[] sorted, final double q) {
         if (sorted == null || sorted.length == 0) return Double.NaN;

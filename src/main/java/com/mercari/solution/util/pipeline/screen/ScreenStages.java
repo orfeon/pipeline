@@ -365,7 +365,8 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size())).update(row.x);
+            // the candidates and, for the binned test's shuffle placebos, the shuffle reference (the next column of x)
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size() + (spec.hasShuffle() ? 1 : 0))).update(row.x);
         }
 
         @FinishBundle
