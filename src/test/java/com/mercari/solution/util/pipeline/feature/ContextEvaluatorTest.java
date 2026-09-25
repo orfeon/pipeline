@@ -81,4 +81,23 @@ public class ContextEvaluatorTest {
         Assertions.assertEquals("007", ContextEvaluator.valueKey("007")); // strings without a fraction are kept verbatim
     }
 
+    /** A declared `value:` against a row value: numbers as numbers (a row expression is float64), texts as texts. */
+    @Test
+    public void testMatchesDeclared() {
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.0d, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1L, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1, "1.0"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.5d, "1.50"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(9_007_199_254_740_993L, "9007199254740993"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(9_007_199_254_740_993L, "9007199254740992"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(0.0d, "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(1.0d, "good"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(null, "1"));
+        // texts: verbatim, or the integral decimal of a float64 category key ("1.0" in a distribution map)
+        Assertions.assertTrue(FeatureValues.matchesDeclared("good", "good"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared("1.0", "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("01", "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(true, "true"));
+    }
+
 }

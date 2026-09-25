@@ -1393,7 +1393,8 @@ public class FeatureSpec implements Serializable {
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");
         op.offsetScale = Json.string(o, "offsetScale");
-        op.scoreNull = Json.string(o, "scoreNull");
+        // `scoreNull: null` unquoted is a YAML null, not an absent key: it means the keyword `null`, not the default
+        op.scoreNull = o.has("scoreNull") && o.get("scoreNull").isJsonNull() ? "null" : Json.string(o, "scoreNull");
         op.seed = longOf(o, "seed", diagnostics, loc);
         if (o.has("against") && o.get("against").isJsonArray()) {
             // a list of explanatory fields (context residualize); the single series of a sequence regression stays a string

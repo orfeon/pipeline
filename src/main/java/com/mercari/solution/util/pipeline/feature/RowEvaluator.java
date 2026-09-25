@@ -123,7 +123,7 @@ public class RowEvaluator implements Serializable {
             }
             case "indicator" -> {
                 final Object v = row.get(inputs.get(0));
-                yield v == null ? null : (c.coordinates.get("value").equals(v.toString()) ? 1L : 0L);
+                yield v == null ? null : (FeatureValues.matchesDeclared(v, c.coordinates.get("value")) ? 1L : 0L);
             }
             case "equals" -> {
                 final Object a = row.get(inputs.get(0));
@@ -225,13 +225,14 @@ public class RowEvaluator implements Serializable {
 
     /**
      * One category's share of a distribution map: 0 when the map holds no mass for it, null when the entry it holds
-     * is not a number. Keys may be CharSequence after a coder round trip, hence the fallback over the entries.
+     * is not a number. Keys may be CharSequence after a coder round trip, and a float64 category is keyed by its text
+     * ({@code "1.0"}, which a declared {@code 1} must find), hence the fallback over the entries.
      */
     private static Double shareOf(final Map<?, ?> map, final String value) {
         Object v = map.get(value);
         if (v == null) {
             for (final Map.Entry<?, ?> e : map.entrySet()) {
-                if (e.getKey() != null && value.equals(e.getKey().toString())) {
+                if (FeatureValues.matchesDeclared(e.getKey(), value)) {
                     v = e.getValue();
                     break;
                 }

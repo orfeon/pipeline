@@ -1571,6 +1571,65 @@ public class FeatureTransformTest {
     }
 
     @Test
+    public void testSoftmaxUnquotedScoreNull() throws java.io.IOException {
+        // `scoreNull: null` unquoted is a YAML null: it must still mean the keyword (rows without a score are null and
+        // leave the denominator), not the absent key (the default zero)
+        final String config = PROB_CONFIG
+                .replace("expr: \"0\"", "expr: \"quantity > 1 ? 0 : null\"")
+                .replace("temperature: 1, as: pWin}", "temperature: 1, scoreNull: null, as: pWin}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // session A: s2 (quantity 1) has no score, so s1 is alone in the denominator
+            Assertions.assertEquals(1.0, byKey.get("A/s1").getAsDouble("f_prob_pWin_softmax"), 1e-12);
+            Assertions.assertNull(byKey.get("A/s2").getPrimitiveValue("f_prob_pWin_softmax"));
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_prob_pWin_softmax"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testDeclaredValueMatchesFloat64RowExpression() throws java.io.IOException {
+        // a row expression is float64: `value: 1` / `values: [1]` must match its 1.0 (a text comparison of "1" with
+        // "1.0" made every runLength 0 and every indicator 0)
+        final String config = FEATURE_CONFIG.replace("      output:\n", """
+                    - name: soldFlag
+                      scope: row
+                      expr: "sold > 0 ? 1 : 0"
+                    - name: streak
+                      scope: sequence
+                      entity: seller
+                      windows: [{maxEvents: 5}]
+                      ops:
+                        - {type: runLength, field: soldFlag, value: 1}
+                    - name: multiFlag
+                      scope: row
+                      expr: "quantity > 1 ? 1 : 0"
+                    - name: multi
+                      scope: row
+                      type: indicator
+                      input: multiFlag
+                      values: [1]
+                  output:
+            """);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // s1 sells in A, not in B, then in C: at D (sold visible up to C) the trailing run of 1.0 is one long
+            Assertions.assertEquals(0L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_streak_n5_soldFlag_runlength")).longValue());
+            Assertions.assertEquals(1L, ((Number) byKey.get("D/s1").getPrimitiveValue("f_streak_n5_soldFlag_runlength")).longValue());
+            Assertions.assertEquals(1L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_multi_1")).longValue());
+            Assertions.assertEquals(0L, ((Number) byKey.get("A/s2").getPrimitiveValue("f_multi_1")).longValue());
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testPlacebosAreDeterministicAcrossEngineModes() throws java.io.IOException {
         // noise / shuffle are pure functions of the row identity / group: the parallel waves and the linear chain agree
         assertParallelMatchesLinear(PROB_CONFIG, 6, List.of(), List.of());

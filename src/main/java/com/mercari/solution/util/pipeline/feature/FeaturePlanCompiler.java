@@ -835,7 +835,9 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("row.indicator.values", loc, "indicator requires 'values' (the categories to flag)");
                     return;
                 }
+                final Ref ref = resolve(input);
                 for (final String value : def.values) {
+                    warnNeverMatches("row.indicator.values", loc, input, ref, value);
                     final OutputColumn c = newColumn(def.name, Scope.row, "indicator", def.name + "_" + value, Schema.FieldType.INT64, computeAt);
                     c.coordinates.put("value", value);
                     addSelfInput(c, input);
@@ -1004,6 +1006,16 @@ public final class FeaturePlanCompiler {
         identity.add(spec.timeField);
         for (final String f : spec.orderTieBreak) if (!identity.contains(f)) identity.add(f);
         return identity;
+    }
+
+    /**
+     * A declared value compared with a numeric field matches as a number ({@code value: 1} = 1.0, the type a row
+     * expression always has), so only a non-numeric one can never match: warn rather than emit a column of zeros.
+     */
+    private void warnNeverMatches(final String code, final String loc, final String field, final Ref ref, final String value) {
+        if (ref == null || !OperatorCatalog.isNumeric(ref.type()) || FeatureValues.toDouble(value) != null) return;
+        diagnostics.warning(code, loc, "'" + value + "' is not a number, and '" + field + "' is " + ref.type().getType()
+                + ": the value never matches");
     }
 
     private String singleInput(final FeatureDef def) {
@@ -1504,6 +1516,7 @@ public final class FeaturePlanCompiler {
                         }
                         case "runLength" -> {
                             if (op.value == null) diagnostics.error("sequence.runLength.value", loc, "runLength requires 'value'");
+                            else warnNeverMatches("sequence.runLength.value", loc, field, ref, op.value);
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "runlength", Schema.FieldType.INT64, computeAt);
                             c.coordinates.put("value", String.valueOf(op.value));
                             c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);

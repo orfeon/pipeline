@@ -750,7 +750,7 @@ public class SequenceEvaluator implements Serializable {
                 long run = 0;
                 for (int i = window.size() - 1; i >= 0; i--) {
                     final Object v = window.get(i).values().get(field);
-                    if (v != null && value.equals(v.toString())) run++;
+                    if (FeatureValues.matchesDeclared(v, value)) run++;
                     else break;
                 }
                 return run;

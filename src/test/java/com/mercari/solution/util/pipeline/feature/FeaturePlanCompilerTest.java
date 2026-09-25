@@ -3763,6 +3763,37 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testUnquotedScoreNullIsTheKeyword() {
+        // YAML reads `scoreNull: null` as a null value: present, so the keyword, never the default zero
+        final FeaturePlan plan = compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "scoreNull: null")));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("null", column(plan, "prob_pWin_softmax").getCoordinates().get("scoreNull"));
+        Assertions.assertEquals("null", column(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "scoreNull: \"null\""))),
+                "prob_pWin_softmax").getCoordinates().get("scoreNull"));
+    }
+
+    @Test
+    public void testDeclaredValueNeverMatchingANumericField() {
+        final String blocks = """
+              - name: streak
+                scope: sequence
+                entity: seller
+                ops:
+                  - {type: runLength, field: quantity, value: VALUE}
+              - {name: multi, scope: row, type: indicator, input: quantity, values: [VALUE]}
+            """;
+        // a number matches a numeric field as a number: no warning
+        final FeaturePlan numeric = compile(SOURCES, withBlocks(blocks.replace("VALUE", "1")));
+        Assertions.assertFalse(hasCode(numeric, "sequence.runLength.value"), numeric::describe);
+        Assertions.assertFalse(hasCode(numeric, "row.indicator.values"), numeric::describe);
+        // a text never does: warned, not an error (the column is still defined, and all zero)
+        final FeaturePlan text = compile(SOURCES, withBlocks(blocks.replace("VALUE", "yes")));
+        Assertions.assertFalse(text.getDiagnostics().hasErrors(), text::describe);
+        Assertions.assertTrue(hasCode(text, "sequence.runLength.value"), text::describe);
+        Assertions.assertTrue(hasCode(text, "row.indicator.values"), text::describe);
+    }
+
+    @Test
     public void testTemperatureFromIsOutsideThePlanHash() {
         final JsonObject sourcesJson = Config.convertConfigJson(SOURCES, Config.Format.yaml);
         final JsonObject base = Config.convertConfigJson(withBlocks(PROB_BLOCK), Config.Format.yaml);

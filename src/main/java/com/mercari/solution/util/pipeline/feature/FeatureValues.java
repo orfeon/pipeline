@@ -55,6 +55,32 @@ public final class FeatureValues {
     }
 
     /**
+     * Whether a row value equals a declared one (a {@code value:} / {@code values:} scalar, kept as text): a number
+     * compares as a number — a row expression is always float64, so {@code value: 1} must match 1.0 —, anything else
+     * by its text, with integral decimals normalised on both sides as {@link ContextEvaluator#valueKey} writes the key
+     * of a counted map ({@code "1.0"} = {@code "1"}; {@code "01"} stays a text of its own). False for null.
+     */
+    static boolean matchesDeclared(final Object value, final String declared) {
+        if (value == null || declared == null) return false;
+        if (value instanceof Number n) {
+            if (value instanceof Long || value instanceof Integer) {
+                try {
+                    return n.longValue() == Long.parseLong(declared);
+                } catch (final NumberFormatException ignored) {
+                    // a decimal or non-numeric declaration: compared as a double below
+                }
+            }
+            try {
+                return n.doubleValue() == Double.parseDouble(declared);
+            } catch (final NumberFormatException e) {
+                return false;
+            }
+        }
+        final String text = value.toString();
+        return text.equals(declared) || ContextEvaluator.valueKey(text).equals(ContextEvaluator.valueKey(declared));
+    }
+
+    /**
      * The numeric target of a row under an optional baseline offset, as the pair {@code (y − b, b)} — {@code b} null
      * without an offset — or null when the target or the baseline is missing / NaN (the row contributes to no
      * statistic, and to no count). A null {@code field} is a target-less statistic (count / share denominator):
