@@ -164,9 +164,19 @@ public final class GroupScorer implements Serializable {
                     Arrays.fill(contribution, 0d);
                     contribution[ScoreAccumulator.N_OBS] = observed(cols[c]);
                     acc.add(unitPeriod, contribution);
-                    acc.addExtra(spec.isGroupedMultinomial()
+                    final double[] sums = spec.isGroupedMultinomial()
                             ? binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight)
-                            : binnedRowContribution(bins, unit.y, unit.p, unit.w, prior));
+                            : binnedRowContribution(bins, unit.y, unit.p, unit.w, prior);
+                    if (spec.suggestionsOn) {
+                        // the suggestions' honest gain: the window's sums, then the discovery half's (a seeded hash of
+                        // the unit); the confirmation half is the difference
+                        final double[] both = new double[2 * sums.length];
+                        System.arraycopy(sums, 0, both, 0, sums.length);
+                        if (discovery(unit.key)) System.arraycopy(sums, 0, both, sums.length, sums.length);
+                        acc.addExtra(both);
+                    } else {
+                        acc.addExtra(sums);
+                    }
                     continue;
                 }
                 final double[] v = transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
@@ -310,6 +320,43 @@ public final class GroupScorer implements Serializable {
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
         for (final Map.Entry<String, double[]> e : byLevel.entrySet()) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + e.getKey(), e.getValue());
+    }
+
+    /** Whether a unit belongs to the suggestions' discovery half: a seeded hash of the unit key (the placebo derivation). */
+    boolean discovery(final String unitKey) {
+        return FeatureValues.seededRandom(spec.seed, unitKey + SEP + "split").nextBoolean();
+    }
+
+    /**
+     * A representative value per bin of column {@code column} (the binned test's k value bins, the missing bin
+     * excluded), for the suggestions' shapes: the midpoint of (edge_{i−1}, edge_i], the outer bins reaching to the
+     * sketch's min / max (a noise placebo: the normal quantile mids); position bins take the position's centre
+     * (b + 0.5) / k. Null without an edge (no sketch value for the column).
+     */
+    double[] binRepresentatives(final int column) {
+        final int k = spec.binsK;
+        final double[] out = new double[k];
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            for (int b = 0; b < k; b++) out[b] = (b + 0.5) / k;
+            return out;
+        }
+        final double[] edges = edges(column);
+        if (edges == null) return null;
+        final boolean candidate = column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise);
+        final int sketch = column < nCandidates ? column : shuffleRef;
+        final double lo = candidate ? quantiles.min(sketch) : StatMath.inverseNormal(0.5 / k);
+        final double hi = candidate ? quantiles.max(sketch) : StatMath.inverseNormal(1 - 0.5 / k);
+        for (int b = 0; b < k; b++) {
+            final double left = b == 0 ? lo : edges[b - 1];
+            final double right = b == k - 1 ? hi : edges[b];
+            out[b] = 0.5 * (left + right);
+        }
+        return out;
+    }
+
+    /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
+    public double[] binEdges(final int column) {
+        return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
     }
 
     /** Finite values of a column (the binned test's n_obs). */

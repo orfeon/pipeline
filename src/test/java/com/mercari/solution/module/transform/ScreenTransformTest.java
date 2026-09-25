@@ -233,10 +233,29 @@ public class ScreenTransformTest {
                       candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids", "s_supp"]}
                       transforms: [raw, rank, absdev, binned]
                       bins: 5
+                      suggestions: true
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
+            // one-candidate suggestions from the binned sums: every scorable candidate and placebo gets its shape,
+            // cut and monotone records (no missing values in the data, so no missing record)
+            final Map<String, Map<String, MElement>> byCandidate = new java.util.HashMap<>();
+            for (final MElement e : rows) byCandidate.computeIfAbsent(e.getAsString("candidate"), k -> new java.util.HashMap<>()).put(e.getAsString("kind"), e);
+            Assertions.assertTrue(byCandidate.containsKey("f_extra"), byCandidate.keySet().toString());
+            final Map<String, MElement> extra = byCandidate.get("f_extra");
+            Assertions.assertEquals(java.util.Set.of("shape", "cut", "monotone"), extra.keySet());
+            Assertions.assertNotNull(extra.get("shape").getAsDouble("confirmation_gain"));
+            Assertions.assertNotNull(extra.get("cut").getAsDouble("cut"));
+            Assertions.assertTrue(extra.get("shape").getAsString("fragment").contains("f_extra"));
+            for (final Map<String, MElement> kinds : byCandidate.values()) {
+                for (final MElement s : kinds.values()) Assertions.assertNotNull(s.getAsDouble("threshold"));
+            }
+            Assertions.assertTrue(byCandidate.containsKey("__noise_0"));
+            Assertions.assertEquals(Boolean.FALSE, byCandidate.get("__noise_0").get("shape").getPrimitiveValue("passed"));
+            return null;
+        });
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = byKey(rows);
             // independent rows: rank / absdev and the value bins read the window quantile sketch (one pre-pass);

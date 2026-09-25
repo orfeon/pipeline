@@ -76,6 +76,7 @@ public class ScreenTransform extends Transform {
         }
         return MCollectionTuple
                 .of(outputs.records(), ScreenReport.recordSchema())
-                .and("summary", outputs.summary(), ScreenReport.summarySchema());
+                .and("summary", outputs.summary(), ScreenReport.summarySchema())
+                .and("suggestions", outputs.suggestions(), ScreenReport.suggestionSchema());
     }
 }

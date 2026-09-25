@@ -63,6 +63,15 @@ public final class WindowQuantiles implements Serializable {
         return sketches[c].quantile(0.5);
     }
 
+    /** The smallest / largest finite value of column {@code c} (NaN without a value). */
+    public double min(final int c) {
+        return sketches[c].isEmpty() ? Double.NaN : sketches[c].min();
+    }
+
+    public double max(final int c) {
+        return sketches[c].isEmpty() ? Double.NaN : sketches[c].max();
+    }
+
     /** The value of column {@code c} at normalized rank {@code q}. */
     public double quantile(final int c, final double q) {
         return sketches[c].quantile(q);
