@@ -181,9 +181,16 @@ order). Re-runs, runners, bundle boundaries and worker counts cannot change a pl
 | `rank` | percentile rank within the group over the observed values: `(smaller + ties / 2) / (observed − 1)` with `ties` the other values equal to it, in [0, 1] (an untied minimum 0, an untied maximum 1) — `(r − 1) / (m − 1)` for the average 1-based rank `r` of `m` observed values, i.e. pandas `(rank() − 1) / (count() − 1)`, not `rank(pct=True)` = `r / m` (numerator and denominator both differ), 0.5 for a single observed value | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group's observed values\| | symmetric "extremeness" effects |
 
-Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics: with
-independent rows only `raw` is available (a window-wide quantile sketch is the extension position, §12).
-Default: all three with `group`, `raw` without; an explicit list is never widened.
+Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics. With
+independent rows (no `group`) "within the unit" would be a single row, so the reference is the window: one
+pre-pass sketches every candidate (a KLL quantile sketch per column, k = 400, rank error about 0.8 %; engine
+doc §2), and `rank` is the mid-rank of the value among the window's finite values as a fraction of their
+count — (values below + half the values equal, itself included) / n, in (0, 1) — while `absdev` is the
+distance to the window median. A noise placebo is standard normal by construction, so its rank is the exact
+normal cdf and its absdev |x|: the sketch's approximation touches only the candidates, as a slightly
+perturbed monotone re-encoding that creates no alignment with the label, and the placebo calibration holds.
+The sketches are the value-bin edges of §12.1 too. Default: all three with `group`, `raw` without (the
+pre-pass is one more read of the input); an explicit list is never widened.
 
 ## 7. Periods, time window, flags, q-values
 
@@ -375,8 +382,6 @@ negative weight → `nRowsInvalid`; a null time → the failure output. Unit ski
   already carries `df`, and `candidates` will accept `{name, fields: [...]}` blocks.
 - **`passRule`**: `placebo` (the current cut) or `fdr` (a q-value cut) — the BH q-value is already computed.
 - **Weights as precision weights** (a separate `precisionWeight`), if a consumer needs H to scale with them.
-- **Independent-row `rank` / `absdev`**: one KLL quantile-sketch pass over the window before the score pass
-  (the profile sink's `KllDoublesSketch`); the grouped transforms stay exact.
 - **Windowed marginal screen** for sliding-window drift monitoring: the marginal path is one Combine and
   could run under a trigger; conditioning stays batch.
 - **Declared interaction probes** (`cross:<field>` transform variants), bounded by declaration only; the
@@ -409,8 +414,8 @@ in O(k) state; the grouped family needs the k × k matrix H = Σ_g [diag(P_g) �
 share of bin b in unit g, the one-hot rows summing to 1 within the unit, so H has rank k − 1 and the test uses
 its pseudo-inverse). Missing is a bin of its own (informative missingness), not a zero.
 
-- *Edges — two kinds, declared* (*review*). Value bins need edges over the window: the KLL pre-pass above,
-  one pass shared by every candidate, for the grouped family too. The grouped family can also bin by the
+- *Edges — two kinds, declared* (*review*). Value bins need edges over the window: the quantile pre-pass of
+  §6 (one pass shared by every candidate, today run for independent rows only), for the grouped family too. The grouped family can also bin by the
   within-unit `rank` (exact, no pre-pass), but that is a *position* bin — the unit's ordinal position, k
   capped by the unit size (a unit of 5 rows fills 5 bins) — not a value bin, and the two answer different
   questions (does the column's level matter / does its standing within the unit matter). `bins: {edges:
@@ -584,10 +589,10 @@ the redundancy clusters first.
 
 ### 12.4 Steps
 
-In value-per-cost order, each a PR on its own; the floor is built (§7).
+In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass (§6) are built.
 
-1. **KLL pre-pass** (the extension position above): independent-row `rank` / `absdev`, and the value-bin
-   edges of §12.1 for every family. One pass shared by every candidate, before the score pass.
+1. **KLL pre-pass** — built for independent-row `rank` / `absdev` (§6, engine doc §2); the value-bin edges
+   of §12.1 read the same sketches, extended to the grouped family with step 2.
 2. **Binned score test** with per-kind thresholds, the missing bin, `bins: {edges, k}`, and the
    heterogeneity test (`by: periods | <field> | baselineBins`, marginal and partial).
 3. **One-candidate suggestions** with the discovery / confirmation split and the `<name>.suggestions` output.

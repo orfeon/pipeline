@@ -17,6 +17,8 @@ feature transform does (engine doc §1.2):
 | `glm.Family` / `glm.Baselines` / `glm.GlmFit` (`util/pipeline/glm/`) | the vocabulary shared by the supervised transforms: the families with their baseline forms, Fisher weight and link; the baseline → mean-per-row conversion and the grouped label normalisation (`Baselines.means` / `normalizeLabels`, with the `Skip` reasons); the offset GLM's fitted means and Newton pass evaluation `[n, ll, g, G]` (`GlmFit.fitted` / `evaluate`) | no |
 | `glm.StatMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; the sample quantile delegates to `OrderStatistics`, and the scorers / Prepare use the feature transform's `FeatureValues` directly for randomness and coercions | no |
 | `glm.SpecJson` | the lenient parameter readers (`string` / `number` / `strings` / `parseInstant`, …) the specs share | no |
+| `glm.SketchAccumulator` | one mergeable KLL quantile sketch (k = 400) with `rank` (mid-rank fraction), `quantile`, `edges`; coder + `Fn`; shared with the evaluation transform's calibration tables | coder + CombineFn |
+| `WindowQuantiles` | the window's sketches, one per candidate (`rank` / `median` / `quantile` / `edges` by column): the rank / absdev reference of independent rows and the value-bin edges of DSL §12.1; coder + `Fn` (input = accumulator = output) | coder + CombineFn |
 | `ScreenRow` | the prepared sample (unit key, identity, time, period, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, the rows `baseline.invalid: dropRow` rejects removed and counted, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms, the family's contribution into `ScoreAccumulator`s | no |
 | `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period, min / max time; the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
@@ -50,6 +52,15 @@ input ─ Prepare ─┬─ rows KV<unitKey, ScreenRow> ─ Group (GBK) or Units
   once per bundle on the bookkeeping key, so the shuffle carries bundles, not rows, on that key.
 - **Units** are the GroupByKey output for a grouped run, or one row each otherwise (`SingletonUnitDoFn`), the
   same `KV<String, Iterable<ScreenRow>>` type for every pass.
+- **WindowQuantiles** (independent rows with `rank` / `absdev` only): one pre-pass over the rows —
+  `QuantilesDoFn` feeds every candidate value of the rows that will be scored (a row whose baseline is
+  invalid for its form is skipped) into per-bundle sketches, flushed at `@FinishBundle` per window, then
+  `Combine.globally(...).asSingletonView()` (a default-carrying singleton per window, so a fixed-window run
+  gets one reference per window). `ScoreUnits` and, under conditioning, `ConditioningPartial` read the view
+  and hand it to the scorers (`withWindowQuantiles`); the transform dispatch is `GroupScorer.transform(spec,
+  quantiles, column, transform, values)` — within the unit when the sketches are null, else the sketch rank /
+  window median for a candidate and the exact normal cdf / |x| for a noise placebo. One more read of the
+  input; nothing else in the graph changes.
 - **ScoreUnits** calls `GroupScorer.score` per unit into a bundle-local `Map<Integer, ScoreAccumulator>` per
   window, flushed at `@FinishBundle`: a partial combine, so the shuffle into `Combine.perKey` carries keys ×
   bundles elements, not units × columns. Keys are `column × transforms + transform` (columns = candidates,
@@ -151,7 +162,9 @@ never on direct (the feature engine doc §9.5 records the same finding for keyed
 the materialised units `maxIter + 1` times through the projection. Accumulator sizes: per (column,
 transform) key periods × 9 doubles; per Newton pass `2 + k + k²` doubles (k ≤ 500 enforced); per partial key
 `(2 + k) × (1 + periods)`, plus one `FIT_PERIOD_KEY` entry of `(1 + k + k²) × (1 + periods)` doubles up to
-k = 100 (`(1 + k) × (1 + periods)` beyond). Nothing is data-dependent in size except the number of period buckets.
+k = 100 (`(1 + k) × (1 + periods)` beyond); the window quantile view is m sketches of a few KB each
+(k = 400: about 3 KB per column, so 500 candidates ≈ 1.5 MB, materialised once per worker). Nothing is
+data-dependent in size except the number of period buckets.
 
 ## 7. Tests
 
@@ -179,7 +192,7 @@ k = 100 (`(1 + k) × (1 + periods)` beyond). Nothing is data-dependent in size e
 ## 8. Status and deferred
 
 Implemented: everything in the DSL document's §1–§11. Deferred, with the design position recorded in the DSL
-document §12: independent-row `rank` / `absdev` (a KLL pass), block tests (`df > 1`), `passRule: fdr`,
+document §12: block tests (`df > 1`), `passRule: fdr`,
 precision weights, a windowed marginal screen under a trigger, declared interaction probes, in-screen
 expansion (binned / categorical score tests, heterogeneity across a modifier, pairwise products on the
 conditioning fit's p̂, pHd), pruning between passes against the `pass.minGain` floor (the floor itself is

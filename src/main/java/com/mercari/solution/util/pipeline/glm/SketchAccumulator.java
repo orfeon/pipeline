@@ -1,4 +1,4 @@
-package com.mercari.solution.util.pipeline.evaluation;
+package com.mercari.solution.util.pipeline.glm;
 
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
@@ -57,6 +57,31 @@ public final class SketchAccumulator implements Serializable {
 
     public double max() {
         return sketch.getMaxItem();
+    }
+
+    /** The number of values fed in. */
+    public long count() {
+        return sketch.getN();
+    }
+
+    /**
+     * The mid-rank of {@code v} in the sketched stream as a fraction of the count: (values below v + half the
+     * values equal to v, v itself included) / n — the mean of the exclusive and inclusive normalized ranks, in
+     * (0, 1). NaN for a non-finite value or an empty sketch.
+     */
+    public double rank(final double v) {
+        if (!Double.isFinite(v) || sketch.isEmpty()) return Double.NaN;
+        synchronized (this) {
+            return 0.5 * (sketch.getRank(v, QuantileSearchCriteria.EXCLUSIVE) + sketch.getRank(v, QuantileSearchCriteria.INCLUSIVE));
+        }
+    }
+
+    /** The value at normalized rank {@code q} (inclusive search); NaN on an empty sketch. */
+    public double quantile(final double q) {
+        if (sketch.isEmpty()) return Double.NaN;
+        synchronized (this) {
+            return sketch.getQuantile(q, QuantileSearchCriteria.INCLUSIVE);
+        }
     }
 
     /** The {@code bins − 1} interior boundaries at ranks i / bins (inclusive search). */

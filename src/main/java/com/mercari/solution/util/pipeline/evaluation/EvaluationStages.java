@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
+import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.google.common.hash.Hashing;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.module.Logging;

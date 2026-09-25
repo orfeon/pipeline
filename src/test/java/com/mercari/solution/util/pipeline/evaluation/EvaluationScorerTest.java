@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
+import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
 import org.junit.jupiter.api.Assertions;

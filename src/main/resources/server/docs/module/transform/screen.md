@@ -69,8 +69,14 @@ for independent rows), so a re-run reproduces the same columns.
 | `rank` | percentile rank within the group over the observed (finite) values: `(number of smaller values + half the number of other values tied with it) / (observed count − 1)`, in [0, 1] (an untied minimum reads 0, an untied maximum 1); 0.5 when only one value is observed. With `r` the average 1-based rank and `m` the observed count it is `(r − 1) / (m − 1)` — in pandas `(s.rank() − 1) / (s.count() − 1)`, not `s.rank(pct=True)` (`r / m`: the numerator and the denominator both differ) | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group\| | symmetric "extremeness" effects |
 
-Records are keyed by (`candidate`, `transform`). `rank` and `absdev` need `group` (the within-group
-statistics); independent rows support `raw` only in this version.
+Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics; with
+independent rows (no `group`) the reference is the whole window instead: one extra pass sketches every
+candidate (a KLL quantile sketch per column, rank error about 0.8 %), `rank` is the value's mid-rank among
+the window's observed values as a fraction of their count — `(values below + half the values equal, itself
+included) / n`, in (0, 1) — and `absdev` is `|x − window median|`. Noise placebos are standard normal by
+construction and take the exact normal cdf / `|x|`; the summary's `notes` says the sketch was used. The
+default without `group` stays `raw` (the pre-pass reads the input once more): list the transforms to get
+`rank` / `absdev`.
 
 ### Periods, time window and leak flags
 
@@ -196,7 +202,7 @@ is an assembly error.
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
 | rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
-| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without. |
+| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
