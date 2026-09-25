@@ -284,7 +284,8 @@ is an assembly error.
 ## Outputs
 
 The default output (`<name>`) holds one scoring record per column × transform, placebo columns included.
-`<name>.summary` holds one record per run (per window under a windowing strategy).
+`<name>.summary` holds one record per run (per window under a windowing strategy). `<name>.suggestions` holds
+the derivation suggestions under `suggestions: true` (see [Suggestions record](#suggestions-record-namesuggestions-with-suggestions-true)).
 
 ### Scoring record
 
@@ -336,7 +337,8 @@ One record per candidate × kind (`shape` / `cut` / `missing` / `monotone`, see 
 `fill`, `consistency`, `share` and `chi2` (discovery half), `confirmation_chi2`, `confirmation_share`,
 `confirmation_gain`, `confirmation_pValue` (confirmation half), `threshold` (the kind's placebo cut),
 `passed`, `placebo`, `fragment` (the recipe in the feature transform's row vocabulary, or a description when it
-has no row op — a monotone constraint, a within-unit rank). The summary counts them (`nSuggestions`).
+has no row op — a monotone constraint, a within-unit rank). Placebo columns get records too (`placebo: true`,
+never `passed`); the summary counts the candidates' records (`nSuggestions`, placebo records excluded).
 
 ## Examples
 

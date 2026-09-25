@@ -486,8 +486,15 @@ public final class ScreenSpec implements Serializable {
             if (suggestions.isJsonPrimitive() && suggestions.getAsJsonPrimitive().isBoolean()) {
                 s.suggestionsOn = suggestions.getAsBoolean();
             } else if (suggestions.isJsonObject()) {
-                final Boolean enabled = suggestions.getAsJsonObject().has("enabled") ? suggestions.getAsJsonObject().get("enabled").getAsBoolean() : Boolean.TRUE;
-                s.suggestionsOn = enabled;
+                // {enabled} (absent / null = on); a non-boolean is an error, not a silent false or an unchecked exception
+                final JsonElement enabled = suggestions.getAsJsonObject().get("enabled");
+                if (enabled == null || enabled.isJsonNull()) {
+                    s.suggestionsOn = true;
+                } else if (enabled.isJsonPrimitive() && enabled.getAsJsonPrimitive().isBoolean()) {
+                    s.suggestionsOn = enabled.getAsBoolean();
+                } else {
+                    errors.add("suggestions.enabled must be a boolean");
+                }
             } else {
                 errors.add("suggestions must be a boolean or an object {enabled}");
             }

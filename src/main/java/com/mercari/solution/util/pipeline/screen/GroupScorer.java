@@ -155,6 +155,8 @@ public final class GroupScorer implements Serializable {
         final String unitLevel = spec.isGroupedMultinomial() ? unit.level() : null;
         final int nTransforms = spec.transforms.size();
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
+        // the suggestions' half of this unit: one seeded hash per unit, not per column
+        final boolean inDiscovery = spec.suggestionsOn && discovery(unit.key);
         for (int c = 0; c < nColumns; c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
@@ -172,7 +174,7 @@ public final class GroupScorer implements Serializable {
                         // the unit); the confirmation half is the difference
                         final double[] both = new double[2 * sums.length];
                         System.arraycopy(sums, 0, both, 0, sums.length);
-                        if (discovery(unit.key)) System.arraycopy(sums, 0, both, sums.length, sums.length);
+                        if (inDiscovery) System.arraycopy(sums, 0, both, sums.length, sums.length);
                         acc.addExtra(both);
                     } else {
                         acc.addExtra(sums);

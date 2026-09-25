@@ -566,6 +566,39 @@ public class GroupScorerTest {
         // without the discovery split (suggestions off) the block reads the plain sums, and no suggestion is produced
         Assertions.assertTrue(ScreenReport.build(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], placebo: {noise: 0}}"), new HashMap<>()).suggestions().isEmpty());
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], suggestions: true}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {enabled: {}}}"));
+        Assertions.assertTrue(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {}}").suggestionsOn);
+    }
+
+    @Test
+    public void testSuggestionShareBoundedByContrasts() throws Exception {
+        // a pure step at the median (binomial, no baseline): the step contrast carries the whole effect. The share is
+        // read against the maximum over the centred contrasts, so it stays in [0, 1] — against the block χ² with a
+        // reference bin dropped from a diagonal H it would exceed 1 (about 1.25 here)
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 4}, suggestions: true, placebo: {noise: 0}}");
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 400; i++) {
+            final double y = i > 200 ? (i % 5 == 0 ? 0 : 1) : (i % 5 == 0 ? 1 : 0);
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{i}));
+        }
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final ScreenRow r : rows) q.update(r.x);
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
+        Assertions.assertFalse(result.suggestions().isEmpty());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("share") >= 0 && (Double) s.get("share") <= 1 + 1e-9, s.toString());
+            Assertions.assertTrue((Double) s.get("confirmation_share") >= 0 && (Double) s.get("confirmation_share") <= 1 + 1e-9, s.toString());
+            // a hinge names its side: one expression, not both
+            if ("hinge".equals(s.get("name"))) Assertions.assertFalse(((String) s.get("fragment")).contains(" or "), s.toString());
+        }
+        for (final Map<String, Object> s : result.suggestions()) {
+            if (!"cut".equals(s.get("kind"))) continue;
+            Assertions.assertEquals(200d, (Double) s.get("cut"), 1e-9);
+            Assertions.assertTrue((Double) s.get("share") > 0.95, s.toString());
+        }
     }
 
     @Test

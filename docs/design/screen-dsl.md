@@ -448,7 +448,7 @@ quantile / 2N of the half without placebos), and `passed` compares the confirmat
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
 transform, never applied automatically. The suggestions read the marginal binned sums (what the baseline
 misses), not the partial block: a shape's redundancy with F is read off the block's `r2_F`. The summary
-counts them (`nSuggestions`).
+counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nScored`).
 
 ## 10. Constraints and diagnostics
 

@@ -397,8 +397,15 @@ public final class ScreenReport {
     /** The bins' geometry the suggestions read: a representative value per value bin, and the k − 1 edges (null for position bins). */
     public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges) {}
 
-    /** A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none). */
-    private record Shape(String name, double[] phi, double cut) {}
+    /**
+     * A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none), and for a
+     * hinge which side of the cut it rises on ({@code below}: max(0, c − x), else max(0, x − c)).
+     */
+    private record Shape(String name, double[] phi, double cut, boolean below) {
+        Shape(final String name, final double[] phi, final double cut) {
+            this(name, phi, cut, false);
+        }
+    }
 
     /**
      * The one-candidate derivation suggestions (DSL doc §9.4) from the binned sums: the shapes (linear / log /
@@ -441,8 +448,8 @@ public final class ScreenReport {
             final boolean position = ScreenSpec.EDGES_RANK.equals(spec.binsEdges);
             final boolean placebo = spec.isPlacebo(c);
             final String name = names.get(c);
-            // the block over the value bins alone (the missing bin is its own suggestion)
-            final double blockDisc = subBlockChi2(bd, k), blockConf = subBlockChi2(bc, k);
+            // the bound over the value bins alone (the missing bin is its own suggestion)
+            final double blockDisc = contrastBound(bd, k), blockConf = contrastBound(bc, k);
             if (blockDisc > 0 && blockConf > 0) {
                 // shapes: chosen on discovery, reported on confirmation
                 final List<Shape> shapes = shapes(x, edges, k, position);
@@ -480,12 +487,16 @@ public final class ScreenReport {
                 final double chiUp = contrastChi2(bd, up, k), chiDown = contrastChi2(bd, down, k);
                 final boolean increasing = chiUp >= chiDown;
                 final double[] phi = increasing ? up : down;
-                int consistent = 0, pairs = 0;
-                for (int b = 1; b < k; b++) {
-                    if (!(weights[b] > 0) || !(weights[b - 1] > 0)) continue;
-                    pairs++;
-                    final double d = effects[b] - effects[b - 1];
-                    if (increasing ? d >= 0 : d <= 0) consistent++;
+                // adjacent among the bins with information: an empty bin (tied edges) does not break the chain
+                int consistent = 0, pairs = 0, previous = -1;
+                for (int b = 0; b < k; b++) {
+                    if (!(weights[b] > 0)) continue;
+                    if (previous >= 0) {
+                        pairs++;
+                        final double d = effects[b] - effects[previous];
+                        if (increasing ? d >= 0 : d <= 0) consistent++;
+                    }
+                    previous = b;
                 }
                 if (pairs > 0) {
                     candidates.add(suggestion(name, placebo, "monotone", increasing ? "increasing" : "decreasing", Double.NaN, increasing ? "+" : "-", Double.NaN,
@@ -497,8 +508,8 @@ public final class ScreenReport {
             if (bd.h[k] > 0 && bc.h[k] > 0) {
                 final double[] phiMiss = new double[nb];
                 phiMiss[k] = 1;
-                final double chiDisc = contrastChi2(bd, phiMiss, nb), chiConf = contrastChi2(bc, phiMiss, nb);
-                final double blockAllDisc = bd.stats.chi2, blockAllConf = bc.stats.chi2;
+                final double chiDisc = contrastChi2(bd, phiMiss, nb);
+                final double blockAllDisc = contrastBound(bd, nb), blockAllConf = contrastBound(bc, nb);
                 final double missEffect = bd.s[k] / bd.h[k];
                 double fill = Double.NaN, gap = Double.POSITIVE_INFINITY;
                 for (int b = 0; b < k; b++) {
@@ -509,12 +520,13 @@ public final class ScreenReport {
                         fill = x[b];
                     }
                 }
-                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, missEffect >= 0 ? "+" : "-", fill, Double.NaN,
+                // the direction of the missing-vs-rest contrast (not the missing bin's raw effect, which an offset
+                // miscalibrated overall would carry)
+                final String fillText = Double.isNaN(fill) ? ""
+                        : position ? ", or place it at rank " + fmt(fill) + " within the unit" : ", or fill with " + fmt(fill);
+                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, direction(bd, phiMiss, nb), fill, Double.NaN,
                         blockAllDisc > 0 ? chiDisc / blockAllDisc : 0d, chiDisc, bc, phiMiss, nb, blockAllConf, nConf,
-                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + (Double.isNaN(fill) ? "" : ", or fill with " + fmt(fill)), placeboGains));
-                // the confirmation statistic used the whole-block share: recompute the share on the confirmation block
-                final Map<String, Object> last = candidates.get(candidates.size() - 1);
-                last.put("confirmation_share", blockAllConf > 0 ? chiConf / blockAllConf : 0d);
+                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains));
             }
         }
         // the cut per kind from the placebo columns' confirmation gains, else the theoretical chi2(1) / 2N of the half
@@ -579,12 +591,41 @@ public final class ScreenReport {
         return v[3 * nb];
     }
 
-    /** The block's χ² over the first {@code over} bins (the value bins, the missing bin left out). */
-    private static double subBlockChi2(final Block block, final int over) {
-        final double[] s = Arrays.copyOf(block.s, over);
-        final double[] diag = Arrays.copyOf(block.h, over);
+    /**
+     * The bound the shares are read against: the maximum of {@link #contrastChi2} over every contrast φ on the first
+     * {@code over} bins. S and H go through the same H-weighted centring P = I − 1w' (w_b = H_bb / Σ H_bb over the
+     * bins with information): S̃ = P'S, H̃ = P'HP, then S̃'H̃⁺S̃ — 1 spans H̃'s null space and S̃ ⊥ 1, so one
+     * reference bin is dropped exactly. The block's own χ² is not that bound: a row family's H is diagonal (the
+     * intercept is not profiled out of it), and the value bins alone leave the missing bin's coupling out, so a
+     * single contrast could exceed it (a share above 1).
+     */
+    private static double contrastBound(final Block block, final int over) {
+        double hsum = 0, ssum = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            hsum += block.h[b];
+            ssum += block.s[b];
+        }
+        if (!(hsum > 0)) return 0d;
+        // w: the centring weights; r = H1 and t = 1'H1 over the bins with information
+        final double[] w = new double[over], r = new double[over];
+        double t = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            w[b] = block.h[b] / hsum;
+            for (int c = 0; c < over; c++) if (block.h[c] > 0) r[b] += block.hFull[b][c];
+            t += r[b];
+        }
+        final double[] s = new double[over], diag = new double[over];
         final double[][] h = new double[over][over];
-        for (int i = 0; i < over; i++) h[i] = Arrays.copyOf(block.hFull[i], over);
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            s[b] = block.s[b] - w[b] * ssum;
+            for (int c = 0; c < over; c++) {
+                if (block.h[c] > 0) h[b][c] = block.hFull[b][c] - r[b] * w[c] - w[b] * r[c] + w[b] * w[c] * t;
+            }
+            diag[b] = h[b][b];
+        }
         final Stats[] out = new Stats[1];
         final int df = blockChi2(s, h, diag, 1, 2, out);
         return df < 1 ? 0d : out[0].chi2;
@@ -636,7 +677,8 @@ public final class ScreenReport {
         for (int b = 0; b < k; b++) index[b] = b;
         out.add(new Shape("rank", index, Double.NaN));
         if (x != null) {
-            out.add(new Shape("linear", x.clone(), Double.NaN));
+            // position bins: the representatives are the rank positions, so linear would repeat rank exactly
+            if (!position) out.add(new Shape("linear", x.clone(), Double.NaN));
             boolean positive = true, nonNegative = true;
             for (final double v : x) {
                 if (!(v > 0)) positive = false;
@@ -665,8 +707,8 @@ public final class ScreenReport {
                 down[b] = Math.max(0, cut - x[b]);
                 abs[b] = Math.abs(x[b] - cut);
             }
-            out.add(new Shape("hinge", up, cut));
-            out.add(new Shape("hinge", down, cut));
+            out.add(new Shape("hinge", up, cut, false));
+            out.add(new Shape("hinge", down, cut, true));
             out.add(new Shape("abs", abs, cut));
         }
         return out;
@@ -701,11 +743,14 @@ public final class ScreenReport {
         final String c = fmt(shape.cut);
         return switch (shape.name) {
             case "linear" -> name + " as is";
-            case "log" -> "{scope: row, expr: \"log(" + name + ")\"}";
-            case "sqrt" -> "{scope: row, expr: \"sqrt(" + name + ")\"}";
+            // position bins: the shape is of the within-unit rank, not of the raw value
+            case "log" -> position ? "the log of the rank of " + name + " within the unit" : "{scope: row, expr: \"log(" + name + ")\"}";
+            case "sqrt" -> position ? "the square root of the rank of " + name + " within the unit" : "{scope: row, expr: \"sqrt(" + name + ")\"}";
             case "rank" -> position ? "the rank of " + name + " within the unit" : "the rank of " + name + " over the window (a quantile transform upstream)";
             case "step" -> position ? "the rows above rank " + c + " within the unit" : "{scope: row, expr: \"" + name + " > " + c + " ? 1 : 0\"}";
-            case "hinge" -> position ? "a hinge at rank " + c + " of " + name + " within the unit" : "{scope: row, expr: \"max(0, " + name + " - " + c + ")\"} or max(0, " + c + " - " + name + ")";
+            case "hinge" -> position
+                    ? "a hinge " + (shape.below ? "below" : "above") + " rank " + c + " of " + name + " within the unit"
+                    : "{scope: row, expr: \"" + (shape.below ? "max(0, " + c + " - " + name + ")" : "max(0, " + name + " - " + c + ")") + "\"}";
             case "abs" -> position ? "the distance to rank " + c + " of " + name + " within the unit" : "{scope: row, expr: \"abs(" + name + " - " + c + ")\"}";
             default -> shape.name;
         };
@@ -1172,7 +1217,8 @@ public final class ScreenReport {
         summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
         summary.put("notes", notes);
         final List<Map<String, Object>> suggested = suggestions(spec, accumulators, nUnits, bins);
-        summary.put("nSuggestions", spec.suggestionsOn ? (long) suggested.size() : null);
+        // the candidates' suggestions (placebo records excluded, as nScored)
+        summary.put("nSuggestions", spec.suggestionsOn ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
         return new Result(records, summary, suggested);
     }
 
