@@ -390,6 +390,10 @@ public class GroupScorerTest {
         Assertions.assertEquals(40d, n, 1e-12);
         Assertions.assertEquals(0d, s, 1e-9);   // prior mode: the bin scores sum to zero (the intercept profiled out)
         Assertions.assertEquals(0d, (Double) binStats.get(4).get("n"));   // the missing bin is empty
+        // the intercept profiled out, every active bin counted (none dropped as a reference): S = [-2.75, 3.25,
+        // 2.25, -2.75] against H = 10 * 0.275 * 0.725 per bin
+        Assertions.assertEquals(30.75 / 1.99375, (Double) binned.get("chi2"), 1e-9);
+        Assertions.assertEquals(profiledChi2(binStats), (Double) binned.get("chi2"), 1e-9);
         @SuppressWarnings("unchecked") final Map<String, Double> thresholds = (Map<String, Double>) result.summary().get("thresholds");
         Assertions.assertEquals(2, thresholds.size());
         Assertions.assertEquals("value/4", result.summary().get("bins"));
@@ -416,12 +420,52 @@ public class GroupScorerTest {
         Assertions.assertEquals(Boolean.TRUE, cb.get("degenerate"));
         Assertions.assertEquals(0L, cb.get("df"));
 
+        // offset mode: a baseline miscalibrated overall (0.1 against a rate of 0.275) is the intercept's misfit,
+        // which the block must profile out rather than score: χ² = Σ S_b² / H_b − (Σ S_b)² / Σ H_b on the raw S_b
+        final ScreenSpec offset = spec("{family: binomial, label: y, baseline: {field: b, form: prob}, candidates: [x], transforms: [binned], bins: {k: 4}, placebo: {noise: 0}}");
+        final GroupScorer os = new GroupScorer(offset).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> oacc = new HashMap<>();
+        for (int i = 1; i <= 40; i++) {
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, i >= 15 && i <= 25 ? 1 : 0, 0.1, 1, new double[]{i});
+            os.score(List.of(r), r.getIdentity(), oacc);
+        }
+        final Map<String, Object> ob = ScreenReport.build(offset, oacc).records().get(0);
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> obStats = (List<Map<String, Object>>) ob.get("bin_stats");
+        Assertions.assertEquals(3L, ob.get("df"));
+        // S = [-1, 5, 4, -1], H = 0.9 per bin: 43 / 0.9 − 49 / 3.6
+        Assertions.assertEquals(43 / 0.9 - 49 / 3.6, (Double) ob.get("chi2"), 1e-9);
+        Assertions.assertEquals(profiledChi2(obStats), (Double) ob.get("chi2"), 1e-9);
+
+        // grouped with value bins: the run holds the window sketches for the edges, but rank / absdev stay within the
+        // unit (a shuffle placebo is not standard normal, a candidate's window rank is not its within-unit rank)
+        final ScreenSpec groupedValue = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [rank, absdev, binned], placebo: {noise: 0}}");
+        Assertions.assertTrue(groupedValue.needsWindowQuantiles());
+        final double[] unitValues = {5, 30, 12};
+        for (final String t : List.of(ScreenSpec.TRANSFORM_RANK, ScreenSpec.TRANSFORM_ABSDEV)) {
+            Assertions.assertArrayEquals(GroupScorer.transform(t, unitValues), GroupScorer.transform(groupedValue, q, 0, t, unitValues), 1e-12, t);
+        }
+        Assertions.assertTrue(groupedValue.notes.stream().noneMatch(note -> note.contains("rank / absdev of independent rows")));
+
         // validation
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], bins: {k: 4}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 1}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {edges: rank}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {edges: median}}"));
         Assertions.assertEquals(10, spec("{family: binomial, label: y, candidates: [x], transforms: [binned]}").binsK);
+    }
+
+    /** The row families' block statistic from its bin_stats: Σ S_b² / H_b − (Σ S_b)² / Σ H_b over the bins with information. */
+    private static double profiledChi2(final List<Map<String, Object>> binStats) {
+        double q = 0, sumS = 0, sumH = 0;
+        for (final Map<String, Object> b : binStats) {
+            final double s = (Double) b.get("S");
+            final double h = (Double) b.get("H");
+            if (!(h > 0)) continue;
+            q += s * s / h;
+            sumS += s;
+            sumH += h;
+        }
+        return q - sumS * sumS / sumH;
     }
 
     @Test

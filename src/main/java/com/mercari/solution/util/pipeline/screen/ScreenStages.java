@@ -343,7 +343,7 @@ public final class ScreenStages {
 
     /** Independent rows: every row is its own unit. */
     /**
-     * The window quantile pre-pass (independent rows with rank / absdev): every candidate value of the rows
+     * The window quantile pre-pass (independent rows with rank / absdev, the binned test's value edges): every candidate value of the rows
      * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
      * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
      * and window (combined globally).

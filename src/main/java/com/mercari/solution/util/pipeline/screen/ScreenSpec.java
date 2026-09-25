@@ -43,7 +43,7 @@ public final class ScreenSpec implements Serializable {
     public static final String TRANSFORM_RANK = "rank";
     public static final String TRANSFORM_ABSDEV = "absdev";
     public static final List<String> TRANSFORMS = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV);
-    /** the binned score test (DSL doc §12.1): a df = k − 1 block, never in the default list */
+    /** the binned score test (DSL doc §6.1): a df = k − 1 block, never in the default list */
     public static final String TRANSFORM_BINNED = "binned";
     public static final List<String> TRANSFORMS_AVAILABLE = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV, TRANSFORM_BINNED);
     /** bins.edges: window value quantiles (the sketch pre-pass) or the within-unit rank (grouped only) */
@@ -88,8 +88,6 @@ public final class ScreenSpec implements Serializable {
     public int binsK = BINS_DEFAULT;
     /** bins.edges: {@link #EDGES_VALUE} (window quantiles) or {@link #EDGES_RANK} (within-unit rank, grouped only) */
     public String binsEdges = EDGES_VALUE;
-    /** True when the config declares a {@code bins} block (which needs the binned transform). */
-    public boolean binsExplicit;
     public String periodsField;
     public String periodsFieldType;
     public String periodsBucket;
@@ -238,11 +236,17 @@ public final class ScreenSpec implements Serializable {
 
     /**
      * Whether the run needs the window quantile sketches (engine doc §2): independent rows (no group) with a
-     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row.
+     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row; or the binned test's
+     * value edges (grouped or not). A grouped run reads the sketches for the edges only: its rank / absdev stay
+     * within the unit ({@link GroupScorer#transform}).
      */
     public boolean needsWindowQuantiles() {
-        return (group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV)))
-                || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+        return needsRankReference() || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+    }
+
+    /** Independent rows with {@code rank} / {@code absdev}: the transforms read the window's sketches. */
+    private boolean needsRankReference() {
+        return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
     }
 
     public boolean hasBinned() {
@@ -398,7 +402,6 @@ public final class ScreenSpec implements Serializable {
         }
         final JsonElement bins = p.get("bins");
         if (bins != null && !bins.isJsonNull()) {
-            s.binsExplicit = true;
             if (bins.isJsonObject()) {
                 final JsonObject o = bins.getAsJsonObject();
                 final Double k = number(o, "k");
@@ -606,7 +609,7 @@ public final class ScreenSpec implements Serializable {
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
-            if (needsWindowQuantiles()) {
+            if (needsRankReference()) {
                 notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");

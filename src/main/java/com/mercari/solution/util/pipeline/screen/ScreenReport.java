@@ -192,7 +192,7 @@ public final class ScreenReport {
     }
 
     /**
-     * The binned block test of one column (DSL doc §12.1): the score test of the one-hot block of B bins with the
+     * The binned block test of one column (DSL doc §6.1): the score test of the one-hot block of B bins with the
      * intercept profiled out — χ²(df) with df = active bins − 1, no sign (z is NaN) — and its per-bin score S_b,
      * information H_bb and weight mass n_b for the report.
      */
@@ -208,8 +208,11 @@ public final class ScreenReport {
         final double[] s = new double[nb];
         final double[] n = new double[nb];
         final double[][] h;
+        final double[] hd = new double[nb];
+        final Stats[] out = new Stats[1];
+        final int df;
         if (spec.isGroupedMultinomial()) {
-            // [S (B), P (B), P P' (B²)]: H = diag(P) − P P'
+            // [S (B), P (B), P P' (B²)]: H = diag(P) − P P', already of rank active − 1 (the shares sum to one per unit)
             if (extra.length < 2 * nb + nb * nb) return Block.degenerate(nObs, nb);
             h = new double[nb][nb];
             for (int b = 0; b < nb; b++) {
@@ -217,6 +220,8 @@ public final class ScreenReport {
                 n[b] = extra[nb + b];
                 for (int c = 0; c < nb; c++) h[b][c] = (b == c ? extra[nb + b] : 0d) - extra[2 * nb + b * nb + c];
             }
+            for (int b = 0; b < nb; b++) hd[b] = h[b][b];
+            df = blockChi2(s, h, hd, nUnits, nObs, out);
         } else {
             // per bin [Σ w, Σ w r, Σ w v] then the totals [Σ w, Σ w r, Σ w r²]
             if (extra.length < 3 * nb + 3) return Block.degenerate(nObs, nb);
@@ -230,17 +235,27 @@ public final class ScreenReport {
                 if (!(sigma2 > 0)) return Block.degenerate(nObs, nb);
             }
             final double priorWeight = prior && !spec.isGaussian() ? spec.fisherWeight(rMean) : 1d;
-            h = new double[nb][nb];
+            double sumS = 0, sumD = 0;
             for (int b = 0; b < nb; b++) {
                 n[b] = extra[3 * b];
                 s[b] = (prior ? extra[3 * b + 1] - rMean * extra[3 * b] : extra[3 * b + 1]) / sigma2;
-                h[b][b] = (spec.isGaussian() ? extra[3 * b] : prior ? priorWeight * extra[3 * b] : extra[3 * b + 2]) / sigma2;
+                hd[b] = (spec.isGaussian() ? extra[3 * b] : prior ? priorWeight * extra[3 * b] : extra[3 * b + 2]) / sigma2;
+                sumS += s[b];
+                sumD += hd[b];
             }
+            // the intercept profiled out: H = D − d d' / Σd and S centred by the d-weighted mean, so the reduced system
+            // (one reference bin dropped) gives χ² = Σ S_b² / H_b − (Σ S_b)² / Σ H_b — the diagonal D alone is full
+            // rank, and dropping a bin from it would lose that bin's term instead of the intercept direction
+            if (!(sumD > 0)) return Block.degenerate(nObs, nb);
+            final double mean = sumS / sumD;
+            final double[] sp = new double[nb];
+            h = new double[nb][nb];
+            for (int b = 0; b < nb; b++) {
+                sp[b] = s[b] - hd[b] * mean;
+                for (int c = 0; c < nb; c++) h[b][c] = (b == c ? hd[b] : 0d) - hd[b] * hd[c] / sumD;
+            }
+            df = blockChi2(sp, h, hd, nUnits, nObs, out);
         }
-        final double[] hd = new double[nb];
-        for (int b = 0; b < nb; b++) hd[b] = h[b][b];
-        final Stats[] out = new Stats[1];
-        final int df = blockChi2(s, h, hd, nUnits, nObs, out);
         return new Block(out[0], df, s, hd, n);
     }
 
@@ -290,11 +305,6 @@ public final class ScreenReport {
         return df;
     }
 
-    /**
-     * The block's partial test from {@code [s (B), H (B² grouped / B diagonal), A (B × k)]} at the fitted p̂:
-     * Γ = (G + l2·N·I)⁻¹ A (a multi-right-hand-side solve), S⊥ = s − Γ'g, H⊥ = H − Γ'A' − A Γ + Γ'GΓ, then χ² = S⊥' H⊥⁺ S⊥
-     * over the bins the marginal block found active; r²_F = 1 − tr(H⊥) / tr(H). Gaussian divides by σ².
-     */
     /** The block's partial test with its degrees of freedom. */
     public record BlockPartial(Partial partial, int df) {
         static BlockPartial degenerate(final long nObs, final double r2) {
@@ -302,6 +312,11 @@ public final class ScreenReport {
         }
     }
 
+    /**
+     * The block's partial test from {@code [s (B), H (B² grouped / B diagonal), A (B × k)]} at the fitted p̂:
+     * Γ = (G + l2·N·I)⁻¹ A (a multi-right-hand-side solve), S⊥ = s − Γ'g, H⊥ = H − Γ'A' − A Γ + Γ'GΓ, then χ² = S⊥' H⊥⁺ S⊥
+     * over the bins the marginal block found active; r²_F = 1 − tr(H⊥) / tr(H). Gaussian divides by σ².
+     */
     static BlockPartial blockPartial(final ScreenSpec spec, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
                                      final long nObs, final double sigma2, final double l2) {
         final int nb = spec.binCount();
@@ -318,6 +333,15 @@ public final class ScreenReport {
         } catch (final RuntimeException e) {
             return BlockPartial.degenerate(nObs, Double.NaN);
         }
+        // G Γ (k × B) once: Γ'GΓ is then O(B² k) instead of O(B² k²)
+        final double[][] gGamma = new double[k][nb];
+        for (int j = 0; j < k; j++) {
+            for (int l = 0; l < k; l++) {
+                final double gjl = fit.bestG[j][l];
+                if (gjl == 0d) continue;
+                for (int c = 0; c < nb; c++) gGamma[j][c] += gjl * gamma[l][c];
+            }
+        }
         final double[] s = new double[nb];
         final double[][] h = new double[nb][nb];
         double trH = 0, trHp = 0;
@@ -331,9 +355,7 @@ public final class ScreenReport {
                 for (int j = 0; j < k; j++) {
                     ga += gamma[j][b] * a[j][c];
                     ag += a[j][b] * gamma[j][c];
-                    double gj = 0;
-                    for (int l = 0; l < k; l++) gj += fit.bestG[j][l] * gamma[l][c];
-                    ggg += gamma[j][b] * gj;
+                    ggg += gamma[j][b] * gGamma[j][c];
                 }
                 h[b][c] = (hbc - ga - ag + ggg) / sigma2;
                 if (b == c) {
@@ -376,7 +398,19 @@ public final class ScreenReport {
         }
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
-        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2) : Map.of();
+        // the df = 1 keys' γ in one batched solve; a binned key's sums have the block layout [s (B), H, A], not
+        // [s, b, a], and blockPartial solves its Γ itself
+        final Map<Integer, double[]> gammas;
+        if (conditioned) {
+            final Map<Integer, PartialAccumulator> scalar = new HashMap<>();
+            for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
+                if (e.getKey() >= 0 && ScreenSpec.isBinned(spec.transforms.get(e.getKey() % nTransforms))) continue;
+                scalar.put(e.getKey(), e.getValue());
+            }
+            gammas = gammas(scalar, fit, spec.conditioningL2);
+        } else {
+            gammas = Map.of();
+        }
         // the fitted model's [n, g, G] per period: the partial statistic's decomposition by period
         final PartialAccumulator fitPeriods = conditioned ? partials.get(ConditioningScorer.FIT_PERIOD_KEY) : null;
         final List<String> notes = new ArrayList<>(spec.notes);

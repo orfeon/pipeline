@@ -251,14 +251,15 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
 | df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
-| pValue, qValue | FLOAT64 | χ²(1) upper tail; Benjamini–Hochberg q-value over the candidate records (null for placebo) |
+| pValue, qValue | FLOAT64 | χ²(df) upper tail (χ²(1), or the binned block's df); Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
 | n_obs | INT64 | rows whose transformed value is finite |
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
-| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms. Under conditioning the block's partial test adds `partial_df` (INT64) |
+| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |

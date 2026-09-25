@@ -18,7 +18,7 @@ import java.io.Serializable;
  * and {@code absdev} transforms when the rows are independent (no {@code group}), where "within the unit" would
  * be a single row. Built by one pass over the prepared rows before the score pass (a KLL sketch per column,
  * {@link SketchAccumulator#K}: rank error about 0.8%), combined globally and read as a singleton side input.
- * The same sketches give the value-bin edges of §12.1. An empty instance (no column, or every sketch empty) is
+ * The same sketches give the value-bin edges of §6.1. An empty instance (no column, or every sketch empty) is
  * the Combine's identity.
  */
 public final class WindowQuantiles implements Serializable {

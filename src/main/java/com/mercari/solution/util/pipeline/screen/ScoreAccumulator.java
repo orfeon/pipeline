@@ -45,7 +45,7 @@ public final class ScoreAccumulator implements Serializable {
     final TreeMap<String, double[]> periods = new TreeMap<>();
     long maxTime = Long.MIN_VALUE;
     long minTime = Long.MAX_VALUE;
-    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §12.1); null until fed */
+    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §6.1); null until fed */
     double[] extra;
 
     public ScoreAccumulator() {}
@@ -56,6 +56,19 @@ public final class ScoreAccumulator implements Serializable {
 
     /** The window's variable-length sums (null when the key carries none). */
     public double[] getExtra() {
+        return extra;
+    }
+
+    /**
+     * The window's variable-length sums for in-place adds (a sparse contribution touches only its entries),
+     * allocated at {@code length} on first use.
+     */
+    double[] extra(final int length) {
+        if (extra == null) {
+            extra = new double[length];
+        } else if (extra.length != length) {
+            throw new IllegalStateException("extra sums of " + extra.length + " and " + length + " values cannot merge");
+        }
         return extra;
     }
 
