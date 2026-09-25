@@ -190,7 +190,7 @@ features:
       - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # two series (see Two-series and fractional-difference ops)
       - {type: fracdiff, field: start_price, d: 0.4, k: 20}
       - {type: ewma, expr: "sold >= 1", halflife: [3, 10], decayBy: events}
-      - {type: runLength, field: condition_grade, value: good}
+      - {type: runLength, field: condition_grade, value: good}   # a declared value matches a numeric field as a number (value: 1 = 1.0)
       - {type: sinceEvent, predicate: "sold = 1", unit: [events, days]}
       - {type: countMatch, predicate: "sold = 1"}
       - {type: countMatch, predicate: "sold = 0", as: losses}   # as: names the column (two predicates of one op type need it)
@@ -1322,7 +1322,7 @@ p_i = w_i · exp(f_i / T) / Σ_j w_j · exp(f_j / T)      w = offset value (1 wi
 | `field` | the score column (numeric) |
 | `offset` | a `baselines[].name` or a numeric column, read **in probability space** (a `share(...)` baseline is one). `offsetScale: log` takes `exp` first (−∞ / NaN → null) |
 | `temperature` | constant > 0 (default 1); `temperatureFrom: <uri>` reads it from a calibration document at assembly (a bare number, or JSON with `temperature` / `T`). The document is outside the plan hash (no fit depends on it); the resolved value and the document hash are in the manifest (`externals`) and the output hash |
-| `scoreNull` | `zero` (default: a null score falls back to 0, i.e. to the offset's probability; with `nullPolicy: indicator` a `<name>_scoreNull` flag says so) \| `null` (the row's output is null) |
+| `scoreNull` | `zero` (default: a null score falls back to 0, i.e. to the offset's probability; with `nullPolicy: indicator` a `<name>_scoreNull` flag says so) \| `null` (the row's output is null and the row leaves the denominator). YAML reads an unquoted `null` as a null value; the transform takes a present key with a null value as the keyword `null`, so `scoreNull: null` and `scoreNull: "null"` are the same |
 
 Null handling, matched to a training-side normalisation that drops NaN from the sum: a **null offset**
 makes the row null and removes it from the denominator (the other rows still sum to 1; `nullPolicy:

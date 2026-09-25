@@ -2823,6 +2823,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(expected.getDiagnostics().hasErrors(), expected::describe);
         Assertions.assertEquals("mapReadout", column(expected, "grade_next_expected").getOperator());
         Assertions.assertNotNull(expected.getColumn("grade_next_to_1"));
+        // a value over a numeric field matches its category by number ("1" finds a float64 key "1.0"), over a string
+        // field by its exact text
+        Assertions.assertEquals("true", column(expected, "grade_next_to_1").getCoordinates().get("numeric"));
+        Assertions.assertNull(column(compile(SOURCES, withEncoding(TRANSITION_BLOCK)), "grade_next_to_good").getCoordinates().get("numeric"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [ownValueProb, entropy]\n        maxFeatures: 1"))), "transitionStats.maxFeatures"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("{toValueProb: fair}", "perplexity"))), "transitionStats.parameters"));
     }
@@ -3760,6 +3764,37 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan plain = compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market, ", "")));
         Assertions.assertNull(column(plain, "prob_pWin_softmax").getCoordinates().get("offset"));
         Assertions.assertNull(column(plain, "prob_pWin_softmax").getValidFor());
+    }
+
+    @Test
+    public void testUnquotedScoreNullIsTheKeyword() {
+        // YAML reads `scoreNull: null` as a null value: present, so the keyword, never the default zero
+        final FeaturePlan plan = compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "scoreNull: null")));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("null", column(plan, "prob_pWin_softmax").getCoordinates().get("scoreNull"));
+        Assertions.assertEquals("null", column(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "scoreNull: \"null\""))),
+                "prob_pWin_softmax").getCoordinates().get("scoreNull"));
+    }
+
+    @Test
+    public void testDeclaredValueNeverMatchingANumericField() {
+        final String blocks = """
+              - name: streak
+                scope: sequence
+                entity: seller
+                ops:
+                  - {type: runLength, field: quantity, value: VALUE}
+              - {name: multi, scope: row, type: indicator, input: quantity, values: [VALUE]}
+            """;
+        // a number matches a numeric field as a number: no warning
+        final FeaturePlan numeric = compile(SOURCES, withBlocks(blocks.replace("VALUE", "1")));
+        Assertions.assertFalse(hasCode(numeric, "sequence.runLength.value"), numeric::describe);
+        Assertions.assertFalse(hasCode(numeric, "row.indicator.values"), numeric::describe);
+        // a text never does: warned, not an error (the column is still defined, and all zero)
+        final FeaturePlan text = compile(SOURCES, withBlocks(blocks.replace("VALUE", "yes")));
+        Assertions.assertFalse(text.getDiagnostics().hasErrors(), text::describe);
+        Assertions.assertTrue(hasCode(text, "sequence.runLength.value"), text::describe);
+        Assertions.assertTrue(hasCode(text, "row.indicator.values"), text::describe);
     }
 
     @Test

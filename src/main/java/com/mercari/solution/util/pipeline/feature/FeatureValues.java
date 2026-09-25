@@ -55,6 +55,48 @@ public final class FeatureValues {
     }
 
     /**
+     * Whether a row value equals a declared one (a {@code value:} / {@code values:} scalar, kept as text): a number
+     * compares as a number — a row expression is always float64, so {@code value: 1} must match 1.0 —, anything else
+     * by its exact text (a string category {@code "2.0"} is not {@code "2"}). A float32 value compares in its own
+     * precision (0.1f is the declared 0.1, as its text was), and NaN matches a declared NaN. False for null.
+     */
+    static boolean matchesDeclared(final Object value, final String declared) {
+        if (value == null || declared == null) return false;
+        if (value instanceof Number n) {
+            if ((value instanceof Long || value instanceof Integer) && isIntegerText(declared)) {
+                try {
+                    return n.longValue() == Long.parseLong(declared);
+                } catch (final NumberFormatException beyondLong) {
+                    // more digits than a long holds: compared as a double below
+                }
+            }
+            try {
+                if (value instanceof Float f) {
+                    final float g = Float.parseFloat(declared);
+                    return f == g || (Float.isNaN(f) && Float.isNaN(g));
+                }
+                final double x = n.doubleValue();
+                final double d = Double.parseDouble(declared);
+                return x == d || (Double.isNaN(x) && Double.isNaN(d));
+            } catch (final NumberFormatException e) {
+                return false;
+            }
+        }
+        return value.toString().equals(declared);
+    }
+
+    /** An optional sign then ASCII digits: the only declarations tried as a long (a decimal would throw per row). */
+    private static boolean isIntegerText(final String s) {
+        final int start = !s.isEmpty() && (s.charAt(0) == '-' || s.charAt(0) == '+') ? 1 : 0;
+        if (start >= s.length()) return false;
+        for (int i = start; i < s.length(); i++) {
+            final char ch = s.charAt(i);
+            if (ch < '0' || ch > '9') return false;
+        }
+        return true;
+    }
+
+    /**
      * The numeric target of a row under an optional baseline offset, as the pair {@code (y − b, b)} — {@code b} null
      * without an offset — or null when the target or the baseline is missing / NaN (the row contributes to no
      * statistic, and to no count). A null {@code field} is a target-less statistic (count / share denominator):

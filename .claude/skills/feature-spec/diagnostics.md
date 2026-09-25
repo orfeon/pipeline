@@ -130,7 +130,7 @@ not expand because another block failed).
 | `row.datetime.input` / `row.datetime.derive` | error | input must be a time field; derivation must be one of year / month / day / dayOfWeek / dayOfYear / weekOfYear / hour / minute (hour / minute not on a date) |
 | `row.bin.edges` | error | `bin` needs `edges` |
 | `row.cross.inputs` / `row.equals.inputs` | error | `cross` ≥ 2 inputs; `equals` exactly 2 |
-| `row.indicator.values` | error | `indicator` needs `values` |
+| `row.indicator.values` | error / warning | `indicator` needs `values`; warning: a listed value is not a number while the input is numeric, so it never matches (a number matches as a number: `values: [1]` flags 1.0) |
 | `row.residual.baseline` / `row.residual.on` | error | `baseline` must name a baseline; `on` is identity / logit / log |
 | `row.noise.seed` / `row.noise.distribution` | error | `noise` needs an integer `seed`; `distribution` is normal / uniform |
 | `row.noise.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp get the same draw; declare a tie-break |
@@ -201,7 +201,7 @@ not expand because another block failed).
 | `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time / a declared calendar (`clock.unknown` otherwise); no other keys |
 | `sequence.dynamics.size` | error | the block emits more than 64 component columns (lower `order` / `depth`, fewer halflifes / windows, or split the channels over blocks), or a log-signature lifts more than 26 channels |
 | `sequence.compress` | error / info | `compress` is `{svd: {rank, center, standardize, outputs, fit}, keep}` with two or more component columns (any other key under `compress` or `compress.svd` is an error); the info names the svd block (`<name>_svd`) |
-| `sequence.runLength.value` | error | `runLength` needs `value` |
+| `sequence.runLength.value` | error / warning | `runLength` needs `value`; warning: the value is not a number while the field is numeric, so the run is always 0 (a number matches as a number: `value: 1` counts 1.0, what a row expression yields) |
 | `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
 | `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |
 | `sequence.rating.context` / `.method` / `.order` / `.func` / `.parameter` | error | `rating` needs `context` (a `contexts[].name`); method is elo / bradleyTerry / plackettLuce / gaussian; order ascending / descending; funcs mu / sigma / count / delta / deviation / z (`sigma` not under elo); `sigma` / `beta` / `tau` belong to the Bayesian methods, `kFactor` / `scale` to elo; `sigma` / `beta` / `kFactor` / `scale` > 0, `tau` ≥ 0 (declare `sigma` when `mu` is 0) |

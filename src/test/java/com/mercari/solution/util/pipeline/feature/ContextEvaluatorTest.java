@@ -81,4 +81,34 @@ public class ContextEvaluatorTest {
         Assertions.assertEquals("007", ContextEvaluator.valueKey("007")); // strings without a fraction are kept verbatim
     }
 
+    /** A declared `value:` against a row value: numbers as numbers (a row expression is float64), texts as texts. */
+    @Test
+    public void testMatchesDeclared() {
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.0d, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1L, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1, "1.0"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.5d, "1.50"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(9_007_199_254_740_993L, "9007199254740993"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(9_007_199_254_740_993L, "9007199254740992"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(0.0d, "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(1.0d, "good"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(null, "1"));
+        // a float32 value in its own precision (its text "0.1" matched before), NaN as NaN, a long against a decimal
+        Assertions.assertTrue(FeatureValues.matchesDeclared(0.1f, "0.1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(1.0f, "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(0.1f, "0.2"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(Double.NaN, "NaN"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(Double.NaN, "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(2L, "2.0"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(-3, "-3"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared(1L, "yes"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("electronics", "toys"));
+        // a text (a string field) only by its exact text: "2.0" and "2" are distinct categories
+        Assertions.assertTrue(FeatureValues.matchesDeclared("good", "good"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("2", "2.00"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("1.0", "1"));
+        Assertions.assertFalse(FeatureValues.matchesDeclared("01", "1"));
+        Assertions.assertTrue(FeatureValues.matchesDeclared(true, "true"));
+    }
+
 }

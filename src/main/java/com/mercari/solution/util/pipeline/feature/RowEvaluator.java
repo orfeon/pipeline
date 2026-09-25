@@ -123,7 +123,7 @@ public class RowEvaluator implements Serializable {
             }
             case "indicator" -> {
                 final Object v = row.get(inputs.get(0));
-                yield v == null ? null : (c.coordinates.get("value").equals(v.toString()) ? 1L : 0L);
+                yield v == null ? null : (FeatureValues.matchesDeclared(v, c.coordinates.get("value")) ? 1L : 0L);
             }
             case "equals" -> {
                 final Object a = row.get(inputs.get(0));
@@ -170,7 +170,7 @@ public class RowEvaluator implements Serializable {
                 // one category's share of a distribution map (targets[].values); keys may be CharSequence after a coder round trip
                 final Object m = row.get(inputs.get(0));
                 if (!(m instanceof Map<?, ?> map)) yield null;
-                yield shareOf(map, c.coordinates.get("value"));
+                yield shareOf(map, c.coordinates.get("value"), Boolean.parseBoolean(c.coordinates.get("numeric")));
             }
             case "mapReadout" -> {
                 // a readout of a distribution map (transitionStats emit): the row's own value's share, its surprisal,
@@ -184,7 +184,7 @@ public class RowEvaluator implements Serializable {
                         if (own == null) yield null;
                         // the map is keyed by the value's own string form (Summary.Counts / the scan path both key
                         // by toString), which is also how a toValueProb value is written: not ContextEvaluator.valueKey
-                        final Double p = shareOf(map, own.toString());
+                        final Double p = shareOf(map, own.toString(), false);
                         if (p == null) yield null;
                         yield "surprisal".equals(readout) ? (p > 0 ? Double.valueOf(-Math.log(p)) : null) : p;
                     }
@@ -225,17 +225,30 @@ public class RowEvaluator implements Serializable {
 
     /**
      * One category's share of a distribution map: 0 when the map holds no mass for it, null when the entry it holds
-     * is not a number. Keys may be CharSequence after a coder round trip, hence the fallback over the entries.
+     * is not a number. Keys may be CharSequence after a coder round trip, hence the fallback over the entries, where
+     * the exact text wins. Over a {@code numeric} target (a declared targets[].values / toValueProb on a numeric field)
+     * a key also matches by its number: a float64 category is keyed by its text ({@code "1.0"}), which a declared
+     * {@code 1} must find. Otherwise the text is exact (a string category {@code "1.0"} is not {@code "1"}; a row's own
+     * value is the key's own text).
      */
-    private static Double shareOf(final Map<?, ?> map, final String value) {
+    private static Double shareOf(final Map<?, ?> map, final String value, final boolean numeric) {
         Object v = map.get(value);
         if (v == null) {
+            final Double number = numeric ? FeatureValues.toDouble(value) : null;
+            Object byNumber = null;
             for (final Map.Entry<?, ?> e : map.entrySet()) {
-                if (e.getKey() != null && value.equals(e.getKey().toString())) {
+                if (e.getKey() == null) continue;
+                final String key = e.getKey().toString();
+                if (value.equals(key)) {
                     v = e.getValue();
                     break;
                 }
+                if (number != null && byNumber == null) {
+                    final Double k = FeatureValues.toDouble(key);
+                    if (k != null && (k.doubleValue() == number || (k.isNaN() && number.isNaN()))) byNumber = e.getValue();
+                }
             }
+            if (v == null) v = byNumber;
         }
         return v == null ? Double.valueOf(0d) : FeatureValues.toDouble(v);
     }
