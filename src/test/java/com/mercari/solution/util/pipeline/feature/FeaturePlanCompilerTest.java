@@ -4236,6 +4236,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("0", untilCount.getCoordinates().get("forwardLagMillis"), "a row count has no lag");
         Assertions.assertNull(mean.getCoordinates().get("untilBlock"), "no until: every block is a fold");
         Assertions.assertTrue(until.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code()) && m.message().contains("fit.fold.until")), until::describe);
+        // the train / evaluation split of the value distributions is said once per block, and only under until
+        Assertions.assertEquals(1, until.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.until.crossFit".equals(m.code())
+                && m.level() == Diagnostics.Level.info && m.location().equals("features.enc")).count(), until::describe);
+        Assertions.assertFalse(hasCode(monthly, "fit.fold.until.crossFit"), monthly::describe);
         // an instant is accepted too, a malformed value is its own error, and until without by: time is ignored with a warning
         Assertions.assertEquals(untilMean.getCoordinates().get("untilBlock"), compile(SOURCES, spec.replace(fold, "fold: {by: time, until: \"2025-06-30T12:00:00Z\"}"))
                 .getColumns().stream().filter(c -> c.getCanonicalName().equals(untilMean.getCanonicalName())).findFirst().orElseThrow().getCoordinates().get("untilBlock"));
