@@ -663,8 +663,9 @@ public final class ScreenStages {
                 // Combine.perKey in the global window: exactly one accumulator per key
                 partials = new HashMap<>(c.sideInput(partialView));
             }
+            // the bins' geometry: the suggestions' representatives and the pass list's edges of a passing block
             ScreenReport.Bins bins = null;
-            if (spec.suggestionsOn) {
+            if (spec.hasBinned()) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
                 bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges);
             }

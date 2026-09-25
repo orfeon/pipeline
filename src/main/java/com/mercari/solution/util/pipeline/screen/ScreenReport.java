@@ -1076,6 +1076,12 @@ public final class ScreenReport {
                         binStats.add(bs);
                     }
                     r.put("bin_stats", binStats);
+                    // the value edges (k − 1), the pass list's material to reproduce a passing block as a row bin op;
+                    // null for position bins or without a sketch value
+                    final double[] edges = bins == null ? null : bins.edges().apply(c);
+                    final List<Double> edgeList = edges == null ? null : new ArrayList<>();
+                    if (edges != null) for (final double v : edges) edgeList.add(v);
+                    r.put("bin_edges", edgeList);
                     Stats used = st;
                     if (conditioned) {
                         final PartialAccumulator pacc = partials.get(key);
@@ -1170,6 +1176,7 @@ public final class ScreenReport {
                 r.put("n_periods", nPeriods);
                 r.put("period_z", periodRecords);
                 r.put("bin_stats", null);
+                r.put("bin_edges", null);
                 // the heterogeneity test across the modifier's levels (marginal; the partial one follows the partial slices)
                 final Het het = !spec.hasHeterogeneity() || st.degenerate ? (spec.hasHeterogeneity() ? Het.degenerate(0) : null)
                         : heterogeneity(spec.heterogeneityByPeriods() ? periodStats : levelStats, nUnits);
@@ -1290,6 +1297,7 @@ public final class ScreenReport {
             r.put("n_periods", null);
             r.put("period_z", null);
             r.put("bin_stats", null);
+            r.put("bin_edges", null);
             putHet(r, "", null);
             r.put("level_z", null);
             final PartialAccumulator pacc = conditioned ? partials.get(key) : null;
@@ -1535,6 +1543,7 @@ public final class ScreenReport {
         }
         o.addProperty("createdAt", Instant.now().toString());
         final JsonArray details = new JsonArray();
+        final JsonArray blocks = new JsonArray();
         for (final Map<String, Object> r : result.records()) {
             if (!Boolean.TRUE.equals(r.get("passed"))) continue;
             final JsonObject d = new JsonObject();
@@ -1553,10 +1562,48 @@ public final class ScreenReport {
                 d.addProperty("n_periods", (Long) r.get(partial ? "partial_n_periods" : "n_periods"));
             }
             d.addProperty("leakSuspect", (Boolean) r.get("leakSuspect"));
+            if (ScreenSpec.isBinned((String) r.get("transform"))) {
+                // a passing block: its edges (value bins) or rank cut points (position bins) and the row op that
+                // reproduces it upstream (DSL doc §6.1 — the pass list's material for closing the loop on a block)
+                final JsonObject block = blockRecipe(spec, (String) r.get("candidate"), r.get("bin_edges"));
+                d.add("bins", block);
+                d.addProperty("fragment", block.get("fragment").getAsString());
+                blocks.add(block);
+            }
             details.add(d);
         }
         o.add("passed", details);
+        if (spec.hasBinned()) o.add("passedBlocks", blocks);
         return o;
+    }
+
+    /**
+     * The recipe of a passing binned block: {@code k}, {@code edges} (value bins: the k − 1 window quantile edges,
+     * bin i = (edge_{i−1}, edge_i]) or {@code rankCuts} (position bins: the rank fractions i / k), whether the
+     * missing values had their own bin, and the feature transform's row {@code bin} op with those edges (a
+     * position block has no row op: the within-unit rank is a context op, the fragment says so).
+     */
+    static JsonObject blockRecipe(final ScreenSpec spec, final String candidate, final Object edges) {
+        final JsonObject block = new JsonObject();
+        block.addProperty("candidate", candidate);
+        block.addProperty("k", spec.binsK);
+        block.addProperty("edgesKind", spec.binsEdges);
+        block.addProperty("missingBin", true);
+        final JsonArray cuts = new JsonArray();
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            for (int j = 1; j < spec.binsK; j++) cuts.add((double) j / spec.binsK);
+            block.add("rankCuts", cuts);
+            block.add("edges", null);
+            block.addProperty("fragment", "the rank of " + candidate + " within the unit, cut at " + cuts + " (a context op upstream, then a row bin)");
+        } else {
+            if (edges instanceof List<?>) for (final Object v : (List<?>) edges) cuts.add((Double) v);
+            block.add("edges", cuts);
+            block.add("rankCuts", null);
+            final StringBuilder list = new StringBuilder();
+            for (int i = 0; i < cuts.size(); i++) list.append(i == 0 ? "" : ", ").append(fmt(cuts.get(i).getAsDouble()));
+            block.addProperty("fragment", "{scope: row, type: bin, input: " + candidate + ", edges: [" + list + "]}");
+        }
+        return block;
     }
 
     /**
@@ -1616,6 +1663,7 @@ public final class ScreenReport {
                 .withField("n_periods", Schema.FieldType.INT64)
                 .withField("period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
                 .withField("bin_stats", Schema.FieldType.array(Schema.FieldType.element(bin)))
+                .withField("bin_edges", Schema.FieldType.array(Schema.FieldType.FLOAT64))
                 .withField("het_chi2", Schema.FieldType.FLOAT64)
                 .withField("het_df", Schema.FieldType.INT64)
                 .withField("het_pValue", Schema.FieldType.FLOAT64)

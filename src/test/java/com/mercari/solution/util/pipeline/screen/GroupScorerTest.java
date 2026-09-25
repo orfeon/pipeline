@@ -362,11 +362,22 @@ public class GroupScorerTest {
         Assertions.assertArrayEquals(new int[]{0, 0, 1, 1, 2, 3, 4}, bins);   // edges 10 / 20 / 30 (inclusive upper)
         final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
         for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
-        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
         final Map<String, Map<String, Object>> byKey = new HashMap<>();
         for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
         final Map<String, Object> raw = byKey.get("x:raw");
         final Map<String, Object> binned = byKey.get("x:binned");
+        // the block's edges travel in the record and, for a passing block, into the pass list as a row bin op
+        Assertions.assertEquals(List.of(10d, 20d, 30d), binned.get("bin_edges"));
+        Assertions.assertNull(raw.get("bin_edges"));
+        final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+        Assertions.assertEquals(1, selection.getAsJsonArray("passedBlocks").size());
+        final com.google.gson.JsonObject block = selection.getAsJsonArray("passedBlocks").get(0).getAsJsonObject();
+        Assertions.assertEquals("x", block.get("candidate").getAsString());
+        Assertions.assertEquals(4, block.get("k").getAsInt());
+        Assertions.assertEquals(3, block.getAsJsonArray("edges").size());
+        Assertions.assertEquals("{scope: row, type: bin, input: x, edges: [10, 20, 30]}", block.get("fragment").getAsString());
+        Assertions.assertEquals("x", selection.getAsJsonArray("passed").get(0).getAsJsonObject().getAsJsonObject("bins").get("candidate").getAsString());
         Assertions.assertTrue(Math.abs((Double) raw.get("z")) < 2, "raw z " + raw.get("z"));
         Assertions.assertEquals(3L, binned.get("df"));
         Assertions.assertNull(binned.get("z"));

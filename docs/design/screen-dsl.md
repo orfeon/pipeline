@@ -233,6 +233,11 @@ partial-residual curve the derivation suggestions of §12.3 read.
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
   list.
+- **Closing the loop.** The record carries `bin_edges` (the k − 1 value edges; null for position bins), and a
+  passing block goes into the pass list as a recipe the feature transform reproduces: `passedBlocks` (and the
+  `bins` member of its `passed` entry) with `k`, `edges` / `rankCuts`, `missingBin` and the fragment
+  `{scope: row, type: bin, input: x, edges: [...]}` (a position block names the within-unit rank cuts, a
+  context op upstream). The `columns` list stays the candidate names — the block's column is the raw one.
 
 ## 7. Periods, time window, flags, q-values
 
@@ -428,7 +433,8 @@ reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust i
 `minPeriodsAgree` / `minGain`), the leak flag (`leakZ` / `leakOn`), family /
 method, thresholds (the df = 1 scalar and the `thresholds` map per kind, `bins`), the heterogeneity modifier and
 its flagged columns (`heterogeneity`, `hetPassedColumns` — apart from `columns`), the passing pairs
-(`passedPairs`: `{a, b, fragment}`, apart from `columns` too), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
+(`passedPairs`: `{a, b, fragment}`, apart from `columns` too), the passing blocks' recipes (`passedBlocks`:
+`{candidate, k, edgesKind, edges | rankCuts, missingBin, fragment}`, §6.1), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
 `createdAt`, and the passing records' statistics. Non-finite thresholds are written as null; an empty pass
@@ -585,9 +591,8 @@ its pseudo-inverse). Missing is a bin of its own (informative missingness), not 
 - *Built* (§6.1): the row-family closed form and the grouped k × k block, value bins from the sketch pre-pass
   and position bins from the within-unit rank (*review*: declared as two kinds, since they answer different
   questions), the missing bin, per-kind calibration, the block partial test, `bin_stats` in the record.
-- *Open*: the pass list records `bin_stats`, not the edges; writing the value edges (or the rank cut points)
-  into it so the feature transform reproduces a surviving block as a row `bin` op is the closing-the-loop
-  step below.
+- *Closing the loop* — built: the record's `bin_edges` and the pass list's `passedBlocks` (§6.1) give a
+  surviving block as a row `bin` op with its edges (or the rank cut points of a position block).
 - *Categorical candidates* read natively: a level → (S, H) map instead of one-hot or target encoding upstream.
   Exact up to a `maxLevels` cap, beyond it a deterministic seeded hash into buckets (collisions dilute, the
   result stays reproducible); a top-K cut needs a prior counting pass. (*review*: the candidates are numeric
@@ -739,11 +744,11 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    of §12.1 read the same sketches, extended to the grouped family with step 2.
 2. **Binned score test** — built (§6.1: per-kind thresholds, the missing bin, `bins: {edges, k}`, the
    block partial test); the **heterogeneity test** — built (§7.1: `periods` and a declared field,
-   marginal and partial). Still open from this position: the edges in the pass list, a built-in baseline-bin
-   modifier.
+   marginal and partial); the edges in the pass list (`passedBlocks`). Still open from this position: a
+   built-in baseline-bin modifier.
 3. **One-candidate suggestions** — built (§9.4: shape / cut / missing / monotone, the discovery /
    confirmation split, per-kind placebo cuts, the `<name>.suggestions` output). Open: the categorical
-   grouping (with step 6), the edges in the pass list.
+   grouping (with step 6).
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.
 5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
