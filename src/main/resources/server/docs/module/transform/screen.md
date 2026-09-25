@@ -75,8 +75,11 @@ candidate (a KLL quantile sketch per column, rank error about 0.8 %), `rank` is 
 the window's observed values as a fraction of their count — `(values below + half the values equal, itself
 included) / n`, in (0, 1) — and `absdev` is `|x − window median|`. Noise placebos are standard normal by
 construction and take the exact normal cdf / `|x|`; the summary's `notes` says the sketch was used. The
-default without `group` stays `raw` (the pre-pass reads the input once more): list the transforms to get
-`rank` / `absdev`.
+sketch's compaction is randomised, so beyond 400 values per candidate a re-run can move a candidate's
+`rank` / `absdev` z slightly (within the rank error; the placebo columns and every grouped transform stay
+exactly reproducible). Session windows cannot carry the window reference (use the global, fixed, sliding or
+calendar window). The default without `group` stays `raw` (the pre-pass reads the input once more): list the
+transforms to get `rank` / `absdev`.
 
 ### Periods, time window and leak flags
 
@@ -542,7 +545,8 @@ transforms:
   neither controls the family-wise error of a large candidate set.
 - Blind to time dynamics: the statistic is a window average; read `period_z` for decay.
 - Batch only (every statistic is a global Combine); under a windowing strategy the records are per window.
-- Independent rows (`group` omitted) support `raw` only; `rank` / `absdev` over the whole window need a
-  quantile sketch (planned).
+- Independent rows (`group` omitted) take `rank` / `absdev` against a window quantile sketch: one extra pass,
+  approximate (rank error about 0.8 %) and not bit-reproducible beyond 400 values per candidate; not under
+  session windows.
 - Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
   hundred columns (the Newton Gram matrix is k × k).

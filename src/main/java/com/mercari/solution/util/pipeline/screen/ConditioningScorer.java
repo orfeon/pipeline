@@ -218,6 +218,7 @@ public final class ConditioningScorer implements Serializable {
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
                         final Map<Integer, PartialAccumulator> into) {
+        GroupScorer.requireWindowQuantiles(spec, quantiles);
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
         final int n = unit.size();
@@ -280,7 +281,8 @@ public final class ConditioningScorer implements Serializable {
         }
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
+                // the transform is taken once over the whole unit (rank / absdev within the unit, or against the
+                // window's sketches for independent rows), then summed per bucket
                 final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
                 for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {

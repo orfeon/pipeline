@@ -542,7 +542,7 @@ public final class ScreenSpec implements Serializable {
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
             if (needsWindowQuantiles()) {
-                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%; noise placebos use the exact normal cdf)");
+                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%, randomised compaction: beyond k values a re-run can shift them within that error; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
             if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");

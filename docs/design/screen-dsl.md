@@ -34,7 +34,8 @@ the per-period statistics say since when.
 - **Calibrated by construction, not by an absolute threshold.** A squared statistic is positive under the
   null; the pass threshold is read off placebo columns that went through the same pipeline (§5).
 - **Deterministic.** Every random draw derives from the declared seed and a row / unit identity, so a rerun
-  on any runner reproduces the placebo columns and therefore the pass list.
+  on any runner reproduces the placebo columns and therefore the pass list (the one approximation that is
+  not bit-reproducible, the window sketch of independent-row `rank` / `absdev`, is recorded in §6).
 - **Same vocabulary as the feature transform.** Roles, lineage selectors, the manifest and the pass list are
   the feature transform's contract; nothing had to be added on the feature side to close the loop.
 - **A ranking device, not an acceptance test.** The probe is linear and univariate (§11); the output is an
@@ -189,8 +190,13 @@ count — (values below + half the values equal, itself included) / n, in (0, 1)
 distance to the window median. A noise placebo is standard normal by construction, so its rank is the exact
 normal cdf and its absdev |x|: the sketch's approximation touches only the candidates, as a slightly
 perturbed monotone re-encoding that creates no alignment with the label, and the placebo calibration holds.
-The sketches are the value-bin edges of §12.1 too. Default: all three with `group`, `raw` without (the
-pre-pass is one more read of the input); an explicit list is never widened.
+The one exception to §5's determinism: the KLL compaction is randomised (the library's unseeded generator)
+and the merge order follows the bundles, so beyond k values per column a re-run can move a candidate's
+window `rank` / `absdev` within the rank error — and a candidate at the threshold can flip; the placebo
+columns and every grouped transform stay exact. Session (merging) windows cannot carry the window reference
+as a side input and are rejected at assembly. The sketches are the value-bin edges of §12.1 too. Default:
+all three with `group`, `raw` without (the pre-pass is one more read of the input); an explicit list is never
+widened.
 
 ## 7. Periods, time window, flags, q-values
 

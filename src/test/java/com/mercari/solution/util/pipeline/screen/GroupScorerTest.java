@@ -343,6 +343,52 @@ public class GroupScorerTest {
         Assertions.assertEquals(39L, byKey.get("x:rank").get("n_obs"));
         Assertions.assertTrue(byKey.containsKey("__noise_0:rank") && byKey.containsKey("__noise_1:absdev"));
         Assertions.assertFalse((Boolean) byKey.get("x:rank").get("degenerate"));
+
+        // an even count: the type-7 median (the mean of the two middle values), like the within-unit absdev
+        final WindowQuantiles even = new WindowQuantiles(1);
+        for (int i = 1; i <= 40; i++) even.update(new double[]{i});
+        Assertions.assertEquals(20.5, even.median(0), 1e-12);
+        Assertions.assertEquals(StatMath.medianFinite(new double[]{1, 2, 3, 4}), windowOf(1, 2, 3, 4).median(0), 1e-12);
+        // the Combine's column-less default reads as no reference (NaN), not an index error
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).rank(0, 1d)));
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).median(0)));
+
+        // addInput never aliases (then mutates) a Combine input: an empty accumulator adopts a copy
+        final WindowQuantiles.Fn fn = new WindowQuantiles.Fn();
+        final WindowQuantiles in1 = windowOf(1, 2);
+        final WindowQuantiles acc1 = fn.addInput(fn.createAccumulator(), in1);
+        Assertions.assertNotSame(in1, acc1);
+        fn.addInput(acc1, windowOf(3, 4, 5));
+        Assertions.assertEquals(2L, in1.count(0));
+        Assertions.assertEquals(5L, acc1.count(0));
+
+        // independent rows with rank / absdev: a scorer without the window reference fails instead of scoring
+        // single-row units (rank 0.5, absdev 0) as silently degenerate records
+        Assertions.assertThrows(IllegalStateException.class, () -> new GroupScorer(spec).score(List.of(rows.get(0)), "r1", new HashMap<>()));
+    }
+
+    private static WindowQuantiles windowOf(final double... values) {
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final double v : values) q.update(new double[]{v});
+        return q;
+    }
+
+    @Test
+    public void testWindowQuantilesRejectMergingWindows() {
+        // the window reference is a side input: a session window cannot map to it (Beam throws at assembly)
+        final ScreenSpec rank = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, rank]}");
+        final ScreenSpec raw = spec("{family: binomial, label: y, candidates: [x]}");
+        final org.apache.beam.sdk.Pipeline p = org.apache.beam.sdk.Pipeline.create();
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> input = p
+                .apply(org.apache.beam.sdk.transforms.Create.empty(org.apache.beam.sdk.coders.SerializableCoder.of(com.mercari.solution.module.MElement.class)));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> sessions = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.Sessions.withGapDuration(org.joda.time.Duration.standardMinutes(10))));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> fixed = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.FixedWindows.of(org.joda.time.Duration.standardDays(1))));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, rank).stream().anyMatch(m -> m.contains("merging (session) windows")));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, raw).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(fixed, rank).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(input, rank).isEmpty());
     }
 
     @Test
