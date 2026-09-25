@@ -660,6 +660,78 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testJointSuggestionsFromTheCandidatesSums() throws Exception {
+        // independent binomial rows over three candidates (schema order b, x, x2): x carries the main effect, x2 is a
+        // near copy of x (redundant), b an independent effect and an interaction with x. The joint sums give the
+        // redundancy cluster {x, x2}, a forward selection that takes one of the pair and then b, the composite of the
+        // two, and pHd directions that load on x and b (the interaction's curvature) rather than on the noise columns.
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [b, x, x2], transforms: [raw], placebo: {noise: 2, seed: 5}, joint: {directions: 2, select: 3}}");
+        Assertions.assertTrue(spec.jointOn);
+        Assertions.assertEquals(List.of(0, 1, 2), spec.jointColumns);
+        Assertions.assertEquals(5, spec.jointColumnCount());   // 3 candidates + 2 noise columns
+        Assertions.assertEquals(3, spec.jointColumn(3));        // the first noise column
+        final java.util.Random random = new java.util.Random(3);
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (int i = 0; i < 400; i++) {
+            final double x = random.nextGaussian(), b = random.nextGaussian();
+            final double x2 = x + 0.05 * random.nextGaussian();
+            final double logit = 1.0 * x + 0.8 * b + 1.2 * x * b;
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-logit)) ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{b, x, x2});
+            scorer.score(List.of(r), r.getIdentity(), acc);
+        }
+        final ScoreAccumulator joint = acc.get(ScoreAccumulator.JOINT_KEY);
+        Assertions.assertNotNull(joint);
+        Assertions.assertEquals(GroupScorer.jointLength(5), joint.getExtra().length);
+        Assertions.assertEquals(400d, joint.getTotal()[ScoreAccumulator.N_OBS]);
+        Assertions.assertEquals(400d, joint.getExtra()[GroupScorer.jointLength(5) - 1]);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        Assertions.assertEquals(5L, result.summary().get("nJointColumns"));
+        final Map<String, List<Map<String, Object>>> byKind = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) byKind.computeIfAbsent((String) s.get("kind"), k -> new java.util.ArrayList<>()).add(s);
+        Assertions.assertEquals(java.util.Set.of("phd", "redundant", "select", "composite"), byKind.keySet(), byKind.toString());
+        // redundancy: x and x2 are one cluster; the head is whichever scores higher, the other is named
+        final Map<String, Object> cluster = byKind.get("redundant").get(0);
+        Assertions.assertEquals(1, byKind.get("redundant").size());
+        Assertions.assertTrue(List.of("x", "x2").contains(cluster.get("candidate")), cluster.toString());
+        Assertions.assertTrue((Double) cluster.get("share") >= 0.95, cluster.toString());
+        Assertions.assertTrue(((String) cluster.get("fragment")).contains(cluster.get("candidate").equals("x") ? "x2" : "x"), cluster.toString());
+        // forward selection: one of the redundant pair, then b (never the other twin); each step above the df1 cut
+        final List<Map<String, Object>> steps = byKind.get("select");
+        Assertions.assertTrue(steps.size() >= 2, steps.toString());
+        Assertions.assertEquals("step1", steps.get(0).get("name"));
+        final java.util.Set<String> picked = new java.util.HashSet<>();
+        for (final Map<String, Object> s : steps) picked.add((String) s.get("candidate"));
+        Assertions.assertTrue(picked.contains("b"), steps.toString());
+        Assertions.assertFalse(picked.contains("x") && picked.contains("x2"), steps.toString());
+        for (final Map<String, Object> s : steps) {
+            Assertions.assertEquals(Boolean.TRUE, s.get("passed"));
+            Assertions.assertTrue((Double) s.get("confirmation_gain") > 0);
+        }
+        // the composite: a row expression over the selected set
+        final Map<String, Object> composite = byKind.get("composite").get(0);
+        Assertions.assertTrue(((String) composite.get("fragment")).startsWith("{scope: row, expr: \""), composite.toString());
+        Assertions.assertTrue(((String) composite.get("fragment")).contains("*b"), composite.toString());
+        Assertions.assertTrue((Double) composite.get("chi2") >= (Double) steps.get(0).get("chi2") - 1e-9, composite.toString());
+        // pHd: two directions, the leading one loading on x (or x2) and b, the noise columns near zero
+        final List<Map<String, Object>> phd = byKind.get("phd");
+        Assertions.assertEquals(2, phd.size());
+        Assertions.assertEquals("direction1", phd.get(0).get("name"));
+        Assertions.assertTrue(List.of("x", "x2", "b").contains(phd.get(0).get("candidate")), phd.toString());
+        Assertions.assertTrue((Double) phd.get(0).get("consistency") < 0.3, "noise loading " + phd.get(0).get("consistency"));
+        Assertions.assertTrue((Double) phd.get(0).get("share") > (Double) phd.get(1).get("share") - 1e-12);
+        Assertions.assertNull(phd.get(0).get("passed"));
+        Assertions.assertTrue(((String) phd.get(0).get("fragment")).contains("*"), phd.toString());
+        Assertions.assertTrue(ScreenReport.describe(spec).contains("joint=3+2"));
+        // validation: at least two joint columns, the bound, an include that keeps one column
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], joint: true}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {maxColumns: 2}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['b']}}"));
+        Assertions.assertEquals(List.of(1, 2), spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['x*'], noise: 0}}").jointColumns);
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

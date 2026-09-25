@@ -189,6 +189,17 @@ public final class GroupScorer implements Serializable {
                 }
             }
         }
+        if (spec.jointOn) {
+            // the candidates' joint sums (S, the Fisher block, the pHd block) under one key
+            final double[] joint = jointContribution(unit, cols, prior);
+            if (joint != null) {
+                final ScoreAccumulator acc = into.computeIfAbsent(ScoreAccumulator.JOINT_KEY, k -> new ScoreAccumulator());
+                Arrays.fill(contribution, 0d);
+                contribution[ScoreAccumulator.N_OBS] = joint[joint.length - 1];
+                acc.add(null, contribution);
+                acc.addExtra(joint);
+            }
+        }
         bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
         bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
         book.add(null, bookSlots);
@@ -357,6 +368,89 @@ public final class GroupScorer implements Serializable {
     /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
     public double[] binEdges(final int column) {
         return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
+    }
+
+    /** The packed (upper triangle, row-major) index of (i, j), i ≤ j, of an m × m symmetric matrix. */
+    static int packed(final int m, final int i, final int j) {
+        final int a = Math.min(i, j), b = Math.max(i, j);
+        return a * m - a * (a - 1) / 2 + (b - a);
+    }
+
+    /** The length of the joint sums vector for m joint columns (DSL doc §9.5): {@code 4 + 2m + m(m + 1)}. */
+    static int jointLength(final int m) {
+        return 4 + 2 * m + m * (m + 1);
+    }
+
+    /**
+     * The unit's contribution to the candidates' joint sums over the joint columns (the chosen candidates, then the
+     * noise placebos), one vector: {@code [Σ w v, Σ w v x (m), Σ w v x x' (packed), Σ w r, Σ w r x (m), Σ w r x x' (packed),
+     * Σ w r², used]}. Row families accumulate raw moments (v the Fisher weight in offset mode, 1 in prior mode; r = y − μ
+     * or y) and the report centres them; a row with a missing joint value is left out (the sums must share one row
+     * set to stay positive definite). The grouped family centres by p̂ within the unit and adds the unit's S, Fisher
+     * block diag(p) − pp' and pHd block Σ (ỹ − p) x̃x̃' in the same slots (the "Σ w v x" / "Σ w r" slots stay 0),
+     * leaving out a unit with a missing joint value. Null when nothing was added.
+     */
+    double[] jointContribution(final Unit unit, final double[][] cols, final boolean prior) {
+        final int m = spec.jointColumnCount();
+        if (m < 2) return null;
+        final int n = unit.size();
+        final int hOff = 1 + m, rOff = 1 + m + m * (m + 1) / 2, sOff = rOff + 1, mOff = sOff + m, r2Off = mOff + m * (m + 1) / 2;
+        final double[] out = new double[jointLength(m)];
+        final double[] x = new double[m];
+        if (spec.isGroupedMultinomial()) {
+            final double[][] xt = new double[n][m];
+            final double[] mean = new double[m];
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < m; j++) {
+                    final double v = cols[spec.jointColumn(j)][i];
+                    if (!StatMath.isFinite(v)) return null;
+                    xt[i][j] = v;
+                    mean[j] += unit.p[i] * v;
+                }
+            }
+            final double w = unit.unitWeight;
+            out[0] = w;
+            for (int i = 0; i < n; i++) {
+                final double r = unit.y[i] - unit.p[i];
+                for (int j = 0; j < m; j++) x[j] = xt[i][j] - mean[j];
+                for (int j = 0; j < m; j++) {
+                    out[sOff + j] += w * r * x[j];
+                    for (int l = j; l < m; l++) {
+                        out[hOff + packed(m, j, l)] += w * unit.p[i] * x[j] * x[l];
+                        out[mOff + packed(m, j, l)] += w * r * x[j] * x[l];
+                    }
+                }
+            }
+            out[r2Off + 1] = 1;
+            return out;
+        }
+        int used = 0;
+        for (int i = 0; i < n; i++) {
+            boolean finite = true;
+            for (int j = 0; j < m && finite; j++) {
+                x[j] = cols[spec.jointColumn(j)][i];
+                finite = StatMath.isFinite(x[j]);
+            }
+            if (!finite) continue;
+            final double w = unit.w[i];
+            final double v = prior ? 1d : spec.fisherWeight(unit.p[i]);
+            final double r = prior ? unit.y[i] : unit.y[i] - unit.p[i];
+            out[0] += w * v;
+            out[rOff] += w * r;
+            out[r2Off] += w * r * r;
+            for (int j = 0; j < m; j++) {
+                out[1 + j] += w * v * x[j];
+                out[sOff + j] += w * r * x[j];
+                for (int l = j; l < m; l++) {
+                    out[hOff + packed(m, j, l)] += w * v * x[j] * x[l];
+                    out[mOff + packed(m, j, l)] += w * r * x[j] * x[l];
+                }
+            }
+            used++;
+        }
+        if (used == 0) return null;
+        out[r2Off + 1] = used;
+        return out;
     }
 
     /** Finite values of a column (the binned test's n_obs). */

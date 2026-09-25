@@ -23,7 +23,7 @@ import java.util.Arrays;
  * (PPMI), by decreasing value for a positive semi-definite one (a covariance), ties in the order the decomposition
  * returned them.
  */
-final class SymmetricEigen {
+public final class SymmetricEigen {
 
     /** Up to this many rows the Jacobi sweep is fast enough, and what every earlier fit was solved by. */
     static final int DENSE_LIMIT = 128;
@@ -32,7 +32,7 @@ final class SymmetricEigen {
      * @param values  the leading eigenvalues: {@code k} of them, or every one when the matrix has fewer rows
      * @param vectors their unit eigenvectors, one per row (oriented by the decomposition; the fits orient them)
      */
-    record Result(double[] values, double[][] vectors) {
+    public record Result(double[] values, double[][] vectors) {
     }
 
     private SymmetricEigen() {
@@ -42,7 +42,7 @@ final class SymmetricEigen {
      * @param byMagnitude order by {@code |λ|} (an indefinite matrix). When false the matrix must be positive
      *                    semi-definite, for which the two orders coincide
      */
-    static Result leading(final double[][] a, final int k, final boolean byMagnitude) {
+    public static Result leading(final double[][] a, final int k, final boolean byMagnitude) {
         final int d = a.length;
         final int kept = Math.min(k, d);
         if (d <= DENSE_LIMIT) {

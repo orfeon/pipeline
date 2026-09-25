@@ -116,6 +116,44 @@ public final class ScreenSpec implements Serializable {
 
     public static final int PAIRS_MAX_DEFAULT = 200;
     public static final int PAIR_PLACEBO_DEFAULT = 5;
+
+    /** joint: the candidates' joint sums (S, the m × m Fisher matrix, the pHd matrix) for the several-candidate suggestions (DSL doc §9.5) */
+    public boolean jointOn;
+    /** joint.include: globs / selectors choosing the joint columns among the candidates (default every candidate) */
+    public List<String> jointInclude = new ArrayList<>();
+    /** joint.maxColumns: the bound on the joint columns (O(m²) state and per-row work) */
+    public int jointMaxColumns = JOINT_MAX_COLUMNS_DEFAULT;
+    /** joint.noise: noise placebo columns carried in the joint sums (the pHd null scale) */
+    public int jointNoise = JOINT_NOISE_DEFAULT;
+    /** joint.directions: pHd directions reported */
+    public int jointDirections = 3;
+    /** joint.redundancy: |correlation| at and above which candidates are one redundancy cluster */
+    public double jointRedundancy = 0.95;
+    /** joint.select: the forward selection's maximum number of steps */
+    public int jointSelect = 10;
+    /** the resolved joint columns as candidate indices */
+    public List<Integer> jointColumns = new ArrayList<>();
+
+    public static final int JOINT_MAX_COLUMNS_DEFAULT = 200;
+    public static final int JOINT_NOISE_DEFAULT = 10;
+
+    /** Joint columns carried: the chosen candidates, then the noise columns. */
+    public int jointColumnCount() {
+        return jointColumns.size() + jointNoiseCount();
+    }
+
+    public int jointNoiseCount() {
+        return Math.min(jointNoise, noise);
+    }
+
+    /** The column (in the scorer's column order: candidates, noise placebos, shuffle placebos) of joint column {@code j}. */
+    public int jointColumn(final int j) {
+        return j < jointColumns.size() ? jointColumns.get(j) : candidates.size() + (j - jointColumns.size());
+    }
+
+    public boolean isJointNoise(final int j) {
+        return j >= jointColumns.size();
+    }
     /** the pair test's own placebo kind and record transform */
     public static final String KIND_PAIR = "pair";
     public static final String TRANSFORM_PRODUCT = "product";
@@ -571,6 +609,43 @@ public final class ScreenSpec implements Serializable {
                 errors.add("pairs must be an object {fields: [[a, b], ...], among: [...], maxPairs, placebo}");
             }
         }
+        final JsonElement joint = p.get("joint");
+        if (joint != null && !joint.isJsonNull()) {
+            if (joint.isJsonPrimitive() && joint.getAsJsonPrimitive().isBoolean()) {
+                s.jointOn = joint.getAsBoolean();
+            } else if (joint.isJsonObject()) {
+                final JsonObject o = joint.getAsJsonObject();
+                s.jointOn = !o.has("enabled") || o.get("enabled").getAsBoolean();
+                s.jointInclude = strings(o, "include", errors);
+                final Double max = number(o, "maxColumns");
+                if (max != null) {
+                    if (max < 2 || max != Math.rint(max)) errors.add("joint.maxColumns must be an integer of at least 2");
+                    else s.jointMaxColumns = max.intValue();
+                }
+                final Double jn = number(o, "noise");
+                if (jn != null) {
+                    if (jn < 0 || jn != Math.rint(jn)) errors.add("joint.noise must be a non-negative integer");
+                    else s.jointNoise = jn.intValue();
+                }
+                final Double directions = number(o, "directions");
+                if (directions != null) {
+                    if (directions < 1 || directions != Math.rint(directions)) errors.add("joint.directions must be a positive integer");
+                    else s.jointDirections = directions.intValue();
+                }
+                final Double redundancy = number(o, "redundancy");
+                if (redundancy != null) {
+                    if (!(redundancy > 0 && redundancy <= 1)) errors.add("joint.redundancy must be in (0, 1]");
+                    else s.jointRedundancy = redundancy;
+                }
+                final Double select = number(o, "select");
+                if (select != null) {
+                    if (select < 0 || select != Math.rint(select)) errors.add("joint.select must be a non-negative integer");
+                    else s.jointSelect = select.intValue();
+                }
+            } else {
+                errors.add("joint must be a boolean or an object {include, maxColumns, noise, directions, redundancy, select}");
+            }
+        }
         s.transformsExplicit = !s.transforms.isEmpty();
         if (s.transforms.isEmpty()) {
             s.transforms = s.group != null ? new ArrayList<>(TRANSFORMS) : new ArrayList<>(List.of(TRANSFORM_RAW));
@@ -883,6 +958,23 @@ public final class ScreenSpec implements Serializable {
                 }
             }
             if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key; declare fewer members or raise the bound)");
+        }
+        // joint columns: the candidates matching joint.include (every candidate by default), within the bound
+        jointColumns = new ArrayList<>();
+        if (jointOn) {
+            final List<Pattern> globs = jointInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
+            final List<String> selectors = jointInclude.stream().filter(FeatureLineage::isSelector).toList();
+            for (int c = 0; c < candidates.size(); c++) {
+                final String name = candidates.get(c);
+                boolean in = jointInclude.isEmpty() || globs.stream().anyMatch(g -> g.matcher(name).matches());
+                if (!in && !selectors.isEmpty()) {
+                    final FeatureLineage.Entry entry = l.columns.get(name);
+                    in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
+                }
+                if (in) jointColumns.add(c);
+            }
+            if (jointColumns.size() < 2) errors.add("joint needs at least two candidate columns (joint.include " + jointInclude + " kept " + jointColumns.size() + ")");
+            if (jointColumns.size() > jointMaxColumns) errors.add("joint: " + jointColumns.size() + " columns exceed joint.maxColumns " + jointMaxColumns + " (the joint sums are m x m per bundle and O(m²) per row; narrow joint.include or raise the bound)");
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
