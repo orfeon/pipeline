@@ -386,7 +386,8 @@ public final class ScreenReport {
         final double[] q = StatMath.benjaminiHochberg(p);
         for (int i = 0; i < p.length; i++) records.get(candidateRecords.get(i)).put("qValue", q[i]);
 
-        // flags
+        // flags: the gain cut is the placebo threshold lifted to pass.minGain (the practical floor) when higher
+        final double gainCut = spec.gainCut(threshold);
         long nPassed = 0, nLeak = 0;
         final Map<String, Double> passedBest = new HashMap<>();
         for (int i = 0; i < records.size(); i++) {
@@ -394,7 +395,7 @@ public final class ScreenReport {
             final Stats st = effective.get(i);
             final boolean placebo = (Boolean) r.get("placebo");
             final long[] agreement = effectiveAgree.get(i);
-            final boolean passed = !placebo && !st.degenerate && !Double.isNaN(threshold) && st.estGain > threshold
+            final boolean passed = !placebo && !st.degenerate && !Double.isNaN(gainCut) && st.estGain > gainCut
                     && spec.periodsAgree(agreement[0], agreement[1]);
             // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned)
             final double flagZ = leakOnPartial ? st.z() : (Double) r.get("z");
@@ -422,6 +423,7 @@ public final class ScreenReport {
         summary.put("test", conditioned ? "partial" : "marginal");
         summary.put("passRule", passRule(spec, conditioned));
         summary.put("minPeriodsAgree", spec.minPeriodsAgree);
+        summary.put("minGain", spec.minGain);
         summary.put("threshold", threshold);
         summary.put("thresholdTheoretical", thresholdTheoretical);
         summary.put("quantile", spec.quantile);
@@ -480,6 +482,7 @@ public final class ScreenReport {
         o.addProperty("test", (String) summary.get("test"));
         o.addProperty("passRule", (String) summary.get("passRule"));
         o.addProperty("minPeriodsAgree", spec.minPeriodsAgree);
+        o.addProperty("minGain", spec.minGain);
         // the z the passing records' leakSuspect was read on (null without a flag)
         o.addProperty("leakZ", spec.leakZ);
         o.addProperty("leakOn", (String) summary.get("leakOn"));
@@ -529,9 +532,12 @@ public final class ScreenReport {
         return o;
     }
 
-    /** The rule behind {@code passed} as applied: the effective test's gain against the threshold, then the period agreement. */
+    /**
+     * The rule behind {@code passed} as applied: the effective test's gain against the threshold (lifted to
+     * {@code pass.minGain} when declared), then the period agreement.
+     */
     static String passRule(final ScreenSpec spec, final boolean conditioned) {
-        final String gain = (conditioned ? "partial_gain" : "est_gain") + " > threshold";
+        final String gain = (conditioned ? "partial_gain" : "est_gain") + " > " + (spec.minGain == null ? "threshold" : "max(threshold, " + spec.minGain + ")");
         if (spec.minPeriodsAgree == null) return gain;
         final String agree = conditioned ? "partial_periods_agree" : "periods_agree";
         final String periods = conditioned ? "partial_n_periods" : "n_periods";
@@ -599,6 +605,7 @@ public final class ScreenReport {
                 .withField("test", Schema.FieldType.STRING)
                 .withField("passRule", Schema.FieldType.STRING)
                 .withField("minPeriodsAgree", Schema.FieldType.FLOAT64)
+                .withField("minGain", Schema.FieldType.FLOAT64)
                 .withField("threshold", Schema.FieldType.FLOAT64)
                 .withField("thresholdTheoretical", Schema.FieldType.FLOAT64)
                 .withField("quantile", Schema.FieldType.FLOAT64)
@@ -652,7 +659,7 @@ public final class ScreenReport {
         parts.add("transforms=" + spec.transforms);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
-        if (spec.minPeriodsAgree != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));
+        if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));
         if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ + (spec.leakOnPartial() ? " on=partial" : ""));
         if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " missing=" + spec.conditioningMissing + " (" + spec.conditioningMaxIter + " + 2 passes)");
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
