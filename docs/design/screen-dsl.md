@@ -371,6 +371,28 @@ a note (`test: marginal`, `conditioningConverged: false`). `conditioningGain` is
 log-likelihood improvement of F over the starting point (divided by the residual variance for gaussian) — a
 sanity check that the conditioning set is informative.
 
+### 8.6 Pairs: the product of two conditioning columns
+
+`pairs: {fields: [[a, b], …]}` or `pairs: {among: [names / globs], maxPairs, placebo}` tests the product
+z = x̃_a x̃_b of two standardised conditioning columns as one more column of the partial pass — the only
+practical route to an interaction, since materialising m(m − 1)/2 columns upstream is not. The design
+position (§12.1, reviewed): the product's score at the baseline offset with the main effects fixed at zero
+is the score test at the restricted maximum only when the baseline already absorbs both main effects; an
+unmodelled main effect leaves curvature the product picks up (§11's attenuation in a second form). So a
+pair's members **must be conditioning fields**: the pair is tested at the fitted means of a model holding
+both, orthogonalised against the whole of F by the same γ solve as any column (§8.2, exact — the cost is
+2 + k doubles per pair, not the 6 of a two-member approximation, and the bound is `maxPairs`, default 200).
+A pair record (`candidate: a*b`, `transform: product`) carries the partial statistics only (`partial_z`,
+`partial_gain`, `r2_F`, …; the marginal fields are null), no period slices, and its own placebo kind
+(`pair`): each pair brings `pairs.placebo` (default 5) placebo pairs — its first member times a noise
+placebo column, a standard normal draw independent of everything, which keeps the member's marginal —
+whose partial gains give the kind's cut. A pair passes on `partial_gain > max(thresholds.pair, minGain)`;
+a passing pair is a recipe, never a column of the pass list: the summary and the pass list carry
+`passedPairs` apart (`{a, b, fragment}`, the fragment `{scope: row, expr: "a * b"}`). Without an
+accepted fit the pair records are degenerate (a note says so). `among` expands a set into every pair
+(the members of a pure interaction have no marginal effect, so a ranking-based pre-selection would miss
+exactly them: declare the set, or read the pHd loadings of §12.1 once built).
+
 ## 9. Outputs
 
 ### 9.1 Scoring records (the default output)
@@ -392,7 +414,8 @@ proposal that introduced the transform so its reference implementation compares 
 One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
 `minPeriodsAgree` / `minGain`, the thresholds and the quantile (`threshold` / `thresholdTheoretical` = the
 df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test;
-`heterogeneity` = the modifier, `nHetPassed` / `hetPassedColumns` = the heterogeneity flag's count and columns), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
+`heterogeneity` = the modifier, `nHetPassed` / `hetPassedColumns` = the heterogeneity flag's count and columns;
+`nPairs` / `nPairsPassed` / `passedPairs` = the declared pairs and the passing ones, §8.6; `nSuggestions`), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
@@ -404,7 +427,8 @@ One JSON document written at the end of the run, in the shape the feature transf
 reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule` (with
 `minPeriodsAgree` / `minGain`), the leak flag (`leakZ` / `leakOn`), family /
 method, thresholds (the df = 1 scalar and the `thresholds` map per kind, `bins`), the heterogeneity modifier and
-its flagged columns (`heterogeneity`, `hetPassedColumns` — apart from `columns`), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
+its flagged columns (`heterogeneity`, `hetPassedColumns` — apart from `columns`), the passing pairs
+(`passedPairs`: `{a, b, fragment}`, apart from `columns` too), quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
 `createdAt`, and the passing records' statistics. Non-finite thresholds are written as null; an empty pass
@@ -460,7 +484,9 @@ or naming a role / the baseline, or more than 500 columns; `time.from` / `time.t
 empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a
 `bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
 `bins.edges: rank` without `group`; `heterogeneity: periods` without `periods`, an unknown `heterogeneity.by`,
-`by: field` without a field, or a modifier field missing from the input schema; a triggered input (every Combine would fire per pane); a non-global window with
+`by: field` without a field, or a modifier field missing from the input schema; `pairs` without
+`conditioning`, a pair member that is not a conditioning field, a pair of one field, more pairs than
+`pairs.maxPairs`, `pairs.placebo` above `placebo.noise`, `suggestions` without the `binned` transform; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
@@ -550,22 +576,13 @@ its pseudo-inverse). Missing is a bin of its own (informative missingness), not 
 partial, its own placebo kind and flag). Still open: bins of the baseline itself as a built-in modifier
 (does the effect depend on the predicted level) — today a field discretised upstream does it.
 
-**Pairwise products** among m candidates. The product z = x̃_i x̃_j is tested with the main effects as
-nuisance: the efficient score S_z − H_zm H_mm⁻¹ S_m with variance H_zz − H_zm H_mm⁻¹ H_mz, per pair from
-Σ r x_i x_j, Σ v x_i² x_j², Σ v x_i² x_j, Σ v x_i x_j² and the shared Σ v x_i x_j. Upstream materialisation of
-m(m − 1)/2 columns is not realistic, so this is the only practical route. *Where the sums are taken*
-(*review*): not at the baseline offset with the main effects fixed at 0 — that is the score test at a point
-that is the restricted maximum only when the baseline already absorbs both main effects, and an unmodelled
-main effect leaves curvature that the product picks up (the attenuation of §11 in a second form). The pair
-sums are taken at the fitted p̂ of a conditioning fit whose F contains the members (in practice the candidate
-set itself, k ≤ 500 — the fit exists, §8, and its cost does not depend on the number of pairs), and the
-orthogonalisation is against the two members only (the cross-terms with the other members of F are
-dropped: an approximation that keeps the state at ≈ 6 doubles per pair; the exact partial test of z against
-all of F would cost |F| per pair). State: m = 200 is ≈ 1.2e5 doubles, m = 2000 ≈ 1.2e7 — beyond an
-accumulator, so a `maxPairs` bound needs a pre-selection (a declared list, or a ranking pass). A pre-selection
-by the marginal ranking misses exactly the pure interactions whose members have no marginal effect; the pHd
-loadings below are the better ranking. Fourth-order raw moments lose digits faster than §3.5's second-order
-ones: the pair path standardises from a moments pass first (or runs on `rank`).
+**Pairwise products** — built (§8.6): declared pairs (or every pair of a declared set) of conditioning
+columns, tested at the fitted means and orthogonalised against the whole of F by the column machinery
+(*review*: at the fitted p̂, not at the baseline offset with the main effects at zero; exact against all of
+F at 2 + k doubles per pair rather than the two-member approximation, under `maxPairs`), with member × noise
+placebo pairs as the kind's calibration, the products of the standardised design (no fourth-order raw
+moments). Still open: a pre-selection beyond a declared set — the pHd loadings below are the ranking that
+does not miss a pure interaction — and the sketch route of §12.2.
 
 **Principal Hessian directions** (pHd, Li 1992), a diagnostic. From M = Σ w r x̃ x̃' and the candidates'
 covariance Σ (the same pass, O(m²) state), the eigenvectors of Σ^(−1/2) M Σ^(−1/2) with large |eigenvalue| are
@@ -711,7 +728,7 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    grouping (with step 6), the edges in the pass list.
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.
-5. **Pairs** on the conditioning fit's p̂, `maxPairs` with a declared list or the sketch; **pHd**; the
-   several-candidate suggestions.
+5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6). Still open from this
+   step: the sketch pre-selection, **pHd**, the several-candidate suggestions (§12.3).
 6. **Categorical candidates** read natively.
 7. **Parameter families**, once the feature lineage carries op and arguments.

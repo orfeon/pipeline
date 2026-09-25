@@ -569,6 +569,97 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testPairsAtTheFittedMeans() throws Exception {
+        // grouped units of 4 whose winner follows softmax(x + x2 + 1.5 x·x2): the product carries information beyond
+        // the main effects. Conditioning on both members (x doubles as the candidate), the pair [x, x2] is tested at
+        // the fitted means and passes its own placebo kind (x × noise pairs); the placebo pairs do not.
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], placebo: {noise: 2, seed: 7}, "
+                + "conditioning: {fields: [x, x2], l2: 1.0e-4, maxIter: 8}, pairs: {fields: [[x, x2]], placebo: 2}}");
+        Assertions.assertTrue(spec.hasPairs());
+        Assertions.assertEquals(1, spec.pairs.size());
+        Assertions.assertEquals(3, spec.pairCount());
+        Assertions.assertEquals("x*x2", spec.pairName(0));
+        Assertions.assertEquals("x*__noise_1", spec.pairName(2));
+        Assertions.assertArrayEquals(new int[]{0, -2}, spec.pairMembers(2));
+        Assertions.assertEquals(List.of("x", "x", "x2"), spec.rowColumns());
+        final java.util.Random random = new java.util.Random(11);
+        final List<List<ScreenRow>> units = new java.util.ArrayList<>();
+        for (int g = 0; g < 120; g++) {
+            final double[] x1 = new double[4], x2 = new double[4], score = new double[4];
+            int best = 0;
+            for (int i = 0; i < 4; i++) {
+                x1[i] = random.nextGaussian();
+                x2[i] = random.nextGaussian();
+                score[i] = x1[i] + x2[i] + 1.5 * x1[i] * x2[i] + 0.3 * random.nextGaussian();
+                if (score[i] > score[best]) best = i;
+            }
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, null, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
+            units.add(rows);
+        }
+        final GroupScorer groups = new GroupScorer(spec);
+        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
+        for (int it = 0; it < 8 && !state.converged; it++) {
+            final com.mercari.solution.util.pipeline.glm.VectorAccumulator eval = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+            for (final List<ScreenRow> rows : units) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).getGroup()), state.proposal, moments.getValues()));
+            state.advance(eval.getValues(), spec.conditioningL2, spec.conditioningTol);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final List<ScreenRow> rows : units) {
+            final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).getGroup());
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partials);
+            groups.score(rows, rows.get(0).getGroup(), marginal);
+        }
+        Assertions.assertTrue(partials.containsKey(spec.pairKey(0)) && partials.containsKey(spec.pairKey(2)));
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state);
+        final Map<String, Map<String, Object>> byKey = new HashMap<>();
+        for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+        Assertions.assertEquals(3 + 3, result.records().size(), byKey.keySet().toString());   // x, 2 noise; the pair + 2 placebo pairs
+        final Map<String, Object> pair = byKey.get("x*x2:product");
+        Assertions.assertNull(pair.get("z"));
+        Assertions.assertNull(pair.get("est_gain"));
+        Assertions.assertTrue((Double) pair.get("partial_z") > 3, "partial z of the pair: " + pair.get("partial_z"));
+        Assertions.assertTrue((Double) pair.get("r2_F") < 0.5, "r2_F of the pair: " + pair.get("r2_F"));
+        Assertions.assertEquals(Boolean.TRUE, pair.get("passed"));
+        Assertions.assertEquals(Boolean.FALSE, pair.get("placebo"));
+        Assertions.assertEquals(Boolean.FALSE, pair.get("leakSuspect"));
+        for (final String placebo : List.of("x*__noise_0:product", "x*__noise_1:product")) {
+            final Map<String, Object> p = byKey.get(placebo);
+            Assertions.assertEquals(Boolean.TRUE, p.get("placebo"));
+            Assertions.assertEquals(Boolean.FALSE, p.get("passed"));
+            Assertions.assertTrue(Math.abs((Double) p.get("partial_z")) < 3, placebo + " partial z " + p.get("partial_z"));
+        }
+        // the marginal test of x survives next to the pair; the main effect of x is in F, so its partial is ~ 0
+        Assertions.assertTrue((Double) byKey.get("x:raw").get("r2_F") > 0.99, byKey.get("x:raw").toString());
+        @SuppressWarnings("unchecked") final Map<String, Double> thresholds = (Map<String, Double>) result.summary().get("thresholds");
+        Assertions.assertTrue(thresholds.containsKey("pair") && thresholds.containsKey("df1"));
+        Assertions.assertEquals(1L, result.summary().get("nPairs"));
+        Assertions.assertEquals(1L, result.summary().get("nPairsPassed"));
+        Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
+        Assertions.assertEquals(List.of(), result.summary().get("passedColumns"));   // a pair is never a column
+        final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+        Assertions.assertEquals(0, selection.getAsJsonArray("columns").size());
+        Assertions.assertEquals("x", selection.getAsJsonArray("passedPairs").get(0).getAsJsonObject().get("a").getAsString());
+        Assertions.assertEquals("x2", selection.getAsJsonArray("passedPairs").get(0).getAsJsonObject().get("b").getAsString());
+        Assertions.assertTrue(selection.getAsJsonArray("passedPairs").get(0).getAsJsonObject().get("fragment").getAsString().contains("x * x2"));
+        Assertions.assertTrue(ScreenReport.describe(spec).contains("pairs=1"));
+        // validation: pairs need conditioning holding both members, two different fields, a placebo count within the noise
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pairs: {fields: [[x, x2]]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x2]}, pairs: {fields: [[x, x2]]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x]]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], placebo: {noise: 1}, conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], placebo: 3}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: ['x*'], maxPairs: 0}}"));
+        final ScreenSpec among = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: ['x*'], placebo: 0}}");
+        Assertions.assertEquals(1, among.pairs.size());
+        Assertions.assertEquals(1, among.pairCount());
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

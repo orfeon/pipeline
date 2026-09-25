@@ -1038,6 +1038,55 @@ public final class ScreenReport {
             }
         }
 
+        // the declared pairs (DSL doc §8.6): partial tests only — the product of two conditioning columns at the
+        // fitted means, orthogonalised against F by the same γ solve as any column; placebo pairs calibrate the kind
+        for (int q = 0; q < spec.pairCount(); q++) {
+            final int key = spec.pairKey(q);
+            final Map<String, Object> r = new LinkedHashMap<>();
+            r.put("candidate", spec.pairName(q));
+            r.put("transform", ScreenSpec.TRANSFORM_PRODUCT);
+            r.put("method", METHOD);
+            r.put("family", spec.family);
+            for (final String f : List.of("S", "H", "beta", "chi2", "z", "est_gain")) r.put(f, null);
+            r.put("df", 1L);
+            r.put("pValue", null);
+            r.put("qValue", null);
+            r.put("n_groups", (long) nUnits);
+            r.put("n_obs", (long) nUnits);
+            r.put("periods_agree", null);
+            r.put("n_periods", null);
+            r.put("period_z", null);
+            r.put("bin_stats", null);
+            putHet(r, "", null);
+            r.put("level_z", null);
+            final PartialAccumulator pacc = conditioned ? partials.get(key) : null;
+            final double[] vec = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
+            final Partial pt = vec == null ? new Partial(Stats.degenerate((long) nUnits), Double.NaN)
+                    : partial(vec, fit, nUnits, (long) nUnits, sigma2, gammas.get(key));
+            final Stats pst = pt.stats;
+            r.put("r2_F", Double.isNaN(pt.r2) ? null : pt.r2);
+            r.put("partial_S", conditioned ? pst.s : null);
+            r.put("partial_H", conditioned ? pst.h : null);
+            r.put("partial_chi2", conditioned ? pst.chi2 : null);
+            r.put("partial_z", conditioned ? pst.z : null);
+            r.put("partial_gain", conditioned ? pst.estGain : null);
+            r.put("partial_pValue", conditioned ? pst.pValue : null);
+            r.put("partial_df", null);
+            putHet(r, "partial_", null);
+            r.put("partial_periods_agree", null);
+            r.put("partial_n_periods", null);
+            r.put("partial_period_z", null);
+            effective.add(pst);
+            effectiveAgree.add(null);
+            effectiveHet.add(null);
+            final boolean placebo = spec.isPlaceboPair(q);
+            if (placebo) placeboGains.computeIfAbsent(ScreenSpec.KIND_PAIR, kind -> new ArrayList<>()).add(pst.degenerate ? 0d : pst.estGain);
+            r.put("placebo", placebo);
+            r.put("degenerate", pst.degenerate);
+            records.add(r);
+        }
+        if (spec.hasPairs() && !conditioned) notes.add("pairs: no partial test (see the conditioning note), so the pair records are degenerate");
+
         // placebo threshold per statistic kind (the theoretical chi2(df) quantile when no placebo column is
         // configured): the df = 1 transforms pool one cut, the binned block test its own
         final Map<String, Double> thresholds = new LinkedHashMap<>();
@@ -1045,6 +1094,7 @@ public final class ScreenReport {
         final List<String> kinds = new ArrayList<>(List.of(ScreenSpec.KIND_DF1));
         if (spec.hasBinned()) kinds.add(ScreenSpec.KIND_BINNED);
         if (spec.hasHeterogeneity()) kinds.add(ScreenSpec.KIND_HET);
+        if (spec.hasPairs()) kinds.add(ScreenSpec.KIND_PAIR);
         // the heterogeneity test's nominal df: the most levels any record found usable, less one
         int hetDf = 1;
         for (final Het h : effectiveHet) if (h != null && !h.degenerate) hetDf = Math.max(hetDf, h.df);
@@ -1072,6 +1122,7 @@ public final class ScreenReport {
         long nPassed = 0, nLeak = 0, nHetPassed = 0;
         final Map<String, Double> passedBest = new HashMap<>();
         final Map<String, Double> hetPassedBest = new HashMap<>();
+        final List<String> passedPairs = new ArrayList<>();
         for (int i = 0; i < records.size(); i++) {
             final Map<String, Object> r = records.get(i);
             final Stats st = effective.get(i);
@@ -1089,9 +1140,12 @@ public final class ScreenReport {
             r.put("threshold", kindThreshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);
+            final boolean pair = ScreenSpec.TRANSFORM_PRODUCT.equals(r.get("transform"));
             if (passed) {
                 nPassed++;
-                passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
+                // a passing pair is a recipe (a product to build upstream), never one of the pass list's columns
+                if (pair) passedPairs.add((String) r.get("candidate"));
+                else passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
             }
             if (leak && !placebo) nLeak++;
             // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
@@ -1149,6 +1203,9 @@ public final class ScreenReport {
         summary.put("nLeakSuspect", nLeak);
         summary.put("nHetPassed", spec.hasHeterogeneity() ? nHetPassed : null);
         summary.put("hetPassedColumns", spec.hasHeterogeneity() ? hetPassedColumns : null);
+        summary.put("nPairs", spec.hasPairs() ? (long) spec.pairs.size() : null);
+        summary.put("nPairsPassed", spec.hasPairs() ? (long) passedPairs.size() : null);
+        summary.put("passedPairs", spec.hasPairs() ? passedPairs : null);
         summary.put("leakOn", spec.leakZ == null ? null : leakOnPartial ? ScreenSpec.LEAK_ON_PARTIAL : ScreenSpec.LEAK_ON_MARGINAL);
         summary.put("timeField", spec.timeField);
         summary.put("timeFrom", spec.timeFrom);
@@ -1211,6 +1268,19 @@ public final class ScreenReport {
             final JsonArray hetColumns = new JsonArray();
             for (final Object name : (List<?>) summary.get("hetPassedColumns")) hetColumns.add((String) name);
             o.add("hetPassedColumns", hetColumns);
+        }
+        // the passing pairs (a product to build upstream: {scope: row, expr: "a * b"}), apart from columns
+        if (summary.get("passedPairs") != null) {
+            final JsonArray pairs = new JsonArray();
+            for (final Object name : (List<?>) summary.get("passedPairs")) {
+                final JsonObject pair = new JsonObject();
+                final String[] members = ((String) name).split("\\*", 2);
+                pair.addProperty("a", members[0]);
+                pair.addProperty("b", members.length > 1 ? members[1] : null);
+                pair.addProperty("fragment", "{scope: row, expr: \"" + members[0] + " * " + (members.length > 1 ? members[1] : "") + "\"}");
+                pairs.add(pair);
+            }
+            o.add("passedPairs", pairs);
         }
         o.addProperty("quantile", spec.quantile);
         o.addProperty("nCandidates", (Long) summary.get("nCandidates"));
@@ -1379,6 +1449,9 @@ public final class ScreenReport {
                 .withField("nHetPassed", Schema.FieldType.INT64)
                 .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("nSuggestions", Schema.FieldType.INT64)
+                .withField("nPairs", Schema.FieldType.INT64)
+                .withField("nPairsPassed", Schema.FieldType.INT64)
+                .withField("passedPairs", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("leakOn", Schema.FieldType.STRING)
                 .withField("timeField", Schema.FieldType.STRING)
                 .withField("timeFrom", Schema.FieldType.STRING)
@@ -1413,6 +1486,7 @@ public final class ScreenReport {
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
+        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebo + " placebo each)");
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

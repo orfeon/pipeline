@@ -300,33 +300,15 @@ public final class ConditioningScorer implements Serializable {
                         continue;
                     }
                     final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
-                    // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
-                    final double pivot = GroupScorer.pivot(v);
-                    double pm = 0, psum = 0;
-                    for (int i = 0; i < n; i++) {
-                        if (StatMath.isFinite(v[i])) {
-                            pm += p[i] * (v[i] - pivot);
-                            psum += p[i];
-                        }
-                    }
-                    final double mean = psum > 0 ? pm / psum : 0d;
-                    double s = 0, b = 0, px = 0;
-                    final double[] a = new double[k];
-                    for (int i = 0; i < n; i++) {
-                        final double xt = StatMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
-                        s += xt * (unit.y[i] - p[i]);
-                        b += p[i] * xt * xt;
-                        px += p[i] * xt;
-                        for (int j = 0; j < k; j++) a[j] += p[i] * xt * f[i][j];
-                    }
-                    final double w = unit.unitWeight;
-                    final double[] acc = new double[partialLength()];
-                    acc[0] = w * s;
-                    acc[1] = w * (b - px * px);
-                    for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
+                    final double[] acc = groupedPartialSums(unit, p, f, pf, v);
                     final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
                     if (level != null) target.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, acc);
                 }
+            }
+            // the declared pairs: the product of two standardised conditioning columns (a placebo pair: a member
+            // times a noise column) as one more column of the partial pass, no period slices (DSL doc §8.6)
+            for (int q = 0; q < spec.pairCount(); q++) {
+                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, f, cols)));
             }
             return;
         }
@@ -365,14 +347,67 @@ public final class ConditioningScorer implements Serializable {
                 }
             }
         }
+        // the declared pairs (DSL doc §8.6): one more column each, no period slices
+        if (spec.hasPairs()) {
+            final List<Integer> all = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) all.add(i);
+            for (int q = 0; q < spec.pairCount(); q++) {
+                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, f, cols), all));
+            }
+        }
     }
 
     /**
-     * The fitted model's {@code [n, g(k), G(k*k)?]} at θ̂ over {@code rows} of the unit (all rows when null; the
-     * grouped family always passes the whole unit): with the Gram, the pass evaluation itself ({@link GlmFit#evaluate},
-     * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
-     * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
+     * A pair's column: the product of its members' standardised conditioning columns (the design's, missing
+     * values filled), or for a placebo pair the first member times a noise placebo column (a standard normal
+     * draw independent of everything, the calibration of the pair kind).
      */
+    private double[] pairColumn(final int pair, final double[][] f, final double[][] cols) {
+        final int[] members = spec.pairMembers(pair);
+        final int n = f.length;
+        final double[] z = new double[n];
+        if (members[1] >= 0) {
+            for (int i = 0; i < n; i++) z[i] = f[i][members[0]] * f[i][members[1]];
+        } else {
+            final double[] noise = cols[spec.candidates.size() + (-1 - members[1])];
+            for (int i = 0; i < n; i++) z[i] = f[i][members[0]] * noise[i];
+        }
+        return z;
+    }
+
+    /**
+     * The grouped family's {@code [s, b, a]} of one column at the fitted p̂, scaled by the unit weight: the column
+     * shifted by its pivot and centred by p̂ over its finite values (a within-unit constant gives b = 0 exactly),
+     * s = x̃'(ỹ − p̂), b = x̃'Wx̃, a = F̃'Wx̃ with W = diag(p̂) − p̂p̂' and {@code pf} = Σ p̂ F̃ over the unit.
+     */
+    private double[] groupedPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] pf, final double[] v) {
+        final int n = unit.size();
+        final double pivot = GroupScorer.pivot(v);
+        double pm = 0, psum = 0;
+        for (int i = 0; i < n; i++) {
+            if (StatMath.isFinite(v[i])) {
+                pm += p[i] * (v[i] - pivot);
+                psum += p[i];
+            }
+        }
+        final double mean = psum > 0 ? pm / psum : 0d;
+        double s = 0, b = 0, px = 0;
+        final double[] a = new double[k];
+        for (int i = 0; i < n; i++) {
+            final double xt = StatMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
+            s += xt * (unit.y[i] - p[i]);
+            b += p[i] * xt * xt;
+            px += p[i] * xt;
+            for (int j = 0; j < k; j++) a[j] += p[i] * xt * f[i][j];
+        }
+        final double w = unit.unitWeight;
+        final double[] acc = new double[partialLength()];
+        acc[0] = w * s;
+        acc[1] = w * (b - px * px);
+        for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
+        return acc;
+    }
+
     /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (a period or a modifier level). */
     private double[] rowPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] v, final List<Integer> rows) {
         final double[] acc = new double[partialLength()];
@@ -387,6 +422,12 @@ public final class ConditioningScorer implements Serializable {
         return acc;
     }
 
+    /**
+     * The fitted model's {@code [n, g(k), G(k*k)?]} at θ̂ over {@code rows} of the unit (all rows when null; the
+     * grouped family always passes the whole unit): with the Gram, the pass evaluation itself ({@link GlmFit#evaluate},
+     * so the period slices sum to the fit's {@code bestGrad} / {@code bestG}); without it (k above
+     * {@link #PERIOD_GRAM_MAX_K}) the unit mass and gradient only, skipping the O(n k²) Gram the evaluation would drop.
+     */
     private double[] fitPeriodSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final List<Integer> rows) {
         final double[] y, mu, w;
         final double[][] ff;

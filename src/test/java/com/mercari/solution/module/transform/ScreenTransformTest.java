@@ -434,6 +434,53 @@ public class ScreenTransformTest {
     }
 
     @Test
+    public void testPairsAtTheFittedMeans() throws Exception {
+        // the winner follows softmax(1.5 f_known + f_extra) with no interaction: conditioned on both members, the
+        // declared pair carries nothing beyond the main effects, and its placebo pairs (f_known × noise) calibrate it
+        final String config = sessionsConfig(80, 8, 42) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      time: {field: session_time}
+                      candidates: {include: ["f_*"]}
+                      transforms: [raw]
+                      placebo: {noise: 20, seed: 3}
+                      conditioning: {fields: [f_known, f_extra], l2: 1.0e-4, maxIter: 6}
+                      pairs: {fields: [[f_known, f_extra]], placebo: 4}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            Assertions.assertEquals(3 + 20 + 1 + 4, records.size(), records.keySet().toString());
+            final MElement pair = records.get("f_known*f_extra:product");
+            Assertions.assertNull(pair.getAsDouble("z"));
+            Assertions.assertNotNull(pair.getAsDouble("partial_z"));
+            Assertions.assertTrue(Math.abs(pair.getAsDouble("partial_z")) < 3, "partial z of the pair: " + pair.getAsDouble("partial_z"));
+            Assertions.assertEquals(Boolean.FALSE, pair.getPrimitiveValue("passed"));
+            Assertions.assertEquals(Boolean.FALSE, pair.getPrimitiveValue("placebo"));
+            final MElement placebo = records.get("f_known*__noise_0:product");
+            Assertions.assertEquals(Boolean.TRUE, placebo.getPrimitiveValue("placebo"));
+            Assertions.assertNotNull(placebo.getAsDouble("partial_gain"));
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), pair.getAsDouble("threshold"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals(1L, summary.getAsLong("nPairs"));
+            Assertions.assertEquals(0L, summary.getAsLong("nPairsPassed"));
+            Assertions.assertEquals(List.of(), summary.getPrimitiveValue("passedPairs"));
+            Assertions.assertTrue(((Map<?, ?>) summary.getPrimitiveValue("thresholds")).containsKey("pair"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testPartialPeriodsAndMinPeriodsAgree() throws Exception {
         // a suppressor column: marginally ~0 (its period signs are noise), given f_known a strong positive effect in
         // every month. The period agreement of the effective (partial) test is the one pass.minPeriodsAgree reads

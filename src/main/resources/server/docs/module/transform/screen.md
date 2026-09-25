@@ -216,6 +216,21 @@ residual variance is 0 (an exact fit) cannot scale the partial statistics: they 
 marginal test and `notes` says so.
 Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
 
+### Pairs
+
+`pairs: {fields: [[f_price, f_recent_bids]]}` (or `among: [f_*]` for every pair of a set) tests the product of
+two conditioning columns — an interaction — beyond what the model of those columns explains. Both members
+must be in `conditioning.fields`: a product is meaningful only at the fitted means of a model that holds
+its main effects (at the baseline alone, an unmodelled main effect leaves curvature the product would pick
+up as a spurious interaction). The pair record (`candidate: a*b`, `transform: product`) carries the partial
+statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null), has its own placebo
+kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column, whose gains give
+`thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A
+passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
+apart, each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
+doubles per partial key (times `1 + placebo`); `maxPairs` bounds a run. The members of a pure interaction
+have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect.
+
 ## Input contract
 
 | role | description |
@@ -274,6 +289,7 @@ is an assembly error.
 | bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
 | heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
 | suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
+| pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`). Needs `conditioning` holding both members of every pair. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -318,7 +334,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier),
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions`),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -486,7 +502,7 @@ transforms:
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null,
-  "heterogeneity": null, "quantile": 0.99,
+  "heterogeneity": null, "passedPairs": [], "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
   "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
