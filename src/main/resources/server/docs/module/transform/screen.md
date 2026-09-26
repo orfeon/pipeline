@@ -176,6 +176,25 @@ next screen. The joint sums cost O(m²) per row and `m(m + 1)` doubles of state:
 candidates worth combining (at most `maxColumns`, default 200). A row (grouped: a unit) with a missing value
 in any joint column is left out of the joint sums.
 
+### Categorical candidates
+
+`categorical: {include: [category, condition_grade]}` tests string fields natively — a level → (score,
+information) block instead of a one-hot or target encoding upstream. The sketch pre-pass counts every level
+exactly (a column past 20,000 distinct levels fails the step: not a categorical candidate), keeps the
+`maxLevels` (default 32) most frequent as named levels and folds the rest into `(other)` (a null value is
+its own level `(null)`); a screen of categorical candidates alone needs no numeric candidate. The column's
+record (`transform: levels`) is the same block test as the
+[binned block](#binned-block-test): `chi2`, `df` (active levels − 1), `pValue`, `est_gain`, no sign, the
+partial block under conditioning, and `level_z` with each level's contrast against the rest (its signed z,
+S, H, n — which levels carry the effect). It has its own placebo kind (`thresholds.levels`): `placebo`
+(default 5) columns per candidate whose levels are redrawn from the window frequencies (the marginal
+distribution kept, the alignment with the label broken). A passing column goes into the pass list by name
+(the feature transform encodes it); for a passing column only, the `suggestions` output adds its `grouping`
+(the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
+fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
+transform's row op in the fragment (`{type: indicator, input, values: [level]}`; `== null` for the `(null)`
+level; none for the folded `(other)`).
+
 ### Periods, time window and leak flags
 
 - `periods` computes S and z per calendar bucket of a time field; `periods_agree / n_periods` counts the buckets
@@ -342,6 +361,7 @@ is an assembly error.
 | suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
 | pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`), `shape` (value bins per member of the pair's 2-D grid for the interaction shape, default 4; `false` / 0 = off). Needs `conditioning` holding both members of every pair. |
 | joint | optional | Boolean or Object | The candidates' joint sums for the several-candidate suggestions (see [Several candidates](#several-candidates-joint)): `true`, or `{include: [globs / selectors] (default every candidate), maxColumns (default 200), noise (noise columns carried for the null scale, default 10), directions (pHd directions, default 3), redundancy (|correlation| of a cluster, default 0.95), select (forward-selection steps, default 10), pairs (difference / ratio suggestions at most, default 10), excess (a pair's joint statistic over the better single one, default 1.5)}`. O(m²) per row: opt-in, bounded. |
+| categorical | optional | Object or Array | String fields tested natively as candidates (see [Categorical candidates](#categorical-candidates)): `{include: [globs / selectors], maxLevels (named levels kept, default 32), placebo (placebo columns per candidate, default 5)}` or a list of include globs. Role fields are never candidates. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -389,7 +409,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions` / `joint`), `nJointColumns` (null without `joint`),
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions` / `joint` / `pairs` / `categorical`), `nJointColumns` (null without `joint`), `nCategoricals` (null without `categorical`),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,

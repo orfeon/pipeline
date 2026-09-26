@@ -235,10 +235,23 @@ public class ScreenTransformTest {
                       bins: 5
                       suggestions: true
                       joint: {noise: 3, directions: 2}
+                      categorical: {include: [session_id], maxLevels: 8, placebo: 2}
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            // the categorical candidate (session_id, a string field that is no role here): 120 sessions fold into 8 named
+            // levels + (other), a block of df <= 8, and two placebo columns with the levels redrawn
+            final Map<String, MElement> records = byKey(rows);
+            final MElement levels = records.get("session_id:levels");
+            Assertions.assertNotNull(levels, records.keySet().toString());
+            Assertions.assertTrue(levels.getAsLong("df") >= 1 && levels.getAsLong("df") <= 8, "df " + levels.getAsLong("df"));
+            Assertions.assertNull(levels.getAsDouble("z"));
+            Assertions.assertEquals(9, ((List<?>) levels.getPrimitiveValue("level_z")).size());
+            Assertions.assertEquals(Boolean.TRUE, records.get("session_id*__noise_1:levels").getPrimitiveValue("placebo"));
+            return null;
+        });
         PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
             // one-candidate suggestions from the binned sums: every scorable candidate and placebo gets its shape,
             // cut and monotone records (no missing values in the data, so no missing record); the joint sums add the
@@ -270,7 +283,7 @@ public class ScreenTransformTest {
             final Map<String, MElement> records = byKey(rows);
             // independent rows: rank / absdev and the value bins read the window quantile sketch (one pre-pass);
             // sold / session_time are roles, p_model / start_price excluded by name
-            Assertions.assertEquals((3 + 10) * 4, records.size());
+            Assertions.assertEquals((3 + 10) * 4 + 1 + 2, records.size());   // + the categorical block and its two placebos
             final MElement binned = records.get("f_extra:binned");
             Assertions.assertEquals(4L, binned.getAsLong("df"));   // 5 value bins, the missing bin empty
             Assertions.assertTrue(binned.getAsDouble("chi2") > 4, "binned chi2 of f_extra: " + binned.getAsDouble("chi2"));
@@ -306,7 +319,8 @@ public class ScreenTransformTest {
             Assertions.assertEquals("2024-06-30T23:59:59Z", summary.getAsString("timeTo"));
             Assertions.assertEquals(List.of("raw", "rank", "absdev", "binned"), summary.getPrimitiveValue("transforms"));
             Assertions.assertEquals("value/5", summary.getAsString("bins"));
-            Assertions.assertEquals(2, ((Map<?, ?>) summary.getPrimitiveValue("thresholds")).size());
+            Assertions.assertEquals(3, ((Map<?, ?>) summary.getPrimitiveValue("thresholds")).size());   // df1, binned, levels
+            Assertions.assertEquals(1L, summary.getAsLong("nCategoricals"));
             Assertions.assertTrue(String.valueOf(summary.getPrimitiveValue("notes")).contains("quantile sketch"), String.valueOf(summary.getPrimitiveValue("notes")));
             return null;
         });

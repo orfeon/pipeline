@@ -249,6 +249,26 @@ partial-residual curve the derivation suggestions of §12.3 read.
   full: v ≥ nextUp(e) exactly when v > e, ties and repeated edges included. The one-candidate cut suggestion
   (§9.4) writes its `bin` fragment the same way.
 
+### 6.2 Categorical candidates
+
+`categorical: {include: [globs / selectors], maxLevels, placebo}` reads string fields natively as
+candidates — a level → (S, H) map instead of a one-hot or target encoding upstream. The sketch pre-pass
+(§6) counts every column's levels exactly (`level → count`; a column past 20,000 distinct levels fails the
+step: not a categorical candidate), and the dictionary the scorers and the report share names the
+`maxLevels` (default 32) most frequent levels, by count then name, folding the rest into one `(other)` level
+(a null value is its own level `(null)`, competing by count). The column is then the block test of §6.1 over
+its levels — one χ²(df) statistic, df = active levels − 1, `transform: levels`, the partial block under
+conditioning — with each level's contrast against the rest in `level_z` (its signed z, S, H, n). Placebo:
+`placebo` (default 5) columns per candidate whose levels are redrawn from the window frequencies
+(`seededRandom(seed, unitKey + "cat" + c + r)` in row order — the marginal distribution kept, the alignment
+with the label broken, reproducible as the noise placebos), giving the `levels` kind its cut. A passing
+column enters the pass list by its name (the feature transform encodes it); the suggestions output carries
+its **grouping** (§12.3: the named levels sorted by effect S_l / H_l and cut once at the best split gain,
+the boosted-tree categorical split — kind `grouping`, the two groups in the fragment, the split's share of
+the block χ²) and every level whose own contrast is strong (|z| ≥ 3) as a one-hot indicator (kind
+`onehot`). The top-K cut of the original position is the counting pass itself: exact, one pass, no
+seeded-hash dilution.
+
 ## 7. Periods, time window, flags, q-values
 
 - **Periods.** `periods: {field, bucket}` (year / quarter / month / week / day, UTC; `field` defaults to
@@ -637,12 +657,8 @@ its pseudo-inverse). Missing is a bin of its own (informative missingness), not 
   questions), the missing bin, per-kind calibration, the block partial test, `bin_stats` in the record.
 - *Closing the loop* — built: the record's `bin_edges` and the pass list's `passedBlocks` (§6.1) give a
   surviving block as a row `bin` op with its edges (or the rank cut points of a position block).
-- *Categorical candidates* read natively: a level → (S, H) map instead of one-hot or target encoding upstream.
-  Exact up to a `maxLevels` cap, beyond it a deterministic seeded hash into buckets (collisions dilute, the
-  result stays reproducible); a top-K cut needs a prior counting pass. (*review*: the candidates are numeric
-  today — `ScreenRow` carries `double[]`, and the lineage's numeric-column rule selects them — so this is a
-  separate step after the binned test: Prepare, the coder and the candidate rule change, the statistic does
-  not.)
+- *Categorical candidates* — built (§6.2): the counting pass of the sketch pre-pass gives the exact top-K
+  dictionary, so no seeded-hash dilution was needed; the row carries the levels as text next to `x[]`.
 - *Report-time shapes* from the same (S_b, H_b), no further pass: a trend on the bin index (≈ `rank`), the
   best single cut point (a max-type statistic), the full k − 1 test. It subsumes `rank` / `absdev` and the
   one-hot case of the block tests.
@@ -742,9 +758,9 @@ give recipes in the feature transform's vocabulary.
 sums, the discovery / confirmation split, per-kind placebo cuts, the `<name>.suggestions` output). Still
 open from this table:
 
-| information | read from | suggestion |
-|---|---|---|
-| categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) — needs the categorical candidates of §12.1 | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
+The categorical grouping (levels sorted by S_l / H_l and cut once, the boosted-tree categorical split; the
+strong levels as one-hot indicators) is built with the categorical candidates (§6.2, kinds `grouping` /
+`onehot`).
 
 **Several candidates — how to combine them** — built: the redundancy clusters, the complementary set, the
 linear composite, the curvature directions (§9.5 over the joint sums: `redundant`, `select`, `composite`,
@@ -790,13 +806,13 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    marginal and partial); the edges in the pass list (`passedBlocks`). Still open from this position: a
    built-in baseline-bin modifier.
 3. **One-candidate suggestions** — built (§9.4: shape / cut / missing / monotone, the discovery /
-   confirmation split, per-kind placebo cuts, the `<name>.suggestions` output). Open: the categorical
-   grouping (with step 6).
+   confirmation split, per-kind placebo cuts, the `<name>.suggestions` output; the categorical grouping
+   with step 6).
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.
 5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
    several-candidate suggestions (redundancy clusters, forward selection, composite) — built over the joint
    sums (§9.5); the interaction shape of a declared pair — built (§8.7); ratios / differences — built
    (§9.5). Still open: a pre-selection of pairs beyond a declared set (the sketch route of §12.2).
-6. **Categorical candidates** read natively.
+6. **Categorical candidates** read natively — built (§6.2, with the grouping / one-hot suggestions).
 7. **Parameter families**, once the feature lineage carries op and arguments.

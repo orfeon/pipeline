@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.MatrixOps;
 import com.mercari.solution.util.pipeline.glm.Baselines;
@@ -215,7 +216,11 @@ public final class ScreenReport {
     }
 
     static Block binnedStats(final ScreenSpec spec, final double[] extra, final double nUnits, final long nObs) {
-        final int nb = spec.binCount();
+        return binnedStats(spec, spec.binCount(), extra, nUnits, nObs);
+    }
+
+    /** {@link #binnedStats(ScreenSpec, double[], double, long)} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    static Block binnedStats(final ScreenSpec spec, final int nb, final double[] extra, final double nUnits, final long nObs) {
         if (extra == null) return Block.degenerate(nObs, nb);
         final double[] s = new double[nb];
         final double[] n = new double[nb];
@@ -331,7 +336,12 @@ public final class ScreenReport {
      */
     static BlockPartial blockPartial(final ScreenSpec spec, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
                                      final long nObs, final double sigma2, final double l2) {
-        final int nb = spec.binCount();
+        return blockPartial(spec, spec.binCount(), vec, marginal, fit, nUnits, nObs, sigma2, l2);
+    }
+
+    /** {@link #blockPartial(ScreenSpec, double[], Block, FitState, double, long, double, double)} over a block of {@code nb} cells. */
+    static BlockPartial blockPartial(final ScreenSpec spec, final int nb, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
+                                     final long nObs, final double sigma2, final double l2) {
         final int k = fit.k;
         final boolean grouped = spec.isGroupedMultinomial();
         final int hLen = grouped ? nb * nb : nb;
@@ -440,13 +450,19 @@ public final class ScreenReport {
      * column, the pair grids' edges by x column (a pair member's conditioning column, the interaction shapes), and a
      * candidate column's smallest finite value in the window (NaN when unknown: the joint's ratio reading).
      */
-    public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges, IntFunction<double[]> gridEdges, IntToDoubleFunction minimum) {
+    public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges, IntFunction<double[]> gridEdges, IntToDoubleFunction minimum,
+                       IntFunction<WindowQuantiles.Levels> levels) {
         public Bins(final IntFunction<double[]> representatives, final IntFunction<double[]> edges) {
-            this(representatives, edges, i -> null, i -> Double.NaN);
+            this(representatives, edges, i -> null, i -> Double.NaN, i -> null);
         }
 
         public Bins(final IntFunction<double[]> representatives, final IntFunction<double[]> edges, final IntFunction<double[]> gridEdges) {
-            this(representatives, edges, gridEdges, i -> Double.NaN);
+            this(representatives, edges, gridEdges, i -> Double.NaN, i -> null);
+        }
+
+        public Bins(final IntFunction<double[]> representatives, final IntFunction<double[]> edges, final IntFunction<double[]> gridEdges,
+                    final IntToDoubleFunction minimum) {
+            this(representatives, edges, gridEdges, minimum, i -> null);
         }
     }
 
@@ -721,6 +737,14 @@ public final class ScreenReport {
         double s = 0;
         for (int b = 0; b < over; b++) if (block.h[b] > 0) s += (phi[b] - mean) * block.s[b];
         return s >= 0 ? "+" : "-";
+    }
+
+    /**
+     * The sign of the centred contrast's score ({@link #direction}) as ±1: a level's effect against the rest, not the
+     * sign of its raw S_l (which carries the window's total residual in offset mode).
+     */
+    private static double contrastSign(final Block block, final double[] phi, final int over) {
+        return "+".equals(direction(block, phi, over)) ? 1d : -1d;
     }
 
     /** The shapes tried on the value bins: the smooth ones on the representatives, the cut ones at every edge. */
@@ -1323,6 +1347,69 @@ public final class ScreenReport {
         return best;
     }
 
+    /**
+     * The categorical grouping suggestions (DSL doc §6.2): a column's named levels sorted by effect S_l / H_l and cut
+     * once at the best split gain (the boosted-tree categorical split) — kind {@code grouping}, the two groups in
+     * the fragment, the split's share of the block χ² — and every level whose own contrast against the rest is
+     * strong (|z| ≥ 3) as a one-hot indicator — kind {@code onehot} (the feature transform's row {@code indicator} op;
+     * the folded {@code (other)} level has no single value to flag and gets none). In-sample, hypotheses, for the
+     * passing columns only ({@code passed}: the column names that passed their test).
+     */
+    static List<Map<String, Object>> groupings(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final Bins bins,
+                                               final Set<String> passed) {
+        final List<Map<String, Object>> out = new ArrayList<>();
+        if (!spec.hasCategoricals() || bins == null) return out;
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            if (!passed.contains(spec.categoricals.get(c))) continue;
+            final WindowQuantiles.Levels levels = bins.levels().apply(c);
+            if (levels == null || levels.size() < 2) continue;
+            final int nb = levels.size();
+            final ScoreAccumulator acc = accumulators.get(spec.categoricalKey(c, -1));
+            if (acc == null || acc.getExtra() == null) continue;
+            final Block block = binnedStats(spec, nb, acc.getExtra(), nUnits, (long) acc.getTotal()[ScoreAccumulator.N_OBS]);
+            if (block.stats.degenerate || !(block.stats.chi2 > 0)) continue;
+            final String name = spec.categoricals.get(c);
+            // levels by effect, the best single cut along that order
+            final List<Integer> order = new ArrayList<>();
+            for (int l = 0; l < nb; l++) if (block.h[l] > 0) order.add(l);
+            order.sort(Comparator.comparingDouble(l -> block.s[l] / block.h[l]));
+            double bestGain = 0;
+            int bestCut = -1;
+            for (int j = 1; j < order.size(); j++) {
+                final double gain = splitGain(block.s, block.h, order.subList(0, j), order.subList(j, order.size()));
+                if (gain > bestGain) {
+                    bestGain = gain;
+                    bestCut = j;
+                }
+            }
+            if (bestCut > 0) {
+                final List<String> low = new ArrayList<>(), high = new ArrayList<>();
+                for (int j = 0; j < order.size(); j++) (j < bestCut ? low : high).add(levels.names().get(order.get(j)));
+                out.add(jointRecord(name, "grouping", "split", Double.NaN, Math.min(1d, bestGain / block.stats.chi2), bestGain,
+                        nUnits > 0 ? bestGain / (2 * nUnits) : Double.NaN, null, Double.NaN,
+                        "group " + name + " into " + low + " (lower effect) vs " + high + " (higher): a level grouping, or one-hot the few strong levels and a shrunk encoding for the rest"));
+            }
+            // strong single levels
+            for (int l = 0; l < nb; l++) {
+                if (!(block.h[l] > 0)) continue;
+                final String level = levels.names().get(l);
+                // the fold of the levels beyond maxLevels is no value a row indicator can name
+                if (levels.folded() && l == nb - 1) continue;
+                final double[] phi = new double[nb];
+                phi[l] = 1;
+                final double chi2 = contrastChi2(block, phi, nb);
+                if (chi2 < 9) continue;
+                final String indicator = ScreenSpec.LEVEL_NULL.equals(level)
+                        ? "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}"
+                        : "{name: " + name + "_is, scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
+                out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
+                        nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
+                        indicator + " (z " + fmt(contrastSign(block, phi, nb) * Math.sqrt(chi2)) + ")"));
+            }
+        }
+        return out;
+    }
+
     public static Schema suggestionSchema() {
         return Schema.builder()
                 .withField("candidate", Schema.FieldType.STRING)
@@ -1698,6 +1785,91 @@ public final class ScreenReport {
         }
         if (spec.hasPairs() && !conditioned) notes.add("pairs: no partial test (see the conditioning note), so the pair records are degenerate");
 
+        // the categorical candidates (DSL doc §6.2): a column's levels as a block (df = active levels − 1), its
+        // per-level contrasts in level_z, its own placebo kind (the levels redrawn from the window frequencies)
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            final WindowQuantiles.Levels levels = bins == null ? null : bins.levels().apply(c);
+            if (levels == null) {
+                if (bins != null) notes.add("categorical " + spec.categoricals.get(c) + ": no level counted (no scorable row)");
+                continue;
+            }
+            final int nb = levels.size();
+            for (int r = -1; r < spec.categoricalPlacebo; r++) {
+                final int key = spec.categoricalKey(c, r);
+                final ScoreAccumulator acc = accumulators.getOrDefault(key, new ScoreAccumulator());
+                final long nObs = (long) acc.getTotal()[ScoreAccumulator.N_OBS];
+                final Block block = nb < 2 ? Block.degenerate(nObs, Math.max(nb, 1)) : binnedStats(spec, nb, acc.getExtra(), nUnits, nObs);
+                final Stats st = block.stats;
+                final boolean placebo = r >= 0;
+                final Map<String, Object> rec = new LinkedHashMap<>();
+                rec.put("candidate", placebo ? spec.categoricalPlaceboName(c, r) : spec.categoricals.get(c));
+                rec.put("transform", ScreenSpec.TRANSFORM_LEVELS);
+                rec.put("method", METHOD);
+                rec.put("family", spec.family);
+                for (final String f : List.of("S", "H", "beta", "z")) rec.put(f, null);
+                rec.put("chi2", st.chi2);
+                rec.put("est_gain", st.estGain);
+                rec.put("df", (long) block.df);
+                rec.put("pValue", st.pValue);
+                rec.put("qValue", null);
+                rec.put("n_groups", (long) nUnits);
+                rec.put("n_obs", st.nObs);
+                rec.put("periods_agree", null);
+                rec.put("n_periods", null);
+                rec.put("period_z", null);
+                rec.put("bin_stats", null);
+                rec.put("bin_edges", null);
+                putHet(rec, "", null);
+                // each level against the rest: the df = 1 contrast's signed z, its score and information
+                final List<Map<String, Object>> levelRecords = new ArrayList<>();
+                if (!placebo) {
+                    for (int l = 0; l < nb; l++) {
+                        final double[] phi = new double[nb];
+                        phi[l] = 1;
+                        final double chi2 = st.degenerate ? 0d : contrastChi2(block, phi, nb);
+                        final Map<String, Object> lr = new LinkedHashMap<>();
+                        lr.put("level", levels.names().get(l));
+                        lr.put("z", st.degenerate || !(block.h[l] > 0) ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
+                        lr.put("S", block.s[l]);
+                        lr.put("H", block.h[l]);
+                        lr.put("n", Math.round(block.n[l]));
+                        levelRecords.add(lr);
+                    }
+                }
+                rec.put("level_z", placebo ? null : levelRecords);
+                Stats used = st;
+                if (conditioned) {
+                    final PartialAccumulator pacc = partials.get(key);
+                    final double[] vec = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
+                    final BlockPartial bp = vec == null || st.degenerate ? BlockPartial.degenerate(st.nObs, Double.NaN)
+                            : blockPartial(spec, nb, vec, block, fit, nUnits, st.nObs, sigma2, spec.conditioningL2);
+                    final Stats pst = bp.partial.stats;
+                    rec.put("r2_F", Double.isNaN(bp.partial.r2) ? null : bp.partial.r2);
+                    rec.put("partial_S", null);
+                    rec.put("partial_H", null);
+                    rec.put("partial_chi2", pst.chi2);
+                    rec.put("partial_z", null);
+                    rec.put("partial_gain", pst.estGain);
+                    rec.put("partial_pValue", pst.pValue);
+                    rec.put("partial_df", (long) bp.df);
+                    used = pst;
+                } else {
+                    for (final String f : List.of("r2_F", "partial_S", "partial_H", "partial_chi2", "partial_z", "partial_gain", "partial_pValue", "partial_df")) rec.put(f, null);
+                }
+                putHet(rec, "partial_", null);
+                rec.put("partial_periods_agree", null);
+                rec.put("partial_n_periods", null);
+                rec.put("partial_period_z", null);
+                effective.add(used);
+                effectiveAgree.add(null);
+                effectiveHet.add(null);
+                if (placebo) placeboGains.computeIfAbsent(ScreenSpec.KIND_LEVELS, kind -> new ArrayList<>()).add(used.degenerate ? 0d : used.estGain);
+                rec.put("placebo", placebo);
+                rec.put("degenerate", st.degenerate);
+                records.add(rec);
+            }
+        }
+
         // placebo threshold per statistic kind (the theoretical chi2(df) quantile when no placebo column is
         // configured): the df = 1 transforms pool one cut, the binned block test its own
         final Map<String, Double> thresholds = new LinkedHashMap<>();
@@ -1706,11 +1878,15 @@ public final class ScreenReport {
         if (spec.hasBinned()) kinds.add(ScreenSpec.KIND_BINNED);
         if (spec.hasHeterogeneity()) kinds.add(ScreenSpec.KIND_HET);
         if (spec.hasPairs()) kinds.add(ScreenSpec.KIND_PAIR);
+        if (spec.hasCategoricals()) kinds.add(ScreenSpec.KIND_LEVELS);
         // the heterogeneity test's nominal df: the most levels any record found usable, less one
         int hetDf = 1;
         for (final Het h : effectiveHet) if (h != null && !h.degenerate) hetDf = Math.max(hetDf, h.df);
+        // the categorical blocks' nominal df: the largest df any of them found
+        int levelsDf = 1;
+        for (final Map<String, Object> r : records) if (ScreenSpec.TRANSFORM_LEVELS.equals(r.get("transform"))) levelsDf = Math.max(levelsDf, ((Long) r.get("df")).intValue());
         for (final String kind : kinds) {
-            final int df = ScreenSpec.KIND_BINNED.equals(kind) ? spec.binsK - 1 : ScreenSpec.KIND_HET.equals(kind) ? hetDf : 1;
+            final int df = ScreenSpec.KIND_BINNED.equals(kind) ? spec.binsK - 1 : ScreenSpec.KIND_HET.equals(kind) ? hetDf : ScreenSpec.KIND_LEVELS.equals(kind) ? levelsDf : 1;
             final double theoretical = nUnits > 0 ? StatMath.chiSquareQuantile(spec.quantile, df) / (2 * nUnits) : Double.NaN;
             final List<Double> gains = placeboGains.getOrDefault(kind, List.of());
             final double cut = gains.isEmpty() ? theoretical : StatMath.quantile(gains.stream().mapToDouble(Double::doubleValue).sorted().toArray(), spec.quantile);
@@ -1849,9 +2025,12 @@ public final class ScreenReport {
         suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold), bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
         suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
+        // the passing categorical candidates' level groupings and strong single levels
+        suggested.addAll(groupings(spec, accumulators, nUnits, bins, passedBest.keySet()));
         // the candidates' suggestions (placebo records excluded, as nScored)
-        summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
+        summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() || spec.hasCategoricals() ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
         summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);
+        summary.put("nCategoricals", spec.hasCategoricals() ? (long) spec.categoricals.size() : null);
         return new Result(records, summary, suggested);
     }
 
@@ -2135,6 +2314,7 @@ public final class ScreenReport {
                 .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("nSuggestions", Schema.FieldType.INT64)
                 .withField("nJointColumns", Schema.FieldType.INT64)
+                .withField("nCategoricals", Schema.FieldType.INT64)
                 .withField("nPairs", Schema.FieldType.INT64)
                 .withField("nPairsPassed", Schema.FieldType.INT64)
                 .withField("passedPairs", Schema.FieldType.array(Schema.FieldType.STRING))
@@ -2174,6 +2354,7 @@ public final class ScreenReport {
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
         if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebos.size() + " placebo pairs)" + (spec.hasPairShape() ? " shape=" + spec.pairShapeBins + "x" + spec.pairShapeBins : ""));
         if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect + " pairs=" + spec.jointPairs + " excess=" + spec.jointExcess);
+        if (spec.hasCategoricals()) parts.add("categorical=" + spec.categoricals.size() + " " + spec.categoricals + " maxLevels=" + spec.categoricalMaxLevels + " placebo=" + spec.categoricalPlacebo);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

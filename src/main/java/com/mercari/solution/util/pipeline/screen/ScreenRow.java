@@ -44,6 +44,14 @@ public final class ScreenRow implements Serializable {
 
     public ScreenRow(final String group, final String identity, final long time, final String period, final String level,
                      final double label, final double baseline, final double weight, final double[] x) {
+        this(group, identity, time, period, level, label, baseline, weight, x, null);
+    }
+
+    /** the categorical candidates' values as text, in the spec's categorical order (a null value = {@link ScreenSpec#LEVEL_NULL}); null without categoricals */
+    final String[] cat;
+
+    public ScreenRow(final String group, final String identity, final long time, final String period, final String level,
+                     final double label, final double baseline, final double weight, final double[] x, final String[] cat) {
         this.group = group;
         this.identity = identity;
         this.time = time;
@@ -53,6 +61,7 @@ public final class ScreenRow implements Serializable {
         this.baseline = baseline;
         this.weight = weight;
         this.x = x;
+        this.cat = cat;
     }
 
     public String getLevel() {
@@ -104,6 +113,8 @@ public final class ScreenRow implements Serializable {
             DOUBLE.encode(value.weight, out);
             INT.encode(value.x.length, out);
             for (final double v : value.x) DOUBLE.encode(v, out);
+            INT.encode(value.cat == null ? -1 : value.cat.length, out);
+            if (value.cat != null) for (final String c : value.cat) STRING.encode(c, out);
         }
 
         @Override
@@ -119,7 +130,13 @@ public final class ScreenRow implements Serializable {
             final int n = INT.decode(in);
             final double[] x = new double[n];
             for (int i = 0; i < n; i++) x[i] = DOUBLE.decode(in);
-            return new ScreenRow(group, identity, time, period, level, label, baseline, weight, x);
+            final int nc = INT.decode(in);
+            String[] cat = null;
+            if (nc >= 0) {
+                cat = new String[nc];
+                for (int i = 0; i < nc; i++) cat[i] = STRING.decode(in);
+            }
+            return new ScreenRow(group, identity, time, period, level, label, baseline, weight, x, cat);
         }
     }
 }

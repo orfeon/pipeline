@@ -1216,6 +1216,137 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testCategoricalCandidates() throws Exception {
+        // independent binomial rows with a string field g (four levels with different positive rates) as a categorical
+        // candidate: the pre-pass counts the levels, the score pass keeps a block per level (df = 3) and five placebo
+        // columns with the levels redrawn from the window frequencies; the level dictionary folds beyond maxLevels
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 5}}");
+        Assertions.assertEquals(List.of("g"), spec.categoricals);
+        Assertions.assertTrue(spec.needsWindowQuantiles());
+        Assertions.assertEquals(ScreenSpec.CATEGORICAL_KEY_BASE, spec.categoricalKey(0, -1));
+        Assertions.assertEquals("g*__noise_2", spec.categoricalPlaceboName(0, 2));
+        final String[] levels = {"A", "B", "C", "D"};
+        final double[] rate = {0.1, 0.3, 0.6, 0.85};
+        final java.util.Random random = new java.util.Random(21);
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+        for (int i = 0; i < 400; i++) {
+            final int l = i % 4;
+            final double y = random.nextDouble() < rate[l] ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, Double.NaN, 1, new double[]{random.nextGaussian()}, new String[]{levels[l]});
+            rows.add(r);
+            q.update(r.x);
+            q.updateLevels(r.cat);
+        }
+        // the dictionary: by count then name; folded beyond maxLevels
+        final WindowQuantiles.Levels dict = q.levels(0, 32);
+        Assertions.assertEquals(List.of("A", "B", "C", "D"), dict.names());
+        Assertions.assertFalse(dict.folded());
+        Assertions.assertEquals(2, dict.indexOf("C"));
+        Assertions.assertEquals(-1, dict.indexOf("Z"));
+        Assertions.assertEquals(0.25, dict.frequency()[1], 1e-12);
+        final WindowQuantiles.Levels folded = q.levels(0, 2);
+        Assertions.assertEquals(List.of("A", "B", "(other)"), folded.names());
+        Assertions.assertTrue(folded.folded());
+        Assertions.assertEquals(2, folded.indexOf("D"));
+        Assertions.assertEquals(0.5, folded.frequency()[2], 1e-12);
+        // the coder round-trips the counts
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        WindowQuantiles.CODER.encode(q, bytes);
+        Assertions.assertEquals(dict.names(), WindowQuantiles.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray())).levels(0, 32).names());
+
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        Assertions.assertTrue(acc.containsKey(spec.categoricalKey(0, -1)) && acc.containsKey(spec.categoricalKey(0, 4)));
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+        final Map<String, Map<String, Object>> byKey = new HashMap<>();
+        for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+        Assertions.assertEquals(1 + 1 + 5, result.records().size(), byKey.keySet().toString());
+        final Map<String, Object> g = byKey.get("g:levels");
+        Assertions.assertEquals(3L, g.get("df"));
+        Assertions.assertNull(g.get("z"));
+        Assertions.assertTrue((Double) g.get("chi2") > 50, "categorical chi2 " + g.get("chi2"));   // rates 0.1 / 0.3 / 0.6 / 0.85 over 100 rows each
+        Assertions.assertEquals(Boolean.TRUE, g.get("passed"));
+        Assertions.assertEquals(Boolean.FALSE, g.get("degenerate"));
+        Assertions.assertEquals(400L, g.get("n_obs"));
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> levelZ = (List<Map<String, Object>>) g.get("level_z");
+        Assertions.assertEquals(4, levelZ.size());
+        Assertions.assertEquals("A", levelZ.get(0).get("level"));
+        Assertions.assertTrue((Double) levelZ.get(0).get("z") < -3 && (Double) levelZ.get(3).get("z") > 3, levelZ.toString());
+        Assertions.assertEquals(100L, levelZ.get(0).get("n"));
+        for (int r = 0; r < 5; r++) {
+            final Map<String, Object> placebo = byKey.get("g*__noise_" + r + ":levels");
+            Assertions.assertEquals(Boolean.TRUE, placebo.get("placebo"));
+            Assertions.assertEquals(Boolean.FALSE, placebo.get("passed"));
+            Assertions.assertNull(placebo.get("level_z"));
+            Assertions.assertTrue((Double) placebo.get("chi2") < 30, placebo.toString());
+        }
+        @SuppressWarnings("unchecked") final Map<String, Double> thresholds = (Map<String, Double>) result.summary().get("thresholds");
+        Assertions.assertTrue(thresholds.containsKey("levels"));
+        Assertions.assertEquals(1L, result.summary().get("nCategoricals"));
+        Assertions.assertEquals(List.of("g"), result.summary().get("passedColumns"));
+        // the grouping suggestion cuts the levels by effect, the strong levels get a one-hot
+        final Map<String, List<Map<String, Object>>> byKind = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) byKind.computeIfAbsent((String) s.get("kind"), k -> new java.util.ArrayList<>()).add(s);
+        Assertions.assertTrue(byKind.containsKey("grouping") && byKind.containsKey("onehot"), byKind.keySet().toString());
+        final Map<String, Object> grouping = byKind.get("grouping").get(0);
+        Assertions.assertEquals("g", grouping.get("candidate"));
+        Assertions.assertTrue((Double) grouping.get("share") > 0.5 && (Double) grouping.get("share") <= 1.0 + 1e-9, grouping.toString());
+        Assertions.assertTrue(((String) grouping.get("fragment")).contains("[A, B]") || ((String) grouping.get("fragment")).contains("[C, D]"), grouping.toString());
+        Assertions.assertTrue(byKind.get("onehot").stream().anyMatch(s -> "D".equals(s.get("name"))), byKind.get("onehot").toString());
+        // the one-hot fragment is the feature transform's row indicator op (its expressions have no string literal)
+        Assertions.assertTrue(byKind.get("onehot").stream().filter(s -> "D".equals(s.get("name")))
+                .allMatch(s -> ((String) s.get("fragment")).startsWith("{name: g_is, scope: row, type: indicator, input: g, values: [\"D\"]}")), byKind.get("onehot").toString());
+        Assertions.assertTrue(ScreenReport.describe(spec).contains("categorical=1 [g]"));
+        // validation
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], categorical: {maxLevels: 4}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], categorical: {include: [x]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], categorical: {include: [g]}}"));
+    }
+
+    @Test
+    public void testCategoricalContrastSignAndCategoricalsAlone() throws Exception {
+        // a baseline below both levels (0.2 against rates 0.3 / 0.5): both raw level scores are positive, yet level A lies
+        // below the rest — its contrast z is negative. No numeric candidate matches: a screen of categoricals alone.
+        for (final String pass : new String[]{"", ", pass: {minGain: 1000}"}) {
+            final ScreenSpec spec = spec("{family: binomial, label: y, baseline: {field: b, form: prob}, candidates: [nomatch], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 0}" + pass + "}");
+            Assertions.assertTrue(spec.candidates.isEmpty());
+            Assertions.assertEquals(List.of("g"), spec.categoricals);
+            final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 200; i++) {
+                final boolean a = i < 100;
+                final double y = (a ? i < 30 : i - 100 < 50) ? 1 : 0;
+                final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, 0.2, 1, new double[0], new String[]{a ? "A" : "B"});
+                rows.add(r);
+                q.update(r.x);
+                q.updateLevels(r.cat);
+            }
+            final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+            final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                    new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+            final Map<String, Object> g = result.records().stream().filter(r -> "g".equals(r.get("candidate"))).findFirst().orElseThrow();
+            @SuppressWarnings("unchecked") final List<Map<String, Object>> levelZ = (List<Map<String, Object>>) g.get("level_z");
+            Assertions.assertEquals("A", levelZ.get(0).get("level"));
+            Assertions.assertTrue((Double) levelZ.get(0).get("S") > 0, levelZ.toString());
+            Assertions.assertTrue((Double) levelZ.get(0).get("z") < 0 && (Double) levelZ.get(1).get("z") > 0, levelZ.toString());
+            if (pass.isEmpty()) {
+                Assertions.assertEquals(Boolean.TRUE, g.get("passed"));
+                final Map<String, Object> onehotA = result.suggestions().stream().filter(s -> "onehot".equals(s.get("kind")) && "A".equals(s.get("name"))).findFirst().orElseThrow();
+                Assertions.assertTrue(((String) onehotA.get("fragment")).contains("(z -"), onehotA.toString());
+            } else {
+                // a column that did not pass gets no grouping / one-hot suggestion
+                Assertions.assertEquals(Boolean.FALSE, g.get("passed"));
+                Assertions.assertTrue(result.suggestions().isEmpty(), result.suggestions().toString());
+            }
+        }
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

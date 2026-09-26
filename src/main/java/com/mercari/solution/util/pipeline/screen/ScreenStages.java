@@ -187,8 +187,9 @@ public final class ScreenStages {
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final TupleTag<MElement> suggestionTag = new TupleTag<>() {};
         // the finalize step reads the window sketches for the suggestions' bin representatives, the pair grids'
-        // edges (the interaction shapes) and the joint's candidate minima (the ratio suggestions); nothing else there does
-        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape() || spec.needsJointMinima()) && quantilesView != null;
+        // edges (the interaction shapes), the joint's candidate minima (the ratio suggestions) and the categorical level
+        // dictionaries; nothing else there does
+        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape() || spec.needsJointMinima() || spec.hasCategoricals()) && quantilesView != null;
         if (finalizeReadsSketches) finalizeSideInputs.add(quantilesView);
         // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
         final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
@@ -306,7 +307,16 @@ public final class ScreenStages {
                     final String v = text(values.get(spec.heterogeneityField));
                     level = v == null ? ScreenSpec.LEVEL_NULL : v;
                 }
-                final ScreenRow row = new ScreenRow(group, identity, time, period, level, label, baseline == null ? Double.NaN : baseline, weight, x);
+                // the categorical candidates' values as text (a null value is its own level)
+                String[] cat = null;
+                if (spec.hasCategoricals()) {
+                    cat = new String[spec.categoricals.size()];
+                    for (int i = 0; i < cat.length; i++) {
+                        final Object v = values.get(spec.categoricals.get(i));
+                        cat[i] = v == null ? ScreenSpec.LEVEL_NULL : String.valueOf(v);
+                    }
+                }
+                final ScreenRow row = new ScreenRow(group, identity, time, period, level, label, baseline == null ? Double.NaN : baseline, weight, x, cat);
                 c.output(rowTag, KV.of(group == null ? identity : group, row));
                 count(window, book);
             } catch (final Throwable e) {
@@ -391,8 +401,11 @@ public final class ScreenStages {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
             // the candidates and the shuffle reference when their sketches are read (rank / absdev of independent rows,
-            // the value bins) and, for a pair's 2-D grid, its members' conditioning columns — a sketch index is the x column
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x, sketched);
+            // the value bins) and, for a pair's 2-D grid, its members' conditioning columns — a sketch index is the x column;
+            // the same pass counts the categorical candidates' levels
+            final WindowQuantiles q = partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns(), spec.categoricals.size()));
+            q.update(row.x, sketched);
+            q.updateLevels(row.cat);
         }
 
         @FinishBundle
@@ -684,9 +697,9 @@ public final class ScreenStages {
             // the bins' geometry: the suggestions' representatives, the pass list's edges of a passing block, the pair
             // grids' edges and the joint's candidate minima
             ScreenReport.Bins bins = null;
-            if (spec.hasBinned() || spec.hasPairShape() || spec.needsJointMinima()) {
+            if (spec.hasBinned() || spec.hasPairShape() || spec.needsJointMinima() || spec.hasCategoricals()) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
-                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin);
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels);
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {

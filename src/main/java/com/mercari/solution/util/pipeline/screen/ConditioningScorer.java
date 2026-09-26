@@ -229,7 +229,11 @@ public final class ConditioningScorer implements Serializable {
      * A_bj = Σ_{i in b} w_i v̂_i f_ij. Only the bins the unit occupies are touched (an empty bin's sums are zero).
      */
     private void binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
-        final int nb = spec.binCount();
+        binnedPartial(spec.binCount(), unit, bins, f, p, into);
+    }
+
+    /** {@link #binnedPartial(GroupScorer.Unit, int[], double[][], double[], PartialAccumulator)} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    private void binnedPartial(final int nb, final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
         final int n = unit.size();
         if (spec.isGroupedMultinomial()) {
             final double[] out = into.total(nb + nb * nb + nb * k);
@@ -333,6 +337,7 @@ public final class ConditioningScorer implements Serializable {
                 final double[] grid = pairGrid(unit, q, p);
                 if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
             }
+            categoricalBlocks(unit, f, p, into);
             return;
         }
         // row families: every row is its own period and modifier level; the rows are bucketed once into (period, level)
@@ -374,6 +379,24 @@ public final class ConditioningScorer implements Serializable {
         for (int q = 0; q < spec.pairs.size(); q++) {
             final double[] grid = pairGrid(unit, q, p);
             if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
+        }
+        categoricalBlocks(unit, f, p, into);
+    }
+
+    /**
+     * The categorical candidates' blocks at the fitted p̂ (DSL doc §6.2): a column's levels (and its placebos'
+     * redrawn levels) as a one-hot block of {@code [s, H, A]} sums under the marginal keys, no period slices.
+     */
+    private void categoricalBlocks(final GroupScorer.Unit unit, final double[][] f, final double[] p, final Map<Integer, PartialAccumulator> into) {
+        if (!spec.hasCategoricals()) return;
+        if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            final WindowQuantiles.Levels levels = binner.categoricalLevels(c);
+            if (levels == null || levels.size() < 2) continue;
+            for (int r = -1; r < spec.categoricalPlacebo; r++) {
+                final int[] idx = r < 0 ? GroupScorer.levelIndices(unit, c, levels) : binner.placeboLevels(unit, c, r, levels);
+                binnedPartial(levels.size(), unit, idx, f, p, into.computeIfAbsent(spec.categoricalKey(c, r), key -> new PartialAccumulator()));
+            }
         }
     }
 
