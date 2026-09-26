@@ -1080,14 +1080,14 @@ public final class ScreenReport {
             final boolean iPositive = p[4] > 0;
             final String first = iPositive ? a : b, second = iPositive ? b : a;
             final double r = Math.abs(iPositive ? p[5] / p[4] : p[4] / p[5]);
-            final Map<String, Object> diff = jointRecord(first, "difference", first + " - " + second, p[6], p[2], p[3], gain, null,
+            final Map<String, Object> diff = jointRecord(first, "difference", first + " - " + second, p[6], p[2], p[3], gain, null, Double.NaN,
                     "{scope: row, expr: \"" + first + " - " + fmt(r) + "*" + second + "\"} (joint chi2 " + fmt(p[3]) + ", " + fmt(p[2]) + "x the better single)");
             out.add(diff);
             // the ratio reading needs positive columns (the log-scale direction); the sketch minima tell
             final Double minI = bins == null ? Double.NaN : bins.minimum().apply(spec.jointColumn(i));
             final Double minJ = bins == null ? Double.NaN : bins.minimum().apply(spec.jointColumn(j));
             if (minI != null && minJ != null && minI > 0 && minJ > 0) {
-                out.add(jointRecord(first, "ratio", first + " / " + second, p[6], p[2], p[3], gain, null,
+                out.add(jointRecord(first, "ratio", first + " / " + second, p[6], p[2], p[3], gain, null, Double.NaN,
                         "{scope: row, expr: \"" + first + " / " + second + "\"} (both positive; the difference's log-scale reading, approximate)"));
             }
         }
