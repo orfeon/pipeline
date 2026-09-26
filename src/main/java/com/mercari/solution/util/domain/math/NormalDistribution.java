@@ -2,7 +2,7 @@ package com.mercari.solution.util.domain.math;
 
 /**
  * Standard normal distribution helpers shared by the feature ({@code quantileTransform}) and screen transforms:
- * the complementary error function and the quantile (inverse CDF). Pure functions, no allocation per call.
+ * the complementary error function, the CDF and the quantile (inverse CDF). Pure functions, no allocation per call.
  */
 public final class NormalDistribution {
 
@@ -49,6 +49,11 @@ public final class NormalDistribution {
         return Math.exp(-x * x) / SQRT_PI / (x + tail);
     }
 
+    /** Standard normal cdf Φ(x) = erfc(−x / √2) / 2. */
+    public static double cdf(final double x) {
+        return 0.5 * erfc(-x / SQRT_2);
+    }
+
     /**
      * Standard normal quantile Φ⁻¹(p): Acklam's rational approximation refined by one Halley step against
      * {@link #erfc} (~1e-15). {@code ±∞} at 0 / 1, NaN outside (0, 1).
@@ -72,7 +77,7 @@ public final class NormalDistribution {
             x = -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1);
         }
         // one Halley refinement step against erfc
-        final double e = 0.5 * erfc(-x / SQRT_2) - p;
+        final double e = cdf(x) - p;
         final double u = e * SQRT_2PI * Math.exp(x * x / 2);
         return x - u / (1 + x * u / 2);
     }

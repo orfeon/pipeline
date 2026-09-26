@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a practical gain floor (pass.minGain), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -76,8 +76,11 @@ candidate (a KLL quantile sketch per column, rank error about 0.8 %), `rank` is 
 the window's observed values as a fraction of their count — `(values below + half the values equal, itself
 included) / n`, in (0, 1) — and `absdev` is `|x − window median|`. Noise placebos are standard normal by
 construction and take the exact normal cdf / `|x|`; the summary's `notes` says the sketch was used. The
-default without `group` stays `raw` (the pre-pass reads the input once more): list the transforms to get
-`rank` / `absdev`.
+sketch's compaction is randomised, so beyond 400 values per candidate a re-run can move a candidate's
+`rank` / `absdev` z slightly (within the rank error; the placebo columns and every grouped transform stay
+exactly reproducible). Session windows cannot carry the window reference (use the global, fixed, sliding or
+calendar window). The default without `group` stays `raw` (the pre-pass reads the input once more): list the
+transforms to get `rank` / `absdev`.
 
 ### Binned block test
 
@@ -139,11 +142,14 @@ effect that flips sign across segments or periods — invisible to the window st
   reported as `passRule` in the summary and the pass list.
 - `pass.minGain` is a practical floor on the gain: `passed` then requires the effective test's gain above
   `max(threshold, minGain)`. The placebo threshold answers "is it distinguishable from noise" and shrinks with
-  the data (≈ 3.3 / N on the χ²(1) scale at q99); on a large window it lets through columns whose gain is real
-  but too small to matter for training. `minGain` is in the unit of `est_gain` — the average log-likelihood
-  improvement per unit, the scale a trained model's excess log score is reported on — so the same value means
-  the same thing whatever N. The record's `threshold` stays the placebo cut (the calibration check); `passRule`
-  names the floor (`est_gain > max(threshold, 1.0E-5)`).
+  the data (the χ²(1) quantile over 2N: ≈ 6.6 / 2N ≈ 3.3 / N on the gain scale at q99); on a large window it lets
+  through columns whose gain is real but too small to matter for training. `minGain` is in the unit of
+  `est_gain` — the average log-likelihood improvement per unit, the scale a trained model's excess log score is
+  reported on — so the same value means the same thing whatever N. With `weight` the gain is weight-scaled (the
+  weights multiply S and H, the gain divides by the unit count), so the floor is compared with the mean weight
+  times the per-unit gain: normalise the weights to mean 1, or scale `minGain` by the mean weight. The record's
+  `threshold` stays the placebo cut (the calibration check); `passRule` names the floor
+  (`est_gain > max(threshold, 1.0E-5)`).
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
@@ -273,17 +279,18 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
 | df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
-| pValue, qValue | FLOAT64 | χ²(1) upper tail; Benjamini–Hochberg q-value over the candidate records (null for placebo) |
+| pValue, qValue | FLOAT64 | χ²(df) upper tail (χ²(1), or the binned block's df); Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
 | n_obs | INT64 | rows whose transformed value is finite |
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
-| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms. Under conditioning the block's partial test adds `partial_df` (INT64) |
+| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
 | het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
 | level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
 | het_passed | BOOL | the effective heterogeneity gain above `max(thresholds.het, minGain)`; candidate records only, never part of `passed` |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
@@ -595,7 +602,8 @@ transforms:
   neither controls the family-wise error of a large candidate set.
 - Blind to time dynamics: the statistic is a window average; read `period_z` for decay.
 - Batch only (every statistic is a global Combine); under a windowing strategy the records are per window.
-- Independent rows (`group` omitted) support `raw` only; `rank` / `absdev` over the whole window need a
-  quantile sketch (planned).
+- Independent rows (`group` omitted) take `rank` / `absdev` against a window quantile sketch: one extra pass,
+  approximate (rank error about 0.8 %) and not bit-reproducible beyond 400 values per candidate; not under
+  session windows.
 - Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
   hundred columns (the Newton Gram matrix is k × k).

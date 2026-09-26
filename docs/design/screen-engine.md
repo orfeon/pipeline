@@ -17,7 +17,7 @@ feature transform does (engine doc §1.2):
 | `glm.Family` / `glm.Baselines` / `glm.GlmFit` (`util/pipeline/glm/`) | the vocabulary shared by the supervised transforms: the families with their baseline forms, Fisher weight and link; the baseline → mean-per-row conversion and the grouped label normalisation (`Baselines.means` / `normalizeLabels`, with the `Skip` reasons); the offset GLM's fitted means and Newton pass evaluation `[n, ll, g, G]` (`GlmFit.fitted` / `evaluate`) | no |
 | `glm.StatMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; the sample quantile delegates to `OrderStatistics`, and the scorers / Prepare use the feature transform's `FeatureValues` directly for randomness and coercions | no |
 | `glm.SpecJson` | the lenient parameter readers (`string` / `number` / `strings` / `parseInstant`, …) the specs share | no |
-| `glm.SketchAccumulator` | one mergeable KLL quantile sketch (k = 400) with `rank` (mid-rank fraction), `quantile`, `edges`; coder + `Fn`; shared with the evaluation transform's calibration tables | coder + CombineFn |
+| `glm.SketchAccumulator` | one mergeable KLL quantile sketch (k = 400) with `rank` (mid-rank fraction), `quantile`, `median` (type-7 below k values), `edges`, read lock-free from a sorted view built once (a side input is read by several bundles); coder + `Fn`; shared with the evaluation transform's calibration tables | coder + CombineFn |
 | `WindowQuantiles` | the window's sketches, one per candidate (`rank` / `median` / `quantile` / `edges` by column): the rank / absdev reference of independent rows and the value-bin edges of DSL §12.1; coder + `Fn` (input = accumulator = output) | coder + CombineFn |
 | `ScreenRow` | the prepared sample (unit key, identity, time, period, the heterogeneity modifier's level, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, the rows `baseline.invalid: dropRow` rejects removed and counted, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms (within the unit, or against the window sketches), the family's contribution into `ScoreAccumulator`s; the binned block's bin assignment (`bins`: value edges cached per column from the sketches, exact normal quantiles for a noise placebo, position bins from the within-unit rank) and its per-bin sums (`binnedRowContribution` / `binnedGroupedContribution`) | no |
@@ -95,7 +95,9 @@ goes to the slots), which `ScreenReport.binnedStats` turns into S_b / H_bb and t
 Every stage is a Combine in the module's windowing strategy: a fixed window yields one record set per
 window; the score DoFn keeps one accumulator map per window. `engineConstraints` rejects a triggered input
 (each Combine would fire once per pane, several partial summaries, and the conditioning singleton views
-break) and a non-global window with conditioning or `output.selection`; streaming is rejected by the module.
+break), a non-global window with conditioning or `output.selection`, and a merging (session) window when
+independent rows use `rank` / `absdev` (the WindowQuantiles view is a side input, which a merging WindowFn
+cannot map); streaming is rejected by the module.
 
 ## 4. The conditioning graph
 
@@ -154,9 +156,11 @@ residual variance at the fit, and falls back to the marginal test when that vari
 ## 5. Determinism and failure routing
 
 Every random draw derives from the seed and the unit key (dsl doc §5); rows are sorted before any draw, so
-bundle boundaries and worker counts cannot change a placebo column. Every DoFn catches per-element errors
-into the failure output (`Module.processError`) under `failFast`; the finalize step's pass-list write is the
-one deliberate hard failure (the list is a primary deliverable).
+bundle boundaries and worker counts cannot change a placebo column. The exception is the WindowQuantiles
+sketch (§2): KLL compaction draws from the library's unseeded generator and the merge follows the bundles,
+so beyond k values a candidate's window `rank` / `absdev` can move within the rank error between runs.
+Every DoFn catches per-element errors into the failure output (`Module.processError`) under `failFast`; the
+finalize step's pass-list write is the one deliberate hard failure (the list is a primary deliverable).
 
 ## 6. Runner findings
 

@@ -81,6 +81,9 @@ public final class ScreenStages {
         if (spec.selectionUri != null && !(strategy.getWindowFn() instanceof GlobalWindows)) {
             errors.add("output.selection needs the global window (one pass list per run; a windowed run would overwrite it per window)");
         }
+        if (spec.needsWindowQuantiles() && !strategy.getWindowFn().isNonMerging()) {
+            errors.add("rank / absdev of independent rows read the window's quantile sketch as a side input, which merging (session) windows cannot provide; use a global / fixed / sliding / calendar window, a group, or transforms: [raw]");
+        }
         if (!(strategy.getTrigger() instanceof DefaultTrigger)) {
             errors.add("screen needs the default trigger (a triggered input fires the Combines once per pane: several partial summaries, and the conditioning singleton views break); remove strategy.trigger");
         }
@@ -348,9 +351,8 @@ public final class ScreenStages {
         }
     }
 
-    /** Independent rows: every row is its own unit. */
     /**
-     * The window quantile pre-pass (independent rows with rank / absdev): every candidate value of the rows
+     * The window quantile pre-pass (independent rows with rank / absdev, the binned test's value edges): every candidate value of the rows
      * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
      * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
      * and window (combined globally).
@@ -385,6 +387,7 @@ public final class ScreenStages {
         }
     }
 
+    /** Independent rows: every row is its own unit. */
     static class SingletonUnitDoFn extends DoFn<KV<String, ScreenRow>, KV<String, Iterable<ScreenRow>>> {
         @ProcessElement
         public void processElement(final ProcessContext c) {

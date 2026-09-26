@@ -43,7 +43,7 @@ public final class ScreenSpec implements Serializable {
     public static final String TRANSFORM_RANK = "rank";
     public static final String TRANSFORM_ABSDEV = "absdev";
     public static final List<String> TRANSFORMS = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV);
-    /** the binned score test (DSL doc §12.1): a df = k − 1 block, never in the default list */
+    /** the binned score test (DSL doc §6.1): a df = k − 1 block, never in the default list */
     public static final String TRANSFORM_BINNED = "binned";
     public static final List<String> TRANSFORMS_AVAILABLE = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV, TRANSFORM_BINNED);
     /** bins.edges: window value quantiles (the sketch pre-pass) or the within-unit rank (grouped only) */
@@ -95,8 +95,6 @@ public final class ScreenSpec implements Serializable {
     public int binsK = BINS_DEFAULT;
     /** bins.edges: {@link #EDGES_VALUE} (window quantiles) or {@link #EDGES_RANK} (within-unit rank, grouped only) */
     public String binsEdges = EDGES_VALUE;
-    /** True when the config declares a {@code bins} block (which needs the binned transform). */
-    public boolean binsExplicit;
     /** heterogeneity.by: {@link #HET_PERIODS} / {@link #HET_FIELD} (null = no heterogeneity test) */
     public String heterogeneityBy;
     /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its first row) for the grouped family */
@@ -262,11 +260,17 @@ public final class ScreenSpec implements Serializable {
 
     /**
      * Whether the run needs the window quantile sketches (engine doc §2): independent rows (no group) with a
-     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row.
+     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row; or the binned test's
+     * value edges (grouped or not). A grouped run reads the sketches for the edges only: its rank / absdev stay
+     * within the unit ({@link GroupScorer#transform}).
      */
     public boolean needsWindowQuantiles() {
-        return (group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV)))
-                || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+        return needsRankReference() || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+    }
+
+    /** Independent rows with {@code rank} / {@code absdev}: the transforms read the window's sketches. */
+    private boolean needsRankReference() {
+        return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
     }
 
     public boolean hasBinned() {
@@ -314,8 +318,8 @@ public final class ScreenSpec implements Serializable {
      * lifted to {@code pass.minGain} when that is declared and higher. NaN stays NaN (no scorable unit).
      */
     public double gainCut(final double threshold) {
-        if (minGain == null || Double.isNaN(threshold)) return threshold;
-        return Math.max(threshold, minGain);
+        // Math.max propagates a NaN threshold
+        return minGain == null ? threshold : Math.max(threshold, minGain);
     }
 
 
@@ -422,7 +426,6 @@ public final class ScreenSpec implements Serializable {
         }
         final JsonElement bins = p.get("bins");
         if (bins != null && !bins.isJsonNull()) {
-            s.binsExplicit = true;
             if (bins.isJsonObject()) {
                 final JsonObject o = bins.getAsJsonObject();
                 final Double k = number(o, "k");
@@ -586,9 +589,13 @@ public final class ScreenSpec implements Serializable {
                     else if (s.minPeriodsAgree > 1 && s.minPeriodsAgree != Math.rint(s.minPeriodsAgree)) errors.add("pass.minPeriodsAgree above 1 is a count of periods and must be an integer");
                     if (s.periodsBucket == null) errors.add("pass.minPeriodsAgree needs periods (the sign agreement is read per period bucket)");
                 }
-                s.minGain = number(o, "minGain");
-                if (s.minGain != null && !(s.minGain > 0 && Double.isFinite(s.minGain))) {
-                    errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                // a declared but malformed floor (a list, an object, a non-numeric string) is an error, never silently no floor
+                final JsonElement minGain = o.get("minGain");
+                if (minGain != null && !minGain.isJsonNull()) {
+                    s.minGain = numeric(minGain);
+                    if (s.minGain == null || !(s.minGain > 0 && Double.isFinite(s.minGain))) {
+                        errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                    }
                 }
             } else {
                 errors.add("pass must be an object {minPeriodsAgree, minGain}");
@@ -665,8 +672,8 @@ public final class ScreenSpec implements Serializable {
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
-            if (needsWindowQuantiles()) {
-                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%; noise placebos use the exact normal cdf)");
+            if (needsRankReference()) {
+                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%, randomised compaction: beyond k values a re-run can shift them within that error; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
             if (hasBinned() && EDGES_RANK.equals(binsEdges)) errors.add("bins.edges rank needs group (the position bins read the within-unit rank); use edges: value for independent rows");

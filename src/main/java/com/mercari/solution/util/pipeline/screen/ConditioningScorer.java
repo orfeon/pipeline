@@ -199,7 +199,7 @@ public final class ConditioningScorer implements Serializable {
         return 2 + k;
     }
 
-    /** the window's quantile sketches (independent rows with rank / absdev), set per bundle from the side input; null = within-unit transforms */
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the binned test's value edges), set per bundle from the side input */
     private transient WindowQuantiles quantiles;
 
     /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
@@ -218,35 +218,52 @@ public final class ConditioningScorer implements Serializable {
     }
 
     /**
-     * The binned block's partial sums at the fitted p̂ (DSL doc §12.1, the generalisation of {@code [s, b, a]} to a
-     * one-hot block of B bins): {@code [s (B), H (B² grouped / B diagonal for the row families), A (B × k)]}. Grouped:
-     * s_b = w Σ_{i in b} (ỹ_i − p̂_i), H = w (diag(P̂) − P̂ P̂'), A_bj = w (Σ_{i in b} p̂_i f_ij − P̂_b Σ_i p̂_i f_ij); row
-     * families: s_b = Σ_{i in b} w_i (y_i − p̂_i), H_bb = Σ_{i in b} w_i v̂_i, A_bj = Σ_{i in b} w_i v̂_i f_ij.
+     * Adds the binned block's partial sums at the fitted p̂ into {@code into} (DSL doc §6.1, the generalisation of
+     * {@code [s, b, a]} to a one-hot block of B bins): {@code [s (B), H (B² grouped / B diagonal for the row families),
+     * A (B × k)]}. Grouped: s_b = w Σ_{i in b} (ỹ_i − p̂_i), H = w (diag(P̂) − P̂ P̂'), A_bj = w (Σ_{i in b} p̂_i f_ij −
+     * P̂_b Σ_i p̂_i f_ij); row families: s_b = Σ_{i in b} w_i (y_i − p̂_i), H_bb = Σ_{i in b} w_i v̂_i,
+     * A_bj = Σ_{i in b} w_i v̂_i f_ij. Only the bins the unit occupies are touched (an empty bin's sums are zero).
      */
-    private double[] binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p) {
+    private void binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
         final int nb = spec.binCount();
         final int n = unit.size();
         if (spec.isGroupedMultinomial()) {
-            final double[] out = new double[nb + nb * nb + nb * k];
+            final double[] out = into.total(nb + nb * nb + nb * k);
+            final int aOffset = nb + nb * nb;
+            final double[] sb = new double[nb];
             final double[] pb = new double[nb];
+            // Σ_{i in b} p̂_i f_i, allocated for the occupied bins only
+            final double[][] pbf = new double[nb][];
             final double[] pf = new double[k];
+            final int[] occupied = new int[Math.min(nb, n)];
+            int m = 0;
             for (int i = 0; i < n; i++) {
-                out[bins[i]] += unit.y[i] - p[i];
-                pb[bins[i]] += p[i];
+                final int b = bins[i];
+                if (pbf[b] == null) {
+                    pbf[b] = new double[k];
+                    occupied[m++] = b;
+                }
+                sb[b] += unit.y[i] - p[i];
+                pb[b] += p[i];
                 for (int j = 0; j < k; j++) {
-                    pf[j] += p[i] * f[i][j];
-                    out[nb + nb * nb + bins[i] * k + j] += p[i] * f[i][j];
+                    final double pfij = p[i] * f[i][j];
+                    pf[j] += pfij;
+                    pbf[b][j] += pfij;
                 }
             }
             final double w = unit.unitWeight;
-            for (int b = 0; b < nb; b++) {
-                out[b] *= w;
-                for (int c = 0; c < nb; c++) out[nb + b * nb + c] = w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
-                for (int j = 0; j < k; j++) out[nb + nb * nb + b * k + j] = w * (out[nb + nb * nb + b * k + j] - pb[b] * pf[j]);
+            for (int x = 0; x < m; x++) {
+                final int b = occupied[x];
+                out[b] += w * sb[b];
+                for (int z = 0; z < m; z++) {
+                    final int c = occupied[z];
+                    out[nb + b * nb + c] += w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
+                }
+                for (int j = 0; j < k; j++) out[aOffset + b * k + j] += w * (pbf[b][j] - pb[b] * pf[j]);
             }
-            return out;
+            return;
         }
-        final double[] out = new double[nb + nb + nb * k];
+        final double[] out = into.total(nb + nb + nb * k);
         for (int i = 0; i < n; i++) {
             final double w = unit.w[i];
             final double vv = spec.fisherWeight(p[i]);
@@ -254,7 +271,6 @@ public final class ConditioningScorer implements Serializable {
             out[nb + bins[i]] += w * vv;
             for (int j = 0; j < k; j++) out[2 * nb + bins[i] * k + j] += w * vv * f[i][j];
         }
-        return out;
     }
 
     /**
@@ -268,6 +284,7 @@ public final class ConditioningScorer implements Serializable {
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
                         final Map<Integer, PartialAccumulator> into) {
+        GroupScorer.requireWindowQuantiles(spec, quantiles);
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
         final int n = unit.size();
@@ -294,7 +311,7 @@ public final class ConditioningScorer implements Serializable {
                 for (int t = 0; t < nTransforms; t++) {
                     if (ScreenSpec.isBinned(spec.transforms.get(t))) {
                         // the block's sums carry no period slices (the binned test has no sign to agree on)
-                        into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(null, binnedPartial(unit, bins(c, cols[c]), f, p));
+                        binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
                         continue;
                     }
                     final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
@@ -346,10 +363,11 @@ public final class ConditioningScorer implements Serializable {
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
                 if (ScreenSpec.isBinned(spec.transforms.get(t))) {
-                    into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(null, binnedPartial(unit, bins(c, cols[c]), f, p));
+                    binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
                     continue;
                 }
-                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per cell
+                // the transform is taken once over the whole unit (rank / absdev within the unit, or against the
+                // window's sketches for independent rows), then summed per cell
                 final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
                 for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
