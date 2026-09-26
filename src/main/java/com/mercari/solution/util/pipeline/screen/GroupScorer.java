@@ -198,6 +198,17 @@ public final class GroupScorer implements Serializable {
                 }
             }
         }
+        if (spec.jointOn) {
+            // the candidates' joint sums (S, the Fisher block, the pHd block) under one key, added in place: at
+            // m(m + 1) doubles a unit's contribution is not worth a vector of its own
+            final ScoreAccumulator acc = into.computeIfAbsent(ScoreAccumulator.JOINT_KEY, k -> new ScoreAccumulator());
+            final int used = addJoint(unit, cols, prior, acc.extra(jointLength(spec.jointColumnCount())));
+            if (used > 0) {
+                Arrays.fill(contribution, 0d);
+                contribution[ScoreAccumulator.N_OBS] = used;
+                acc.add(null, contribution);
+            }
+        }
         bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
         bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
         book.add(null, bookSlots);
@@ -366,6 +377,115 @@ public final class GroupScorer implements Serializable {
     /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
     public double[] binEdges(final int column) {
         return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
+    }
+
+    /** The packed (upper triangle, row-major) index of (i, j), i ≤ j, of an m × m symmetric matrix. */
+    static int packed(final int m, final int i, final int j) {
+        final int a = Math.min(i, j), b = Math.max(i, j);
+        return a * m - a * (a - 1) / 2 + (b - a);
+    }
+
+    /**
+     * The offsets of the joint sums vector for m joint columns (DSL doc §9.5), one definition for the scorer and the
+     * report: {@code [Σ w v, Σ w v x (m), Σ w v x x' (packed at h), Σ w r (at r), Σ w r x (m, at s), Σ w r x x' (packed
+     * at mm), Σ w r² (at r2), used]}, {@code length = 4 + 2m + m(m + 1)}.
+     */
+    record JointLayout(int m, int h, int r, int s, int mm, int r2, int length) {
+        static JointLayout of(final int m) {
+            final int packed = m * (m + 1) / 2;
+            final int h = 1 + m, r = h + packed, s = r + 1, mm = s + m, r2 = mm + packed;
+            return new JointLayout(m, h, r, s, mm, r2, r2 + 2);
+        }
+
+        /** The slot counting the rows (grouped: units) added. */
+        int used() {
+            return r2 + 1;
+        }
+    }
+
+    /** The length of the joint sums vector for m joint columns (DSL doc §9.5): {@code 4 + 2m + m(m + 1)}. */
+    static int jointLength(final int m) {
+        return JointLayout.of(m).length();
+    }
+
+    /**
+     * Adds the unit's contribution to the candidates' joint sums over the joint columns (the chosen candidates, then
+     * the noise placebos) into {@code out} (laid out by {@link JointLayout}). Row families accumulate raw moments (v the
+     * Fisher weight in offset mode, 1 in prior mode; r = y − μ or y) and the report centres them; a row with a missing
+     * joint value is left out (the sums must share one row set to stay positive definite). The grouped family centres
+     * by p̂ within the unit and adds the unit's S, Fisher block diag(p) − pp' and pHd block Σ (ỹ − p) x̃x̃' in the same
+     * slots (the "Σ w v x" / "Σ w r" slots stay 0), leaving out a unit with a missing joint value. Returns the rows
+     * (grouped: units) added, 0 when nothing was.
+     */
+    int addJoint(final Unit unit, final double[][] cols, final boolean prior, final double[] out) {
+        final int m = spec.jointColumnCount();
+        if (m < 2) return 0;
+        final JointLayout at = JointLayout.of(m);
+        final int n = unit.size();
+        final double[] x = new double[m];
+        if (spec.isGroupedMultinomial()) {
+            // shifted by the unit's pivot first, as the marginal test is: a column constant within the unit centres to
+            // exactly 0 instead of the rounding residue of its magnitude
+            final double[][] xt = new double[n][m];
+            final double[] mean = new double[m];
+            for (int j = 0; j < m; j++) {
+                final double[] col = cols[spec.jointColumn(j)];
+                for (final double v : col) if (!StatMath.isFinite(v)) return 0;
+                final double pivot = pivot(col);
+                for (int i = 0; i < n; i++) {
+                    xt[i][j] = col[i] - pivot;
+                    mean[j] += unit.p[i] * xt[i][j];
+                }
+            }
+            final double w = unit.unitWeight;
+            out[0] += w;
+            for (int i = 0; i < n; i++) {
+                final double r = unit.y[i] - unit.p[i];
+                for (int j = 0; j < m; j++) {
+                    x[j] = xt[i][j] - mean[j];
+                    out[at.s() + j] += w * r * x[j];
+                }
+                addOuter(out, at, x, w * unit.p[i], w * r);
+            }
+            out[at.used()] += 1;
+            return 1;
+        }
+        int used = 0;
+        for (int i = 0; i < n; i++) {
+            boolean finite = true;
+            for (int j = 0; j < m && finite; j++) {
+                x[j] = cols[spec.jointColumn(j)][i];
+                finite = StatMath.isFinite(x[j]);
+            }
+            if (!finite) continue;
+            final double w = unit.w[i];
+            final double v = prior ? 1d : spec.fisherWeight(unit.p[i]);
+            final double r = prior ? unit.y[i] : unit.y[i] - unit.p[i];
+            out[0] += w * v;
+            out[at.r()] += w * r;
+            out[at.r2()] += w * r * r;
+            for (int j = 0; j < m; j++) {
+                out[1 + j] += w * v * x[j];
+                out[at.s() + j] += w * r * x[j];
+            }
+            addOuter(out, at, x, w * v, w * r);
+            used++;
+        }
+        out[at.used()] += used;
+        return used;
+    }
+
+    /** Adds {@code a·xx'} to the packed Fisher block and {@code b·xx'} to the packed pHd block (upper triangles, row-major). */
+    private static void addOuter(final double[] out, final JointLayout at, final double[] x, final double a, final double b) {
+        final int m = x.length;
+        int k = 0;
+        for (int j = 0; j < m; j++) {
+            final double aj = a * x[j], bj = b * x[j];
+            for (int l = j; l < m; l++, k++) {
+                out[at.h() + k] += aj * x[l];
+                out[at.mm() + k] += bj * x[l];
+            }
+        }
     }
 
     /** Finite values of a column (the binned test's n_obs). */

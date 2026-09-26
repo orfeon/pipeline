@@ -234,15 +234,25 @@ public class ScreenTransformTest {
                       transforms: [raw, rank, absdev, binned]
                       bins: 5
                       suggestions: true
+                      joint: {noise: 3, directions: 2}
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
             // one-candidate suggestions from the binned sums: every scorable candidate and placebo gets its shape,
-            // cut and monotone records (no missing values in the data, so no missing record)
+            // cut and monotone records (no missing values in the data, so no missing record); the joint sums add the
+            // pHd directions and the forward selection over the three candidates
             final Map<String, Map<String, MElement>> byCandidate = new java.util.HashMap<>();
-            for (final MElement e : rows) byCandidate.computeIfAbsent(e.getAsString("candidate"), k -> new java.util.HashMap<>()).put(e.getAsString("kind"), e);
+            final java.util.Set<String> jointKinds = new java.util.HashSet<>();
+            for (final MElement e : rows) {
+                if (java.util.Set.of("phd", "redundant", "select", "composite").contains(e.getAsString("kind"))) {
+                    jointKinds.add(e.getAsString("kind"));
+                    continue;
+                }
+                byCandidate.computeIfAbsent(e.getAsString("candidate"), k -> new java.util.HashMap<>()).put(e.getAsString("kind"), e);
+            }
+            Assertions.assertTrue(jointKinds.contains("phd") && jointKinds.contains("select"), jointKinds.toString());
             Assertions.assertTrue(byCandidate.containsKey("f_extra"), byCandidate.keySet().toString());
             final Map<String, MElement> extra = byCandidate.get("f_extra");
             Assertions.assertEquals(java.util.Set.of("shape", "cut", "monotone"), extra.keySet());

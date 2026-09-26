@@ -487,6 +487,35 @@ transform, never applied automatically. The suggestions read the marginal binned
 misses), not the partial block: a shape's redundancy with F is read off the block's `r2_F`. The summary
 counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nScored`).
 
+### 9.5 Several candidates: the joint sums
+
+`joint: true` (or `{include, maxColumns, noise, directions, redundancy, select}`) accumulates, under one
+key, the candidates' *joint* sums over the joint columns — the candidates matching `include` (every
+candidate by default, at most `maxColumns` = 200) and the first `noise` (default 10) noise placebo columns
+for the null scale: the score vector S = Σ w x̃ r, the m × m Fisher matrix H = Σ w v x̃x̃' and the pHd matrix
+M = Σ w r x̃x̃' (row families: raw moments centred at report time, a row with a missing joint value left out
+so the sums share one row set, r the residual with the intercept profiled out as in S — r − v Σ w r / Σ w v,
+so a miscalibrated baseline does not add its mean residual times H — gaussian S, H and M over σ² as in the
+marginal test, a column the raw moments cannot centre dropped as degenerate; grouped: centred by p̂ within the
+unit, the Fisher block diag(p) − pp', a unit with a missing joint value left out). O(m²) state and per-row
+work, hence the explicit opt-in and the bound.
+The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:
+
+| kind | read from | record |
+|---|---|---|
+| `phd` | the principal Hessian directions (Li 1992): the eigenpairs of H^(−1/2) M H^(−1/2) by \|eigenvalue\|, the directions mapped back through H^(−1/2) — residual curvature, quadratic effects and interactions in bulk, the loadings naming the candidates — scale-free, v_j √H_jj, so a column's units do not decide its rank | `name` direction i, `candidate` the top loading, `chi2` the eigenvalue, `share` its \|λ\| over the sum, `consistency` the largest \|loading\| of a noise column (the null scale: a real direction loads on candidates, not noise; null without a noise column), `fragment` the top-loading candidates' coefficients in their own units — the projection v'x and its square are the recipe; a diagnostic, `passed` null |
+| `redundant` | single linkage at \|H_ij\| / √(H_ii H_jj) ≥ `redundancy` (default 0.95) among the candidates | one record per cluster of two or more: `candidate` the member with the largest marginal χ², `share` the cluster's smallest pairwise \|correlation\|, `fragment` the others — keep one, or average / project them |
+| `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `threshold` the cut, `fragment` "given [A]" |
+| `composite` | β = H_AA⁻¹ S_A over the selected set and the joint χ² = S_A' H_AA⁻¹ S_A | `fragment` the row expression Σ β_j x_j, `chi2`, `share` its gain |
+
+One-step, in-sample, at β = 0 (a composite with a large effect is approximate): hypotheses for a feature
+spec, checked by the next screen. The pHd metric is the Fisher matrix rather than the plain covariance
+(scale-free, and what the score tests use); Li's elliptical-symmetry condition does not hold for binary or
+heavily skewed candidates, whose loadings are then biased — one more reason `phd` stays a diagnostic. The
+pHd loadings are the pre-selection for `pairs` (§8.6) that does not miss a pure interaction: declare the
+pairs among the candidates a direction names. The summary carries `nJointColumns`; `nSuggestions` counts
+these records too.
+
 ## 10. Constraints and diagnostics
 
 Assembly errors (every message names the parameter and what is available): an unknown family or a form not
@@ -599,13 +628,8 @@ placebo pairs as the kind's calibration, the products of the standardised design
 moments). Still open: a pre-selection beyond a declared set — the pHd loadings below are the ranking that
 does not miss a pure interaction — and the sketch route of §12.2.
 
-**Principal Hessian directions** (pHd, Li 1992), a diagnostic. From M = Σ w r x̃ x̃' and the candidates'
-covariance Σ (the same pass, O(m²) state), the eigenvectors of Σ^(−1/2) M Σ^(−1/2) with large |eigenvalue| are
-the directions of residual curvature — quadratic effects and interactions in bulk, with the loadings naming
-the candidates involved (the eigensolver is the feature transform's `SymmetricEigen`). Reported, never a pass
-flag; placebo noise columns included in x give the null scale of the eigenvalues and should load ≈ 0. Li's
-condition (an elliptically distributed x) does not hold for binary or heavily skewed candidates, whose
-loadings are then biased — one more reason it stays a diagnostic.
+**Principal Hessian directions** (pHd, Li 1992) — built (§9.5, over the joint sums, in the Fisher metric,
+with the noise columns' loadings as the null scale; the feature transform's `SymmetricEigen`).
 
 Shared requirements:
 
@@ -691,17 +715,14 @@ open from this table:
 |---|---|---|
 | categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) — needs the categorical candidates of §12.1 | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
 
-**Several candidates — how to combine them:**
+**Several candidates — how to combine them** — the first three rows and the last two are built (§9.5 over
+the joint sums: `redundant`, `select`, `composite`, `phd`; the segment / time dependence is the heterogeneity
+test of §7.1). Still open:
 
 | information | needs | suggestion |
 |---|---|---|
-| redundancy clusters | the candidates' Fisher matrix H (m × m) | near-duplicate sets: keep one, or average / project them |
-| complementary set | the same H and S | a report-time forward selection: the score test of candidate j given a selected set is closed-form at β = 0 (a one-step approximation of the partial test, not the fitted one), so no pass re-reads the data — a set that works together, which a univariate ranking cannot give |
-| linear composite | the same | β = H⁻¹S, the best linear combination to add to the baseline |
 | ratios and differences | the two-dimensional Newton direction of a pair, on log-transformed candidates | coefficients ≈ (+1, −1) → x_i / x_j; on the raw scale ≈ equal and opposite → x_i − x_j; suggested only when the pair's joint χ² clearly exceeds the better single one |
 | interaction shape | a two-dimensional histogram of a selected pair (O(k²), a depth-2 tree) | "x_j matters only when x_i > c" → a conditional feature or crossed bins |
-| segment / time dependence | the heterogeneity test (§12.1) | a cross with the modifier; an effect decaying over periods → a shorter window |
-| curvature directions | pHd (§12.1) | the projection v'x and its square |
 
 **Parameter families.** When the feature transform emits a family (a window of 7 / 30 / 90 days), gain
 against the parameter gives the best value and the point where the gain saturates. The lineage today
@@ -744,7 +765,9 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    grouping (with step 6), the edges in the pass list.
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.
-5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6). Still open from this
-   step: the sketch pre-selection, **pHd**, the several-candidate suggestions (§12.3).
+5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
+   several-candidate suggestions (redundancy clusters, forward selection, composite) — built over the joint
+   sums (§9.5). Still open: the sketch pre-selection of pairs, ratios / differences, the two-dimensional
+   interaction shape.
 6. **Categorical candidates** read natively.
 7. **Parameter families**, once the feature lineage carries op and arguments.

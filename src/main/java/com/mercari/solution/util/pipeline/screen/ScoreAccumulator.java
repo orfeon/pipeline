@@ -37,6 +37,8 @@ public final class ScoreAccumulator implements Serializable {
 
     /** key of the bookkeeping accumulator (never a column index) */
     public static final int BOOKKEEPING_KEY = -1;
+    /** the candidates' joint sums (DSL doc §9.5) travel under this key, in the {@code extra} vector */
+    public static final int JOINT_KEY = -2;
     public static final int ROWS_IN = 0, ROWS_TIME_FILTERED = 1, ROWS_INVALID = 2, UNITS_SCORED = 3, UNITS_SKIPPED = 4, ROWS_SCORED = 5;
     /** bookkeeping: units skipped for an invalid baseline (the rest of UNITS_SKIPPED had no positive label); rows {@code baseline.invalid: dropRow} removed */
     public static final int UNITS_SKIPPED_BASELINE = 6, ROWS_DROPPED = 7;

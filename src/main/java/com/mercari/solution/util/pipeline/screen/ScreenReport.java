@@ -7,6 +7,7 @@ import com.mercari.solution.util.domain.math.MatrixOps;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.StatMath;
+import com.mercari.solution.util.pipeline.feature.SymmetricEigen;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -794,6 +795,302 @@ public final class ScreenReport {
         return v == Math.rint(v) && Math.abs(v) < 1e15 ? String.valueOf((long) v) : String.format(java.util.Locale.ROOT, "%.6g", v);
     }
 
+    /**
+     * The several-candidate suggestions (DSL doc §9.5) from the candidates' joint sums under {@link ScoreAccumulator#JOINT_KEY}:
+     * the score vector S, the m × m Fisher matrix H and the pHd matrix M = Σ w r x̃x̃' over the joint columns (the chosen
+     * candidates, then a few noise placebos for the null scale; row families: r with the intercept profiled out as in S,
+     * gaussian S / H / M over σ² as in {@link #stats}, a degenerate column dropped). Reported: the principal Hessian
+     * directions of H^(−1/2) M H^(−1/2) (residual curvature: quadratic effects and interactions in bulk, the scale-free
+     * loadings v_j √H_jj naming the candidates; a diagnostic, never a pass flag), the redundancy clusters (|correlation| in the Fisher metric at or
+     * above {@code joint.redundancy}), a report-time forward selection (the score test of a candidate given the
+     * selected set, closed form at β = 0, stopped at the df = 1 cut) and the linear composite of the selected set.
+     * In-sample, one-step: hypotheses for a feature spec, not decisions.
+     */
+    static List<Map<String, Object>> joint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final double df1Cut) {
+        final List<Map<String, Object>> out = new ArrayList<>();
+        if (!spec.jointOn) return out;
+        final ScoreAccumulator acc = accumulators.get(ScoreAccumulator.JOINT_KEY);
+        final int m = spec.jointColumnCount();
+        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(m);
+        final double[] e = acc == null ? null : acc.getExtra();
+        if (e == null || e.length != at.length() || !(e[0] > 0)) return out;
+        final List<String> names = spec.columnNames();
+        final int nCand = spec.jointColumns.size();
+        // centred S, H (Fisher), M (pHd)
+        final double[] s = new double[m];
+        final double[][] h = new double[m][m], mm = new double[m][m];
+        if (spec.isGroupedMultinomial()) {
+            for (int j = 0; j < m; j++) {
+                s[j] = e[at.s() + j];
+                for (int l = 0; l < m; l++) {
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)];
+                }
+            }
+        } else {
+            final double n0 = e[0], rsum = e[at.r()];
+            final double[] mu = new double[m];
+            for (int j = 0; j < m; j++) mu[j] = e[1 + j] / n0;
+            for (int j = 0; j < m; j++) {
+                s[j] = e[at.s() + j] - mu[j] * rsum;
+                for (int l = 0; l < m; l++) {
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)] - n0 * mu[j] * mu[l];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
+                }
+            }
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
+            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
+            for (int j = 0; j < m; j++) {
+                if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
+                s[j] = 0d;
+                for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+            }
+            // the intercept is profiled out of M as it is out of S: the residual at its one-step estimate
+            // Σ w r / Σ w v (prior mode: y − ȳ), so a miscalibrated baseline does not add its mean residual times H
+            final double rMean = rsum / n0;
+            for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) mm[j][l] -= rMean * h[j][l];
+            if (spec.isGaussian()) {
+                // identity link: S, H and M over σ², the residual (offset) / label (prior) variance, as in stats()
+                final double sigma2 = e[at.r2()] / n0 - rMean * rMean;
+                if (!(sigma2 > 0)) return out;
+                for (int j = 0; j < m; j++) {
+                    s[j] /= sigma2;
+                    for (int l = 0; l < m; l++) {
+                        h[j][l] /= sigma2;
+                        mm[j][l] /= sigma2;
+                    }
+                }
+            } else if (!spec.hasBaseline()) {
+                // prior mode: raw moments, the Fisher weight at ȳ (offset mode: already inside the sums)
+                final double weight = spec.fisherWeight(rMean);
+                for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) h[j][l] *= weight;
+            }
+        }
+        // overflowing sums leave nothing to decompose (a non-finite matrix may not terminate the eigensolver)
+        if (!allFinite(s) || !allFinite(h) || !allFinite(mm)) return out;
+        double trace = 0;
+        final double[] hd = new double[m];
+        for (int j = 0; j < m; j++) {
+            hd[j] = h[j][j];
+            trace += hd[j];
+        }
+        if (!(trace > 0)) return out;
+        final double ridge = 1e-8 * trace / m;
+        // pHd: eigenpairs of H^(-1/2) M H^(-1/2) (H ridged to stay definite), the directions mapped back through H^(-1/2)
+        try {
+            final double[][] hr = new double[m][];
+            for (int j = 0; j < m; j++) {
+                hr[j] = h[j].clone();
+                hr[j][j] += ridge;
+            }
+            final SymmetricEigen.Result eh = SymmetricEigen.leading(hr, m, false);
+            final double[][] hm = new double[m][m];
+            for (int i = 0; i < eh.values().length; i++) {
+                if (!(eh.values()[i] > 1e-12 * trace)) continue;
+                final double[] u = eh.vectors()[i];
+                final double f = 1 / Math.sqrt(eh.values()[i]);
+                for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) hm[j][l] += f * u[j] * u[l];
+            }
+            // B = hm M hm as two m³ products
+            final double[][] b = multiply(multiply(hm, mm), hm);
+            final SymmetricEigen.Result eb = SymmetricEigen.leading(b, m, true);
+            double total = 0;
+            for (final double v : eb.values()) total += Math.abs(v);
+            final boolean noise = nCand < m;
+            for (int k = 0; k < Math.min(spec.jointDirections, eb.values().length); k++) {
+                final double[] q = eb.vectors()[k];
+                // v: the projection's coefficients in the columns' units (the recipe v'x); z: the scale-free loadings
+                // v_j √H_jj, which name the candidates and compare with the noise columns' (the null scale)
+                final double[] v = new double[m], z = new double[m];
+                double norm = 0, zNorm = 0;
+                for (int j = 0; j < m; j++) {
+                    for (int l = 0; l < m; l++) v[j] += hm[j][l] * q[l];
+                    z[j] = v[j] * Math.sqrt(Math.max(hd[j], 0d));
+                    norm += v[j] * v[j];
+                    zNorm += z[j] * z[j];
+                }
+                norm = Math.sqrt(norm);
+                zNorm = Math.sqrt(zNorm);
+                if (!(norm > 0) || !(zNorm > 0)) continue;
+                for (int j = 0; j < m; j++) {
+                    v[j] /= norm;
+                    z[j] /= zNorm;
+                }
+                final Integer[] order = new Integer[nCand];
+                for (int j = 0; j < nCand; j++) order[j] = j;
+                Arrays.sort(order, Comparator.comparingDouble(j -> -Math.abs(z[j])));
+                double noiseLoading = noise ? 0d : Double.NaN;
+                for (int j = nCand; j < m; j++) noiseLoading = Math.max(noiseLoading, Math.abs(z[j]));
+                final StringBuilder fragment = new StringBuilder();
+                for (int i = 0; i < Math.min(5, nCand); i++) {
+                    final int j = order[i];
+                    if (Math.abs(z[j]) < 0.05) break;
+                    fragment.append(fragment.length() == 0 ? (v[j] < 0 ? "-" : "") : (v[j] < 0 ? " - " : " + "))
+                            .append(fmt(Math.abs(v[j]))).append("*").append(names.get(spec.jointColumn(j)));
+                }
+                out.add(jointRecord(names.get(spec.jointColumn(order[0])), "phd", "direction" + (k + 1), noiseLoading,
+                        total > 0 ? Math.abs(eb.values()[k]) / total : 0d, eb.values()[k], Double.NaN, null, Double.NaN,
+                        "the projection v'x and its square, v = " + fragment
+                                + (noise ? " (max noise loading " + fmt(noiseLoading) + ")" : " (no noise column: no null scale)")));
+            }
+        } catch (final RuntimeException ex) {
+            // a singular metric or a failed decomposition leaves the pHd diagnostic out
+        }
+        // redundancy clusters among the candidates: single linkage at |corr| >= joint.redundancy in the Fisher metric
+        final int[] parent = new int[nCand];
+        for (int j = 0; j < nCand; j++) parent[j] = j;
+        final double[][] corr = new double[nCand][nCand];
+        for (int j = 0; j < nCand; j++) {
+            for (int l = j + 1; l < nCand; l++) {
+                corr[j][l] = corr[l][j] = hd[j] > 0 && hd[l] > 0 ? h[j][l] / Math.sqrt(hd[j] * hd[l]) : 0d;
+                if (Math.abs(corr[j][l]) >= spec.jointRedundancy) parent[find(parent, j)] = find(parent, l);
+            }
+        }
+        final Map<Integer, List<Integer>> clusters = new LinkedHashMap<>();
+        for (int j = 0; j < nCand; j++) clusters.computeIfAbsent(find(parent, j), k -> new ArrayList<>()).add(j);
+        for (final List<Integer> members : clusters.values()) {
+            if (members.size() < 2) continue;
+            int head = members.get(0);
+            double best = -1, minCorr = 1;
+            for (final int j : members) {
+                final double chi2 = h[j][j] > 0 ? s[j] * s[j] / h[j][j] : 0;
+                if (chi2 > best) {
+                    best = chi2;
+                    head = j;
+                }
+                for (final int l : members) if (l > j) minCorr = Math.min(minCorr, Math.abs(corr[j][l]));
+            }
+            final List<String> others = new ArrayList<>();
+            for (final int j : members) if (j != head) others.add(names.get(spec.jointColumn(j)));
+            out.add(jointRecord(names.get(spec.jointColumn(head)), "redundant", "cluster", Double.NaN, minCorr, best, Double.NaN, null, Double.NaN,
+                    "near-duplicates of " + names.get(spec.jointColumn(head)) + ": " + others + " (|corr| >= " + fmt(spec.jointRedundancy) + "); keep one, or average / project them"));
+        }
+        // forward selection at beta = 0: the score test of a candidate given the selected set, closed form
+        final List<Integer> selected = new ArrayList<>();
+        final boolean[] taken = new boolean[nCand];
+        for (int step = 0; step < spec.jointSelect; step++) {
+            // γ_j = H_AA⁻¹ H_Aj for every candidate at once: one factorisation of the selected block per step
+            final int a = selected.size();
+            final double[] sa = new double[a];
+            final double[][] hac = new double[a][nCand];
+            double[][] gamma = null;
+            if (a > 0) {
+                final double[][] haa = new double[a][a];
+                for (int i = 0; i < a; i++) {
+                    final int si = selected.get(i);
+                    sa[i] = s[si];
+                    for (int l = 0; l < a; l++) haa[i][l] = h[si][selected.get(l)];
+                    for (int j = 0; j < nCand; j++) hac[i][j] = h[si][j];
+                }
+                gamma = MatrixOps.solveGram(haa, hac, ridge);
+            }
+            int bestJ = -1;
+            double bestChi2 = 0;
+            for (int j = 0; j < nCand; j++) {
+                if (taken[j] || !(h[j][j] > 0)) continue;
+                double sPerp = s[j], hPerp = h[j][j];
+                for (int i = 0; i < a; i++) {
+                    sPerp -= gamma[i][j] * sa[i];
+                    hPerp -= gamma[i][j] * hac[i][j];
+                }
+                if (!(hPerp > 1e-10 * h[j][j])) continue;
+                final double chi2 = sPerp * sPerp / hPerp;
+                if (Double.isFinite(chi2) && chi2 > bestChi2) {
+                    bestChi2 = chi2;
+                    bestJ = j;
+                }
+            }
+            final double gain = nUnits > 0 ? bestChi2 / (2 * nUnits) : Double.NaN;
+            if (bestJ < 0 || !(gain > df1Cut)) break;
+            final List<String> given = new ArrayList<>();
+            for (final int j : selected) given.add(names.get(spec.jointColumn(j)));
+            out.add(jointRecord(names.get(spec.jointColumn(bestJ)), "select", "step" + (step + 1), Double.NaN, gain, bestChi2, gain, true, df1Cut,
+                    "adds " + fmt(gain) + " given " + given));
+            selected.add(bestJ);
+            taken[bestJ] = true;
+        }
+        if (selected.size() >= 2) {
+            final int a = selected.size();
+            final double[][] haa = new double[a][a];
+            final double[] sa = new double[a];
+            for (int i = 0; i < a; i++) {
+                sa[i] = s[selected.get(i)];
+                for (int l = 0; l < a; l++) haa[i][l] = h[selected.get(i)][selected.get(l)];
+            }
+            try {
+                final double[] beta = MatrixOps.solveGram(haa, sa, ridge);
+                final double chi2 = MatrixOps.dot(beta, sa);
+                final StringBuilder expr = new StringBuilder();
+                for (int i = 0; i < a; i++) {
+                    expr.append(i == 0 ? (beta[i] < 0 ? "-" : "") : (beta[i] < 0 ? " - " : " + "))
+                            .append(fmt(Math.abs(beta[i]))).append("*").append(names.get(spec.jointColumn(selected.get(i))));
+                }
+                final double gain = nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN;
+                out.add(jointRecord(names.get(spec.jointColumn(selected.get(0))), "composite", "composite", Double.NaN, gain, chi2, gain, null, Double.NaN,
+                        "{scope: row, expr: \"" + expr + "\"}"));
+            } catch (final RuntimeException ex) {
+                // a singular selected block leaves the composite out
+            }
+        }
+        return out;
+    }
+
+    private static int find(final int[] parent, final int j) {
+        int r = j;
+        while (parent[r] != r) r = parent[r];
+        return r;
+    }
+
+    /** The product of two square matrices (the pHd metric's B = H^(−1/2) M H^(−1/2)), i-k-j order. */
+    private static double[][] multiply(final double[][] x, final double[][] y) {
+        final int n = x.length;
+        final double[][] out = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            for (int k = 0; k < n; k++) {
+                final double xik = x[i][k];
+                if (xik == 0d) continue;
+                final double[] yk = y[k], oi = out[i];
+                for (int j = 0; j < n; j++) oi[j] += xik * yk[j];
+            }
+        }
+        return out;
+    }
+
+    private static boolean allFinite(final double[] v) {
+        for (final double d : v) if (!Double.isFinite(d)) return false;
+        return true;
+    }
+
+    private static boolean allFinite(final double[][] m) {
+        for (final double[] row : m) if (!allFinite(row)) return false;
+        return true;
+    }
+
+    /** A joint suggestion record in the suggestions schema (the discovery / confirmation fields carry the in-sample values). */
+    private static Map<String, Object> jointRecord(final String candidate, final String kind, final String name, final double consistency,
+                                                   final double share, final double chi2, final double gain, final Boolean passed,
+                                                   final double threshold, final String fragment) {
+        final Map<String, Object> s = new LinkedHashMap<>();
+        s.put("candidate", candidate);
+        s.put("kind", kind);
+        s.put("name", name);
+        s.put("cut", null);
+        s.put("direction", null);
+        s.put("fill", null);
+        s.put("consistency", Double.isNaN(consistency) ? null : consistency);
+        s.put("share", share);
+        s.put("chi2", chi2);
+        s.put("confirmation_chi2", null);
+        s.put("confirmation_share", null);
+        s.put("confirmation_gain", Double.isNaN(gain) ? null : gain);
+        s.put("confirmation_pValue", null);
+        s.put("threshold", Double.isNaN(threshold) ? null : threshold);
+        s.put("passed", passed);
+        s.put("placebo", false);
+        s.put("fragment", fragment);
+        return s;
+    }
+
     public static Schema suggestionSchema() {
         return Schema.builder()
                 .withField("candidate", Schema.FieldType.STRING)
@@ -1307,9 +1604,12 @@ public final class ScreenReport {
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
         summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
         summary.put("notes", notes);
-        final List<Map<String, Object>> suggested = suggestions(spec, accumulators, nUnits, bins);
+        final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, nUnits, bins));
+        // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
+        suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold)));
         // the candidates' suggestions (placebo records excluded, as nScored)
-        summary.put("nSuggestions", spec.suggestionsOn ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
+        summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
+        summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);
         return new Result(records, summary, suggested);
     }
 
@@ -1533,6 +1833,7 @@ public final class ScreenReport {
                 .withField("nHetPassed", Schema.FieldType.INT64)
                 .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("nSuggestions", Schema.FieldType.INT64)
+                .withField("nJointColumns", Schema.FieldType.INT64)
                 .withField("nPairs", Schema.FieldType.INT64)
                 .withField("nPairsPassed", Schema.FieldType.INT64)
                 .withField("passedPairs", Schema.FieldType.array(Schema.FieldType.STRING))
@@ -1571,6 +1872,7 @@ public final class ScreenReport {
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
         if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebos.size() + " placebo pairs)");
+        if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));
