@@ -239,6 +239,9 @@ public class GroupScorerTest {
         Assertions.assertEquals(Boolean.TRUE, x2Raw.get("degenerate"));
         Assertions.assertEquals(Boolean.FALSE, x2Raw.get("passed"));
         Assertions.assertEquals(0d, x2Raw.get("est_gain"));
+        // the placeholder gain of a degenerate test carries no excess (not a negative df / 2N)
+        Assertions.assertNull(x2Raw.get("excess_gain"));
+        Assertions.assertEquals((Double) xRaw.get("est_gain") - 1d / 40, (Double) xRaw.get("excess_gain"), 1e-12);
         Assertions.assertEquals(List.of("x"), result.summary().get("passedColumns"));
         Assertions.assertEquals(2L, result.summary().get("nPassed"));
         Assertions.assertEquals(20L, result.summary().get("nUnits"));
@@ -438,6 +441,10 @@ public class GroupScorerTest {
         Assertions.assertEquals("x", selection.getAsJsonArray("passed").get(0).getAsJsonObject().getAsJsonObject("bins").get("candidate").getAsString());
         Assertions.assertTrue(Math.abs((Double) raw.get("z")) < 2, "raw z " + raw.get("z"));
         Assertions.assertEquals(3L, binned.get("df"));
+        // the excess gain subtracts the record's own df / 2N: 3 / 80 for the block, 1 / 80 for raw
+        Assertions.assertEquals((Double) binned.get("est_gain") - 3d / 80, (Double) binned.get("excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) raw.get("est_gain") - 1d / 80, (Double) raw.get("excess_gain"), 1e-12);
+        Assertions.assertNull(binned.get("partial_excess_gain"));
         Assertions.assertNull(binned.get("z"));
         Assertions.assertNull(binned.get("S"));
         Assertions.assertTrue((Double) binned.get("chi2") > 8, "binned chi2 " + binned.get("chi2"));   // bins 0 / 6 / 5 / 0 of 10 positives
@@ -864,6 +871,55 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testPairKeysKeepTheirPartialUnderABinnedTransform() throws Exception {
+        // transforms: [binned] alone — every key's modulus is the binned index, the pair keys' too: the pair keys after
+        // the columns are [s, b, a] sums and must stay in the batched γ solve (the testPairsAtTheFittedMeans data)
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [binned], bins: {k: 4, edges: value}, "
+                + "placebo: {noise: 2, seed: 7}, conditioning: {fields: [x, x2], l2: 1.0e-4, maxIter: 8}, pairs: {fields: [[x, x2]], placebo: 2}}");
+        final java.util.Random random = new java.util.Random(11);
+        final List<List<ScreenRow>> units = new java.util.ArrayList<>();
+        for (int g = 0; g < 120; g++) {
+            final double[] x1 = new double[4], x2 = new double[4], score = new double[4];
+            int best = 0;
+            for (int i = 0; i < 4; i++) {
+                x1[i] = random.nextGaussian();
+                x2[i] = random.nextGaussian();
+                score[i] = x1[i] + x2[i] + 1.5 * x1[i] * x2[i] + 0.3 * random.nextGaussian();
+                if (score[i] > score[best]) best = i;
+            }
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, null, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
+            units.add(rows);
+        }
+        final WindowQuantiles quantiles = new WindowQuantiles(spec.sketchColumns());
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) quantiles.update(r.x);
+        final GroupScorer groups = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        final ConditioningScorer scorer = new ConditioningScorer(spec).withWindowQuantiles(quantiles);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
+        for (int it = 0; it < 8 && !state.converged; it++) {
+            final com.mercari.solution.util.pipeline.glm.VectorAccumulator eval = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+            for (final List<ScreenRow> rows : units) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).getGroup()), state.proposal, moments.getValues()));
+            state.advance(eval.getValues(), spec.conditioningL2, spec.conditioningTol);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final List<ScreenRow> rows : units) {
+            final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).getGroup());
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partials);
+            groups.score(rows, rows.get(0).getGroup(), marginal);
+        }
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, null);
+        Map<String, Object> pair = null;
+        for (final Map<String, Object> r : result.records()) if ("x*x2".equals(r.get("candidate"))) pair = r;
+        Assertions.assertNotNull(pair, result.records().toString());
+        Assertions.assertTrue((Double) pair.get("partial_z") > 3, "partial z of the pair: " + pair.get("partial_z"));
+        Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
+    }
+
+    @Test
     public void testPairSketchesLeaveGroupedTransformsWithinTheGroup() throws Exception {
         // a grouped run with the default transforms (raw, rank, absdev) and a pair: the pre-pass sketches the pair's
         // members only (their grid edges), and rank / absdev stay within the group — the window's sketches are the
@@ -1027,6 +1083,16 @@ public class GroupScorerTest {
         Assertions.assertEquals(37, x[1], 2);
         Assertions.assertEquals(62, x[2], 2);
         Assertions.assertEquals(87, x[3], 2);
+        // tied values collapse the edges: 0 in 90 rows and 1..10 — edges (0, 0, 0), the top bin holds the positives and
+        // its median is 5 (a quantile at 0.875 would be 0, the bottom bin's value); every representative lies in its bin
+        final WindowQuantiles tied = new WindowQuantiles(spec.sketchColumns(), 0);
+        for (int i = 0; i < 100; i++) tied.update(new double[]{i < 90 ? 0 : i - 89}, spec.sketchedColumns());
+        final GroupScorer tiedScorer = new GroupScorer(spec).withWindowQuantiles(tied);
+        final double[] tiedEdges = tiedScorer.binEdges(0);
+        Assertions.assertArrayEquals(new double[]{0, 0, 0}, tiedEdges, 0d);
+        final double[] xt = tiedScorer.binRepresentatives(0);
+        Assertions.assertEquals(0d, xt[0], 0d);
+        Assertions.assertEquals(5d, xt[3], 0d);
         // a noise placebo: the normal quantiles at the same ranks
         final double[] noise = scorer.binRepresentatives(1);
         Assertions.assertEquals(StatMath.inverseNormal(0.125), noise[0], 1e-12);
@@ -1163,6 +1229,29 @@ public class GroupScorerTest {
         final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         WindowQuantiles.CODER.encode(q, bytes);
         Assertions.assertEquals(q.mean(0), WindowQuantiles.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray())).mean(0), 0d);
+
+        // a column constant over its observed values has that value as its mean exactly (0.1 fed ten times sums to
+        // 0.9999999999999999): its shifted values are 0 like the fills, not a rounding residue times the observed
+        // indicator that the report would score as the missingness
+        final WindowQuantiles constant = new WindowQuantiles(1, 0);
+        for (int i = 0; i < 10; i++) constant.update(new double[]{0.1});
+        Assertions.assertEquals(0.1, constant.mean(0), 0d);
+
+        // a joint column with no value in the window: every row is a fill (the column is degenerate) instead of every
+        // row leaving the joint sums
+        final List<ScreenRow> empty = new ArrayList<>();
+        for (final ScreenRow r : data) empty.add(new ScreenRow(r.group, r.identity, r.time, null, r.label, Double.NaN, 1, new double[]{Double.NaN, r.x[1]}));
+        final WindowQuantiles qe = new WindowQuantiles(rows.sketchColumns(), 0);
+        for (final ScreenRow r : empty) qe.update(r.x, rows.sketchedColumns());
+        final GroupScorer emptyScorer = new GroupScorer(rows).withWindowQuantiles(qe);
+        final Map<Integer, ScoreAccumulator> eacc = new HashMap<>();
+        for (final ScreenRow r : empty) emptyScorer.score(List.of(r), r.getIdentity(), eacc);
+        final double[] ee = eacc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(200d, ee[rl.used()]);
+        Assertions.assertEquals(200d, ee[rl.filled()]);
+        Assertions.assertEquals(0d, ee[rl.dropped()]);
+        final ScreenReport.Result er = ScreenReport.build(rows, eacc);
+        Assertions.assertEquals(0L, er.summary().get("nJointDropped"));
     }
 
     @Test
@@ -1206,9 +1295,13 @@ public class GroupScorerTest {
         final double[] binnedPartial = partials.get(spec.key(1, 1)).getTotal();
         Assertions.assertEquals(2 * scorer.binnedPartialLength(nb), binnedPartial.length);
         final double[] marginalBinned = marginal.get(spec.key(1, 1)).getExtra();
-        // the discovery half is the same seeded split as the marginal pass: the halves' bin masses agree
+        // the discovery half is the same seeded split as the marginal pass: a bin holds discovery rows in both halves'
+        // sums or in neither (the partial H_bb = Σ w v̂ against the marginal Σ w of the discovery half)
+        final int plen = scorer.binnedPartialLength(nb), mlen = marginalBinned.length / 2;
+        double discMass = 0;
         for (int b = 0; b < nb; b++) {
-            Assertions.assertTrue(binnedPartial[b] != 0 || marginalBinned[3 * b] == 0, "bin " + b);
+            Assertions.assertEquals(marginalBinned[mlen + 3 * b] > 0, binnedPartial[plen + nb + b] > 0, "bin " + b);
+            discMass += marginalBinned[mlen + 3 * b];
         }
         final ConditioningScorer.JointPartialLayout at = ConditioningScorer.JointPartialLayout.of(4, scorer.k);
         final double[] joint = partials.get(ConditioningScorer.JOINT_PARTIAL_KEY).getTotal();
@@ -1225,6 +1318,14 @@ public class GroupScorerTest {
         Assertions.assertTrue(js.hRaw()[0][0] > 0 && js.hRaw()[1][1] > js.h()[1][1]);
 
         final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        // under conditioning the block's partial excess subtracts the partial block's df (600 rows as units)
+        final Map<String, Object> bBinned = result.records().stream()
+                .filter(r -> "b".equals(r.get("candidate")) && ScreenSpec.TRANSFORM_BINNED.equals(r.get("transform"))).findFirst().orElseThrow();
+        Assertions.assertFalse((Boolean) bBinned.get("degenerate"));
+        Assertions.assertEquals((Double) bBinned.get("partial_gain") - ((Long) bBinned.get("partial_df")).doubleValue() / 1200,
+                (Double) bBinned.get("partial_excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) bBinned.get("est_gain") - ((Long) bBinned.get("df")).doubleValue() / 1200,
+                (Double) bBinned.get("excess_gain"), 1e-12);
         final Map<String, Map<String, Object>> select = new HashMap<>();
         final List<Map<String, Object>> shapes = new ArrayList<>();
         for (final Map<String, Object> sg : result.suggestions()) {
@@ -1259,6 +1360,8 @@ public class GroupScorerTest {
         Assertions.assertNotNull(discFit);
         Assertions.assertEquals(scorer.fitPeriodLength(), discFit.length);
         Assertions.assertTrue(discFit[0] > 200 && discFit[0] < 400, "discovery rows " + discFit[0]);
+        // the fit's discovery slice covers the same rows as the marginal discovery half (unit weights)
+        Assertions.assertEquals(discMass, discFit[0], 1e-9);
         Assertions.assertEquals(Boolean.TRUE, shapeB.get("passed"), shapeB.toString());
 
         // without conditioning the same data reads the marginal sums: basis marginal, no r2_F, x the first step
@@ -1275,6 +1378,69 @@ public class GroupScorerTest {
             if ("select".equals(sg.get("kind")) && "step1".equals(sg.get("name"))) firstStepIsX = "x".equals(sg.get("candidate"));
         }
         Assertions.assertTrue(firstStepIsX);
+    }
+
+    @Test
+    public void testPartialJointCentresAndOrthogonalisesOverTheKeptRows() throws Exception {
+        // no sketch view (no transform needs one): the row family's joint columns are not shifted and a row missing a
+        // joint value is left out. b and c are independent with large means, x (30% missing) is re-encoded by the
+        // conditioning column x2. The partial basis must orthogonalise x over the rows it keeps (r2_F ≈ 1 despite the
+        // dropped rows) and read b / c on the intercept-centred metric (no r2_F from their means, no redundancy)
+        final Schema schema = Schema.builder()
+                .withField("y", Schema.FieldType.INT64)
+                .withField("b", Schema.FieldType.FLOAT64)
+                .withField("x", Schema.FieldType.FLOAT64)
+                .withField("c", Schema.FieldType.FLOAT64)
+                .withField("x2", Schema.FieldType.FLOAT64)
+                .build();
+        final ScreenSpec spec = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: [b, x, c], transforms: [raw], placebo: {noise: 2, seed: 5}, "
+                + "joint: {noise: 2, select: 3, pairs: 0}, conditioning: {fields: [x2], l2: 1.0e-4}}").getAsJsonObject()).resolve(schema, null);
+        Assertions.assertEquals(List.of("b", "x", "c"), spec.candidates);
+        Assertions.assertEquals(3, spec.conditioningOffset());
+        Assertions.assertFalse(spec.needsWindowQuantiles());
+        final java.util.Random random = new java.util.Random(23);
+        final List<ScreenRow> rows = new ArrayList<>();
+        for (int i = 0; i < 800; i++) {
+            final double x = random.nextGaussian(), b = random.nextGaussian(), c = random.nextGaussian();
+            final double x2 = x + 0.02 * random.nextGaussian();
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-(1.2 * x + 0.8 * b))) ? 1 : 0;
+            final double xObserved = random.nextDouble() < 0.3 ? Double.NaN : x;
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{50 + b, xObserved, 80 + c, x2}));
+        }
+        final GroupScorer groups = new GroupScorer(spec);
+        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k, scorer.initialTheta(moments.getValues()));
+        for (int it = 0; it < spec.conditioningMaxIter && !state.converged; it++) {
+            final com.mercari.solution.util.pipeline.glm.VectorAccumulator eval = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+            for (final ScreenRow r : rows) eval.add(scorer.evaluate(groups.prepare(List.of(r), r.getIdentity()), state.proposal, moments.getValues()));
+            state.advance(eval.getValues(), spec.conditioningL2, spec.conditioningTol);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final ScreenRow r : rows) {
+            final GroupScorer.Unit unit = groups.prepare(List.of(r), r.getIdentity());
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partials);
+            groups.score(List.of(r), r.getIdentity(), marginal);
+        }
+        final ConditioningScorer.JointPartialLayout at = ConditioningScorer.JointPartialLayout.of(spec.jointColumnCount(), scorer.k);
+        final double[] joint = partials.get(ConditioningScorer.JOINT_PARTIAL_KEY).getTotal();
+        Assertions.assertTrue(joint[at.dropped()] > 150 && joint[at.dropped()] < 330, "dropped " + joint[at.dropped()]);
+        final ScreenReport.JointSums js = ScreenReport.partialJoint(spec, partials, state, 1d);
+        Assertions.assertNotNull(js);
+        // joint columns in order b, x, c: x is F's over the kept rows, b and c carry nothing of F
+        Assertions.assertTrue(js.r2()[1] > 0.9, "r2_F of x: " + js.r2()[1]);
+        Assertions.assertTrue(js.r2()[0] < 0.2, "r2_F of b: " + js.r2()[0]);
+        Assertions.assertTrue(js.r2()[2] < 0.2, "r2_F of c: " + js.r2()[2]);
+        final double[][] hr = js.hRaw();
+        Assertions.assertTrue(Math.abs(hr[0][2] / Math.sqrt(hr[0][0] * hr[2][2])) < 0.3, "corr(b, c)");
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, null);
+        for (final Map<String, Object> sg : result.suggestions()) {
+            Assertions.assertNotEquals("redundant", sg.get("kind"), sg.toString());
+            if ("select".equals(sg.get("kind")) && "step1".equals(sg.get("name"))) Assertions.assertEquals("b", sg.get("candidate"), sg.toString());
+        }
     }
 
     @Test
@@ -1644,6 +1810,40 @@ public class GroupScorerTest {
                 Assertions.assertEquals(Boolean.FALSE, g.get("passed"));
                 Assertions.assertTrue(result.suggestions().isEmpty(), result.suggestions().toString());
             }
+        }
+    }
+
+    @Test
+    public void testCategoricalLevelWithoutInformation() throws Exception {
+        // levels A / B (100 rows each at baseline 0.2) and a lone row of level C at p̂ ≈ 0 with y = 1 (H ≈ 1e-12, S ≈ 1):
+        // C has no z and takes no part in the grouping, whose split would otherwise isolate it with a gain of 1 / H
+        final ScreenSpec spec = spec("{family: binomial, label: y, baseline: {field: b, form: prob}, candidates: [nomatch], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 0}}");
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < 201; i++) {
+            final String level = i < 100 ? "A" : i < 200 ? "B" : "C";
+            final double y = i == 200 || (i < 100 ? i < 30 : i - 100 < 50) ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, i == 200 ? 0 : 0.2, 1, new double[0], new String[]{level});
+            rows.add(r);
+            q.update(r.x);
+            q.updateLevels(r.cat);
+        }
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+        final Map<String, Object> g = result.records().stream().filter(r -> "g".equals(r.get("candidate"))).findFirst().orElseThrow();
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> levelZ = (List<Map<String, Object>>) g.get("level_z");
+        final Map<String, Object> c = levelZ.stream().filter(l -> "C".equals(l.get("level"))).findFirst().orElseThrow();
+        Assertions.assertNull(c.get("z"), levelZ.toString());
+        Assertions.assertNotNull(levelZ.stream().filter(l -> "A".equals(l.get("level"))).findFirst().orElseThrow().get("z"), levelZ.toString());
+        Assertions.assertEquals(Boolean.TRUE, g.get("passed"), g.toString());
+        final Map<String, Object> grouping = result.suggestions().stream().filter(s -> "grouping".equals(s.get("kind"))).findFirst().orElseThrow();
+        Assertions.assertTrue(((String) grouping.get("fragment")).startsWith("group g into [A] (lower effect) vs [B]"), grouping.toString());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("chi2") < 1e3, s.toString());
+            Assertions.assertNotEquals("C", s.get("name"), s.toString());
         }
     }
 

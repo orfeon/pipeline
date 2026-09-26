@@ -117,7 +117,7 @@ public final class WindowQuantiles implements Serializable {
         return c < sketches.length ? sketches[c].rank(v) : Double.NaN;
     }
 
-    /** The window mean of column {@code c} (exact, from the sketch's running sum; NaN without a value). */
+    /** The window mean of column {@code c} (from the sketch's running sum, clamped to its exact min / max; NaN without a value). */
     public double mean(final int c) {
         return c < sketches.length ? sketches[c].mean() : Double.NaN;
     }
@@ -144,6 +144,11 @@ public final class WindowQuantiles implements Serializable {
     /** The {@code bins − 1} interior edges of column {@code c} at ranks i / bins. */
     public double[] edges(final int c, final int bins) {
         return sketches[c].edges(bins);
+    }
+
+    /** The median of the values of column {@code c} within each bin cut by {@code edges} ({@link SketchAccumulator#binMedians}). */
+    public double[] binMedians(final int c, final double[] edges) {
+        return sketches[c].binMedians(edges);
     }
 
     /**
