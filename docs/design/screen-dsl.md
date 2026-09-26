@@ -237,7 +237,11 @@ partial-residual curve the derivation suggestions of §12.3 read.
   passing block goes into the pass list as a recipe the feature transform reproduces: `passedBlocks` (and the
   `bins` member of its `passed` entry) with `k`, `edges` / `rankCuts`, `missingBin` and the fragment
   `{scope: row, type: bin, input: x, edges: [...]}` (a position block names the within-unit rank cuts, a
-  context op upstream). The `columns` list stays the candidate names — the block's column is the raw one.
+  context op upstream). The `columns` list stays the candidate names — the block's column is the raw one. The
+  row `bin` op's bins are `[edge_{i−1}, edge_i)` against the block's `(edge_{i−1}, edge_i]` (and a sketch edge is
+  an observed value, so ties at the edges are the rule), hence the fragment's edges are `nextUp(edge)`, written in
+  full: v ≥ nextUp(e) exactly when v > e, ties and repeated edges included. The one-candidate cut suggestion
+  (§9.4) writes its `bin` fragment the same way.
 
 ## 7. Periods, time window, flags, q-values
 

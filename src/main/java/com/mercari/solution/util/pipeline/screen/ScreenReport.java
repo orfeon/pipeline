@@ -395,7 +395,10 @@ public final class ScreenReport {
         r.put(prefix + "het_levels", het == null ? null : (long) het.levels);
     }
 
-    /** The bins' geometry the suggestions read: a representative value per value bin, and the k − 1 edges (null for position bins). */
+    /**
+     * The bins' geometry: a representative value per value bin (the suggestions' shapes), and the k − 1 edges (the
+     * suggestions' cuts, the records' {@code bin_edges} and the pass list's block recipes; null for position bins).
+     */
     public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges) {}
 
     /** A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none). */
@@ -469,7 +472,7 @@ public final class ScreenReport {
                 if (bestStep != null) {
                     candidates.add(suggestion(name, placebo, "cut", "step", bestStep.cut, direction(bd, bestStep.phi, k), Double.NaN, Double.NaN,
                             bestStepChi2 / blockDisc, bestStepChi2, bc, bestStep.phi, k, blockConf, nConf,
-                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : "{scope: row, type: bin, input: " + name + ", edges: [" + fmt(bestStep.cut) + "]}", placeboGains));
+                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : rowBinFragment(name, new double[]{bestStep.cut}), placeboGains));
                 }
                 // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction
                 final double[] effects = new double[k], weights = new double[k];
@@ -983,7 +986,8 @@ public final class ScreenReport {
     /**
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
-     * @param bins     the bins' geometry for the suggestions (null = no suggestions)
+     * @param bins     the bins' geometry for the suggestions and the block records' {@code bin_edges} (null = no
+     *                 suggestions, and null edges: a passing value block then has no row bin op in the pass list)
      */
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                final Map<Integer, PartialAccumulator> partials, final FitState fit, final Bins bins) {
@@ -1079,9 +1083,7 @@ public final class ScreenReport {
                     // the value edges (k − 1), the pass list's material to reproduce a passing block as a row bin op;
                     // null for position bins or without a sketch value
                     final double[] edges = bins == null ? null : bins.edges().apply(c);
-                    final List<Double> edgeList = edges == null ? null : new ArrayList<>();
-                    if (edges != null) for (final double v : edges) edgeList.add(v);
-                    r.put("bin_edges", edgeList);
+                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(edges).boxed().toList()));
                     Stats used = st;
                     if (conditioned) {
                         final PartialAccumulator pacc = partials.get(key);
@@ -1580,8 +1582,9 @@ public final class ScreenReport {
     /**
      * The recipe of a passing binned block: {@code k}, {@code edges} (value bins: the k − 1 window quantile edges,
      * bin i = (edge_{i−1}, edge_i]) or {@code rankCuts} (position bins: the rank fractions i / k), whether the
-     * missing values had their own bin, and the feature transform's row {@code bin} op with those edges (a
-     * position block has no row op: the within-unit rank is a context op, the fragment says so).
+     * missing values had their own bin, and the feature transform's row {@code bin} op that reproduces those bins
+     * ({@link #rowBinFragment}: the next double above each edge; a position block has no row op: the within-unit
+     * rank is a context op, the fragment says so).
      */
     static JsonObject blockRecipe(final ScreenSpec spec, final String candidate, final Object edges) {
         final JsonObject block = new JsonObject();
@@ -1595,15 +1598,33 @@ public final class ScreenReport {
             block.add("rankCuts", cuts);
             block.add("edges", null);
             block.addProperty("fragment", "the rank of " + candidate + " within the unit, cut at " + cuts + " (a context op upstream, then a row bin)");
-        } else {
-            if (edges instanceof List<?>) for (final Object v : (List<?>) edges) cuts.add((Double) v);
+        } else if (edges instanceof List<?> list) {
+            final double[] values = list.stream().mapToDouble(v -> (Double) v).toArray();
+            for (final double v : values) cuts.add(v);
             block.add("edges", cuts);
             block.add("rankCuts", null);
-            final StringBuilder list = new StringBuilder();
-            for (int i = 0; i < cuts.size(); i++) list.append(i == 0 ? "" : ", ").append(fmt(cuts.get(i).getAsDouble()));
-            block.addProperty("fragment", "{scope: row, type: bin, input: " + candidate + ", edges: [" + list + "]}");
+            block.addProperty("fragment", rowBinFragment(candidate, values));
+        } else {
+            // no value edges (no window sketch value for the column, or a report built without the bins' geometry):
+            // an empty edge list is not a row bin op (the feature transform rejects it), so say so instead
+            block.add("edges", null);
+            block.add("rankCuts", null);
+            block.addProperty("fragment", "no value edges for " + candidate + " (no window sketch value): no row bin op reproduces the block");
         }
         return block;
+    }
+
+    /**
+     * The feature transform's row {@code bin} op over the screen's value edges. The screen's bin i is
+     * (edge_{i−1}, edge_i] (a value equal to an edge falls below it, and a sketch edge is an observed value) while
+     * the row op counts the edges a value reaches (bin i = [edge_{i−1}, edge_i)), so the op takes the next double
+     * above each edge — v ≥ nextUp(e) exactly when v > e, the same partition with ties and repeated edges — written
+     * in full (a rounded edge moves the rows between it and the true one to the neighbouring bin).
+     */
+    static String rowBinFragment(final String input, final double[] edges) {
+        final StringBuilder list = new StringBuilder();
+        for (int i = 0; i < edges.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(edges[i])));
+        return "{scope: row, type: bin, input: " + input + ", edges: [" + list + "]}";
     }
 
     /**
