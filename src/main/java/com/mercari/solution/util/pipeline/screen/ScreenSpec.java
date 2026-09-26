@@ -102,6 +102,63 @@ public final class ScreenSpec implements Serializable {
 
     /** suggestions: the one-candidate derivation suggestions from the binned sums (DSL doc §9.4; needs the binned transform) */
     public boolean suggestionsOn;
+    /** pairs.fields: declared pairs of conditioning fields (names); pairs.among: fields whose every pair is tested */
+    public List<String[]> pairFields = new ArrayList<>();
+    public List<String> pairAmong = new ArrayList<>();
+    /** pairs.maxPairs: the bound on the pairs a run tests (each costs 2 + k doubles per partial key) */
+    public int pairMaxPairs = PAIRS_MAX_DEFAULT;
+    /** pairs.placebo: noise placebos per pair (member × noise column), the pair kind's calibration */
+    public int pairPlacebo = PAIR_PLACEBO_DEFAULT;
+    /** the resolved pairs as indices into {@link #conditioningFields} (DSL doc §8.6) */
+    public List<int[]> pairs = new ArrayList<>();
+    /**
+     * the resolved placebo pairs {@code [member, noise column]}: up to {@code pairPlacebo} per pair, its first member
+     * times a noise column that member is not already paired with (pairs sharing a member never repeat a placebo)
+     */
+    public List<int[]> pairPlacebos = new ArrayList<>();
+
+    public static final int PAIRS_MAX_DEFAULT = 200;
+    public static final int PAIR_PLACEBO_DEFAULT = 5;
+    /** the pair test's own placebo kind and record transform */
+    public static final String KIND_PAIR = "pair";
+    public static final String TRANSFORM_PRODUCT = "product";
+
+    public boolean hasPairs() {
+        return !pairs.isEmpty();
+    }
+
+    /** The member field names {@code [a, b]} of a (real) pair. */
+    public String[] pairFieldNames(final int pair) {
+        return new String[]{conditioningFields.get(pairs.get(pair)[0]), conditioningFields.get(pairs.get(pair)[1])};
+    }
+
+    /** The pair's record name: {@code a*b}; a placebo pair {@code a*__noise_<r>}. */
+    public String pairName(final int pair) {
+        if (pair < pairs.size()) return String.join("*", pairFieldNames(pair));
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return conditioningFields.get(placebo[0]) + "*" + NOISE_PREFIX + placebo[1];
+    }
+
+    /** The real pairs, then the placebo pairs ({@link #pairPlacebos}: a first member × a noise column). */
+    public int pairCount() {
+        return pairs.size() + pairPlacebos.size();
+    }
+
+    public boolean isPlaceboPair(final int pair) {
+        return pair >= pairs.size();
+    }
+
+    /** The accumulator key of a pair (after every column × transform key). */
+    public int pairKey(final int pair) {
+        return columnCount() * transforms.size() + pair;
+    }
+
+    /** The conditioning-field indices of a pair's members; for a placebo pair the first member and the noise column index (as the second value, negative: −1 − r). */
+    public int[] pairMembers(final int pair) {
+        if (pair < pairs.size()) return pairs.get(pair);
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return new int[]{placebo[0], -1 - placebo[1]};
+    }
 
     public boolean hasHeterogeneity() {
         return heterogeneityBy != null;
@@ -286,7 +343,7 @@ public final class ScreenSpec implements Serializable {
 
     /** The statistic kind a transform's placebo threshold is pooled over. */
     public static String kind(final String transform) {
-        return isBinned(transform) ? KIND_BINNED : KIND_DF1;
+        return isBinned(transform) ? KIND_BINNED : TRANSFORM_PRODUCT.equals(transform) ? KIND_PAIR : KIND_DF1;
     }
 
     /** Bins of the binned test: {@code bins.k} value / position bins plus the missing bin (the last index). */
@@ -504,6 +561,40 @@ public final class ScreenSpec implements Serializable {
             }
             if (s.suggestionsOn && !s.transforms.contains(TRANSFORM_BINNED)) {
                 errors.add("suggestions read the binned sums: add binned to transforms");
+            }
+        }
+        final JsonElement pairs = p.get("pairs");
+        if (pairs != null && !pairs.isJsonNull()) {
+            if (pairs.isJsonObject()) {
+                final JsonObject o = pairs.getAsJsonObject();
+                final JsonElement fields = o.get("fields");
+                if (fields != null && !fields.isJsonNull() && !fields.isJsonArray()) {
+                    errors.add("pairs.fields must be a list of [a, b] pairs of field names");
+                } else if (fields != null && fields.isJsonArray()) {
+                    for (final JsonElement e : fields.getAsJsonArray()) {
+                        // both members field names (a null / object member would throw from getAsString)
+                        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2
+                                || !e.getAsJsonArray().get(0).isJsonPrimitive() || !e.getAsJsonArray().get(1).isJsonPrimitive()) {
+                            errors.add("pairs.fields must be a list of [a, b] pairs of field names");
+                            continue;
+                        }
+                        s.pairFields.add(new String[]{e.getAsJsonArray().get(0).getAsString(), e.getAsJsonArray().get(1).getAsString()});
+                    }
+                }
+                s.pairAmong = strings(o, "among", errors);
+                final Double max = number(o, "maxPairs");
+                if (max != null) {
+                    if (max < 1 || max != Math.rint(max)) errors.add("pairs.maxPairs must be a positive integer");
+                    else s.pairMaxPairs = max.intValue();
+                }
+                final Double placebo = number(o, "placebo");
+                if (placebo != null) {
+                    if (placebo < 0 || placebo != Math.rint(placebo)) errors.add("pairs.placebo must be a non-negative integer");
+                    else s.pairPlacebo = placebo.intValue();
+                }
+                if (s.pairFields.isEmpty() && s.pairAmong.isEmpty()) errors.add("pairs needs fields ([[a, b], ...]) or among ([names / globs])");
+            } else {
+                errors.add("pairs must be an object {fields: [[a, b], ...], among: [...], maxPairs, placebo}");
             }
         }
         s.transformsExplicit = !s.transforms.isEmpty();
@@ -791,6 +882,63 @@ public final class ScreenSpec implements Serializable {
                 if (!matched) errors.add("conditioning.fields '" + pattern + "' matched no numeric input field (role fields cannot be conditioned on)");
             }
             if (conditioningFields.size() > 500) errors.add("conditioning.fields resolved to " + conditioningFields.size() + " columns; the Newton Gram matrix is k x k, keep k <= 500");
+        }
+        // pairs: every member is a conditioning field (the product is tested at the fitted means of a model holding
+        // its members), declared as pairs or as a set whose every pair is tested, within the bound
+        pairs = new ArrayList<>();
+        pairPlacebos = new ArrayList<>();
+        if (!pairFields.isEmpty() || !pairAmong.isEmpty()) {
+            final int pairErrors = errors.size();
+            if (conditioningFields.isEmpty()) errors.add("pairs need conditioning: a product is tested at the fitted means of a model holding both members (declare them in conditioning.fields)");
+            // the placebo block may follow pairs in the parameters: checked once both are read
+            if (pairPlacebo > noise) errors.add("pairs.placebo (" + pairPlacebo + ") exceeds placebo.noise (" + noise + "): a placebo pair is a member times a noise column");
+            final Set<String> seen = new HashSet<>();
+            for (final String[] pf : pairFields) {
+                final int a = conditioningFields.indexOf(pf[0]), b = conditioningFields.indexOf(pf[1]);
+                if (a < 0 || b < 0) errors.add("pairs.fields [" + pf[0] + ", " + pf[1] + "]: both members must be conditioning fields (" + conditioningFields + ")");
+                else if (a == b) errors.add("pairs.fields [" + pf[0] + ", " + pf[1] + "]: a pair needs two different fields");
+                else if (seen.add(Math.min(a, b) + ":" + Math.max(a, b))) pairs.add(new int[]{Math.min(a, b), Math.max(a, b)});
+            }
+            final List<Integer> among = new ArrayList<>();
+            for (final String pattern : pairAmong) {
+                final Pattern glob = StatMath.glob(pattern);
+                boolean matched = false;
+                for (int i = 0; i < conditioningFields.size(); i++) {
+                    if (glob.matcher(conditioningFields.get(i)).matches()) {
+                        matched = true;
+                        if (!among.contains(i)) among.add(i);
+                    }
+                }
+                if (!matched) errors.add("pairs.among '" + pattern + "' matched no conditioning field (" + conditioningFields + ")");
+            }
+            for (int i = 0; i < among.size(); i++) {
+                for (int j = i + 1; j < among.size(); j++) {
+                    final int a = Math.min(among.get(i), among.get(j)), b = Math.max(among.get(i), among.get(j));
+                    if (seen.add(a + ":" + b)) pairs.add(new int[]{a, b});
+                }
+            }
+            // among matching a single field (and no declared pair) would silently test nothing
+            if (pairs.isEmpty() && errors.size() == pairErrors) errors.add("pairs resolved to no pair: among needs at least two matching conditioning fields (" + conditioningFields + ")");
+            if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key; declare fewer members or raise the bound)");
+            // the placebo pairs: each pair's first member times a noise column it is not already paired with, spread
+            // over the noise columns, so pairs sharing a member never repeat a placebo (an identical column would
+            // duplicate a record name and a calibration sample); a member already paired with every noise column
+            // brings no further placebo
+            if (pairPlacebo <= noise) {
+                final Set<Long> used = new HashSet<>();
+                for (int i = 0; i < pairs.size(); i++) {
+                    final int member = pairs.get(i)[0];
+                    for (int j = 0; j < pairPlacebo; j++) {
+                        for (int step = 0; step < noise; step++) {
+                            final int r = (int) (((long) i * pairPlacebo + j + step) % noise);
+                            if (used.add((long) member * noise + r)) {
+                                pairPlacebos.add(new int[]{member, r});
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
