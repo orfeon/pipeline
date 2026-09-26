@@ -279,15 +279,23 @@ seeded-hash dilution.
   since the marginal and the partial period signs can disagree (a suppressor).
 - **Pass rule.** `pass: {minPeriodsAgree}` adds the period agreement of the effective test to the cut: a share
   (≤ 1) of its usable periods or a count (> 1); no usable period never passes. `pass: {minGain}` puts a
-  practical floor under the cut: `passed` needs the effective gain above `max(threshold, minGain)`. The placebo
+  practical floor under the cut: `passed` needs the effective gain above the threshold and its *excess* —
+  `excess_gain` = gain − df / 2N, the gain less what a null test of the same degrees of freedom shows on average
+  (E[χ²] = df over 2N; `partial_excess_gain` with conditioning, the partial df) — above the floor. On the raw
+  gain a binned block of df = 10 carries ten times the null gain of a df = 1 test (≈ 1e-4 at N = 50k), so one
+  floor would be lenient to blocks and strict to columns; the excess holds both to the same bar. The placebo
   threshold is a significance cut — roughly constant on the χ² scale (≈ 6.6, the χ²(1) quantile at q99) and so
   ≈ 6.6 / (2N) ≈ 3.3 / N on the gain scale — and on a large window it admits columns whose gain is real but too
   small to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the
   scale a trained model's excess log score is reported on, so it means the same thing whatever N. With
   `weight` (§3.4) S and H carry the weights while the gain divides by the unit count, so the floor reads the
-  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected). Both rules tighten
+  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected); the excess's
+  null term df / 2N is the unit-weight one (a null test's χ² scales as Σw² / Σw), so the weights are to be
+  normalised to mean 1 — a `minGain` scaled by the mean weight instead leaves that term unscaled. Both rules tighten
   the placebo cut and are not themselves placebo-calibrated; the record's `threshold` stays the placebo cut,
-  and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`).
+  and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`). The
+  same floor holds the heterogeneity flag (§7.1, the het df), the suggestions' confirmation gains (§9.4, df = 1
+  over the confirmation half) and the joint selection's steps and pair increments (§9.5, df = 1).
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
   (`nRowsTimeFiltered`). Screening the evaluation period leaks the evaluation into the selection.
 - **Leak flag.** `flags.leakZ` marks a candidate with |z| above it as `leakSuspect` — a flag, never a
@@ -326,7 +334,7 @@ per level exactly as per period, with the fit's per-level [n, g, G] — as `part
 effective test decides as for the main statistic.
 
 **Its own flag.** The heterogeneity test is a df = L − 1 statistic with its own placebo kind (`het`, §5):
-`het_passed` = effective het gain above `max(thresholds.het, pass.minGain)`. It is never folded into
+`het_passed` = effective het gain above `thresholds.het` (its excess over het df / 2N above `pass.minGain`). It is never folded into
 `passed` — a candidate passes on its main effect — and the summary / pass list list the flagged columns
 apart (`hetPassedColumns`, `nHetPassed`): the reading is "cross this candidate with the modifier
 upstream" (§12.3), not "select it". A stable effect leaves nothing to the heterogeneity test; a decaying
@@ -427,7 +435,7 @@ sharing a member take different noise columns, so no placebo column repeats —
 whose partial gains give the kind's cut. A row missing either member is missing for the product (it
 contributes nothing, as a missing candidate value does): the recipe `a * b` is null there, and the product of
 the design's fill would carry the members' missingness as a spurious interaction the placebos do not see.
-A pair passes on `partial_gain > max(thresholds.pair, minGain)`;
+A pair passes on `partial_gain > thresholds.pair` (its excess gain above `pass.minGain` when declared);
 a passing pair is a recipe, never a column of the pass list: the summary and the pass list carry
 `passedPairs` apart (`{a, b, fragment}`, the fragment `{scope: row, expr: "a * b"}`; counted in
 `nPairsPassed`, not `nPassed`). Without an
@@ -460,11 +468,12 @@ declares — read it for the pairs that passed.
 ### 9.1 Scoring records (the default output)
 
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
-(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; the block test's active bins − 1),
+(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `excess_gain` (gain − df / 2N, §7; null when
+degenerate), `df` (1; the block test's active bins − 1),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
 (array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `het_chi2 / df /
 pValue / gain / levels` and `level_z` (array of {level, z, S, H, n}; §7.1, null without a modifier), `r2_F`,
-`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
+`partial_S / H / chi2 / z / gain / pValue`, `partial_excess_gain`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
 gain / levels`, `partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without
 conditioning), `threshold` (the record's kind's cut), `passed`, `leakSuspect`, `het_passed`, `placebo`,
 `degenerate`. A block record leaves the signed fields null (`S`, `H`,
@@ -535,8 +544,9 @@ while `confirmation_chi2 / share / gain / pValue` report the chosen contrast on 
 gain over the half's unit mass, in proportion to its weight). `share` and `chi2` are the discovery values.
 
 **Calibration.** Placebo columns go through the same search, so each kind takes the placebo quantile of the
-placebo columns' confirmation gains as its cut (`threshold`, lifted to `pass.minGain`; the theoretical χ²(1)
-quantile / 2N of the half without placebos), and `passed` compares the confirmation gain with it.
+placebo columns' confirmation gains as its cut (`threshold`; the theoretical χ²(1) quantile / 2N of the half
+without placebos), and `passed` compares the confirmation gain with it — under `pass.minGain` its excess (less
+1 / 2N of the half, §7) must clear the floor too.
 
 **Hypotheses, not decisions.** The score test is local to β = 0 and a shape with a large effect is
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
@@ -592,7 +602,7 @@ The report reads them as the several-candidate suggestions of §12.3, written to
 |---|---|---|
 | `phd` | the principal Hessian directions (Li 1992): the eigenpairs of H^(−1/2) M H^(−1/2) by \|eigenvalue\|, the directions mapped back through H^(−1/2) — residual curvature, quadratic effects and interactions in bulk, the loadings naming the candidates — scale-free, v_j √H_jj, so a column's units do not decide its rank | `name` direction i, `candidate` the top loading, `chi2` the eigenvalue, `share` its \|λ\| over the sum, `consistency` the largest \|loading\| of a noise column (the null scale: a real direction loads on candidates, not noise; null without a noise column), `fragment` the top-loading candidates' coefficients in their own units — the projection v'x and its square are the recipe; a diagnostic, `passed` null |
 | `redundant` | single linkage at \|H_ij\| / √(H_ii H_jj) ≥ `redundancy` (default 0.95) among the candidates | one record per cluster of two or more: `candidate` the member with the largest marginal χ², `share` the cluster's smallest pairwise \|correlation\|, `fragment` the others — keep one, or average / project them |
-| `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `threshold` the cut, `fragment` "given [A]" |
+| `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (and its excess gain − 1 / 2N the `pass.minGain` floor), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `threshold` the cut, `fragment` "given [A]" |
 | `composite` | β = H_AA⁻¹ S_A over the selected set and the joint χ² = S_A' H_AA⁻¹ S_A | `fragment` the row expression Σ β_j x_j, `chi2`, `share` its gain |
 | `difference` | every pair of candidates: the two-dimensional Newton direction β = H₂⁻¹ S₂ — kept when the pair's joint χ² exceeds the better single one by `excess` (default 1.5), the increment over it (the other member's score test given the better one) clears the df = 1 cut, and the standardised coefficients β_i √H_ii, β_j √H_jj are opposite in sign and within a factor of two of each other; the `pairs` (default 10) largest excesses | `name` a − b, `fragment` `{scope: row, expr: "a - r*b"}` with r the raw-scale coefficient ratio, `chi2` the joint χ², `share` the excess, `consistency` the magnitudes' ratio |
 | `ratio` | the same pair when both columns are positive over the window (the sketch minima): the difference's log-scale reading, approximate | `fragment` `{scope: row, expr: "a / b"}` |

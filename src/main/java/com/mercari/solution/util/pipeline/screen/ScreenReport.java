@@ -707,11 +707,12 @@ public final class ScreenReport {
                     : StatMath.quantile(gains.stream().mapToDouble(Double::doubleValue).sorted().toArray(), spec.quantile));
         }
         for (final Map<String, Object> s : candidates) {
-            final double cut = spec.gainCut(thresholds.get((String) s.get("kind")));
+            final double cut = thresholds.get((String) s.get("kind"));
             final double gain = (Double) s.get("confirmation_gain");
-            s.remove("_nConf");
+            final double nConf = (Double) s.remove("_nConf");
             s.put("threshold", cut);
-            s.put("passed", !(Boolean) s.get("placebo") && !Double.isNaN(cut) && gain > cut);
+            // a df = 1 contrast on the confirmation half: the floor reads its excess over 1 / 2N of the half
+            s.put("passed", !(Boolean) s.get("placebo") && spec.passesGain(gain, 1, nConf, cut));
             out.add(s);
         }
         return out;
@@ -1123,7 +1124,7 @@ public final class ScreenReport {
                 }
             }
             final double gain = nUnits > 0 ? bestChi2 / (2 * nUnits) : Double.NaN;
-            if (bestJ < 0 || !(gain > df1Cut)) break;
+            if (bestJ < 0 || !spec.passesGain(gain, 1, nUnits, df1Cut)) break;
             final List<String> given = new ArrayList<>();
             for (final int j : selected) given.add(names.get(spec.jointColumn(j)));
             out.add(jointRecord(names.get(spec.jointColumn(bestJ)), "select", "step" + (step + 1), Double.NaN, gain, bestChi2, gain, true, df1Cut,
@@ -1167,7 +1168,7 @@ public final class ScreenReport {
                 final double bi = (h[j][j] * s[i] - h[i][j] * s[j]) / det, bj = (h[i][i] * s[j] - h[i][j] * s[i]) / det;
                 final double chi2 = bi * s[i] + bj * s[j];
                 final double single = Math.max(s[i] * s[i] / h[i][i], s[j] * s[j] / h[j][j]);
-                if (!(single > 0) || !(chi2 > spec.jointExcess * single) || !((chi2 - single) / (2 * nUnits) > df1Cut)) continue;
+                if (!(single > 0) || !(chi2 > spec.jointExcess * single) || !spec.passesGain((chi2 - single) / (2 * nUnits), 1, nUnits, df1Cut)) continue;
                 // standardised coefficients: opposite signs, comparable magnitudes
                 final double si = bi * Math.sqrt(h[i][i]), sj = bj * Math.sqrt(h[j][j]);
                 if (si * sj >= 0) continue;
@@ -2163,8 +2164,9 @@ public final class ScreenReport {
         final double[] q = StatMath.benjaminiHochberg(p);
         for (int i = 0; i < p.length; i++) records.get(candidateRecords.get(i)).put("qValue", q[i]);
 
-        // flags: the gain cut is the record's kind's placebo threshold lifted to pass.minGain (the practical
-        // floor) when higher; the period rule applies to the df = 1 tests (a block has no sign to agree on)
+        // flags: the effective gain above the record's kind's placebo threshold and, under pass.minGain (the
+        // practical floor), its excess over df / 2N above the floor; the period rule applies to the df = 1 tests (a
+        // block has no sign to agree on)
         long nPassed = 0, nLeak = 0, nHetPassed = 0;
         final Map<String, Double> passedBest = new HashMap<>();
         final Map<String, Double> hetPassedBest = new HashMap<>();
@@ -2175,8 +2177,15 @@ public final class ScreenReport {
             final boolean placebo = (Boolean) r.get("placebo");
             final long[] agreement = effectiveAgree.get(i);
             final double kindThreshold = thresholds.get(ScreenSpec.kind((String) r.get("transform")));
-            final double gainCut = spec.gainCut(kindThreshold);
-            final boolean passed = !placebo && !st.degenerate && !Double.isNaN(gainCut) && st.estGain > gainCut
+            // the degrees of freedom of the marginal and the effective test (a block's partial df may be fewer)
+            final double marginalDf = ((Long) r.get("df")).doubleValue();
+            final double effectiveDf = conditioned && r.get("partial_df") != null ? ((Long) r.get("partial_df")).doubleValue() : marginalDf;
+            final Double estGain = (Double) r.get("est_gain"), partialGain = (Double) r.get("partial_gain");
+            // a degenerate test's gain is a placeholder 0: no excess (not a negative df / 2N) is read off it
+            final boolean marginalDegenerate = (Boolean) r.get("degenerate");
+            r.put("excess_gain", estGain == null || marginalDegenerate ? null : ScreenSpec.excessGain(estGain, marginalDf, nUnits));
+            r.put("partial_excess_gain", partialGain == null || (conditioned && st.degenerate) ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
+            final boolean passed = !placebo && !st.degenerate && spec.passesGain(st.estGain, effectiveDf, nUnits, kindThreshold)
                     && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
             // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned);
             // a block test has no z, so the leak flag does not read it
@@ -2198,12 +2207,12 @@ public final class ScreenReport {
                 }
             }
             if (leak && !placebo) nLeak++;
-            // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
+            // the heterogeneity test's own flag (never folded into passed): its kind's cut, and its excess over het df / 2N
+            // above the floor
             final Het het = effectiveHet.get(i);
             Boolean hetPassed = null;
             if (het != null) {
-                final double hetCut = spec.gainCut(thresholds.get(ScreenSpec.KIND_HET));
-                hetPassed = !placebo && !het.degenerate && !Double.isNaN(hetCut) && het.gain > hetCut;
+                hetPassed = !placebo && !het.degenerate && spec.passesGain(het.gain, het.df, nUnits, thresholds.get(ScreenSpec.KIND_HET));
                 if (hetPassed) {
                     nHetPassed++;
                     hetPassedBest.merge((String) r.get("candidate"), het.gain, Math::max);
@@ -2305,7 +2314,7 @@ public final class ScreenReport {
         summary.put("notes", notes);
         final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, bins));
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
-        suggested.addAll(joint(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, spec.gainCut(threshold), bins));
+        suggested.addAll(joint(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, threshold, bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
         suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
         // the passing categorical candidates' level groupings and strong single levels
@@ -2396,9 +2405,11 @@ public final class ScreenReport {
             d.addProperty("candidate", (String) r.get("candidate"));
             d.addProperty("transform", (String) r.get("transform"));
             d.addProperty("est_gain", (Double) r.get("est_gain"));
+            d.addProperty("excess_gain", (Double) r.get("excess_gain"));
             d.addProperty("z", (Double) r.get("z"));
             if (r.get("partial_gain") != null) {
                 d.addProperty("partial_gain", (Double) r.get("partial_gain"));
+                d.addProperty("partial_excess_gain", (Double) r.get("partial_excess_gain"));
                 d.addProperty("partial_z", (Double) r.get("partial_z"));
                 d.addProperty("r2_F", (Double) r.get("r2_F"));
             }
@@ -2472,11 +2483,12 @@ public final class ScreenReport {
     }
 
     /**
-     * The rule behind {@code passed} as applied: the effective test's gain against the threshold (lifted to
-     * {@code pass.minGain} when declared), then the period agreement.
+     * The rule behind {@code passed} as applied: the effective test's gain against the threshold, its excess gain
+     * (gain − df / 2N) against {@code pass.minGain} when declared, then the period agreement.
      */
     static String passRule(final ScreenSpec spec, final boolean conditioned) {
-        final String gain = (conditioned ? "partial_gain" : "est_gain") + " > " + (spec.minGain == null ? "threshold" : "max(threshold, " + spec.minGain + ")");
+        final String gain = (conditioned ? "partial_gain" : "est_gain") + " > threshold"
+                + (spec.minGain == null ? "" : " and " + (conditioned ? "partial_excess_gain" : "excess_gain") + " > " + spec.minGain);
         if (spec.minPeriodsAgree == null) return gain;
         final String agree = conditioned ? "partial_periods_agree" : "periods_agree";
         final String periods = conditioned ? "partial_n_periods" : "n_periods";
@@ -2519,6 +2531,7 @@ public final class ScreenReport {
                 .withField("chi2", Schema.FieldType.FLOAT64)
                 .withField("z", Schema.FieldType.FLOAT64)
                 .withField("est_gain", Schema.FieldType.FLOAT64)
+                .withField("excess_gain", Schema.FieldType.FLOAT64)
                 .withField("df", Schema.FieldType.INT64)
                 .withField("pValue", Schema.FieldType.FLOAT64)
                 .withField("qValue", Schema.FieldType.FLOAT64)
@@ -2541,6 +2554,7 @@ public final class ScreenReport {
                 .withField("partial_chi2", Schema.FieldType.FLOAT64)
                 .withField("partial_z", Schema.FieldType.FLOAT64)
                 .withField("partial_gain", Schema.FieldType.FLOAT64)
+                .withField("partial_excess_gain", Schema.FieldType.FLOAT64)
                 .withField("partial_pValue", Schema.FieldType.FLOAT64)
                 .withField("partial_df", Schema.FieldType.INT64)
                 .withField("partial_het_chi2", Schema.FieldType.FLOAT64)

@@ -239,6 +239,9 @@ public class GroupScorerTest {
         Assertions.assertEquals(Boolean.TRUE, x2Raw.get("degenerate"));
         Assertions.assertEquals(Boolean.FALSE, x2Raw.get("passed"));
         Assertions.assertEquals(0d, x2Raw.get("est_gain"));
+        // the placeholder gain of a degenerate test carries no excess (not a negative df / 2N)
+        Assertions.assertNull(x2Raw.get("excess_gain"));
+        Assertions.assertEquals((Double) xRaw.get("est_gain") - 1d / 40, (Double) xRaw.get("excess_gain"), 1e-12);
         Assertions.assertEquals(List.of("x"), result.summary().get("passedColumns"));
         Assertions.assertEquals(2L, result.summary().get("nPassed"));
         Assertions.assertEquals(20L, result.summary().get("nUnits"));
@@ -438,6 +441,10 @@ public class GroupScorerTest {
         Assertions.assertEquals("x", selection.getAsJsonArray("passed").get(0).getAsJsonObject().getAsJsonObject("bins").get("candidate").getAsString());
         Assertions.assertTrue(Math.abs((Double) raw.get("z")) < 2, "raw z " + raw.get("z"));
         Assertions.assertEquals(3L, binned.get("df"));
+        // the excess gain subtracts the record's own df / 2N: 3 / 80 for the block, 1 / 80 for raw
+        Assertions.assertEquals((Double) binned.get("est_gain") - 3d / 80, (Double) binned.get("excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) raw.get("est_gain") - 1d / 80, (Double) raw.get("excess_gain"), 1e-12);
+        Assertions.assertNull(binned.get("partial_excess_gain"));
         Assertions.assertNull(binned.get("z"));
         Assertions.assertNull(binned.get("S"));
         Assertions.assertTrue((Double) binned.get("chi2") > 8, "binned chi2 " + binned.get("chi2"));   // bins 0 / 6 / 5 / 0 of 10 positives
@@ -1254,6 +1261,14 @@ public class GroupScorerTest {
         Assertions.assertTrue(js.hRaw()[0][0] > 0 && js.hRaw()[1][1] > js.h()[1][1]);
 
         final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        // under conditioning the block's partial excess subtracts the partial block's df (600 rows as units)
+        final Map<String, Object> bBinned = result.records().stream()
+                .filter(r -> "b".equals(r.get("candidate")) && ScreenSpec.TRANSFORM_BINNED.equals(r.get("transform"))).findFirst().orElseThrow();
+        Assertions.assertFalse((Boolean) bBinned.get("degenerate"));
+        Assertions.assertEquals((Double) bBinned.get("partial_gain") - ((Long) bBinned.get("partial_df")).doubleValue() / 1200,
+                (Double) bBinned.get("partial_excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) bBinned.get("est_gain") - ((Long) bBinned.get("df")).doubleValue() / 1200,
+                (Double) bBinned.get("excess_gain"), 1e-12);
         final Map<String, Map<String, Object>> select = new HashMap<>();
         final List<Map<String, Object>> shapes = new ArrayList<>();
         for (final Map<String, Object> sg : result.suggestions()) {
@@ -1799,12 +1814,16 @@ public class GroupScorerTest {
             final double threshold = (Double) xRaw.get("threshold");
             Assertions.assertTrue(gain > 0.001 && gain > threshold && gain < 10, pass + " gain=" + gain);
             Assertions.assertEquals(threshold, result.summary().get("threshold"), pass);
-            final boolean expected = floor == null || floor < gain;
+            // the floor reads the excess gain: the gain less df / 2N (30 units, df = 1)
+            final double excess = (Double) xRaw.get("excess_gain");
+            Assertions.assertEquals(gain - 1d / 60, excess, 1e-12, pass);
+            Assertions.assertNull(xRaw.get("partial_excess_gain"));
+            final boolean expected = floor == null || floor < excess;
             Assertions.assertEquals(expected, xRaw.get("passed"), pass);
             Assertions.assertEquals(expected ? List.of("x") : List.of(), result.summary().get("passedColumns"), pass);
             Assertions.assertEquals(expected ? 1L : 0L, result.summary().get("nPassed"), pass);
             final String rule = (String) result.summary().get("passRule");
-            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > max(threshold, " + floor + ")", rule);
+            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > threshold and excess_gain > " + floor, rule);
             Assertions.assertEquals(floor, result.summary().get("minGain"), pass);
             final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
             Assertions.assertEquals(rule, selection.get("passRule").getAsString());
@@ -1814,13 +1833,22 @@ public class GroupScorerTest {
         }
         // with conditioning the floor applies to partial_gain, and it composes with the period agreement
         final ScreenSpec both = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], periods: year, pass: {minPeriodsAgree: 0.66, minGain: 1e-5}}");
-        Assertions.assertEquals("partial_gain > max(threshold, 1.0E-5) and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
-        Assertions.assertEquals("est_gain > max(threshold, 1.0E-5) and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
+        Assertions.assertEquals("partial_gain > threshold and partial_excess_gain > 1.0E-5 and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
+        Assertions.assertEquals("est_gain > threshold and excess_gain > 1.0E-5 and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
         // a floor never lowers the cut below the placebo threshold
         final ScreenSpec low = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 1e-12}}");
-        Assertions.assertEquals(0.5, low.gainCut(0.5));
-        Assertions.assertEquals(1e-12, low.gainCut(1e-13));
-        Assertions.assertTrue(Double.isNaN(low.gainCut(Double.NaN)));
+        Assertions.assertTrue(low.passesGain(0.5, 1, 1000, 0.4));
+        Assertions.assertFalse(low.passesGain(0.5, 1, 1000, 0.6));
+        Assertions.assertFalse(low.passesGain(0.5, 1, 1000, Double.NaN));
+        Assertions.assertFalse(low.passesGain(Double.NaN, 1, 1000, 0.4));
+        // the excess: a df = 10 block at chi2 = 10 over 100 units has gain 0.05 and no excess; the same gain with
+        // df = 1 has 0.045 of it, so a floor between the two admits the df = 1 test alone
+        Assertions.assertEquals(0d, ScreenSpec.excessGain(0.05, 10, 100), 1e-15);
+        Assertions.assertEquals(0.045, ScreenSpec.excessGain(0.05, 1, 100), 1e-15);
+        final ScreenSpec mid = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0.02}}");
+        Assertions.assertTrue(mid.passesGain(0.05, 1, 100, 0.01));
+        Assertions.assertFalse(mid.passesGain(0.05, 10, 100, 0.01));
+        Assertions.assertTrue(spec("{family: groupedMultinomial, group: g, label: y, candidates: [x]}").passesGain(0.05, 10, 100, 0.01));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: -1}}"));
         // a declared but malformed floor is an error, never silently no floor

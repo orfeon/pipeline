@@ -101,8 +101,9 @@ block's information F explains).
 - **Its own threshold.** A df = k − 1 gain is not comparable with a df = 1 gain, so the placebo cut is taken
   per statistic kind: `raw` / `rank` / `absdev` share one, `binned` has its own; each record's `threshold` is
   its kind's cut and the summary / pass list carry the `thresholds` map (`df1`, `binned`), the scalar
-  `threshold` staying the df = 1 cut. `pass.minGain` applies to both; `pass.minPeriodsAgree` is a df = 1 rule
-  and does not bar the block.
+  `threshold` staying the df = 1 cut. `pass.minGain` applies to both through the excess gain (the gain less
+  df / 2N, the null expectation of a df-degree test — a block's extra degrees of freedom do not buy it a lower
+  bar); `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block.
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; keep `binned` for the shapes `raw` and `rank` miss, and keep `k` small (10 is plenty).
 - **Closing the loop.** The record carries `bin_edges` (value bins), and a passing block goes into the pass
@@ -125,7 +126,7 @@ effect that flips sign across segments or periods — invisible to the window st
   field modifier `level_z` (per level: z, S, H, n; for `periods` read `period_z`). With conditioning the same
   decomposition runs on the partial slices (`partial_het_*`) and decides, as for the main statistic.
 - **Its own flag.** `het_passed` compares the effective heterogeneity gain with its own placebo cut
-  (`thresholds.het`, lifted to `pass.minGain`). It is **never folded into `passed`** — a candidate passes on
+  (`thresholds.het`; under `pass.minGain` its excess gain `het_gain − het_df / 2N` must clear the floor). It is **never folded into `passed`** — a candidate passes on
   its main effect; the summary and the pass list list the flagged columns apart (`nHetPassed`,
   `hetPassedColumns`). The reading is "cross this candidate with the modifier upstream" (a `cross` op in the
   feature transform), not "select it as is".
@@ -151,7 +152,8 @@ scorable candidate, recipes in the feature transform's vocabulary to the `<name>
   `confirmation_share` / `confirmation_gain` / `confirmation_pValue` the chosen recipe's on the confirmation
   half — the numbers to trust.
 - **Calibrated.** Placebo columns go through the same search; each kind's `threshold` is the placebo quantile
-  of their confirmation gains (lifted to `pass.minGain`), and `passed` compares the confirmation gain with it.
+  of their confirmation gains, and `passed` compares the confirmation gain with it (under `pass.minGain` the
+  confirmation excess — the gain less 1 / 2N of the confirmation half — must clear the floor too).
 - **Basis.** Without `conditioning` the recipes are read on the marginal binned sums (what the baseline
   misses). With it they are read on the partial block — both halves orthogonalised against the conditioning
   set — so a recipe says what the conditioning set does not already carry, not a re-encoding of it; `basis`
@@ -170,7 +172,7 @@ scale) — and writes, to the same `suggestions` output, what a univariate ranki
 |---|---|---|
 | `phd` | the principal Hessian directions: the directions of residual curvature (quadratic effects and interactions in bulk), their loadings naming the candidates involved — a diagnostic, never a pass flag; a real direction loads on candidates, not on the noise columns | `name` direction i, `candidate` the top loading (loadings are scale-free: a column's units do not decide its rank), `chi2` the eigenvalue, `share`, `consistency` the largest noise loading (null without a noise column), `fragment` the top candidates' coefficients in their own units — the recipe is the projection and its square; and the members to declare as `pairs` |
 | `redundant` | near-duplicate candidates (\|correlation\| ≥ `joint.redundancy` in the Fisher metric): keep one, or average / project them | `candidate` the strongest member, `fragment` the others, `share` the cluster's smallest \|correlation\| |
-| `select` | a forward selection: the candidate that adds most given the already selected set, step by step, while it clears the df = 1 cut — a set that works together | `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = the gain given the set (in-sample), `threshold` the cut it cleared, `fragment` "given [...]" |
+| `select` | a forward selection: the candidate that adds most given the already selected set, step by step, while it clears the df = 1 cut — a set that works together | `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = the gain given the set (in-sample), `threshold` the df = 1 placebo cut it cleared (under `pass.minGain` its excess gain cleared the floor too), `fragment` "given [...]" |
 | `composite` | the best linear combination of the selected set to add to the baseline | `fragment` the row expression, `chi2` / `share` the joint statistic and gain |
 | `difference` | a pair whose joint statistic clearly exceeds the better single one (`joint.excess`, default 1.5×, and the other member's gain given the better one clears the df = 1 cut) with equal and opposite standardised coefficients — the label follows `a − b`; at most `joint.pairs` (default 10) pairs | `name` `a - b`, `fragment` `{scope: row, expr: "a - r*b"}`, `chi2` the joint statistic, `share` the excess factor, `consistency` how equal the magnitudes are |
 | `ratio` | the same pair when both columns are positive over the window: the difference's log-scale reading (approximate) | `fragment` `{scope: row, expr: "a / b"}` |
@@ -222,16 +224,21 @@ level; none for the folded `(other)`).
   1) on top of the placebo threshold; a candidate without a usable period never passes. It is a stability
   filter on top of the calibrated cut, not calibrated by the placebo columns itself; the rule as applied is
   reported as `passRule` in the summary and the pass list.
-- `pass.minGain` is a practical floor on the gain: `passed` then requires the effective test's gain above
-  `max(threshold, minGain)`. The placebo threshold answers "is it distinguishable from noise" and shrinks with
-  the data (the χ²(1) quantile over 2N: ≈ 6.6 / 2N ≈ 3.3 / N on the gain scale at q99); on a large window it lets
-  through columns whose gain is real but too small to matter for training. `minGain` is in the unit of
-  `est_gain` — the average log-likelihood improvement per unit, the scale a trained model's excess log score is
-  reported on — so the same value means the same thing whatever N. With `weight` the gain is weight-scaled (the
-  weights multiply S and H, the gain divides by the unit count), so the floor is compared with the mean weight
-  times the per-unit gain: normalise the weights to mean 1, or scale `minGain` by the mean weight. The record's
-  `threshold` stays the placebo cut (the calibration check); `passRule` names the floor
-  (`est_gain > max(threshold, 1.0E-5)`).
+- `pass.minGain` is a practical floor on the gain: `passed` then requires, on top of the threshold, the
+  effective test's *excess gain* above the floor — `excess_gain` = `est_gain − df / 2N` (`partial_excess_gain`
+  with conditioning), the gain less what a null test of the same degrees of freedom shows on average (E[χ²] = df).
+  A df = 1 test loses 1 / 2N, negligible; a binned block of df = 10 loses ten times that, which on the raw gain
+  would let the block through a floor a df = 1 column of the same real effect fails. The placebo threshold
+  answers "is it distinguishable from noise" and shrinks with the data (the χ²(1) quantile over 2N: ≈ 6.6 / 2N ≈
+  3.3 / N on the gain scale at q99); on a large window it lets through columns whose gain is real but too small
+  to matter for training. `minGain` is in the unit of `est_gain` — the average log-likelihood improvement per
+  unit, the scale a trained model's excess log score is reported on — so the same value means the same thing
+  whatever N. With `weight` the gain is weight-scaled (the weights multiply S and H, the gain divides by the unit
+  count), so the floor is compared with the mean weight times the per-unit gain: normalise the weights to mean 1
+  (the excess subtracts the unit-weight null term df / 2N, so scaling `minGain` by the mean weight instead leaves
+  that term unscaled). The record's `threshold` stays the placebo cut (the calibration check);
+  `passRule` names the floor (`est_gain > threshold and excess_gain > 1.0E-5`). The same rule holds the
+  heterogeneity flag, the suggestions' confirmation gains and the joint selection to the floor.
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
@@ -292,7 +299,7 @@ up as a spurious interaction). The pair record (`candidate: a*b`, `transform: pr
 statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null), has its own placebo
 kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column (pairs sharing a
 member take different noise columns, so no placebo repeats), whose gains give
-`thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A row
+`thresholds.pair` — and `passed` compares its partial gain with that cut (under `pass.minGain` its excess gain must clear the floor). A row
 missing either member is missing for the product (as the fragment `a * b` would be null there), not the
 product of the conditioning fill. A
 passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
@@ -379,7 +386,7 @@ is an assembly error.
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
-| pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. `minGain`: a positive floor on the effective test's gain (`est_gain` / `partial_gain`, the average log-likelihood improvement per unit): `passed` needs the gain above `max(threshold, minGain)`. Default: the placebo threshold alone. |
+| pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. `minGain`: a positive floor on the effective test's excess gain (`excess_gain` / `partial_excess_gain` = the gain less df / 2N, the average log-likelihood improvement per unit beyond a null test's): `passed` needs the gain above the threshold and the excess above the floor. Default: the placebo threshold alone. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol, missing}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit; `missing` (`mean` (default) \| `groupMean`) how a missing conditioning value enters the fit — the window mean, or the unit's baseline-weighted mean of its observed values (`groupedMultinomial` only). Needs the global window. |
 | output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
 
@@ -398,6 +405,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | method | STRING | `scoreTest` |
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
+| excess_gain | FLOAT64 | `est_gain − df / 2N`: the gain less a null test's expectation over the same degrees of freedom — what `pass.minGain` reads (null when degenerate) |
 | df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
 | pValue, qValue | FLOAT64 | χ²(df) upper tail (χ²(1), or the binned block's df); Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
@@ -408,14 +416,15 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | bin_edges | ARRAY<FLOAT64\> | the binned block test with `edges: value`: the k − 1 window quantile edges (bin i = `(edge_{i−1}, edge_i]`); null for position bins, a column without a sketch value and the other transforms |
 | het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
 | level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
-| het_passed | BOOL | the effective heterogeneity gain above `max(thresholds.het, minGain)`; candidate records only, never part of `passed` |
+| het_passed | BOOL | the effective heterogeneity gain above `thresholds.het` (and its excess `het_gain − het_df / 2N` above `pass.minGain`); candidate records only, never part of `passed` |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| partial_excess_gain | FLOAT64 | conditioning only: `partial_gain − partial_df / 2N` (df = 1 for a scalar test) — what `pass.minGain` reads with conditioning (null when the partial test is degenerate) |
 | partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
-| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning; `max(threshold, minGain)` under `pass.minGain`), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
+| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), `excess_gain > minGain` under `pass.minGain` (`partial_excess_gain` with conditioning), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
 | leakSuspect | BOOL | \|z\| > `flags.leakZ` (\|partial_z\| under `flags.leakZ.on: partial`) |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
@@ -601,7 +610,7 @@ transforms:
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
   "conditioningFields": ["model_a", "model_b"],
   "createdAt": "2026-09-05T10:00:00Z",
-  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "z": 8.95, "partial_gain": 0.00051, "partial_z": 7.1, "r2_F": 0.035, "periods_agree": 3, "n_periods": 3, "leakSuspect": false}]
+  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "excess_gain": 0.00076, "z": 8.95, "partial_gain": 0.00051, "partial_excess_gain": 0.0005, "partial_z": 7.1, "r2_F": 0.035, "periods_agree": 3, "n_periods": 3, "leakSuspect": false}]
 }
 ```
 
@@ -637,9 +646,10 @@ transforms:
   share is compared as `agree ≥ share × n_periods`, and 2 of 3 is 0.667 < 0.67), so the pass list
   applies it too.
 - On a large window the placebo cut alone admits columns whose gain is real but negligible (the cut shrinks
-  as 1 / N). Put a practical floor under it with `pass: {minGain: 1e-5}` — in the unit of `est_gain`, so
-  compare it with the gain a model comparison would have to show to be worth a retrain; the pass list
-  records the floor (`minGain`) and the rule (`passRule`).
+  as 1 / N). Put a practical floor under it with `pass: {minGain: 1e-5}` — in the unit of `est_gain`, read on
+  the excess gain (the gain less df / 2N, so a block's degrees of freedom do not count as gain), so compare it
+  with the gain a model comparison would have to show to be worth a retrain; the pass list records the floor
+  (`minGain`) and the rule (`passRule`).
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome. When strong legitimate candidates trip the flag, read it on
   the partial z (`flags: {leakZ: {z: 20, on: partial}}`): a leak survives the conditioning, a re-summary of what
