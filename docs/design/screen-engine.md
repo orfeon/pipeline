@@ -156,8 +156,8 @@ Gather ─ Finalize [side: state_max, partial map] ─ records / summary / selec
   then the discovery half's, the marginal pass's seeded split — the fit's `[n, g, G]` over the discovery half goes
   to the `DISCOVERY_SLICE` of `FIT_PERIOD_KEY`, and `ScreenReport.suggestions` reads each half through
   `orthogonalBlock` with the window's Γ and the half's own g / G (the confirmation's = the window's less the
-  discovery's): the partial basis of DSL §9.4. With `joint` the pass also keeps the joint columns' sums at p̂ and their cross terms with
-  F̃ (A, Mxf, Mff) under `JOINT_PARTIAL_KEY` (`addJointPartial`), which `ScreenReport.partialJoint`
+  discovery's): the partial basis of DSL §9.4. With `joint` the pass also keeps the joint columns' sums at p̂, their cross terms with
+  F̃ (A, Mxf, Mff) and the fit's g / G over the same rows under `JOINT_PARTIAL_KEY` (`addJointPartial`), which `ScreenReport.partialJoint`
   orthogonalises in closed form into S⊥ / H⊥ / M⊥ for the several-candidate suggestions (DSL §9.5). With a heterogeneity
   modifier the pass also keeps the `[s, b, a]` sums and the fit's `[n, g, G]` per modifier level (a slice
   under `LEVEL_PREFIX`, the grouped family's per unit; the row families bucket a unit's rows once into
