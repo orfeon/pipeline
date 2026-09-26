@@ -191,6 +191,189 @@ public final class ScreenReport {
         return fromScore(sPerp / sigma2, hPerp / sigma2, nObs, nUnits);
     }
 
+    /**
+     * The binned block test of one column (DSL doc §6.1): the score test of the one-hot block of B bins with the
+     * intercept profiled out — χ²(df) with df = active bins − 1, no sign (z is NaN) — and its per-bin score S_b,
+     * information H_bb and weight mass n_b for the report.
+     */
+    public record Block(Stats stats, int df, double[] s, double[] h, double[] n) {
+        static Block degenerate(final long nObs, final int nb) {
+            return new Block(Stats.degenerate(nObs), 0, new double[nb], new double[nb], new double[nb]);
+        }
+    }
+
+    static Block binnedStats(final ScreenSpec spec, final double[] extra, final double nUnits, final long nObs) {
+        final int nb = spec.binCount();
+        if (extra == null) return Block.degenerate(nObs, nb);
+        final double[] s = new double[nb];
+        final double[] n = new double[nb];
+        final double[][] h;
+        final double[] hd = new double[nb];
+        final Stats[] out = new Stats[1];
+        final int df;
+        if (spec.isGroupedMultinomial()) {
+            // [S (B), P (B), P P' (B²)]: H = diag(P) − P P', already of rank active − 1 (the shares sum to one per unit)
+            if (extra.length < 2 * nb + nb * nb) return Block.degenerate(nObs, nb);
+            h = new double[nb][nb];
+            for (int b = 0; b < nb; b++) {
+                s[b] = extra[b];
+                n[b] = extra[nb + b];
+                for (int c = 0; c < nb; c++) h[b][c] = (b == c ? extra[nb + b] : 0d) - extra[2 * nb + b * nb + c];
+            }
+            for (int b = 0; b < nb; b++) hd[b] = h[b][b];
+            df = blockChi2(s, h, hd, nUnits, nObs, out);
+        } else {
+            // per bin [Σ w, Σ w r, Σ w v] then the totals [Σ w, Σ w r, Σ w r²]
+            if (extra.length < 3 * nb + 3) return Block.degenerate(nObs, nb);
+            final double wsum = extra[3 * nb], rsum = extra[3 * nb + 1], rr = extra[3 * nb + 2];
+            if (!(wsum > 0)) return Block.degenerate(nObs, nb);
+            final double rMean = rsum / wsum;
+            final boolean prior = !spec.hasBaseline();
+            double sigma2 = 1d;
+            if (spec.isGaussian()) {
+                sigma2 = rr / wsum - rMean * rMean;
+                if (!(sigma2 > 0)) return Block.degenerate(nObs, nb);
+            }
+            final double priorWeight = prior && !spec.isGaussian() ? spec.fisherWeight(rMean) : 1d;
+            double sumS = 0, sumD = 0;
+            for (int b = 0; b < nb; b++) {
+                n[b] = extra[3 * b];
+                s[b] = (prior ? extra[3 * b + 1] - rMean * extra[3 * b] : extra[3 * b + 1]) / sigma2;
+                hd[b] = (spec.isGaussian() ? extra[3 * b] : prior ? priorWeight * extra[3 * b] : extra[3 * b + 2]) / sigma2;
+                sumS += s[b];
+                sumD += hd[b];
+            }
+            // the intercept profiled out: H = D − d d' / Σd and S centred by the d-weighted mean, so the reduced system
+            // (one reference bin dropped) gives χ² = Σ S_b² / H_b − (Σ S_b)² / Σ H_b — the diagonal D alone is full
+            // rank, and dropping a bin from it would lose that bin's term instead of the intercept direction
+            if (!(sumD > 0)) return Block.degenerate(nObs, nb);
+            final double mean = sumS / sumD;
+            final double[] sp = new double[nb];
+            h = new double[nb][nb];
+            for (int b = 0; b < nb; b++) {
+                sp[b] = s[b] - hd[b] * mean;
+                for (int c = 0; c < nb; c++) h[b][c] = (b == c ? hd[b] : 0d) - hd[b] * hd[c] / sumD;
+            }
+            df = blockChi2(sp, h, hd, nUnits, nObs, out);
+        }
+        return new Block(out[0], df, s, hd, n);
+    }
+
+    /**
+     * χ² = S' H⁺ S over the active bins (positive diagonal information) with one bin dropped as the reference —
+     * the block's rank is one less than its active bins whether the intercept is profiled (row families) or the
+     * shares sum to one within the unit (grouped) — solved by Cholesky on the reduced system. Returns df; the
+     * statistic goes to {@code out[0]}.
+     */
+    private static int blockChi2(final double[] s, final double[][] h, final double[] diag, final double nUnits, final long nObs, final Stats[] out) {
+        final int nb = s.length;
+        double maxDiag = 0;
+        for (int b = 0; b < nb; b++) maxDiag = Math.max(maxDiag, diag[b]);
+        final List<Integer> active = new ArrayList<>();
+        int ref = -1;
+        for (int b = 0; b < nb; b++) {
+            if (diag[b] > 1e-12 * maxDiag && diag[b] > 1e-300 && Double.isFinite(s[b])) {
+                active.add(b);
+                if (ref < 0 || diag[b] > diag[ref]) ref = b;
+            }
+        }
+        final int df = active.size() - 1;
+        if (df < 1 || nObs < 2) {
+            out[0] = Stats.degenerate(nObs);
+            return 0;
+        }
+        final List<Integer> kept = new ArrayList<>(active);
+        kept.remove(Integer.valueOf(ref));
+        final double[][] hr = new double[df][df];
+        final double[] sr = new double[df];
+        for (int i = 0; i < df; i++) {
+            sr[i] = s[kept.get(i)];
+            for (int j = 0; j < df; j++) hr[i][j] = h[kept.get(i)][kept.get(j)];
+        }
+        double chi2;
+        try {
+            chi2 = MatrixOps.dot(sr, MatrixOps.solveGram(hr, sr, 0d));
+        } catch (final RuntimeException e) {
+            chi2 = Double.NaN;
+        }
+        if (!Double.isFinite(chi2) || chi2 < 0) {
+            out[0] = Stats.degenerate(nObs);
+            return 0;
+        }
+        final double estGain = nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN;
+        out[0] = new Stats(Double.NaN, Double.NaN, Double.NaN, chi2, Double.NaN, estGain, StatMath.chiSquareUpperTail(chi2, df), nObs, false);
+        return df;
+    }
+
+    /** The block's partial test with its degrees of freedom. */
+    public record BlockPartial(Partial partial, int df) {
+        static BlockPartial degenerate(final long nObs, final double r2) {
+            return new BlockPartial(new Partial(Stats.degenerate(nObs), r2), 0);
+        }
+    }
+
+    /**
+     * The block's partial test from {@code [s (B), H (B² grouped / B diagonal), A (B × k)]} at the fitted p̂:
+     * Γ = (G + l2·N·I)⁻¹ A (a multi-right-hand-side solve), S⊥ = s − Γ'g, H⊥ = H − Γ'A' − A Γ + Γ'GΓ, then χ² = S⊥' H⊥⁺ S⊥
+     * over the bins the marginal block found active; r²_F = 1 − tr(H⊥) / tr(H). Gaussian divides by σ².
+     */
+    static BlockPartial blockPartial(final ScreenSpec spec, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
+                                     final long nObs, final double sigma2, final double l2) {
+        final int nb = spec.binCount();
+        final int k = fit.k;
+        final boolean grouped = spec.isGroupedMultinomial();
+        final int hLen = grouped ? nb * nb : nb;
+        if (vec == null || vec.length < nb + hLen + nb * k || marginal.df < 1) return BlockPartial.degenerate(nObs, Double.NaN);
+        final double[][] a = new double[k][nb];   // A' : k × B, the right-hand sides
+        for (int b = 0; b < nb; b++) for (int j = 0; j < k; j++) a[j][b] = vec[nb + hLen + b * k + j];
+        for (final double[] row : a) for (final double v : row) if (!Double.isFinite(v)) return BlockPartial.degenerate(nObs, Double.NaN);
+        final double[][] gamma;
+        try {
+            gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);   // k × B
+        } catch (final RuntimeException e) {
+            return BlockPartial.degenerate(nObs, Double.NaN);
+        }
+        // G Γ (k × B) once: Γ'GΓ is then O(B² k) instead of O(B² k²)
+        final double[][] gGamma = new double[k][nb];
+        for (int j = 0; j < k; j++) {
+            for (int l = 0; l < k; l++) {
+                final double gjl = fit.bestG[j][l];
+                if (gjl == 0d) continue;
+                for (int c = 0; c < nb; c++) gGamma[j][c] += gjl * gamma[l][c];
+            }
+        }
+        final double[] s = new double[nb];
+        final double[][] h = new double[nb][nb];
+        double trH = 0, trHp = 0;
+        for (int b = 0; b < nb; b++) {
+            double gg = 0;
+            for (int j = 0; j < k; j++) gg += gamma[j][b] * fit.bestGrad[j];
+            s[b] = (vec[b] - gg) / sigma2;
+            for (int c = 0; c < nb; c++) {
+                final double hbc = grouped ? vec[nb + b * nb + c] : (b == c ? vec[nb + b] : 0d);
+                double ga = 0, ag = 0, ggg = 0;
+                for (int j = 0; j < k; j++) {
+                    ga += gamma[j][b] * a[j][c];
+                    ag += a[j][b] * gamma[j][c];
+                    ggg += gamma[j][b] * gGamma[j][c];
+                }
+                h[b][c] = (hbc - ga - ag + ggg) / sigma2;
+                if (b == c) {
+                    trH += hbc / sigma2;
+                    trHp += h[b][c];
+                }
+            }
+        }
+        // the bins the marginal test kept; a bin F explains fully (no information left) drops out
+        final double[] diag = new double[nb];
+        for (int b = 0; b < nb; b++) diag[b] = marginal.h[b] > 0 && h[b][b] > 1e-10 * (vec[nb + (grouped ? b * nb + b : b)] / sigma2) ? h[b][b] : 0d;
+        final Stats[] out = new Stats[1];
+        final int df = blockChi2(s, h, diag, nUnits, nObs, out);
+        final double r2 = trH > 0 ? Math.min(1d, Math.max(0d, 1d - trHp / trH)) : Double.NaN;
+        if (df < 1) return BlockPartial.degenerate(nObs, trH > 0 && trHp <= 1e-10 * trH ? 1d : r2);
+        return new BlockPartial(new Partial(out[0], r2), df);
+    }
+
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
         return build(spec, accumulators, null, null);
     }
@@ -215,7 +398,19 @@ public final class ScreenReport {
         }
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
-        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2) : Map.of();
+        // the df = 1 keys' γ in one batched solve; a binned key's sums have the block layout [s (B), H, A], not
+        // [s, b, a], and blockPartial solves its Γ itself
+        final Map<Integer, double[]> gammas;
+        if (conditioned) {
+            final Map<Integer, PartialAccumulator> scalar = new HashMap<>();
+            for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
+                if (e.getKey() >= 0 && ScreenSpec.isBinned(spec.transforms.get(e.getKey() % nTransforms))) continue;
+                scalar.put(e.getKey(), e.getValue());
+            }
+            gammas = gammas(scalar, fit, spec.conditioningL2);
+        } else {
+            gammas = Map.of();
+        }
         // the fitted model's [n, g, G] per period: the partial statistic's decomposition by period
         final PartialAccumulator fitPeriods = conditioned ? partials.get(ConditioningScorer.FIT_PERIOD_KEY) : null;
         final List<String> notes = new ArrayList<>(spec.notes);
@@ -248,11 +443,77 @@ public final class ScreenReport {
         final List<Stats> effective = new ArrayList<>();
         /** the effective test's {@code [periods_agree, n_periods]} per record (pass.minPeriodsAgree) */
         final List<long[]> effectiveAgree = new ArrayList<>();
-        final List<Double> placeboGains = new ArrayList<>();
+        /** the placebo columns' effective gains per statistic kind (df1 / binned): one threshold per kind */
+        final Map<String, List<Double>> placeboGains = new LinkedHashMap<>();
         for (int c = 0; c < names.size(); c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final int key = spec.key(c, t);
                 final ScoreAccumulator acc = accumulators.getOrDefault(key, new ScoreAccumulator());
+                if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                    // the binned block test: χ²(df) without a sign, no period slices, its own placebo kind
+                    final long nObs = (long) acc.getTotal()[ScoreAccumulator.N_OBS];
+                    final Block block = binnedStats(spec, acc.getExtra(), nUnits, nObs);
+                    final Stats st = block.stats;
+                    final Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("candidate", names.get(c));
+                    r.put("transform", spec.transforms.get(t));
+                    r.put("method", METHOD);
+                    r.put("family", spec.family);
+                    r.put("S", null);
+                    r.put("H", null);
+                    r.put("beta", null);
+                    r.put("chi2", st.chi2);
+                    r.put("z", null);
+                    r.put("est_gain", st.estGain);
+                    r.put("df", (long) block.df);
+                    r.put("pValue", st.pValue);
+                    r.put("qValue", null);
+                    r.put("n_groups", (long) nUnits);
+                    r.put("n_obs", st.nObs);
+                    r.put("periods_agree", null);
+                    r.put("n_periods", null);
+                    r.put("period_z", null);
+                    final List<Map<String, Object>> binStats = new ArrayList<>();
+                    for (int bi = 0; bi < spec.binCount(); bi++) {
+                        final Map<String, Object> bs = new LinkedHashMap<>();
+                        bs.put("bin", (long) bi);
+                        bs.put("S", block.s[bi]);
+                        bs.put("H", block.h[bi]);
+                        bs.put("n", block.n[bi]);
+                        binStats.add(bs);
+                    }
+                    r.put("bin_stats", binStats);
+                    Stats used = st;
+                    if (conditioned) {
+                        final PartialAccumulator pacc = partials.get(key);
+                        final double[] vec = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
+                        final BlockPartial bp = vec == null || st.degenerate
+                                ? BlockPartial.degenerate(st.nObs, Double.NaN)
+                                : blockPartial(spec, vec, block, fit, nUnits, st.nObs, sigma2, spec.conditioningL2);
+                        final Stats pst = bp.partial.stats;
+                        r.put("r2_F", Double.isNaN(bp.partial.r2) ? null : bp.partial.r2);
+                        r.put("partial_S", null);
+                        r.put("partial_H", null);
+                        r.put("partial_chi2", pst.chi2);
+                        r.put("partial_z", null);
+                        r.put("partial_gain", pst.estGain);
+                        r.put("partial_pValue", pst.pValue);
+                        r.put("partial_df", (long) bp.df);
+                        r.put("partial_periods_agree", null);
+                        r.put("partial_n_periods", null);
+                        r.put("partial_period_z", null);
+                        used = pst;
+                    } else {
+                        for (final String f : List.of("r2_F", "partial_S", "partial_H", "partial_chi2", "partial_z", "partial_gain", "partial_pValue", "partial_df", "partial_periods_agree", "partial_n_periods", "partial_period_z")) r.put(f, null);
+                    }
+                    effective.add(used);
+                    effectiveAgree.add(null);
+                    if (spec.isPlacebo(c)) placeboGains.computeIfAbsent(ScreenSpec.KIND_BINNED, kind -> new ArrayList<>()).add(used.degenerate ? 0d : used.estGain);
+                    r.put("placebo", spec.isPlacebo(c));
+                    r.put("degenerate", st.degenerate);
+                    records.add(r);
+                    continue;
+                }
                 final Stats st = stats(spec, acc.getTotal(), nUnits);
                 final Map<String, Object> r = new LinkedHashMap<>();
                 r.put("candidate", names.get(c));
@@ -292,6 +553,7 @@ public final class ScreenReport {
                 r.put("periods_agree", agree);
                 r.put("n_periods", nPeriods);
                 r.put("period_z", periodRecords);
+                r.put("bin_stats", null);
                 // partial test
                 Stats used = st;
                 long usedAgree = agree, usedPeriods = nPeriods;
@@ -312,6 +574,7 @@ public final class ScreenReport {
                     r.put("partial_z", pst.z);
                     r.put("partial_gain", pst.estGain);
                     r.put("partial_pValue", pst.pValue);
+                    r.put("partial_df", null);
                     // the partial statistic by period, with the window's γ: the sign agreement of the effective test
                     final List<Map<String, Object>> partialPeriods = new ArrayList<>();
                     long pAgree = 0, pPeriods = 0;
@@ -355,28 +618,34 @@ public final class ScreenReport {
                     r.put("partial_z", null);
                     r.put("partial_gain", null);
                     r.put("partial_pValue", null);
+                    r.put("partial_df", null);
                     r.put("partial_periods_agree", null);
                     r.put("partial_n_periods", null);
                     r.put("partial_period_z", null);
                 }
                 effective.add(used);
                 effectiveAgree.add(new long[]{usedAgree, usedPeriods});
-                if (spec.isPlacebo(c)) placeboGains.add(used.degenerate ? 0d : used.estGain);
+                if (spec.isPlacebo(c)) placeboGains.computeIfAbsent(ScreenSpec.KIND_DF1, kind -> new ArrayList<>()).add(used.degenerate ? 0d : used.estGain);
                 r.put("placebo", spec.isPlacebo(c));
                 r.put("degenerate", st.degenerate);
                 records.add(r);
             }
         }
 
-        // placebo threshold (theoretical chi2(1) quantile when no placebo columns are configured)
-        final double thresholdTheoretical = nUnits > 0 ? StatMath.chiSquare1Quantile(spec.quantile) / (2 * nUnits) : Double.NaN;
-        final double threshold;
-        if (placeboGains.isEmpty()) {
-            threshold = thresholdTheoretical;
-        } else {
-            final double[] sorted = placeboGains.stream().mapToDouble(Double::doubleValue).sorted().toArray();
-            threshold = StatMath.quantile(sorted, spec.quantile);
+        // placebo threshold per statistic kind (the theoretical chi2(df) quantile when no placebo column is
+        // configured): the df = 1 transforms pool one cut, the binned block test its own
+        final Map<String, Double> thresholds = new LinkedHashMap<>();
+        final Map<String, Double> thresholdsTheoretical = new LinkedHashMap<>();
+        for (final String kind : spec.hasBinned() ? List.of(ScreenSpec.KIND_DF1, ScreenSpec.KIND_BINNED) : List.of(ScreenSpec.KIND_DF1)) {
+            final int df = ScreenSpec.KIND_BINNED.equals(kind) ? spec.binsK - 1 : 1;
+            final double theoretical = nUnits > 0 ? StatMath.chiSquareQuantile(spec.quantile, df) / (2 * nUnits) : Double.NaN;
+            final List<Double> gains = placeboGains.getOrDefault(kind, List.of());
+            final double cut = gains.isEmpty() ? theoretical : StatMath.quantile(gains.stream().mapToDouble(Double::doubleValue).sorted().toArray(), spec.quantile);
+            thresholds.put(kind, cut);
+            thresholdsTheoretical.put(kind, theoretical);
         }
+        final double thresholdTheoretical = thresholdsTheoretical.get(ScreenSpec.KIND_DF1);
+        final double threshold = thresholds.get(ScreenSpec.KIND_DF1);
 
         // q-values over the candidate records (of the effective test: partial when conditioned)
         final List<Integer> candidateRecords = new ArrayList<>();
@@ -386,8 +655,8 @@ public final class ScreenReport {
         final double[] q = StatMath.benjaminiHochberg(p);
         for (int i = 0; i < p.length; i++) records.get(candidateRecords.get(i)).put("qValue", q[i]);
 
-        // flags: the gain cut is the placebo threshold lifted to pass.minGain (the practical floor) when higher
-        final double gainCut = spec.gainCut(threshold);
+        // flags: the gain cut is the record's kind's placebo threshold lifted to pass.minGain (the practical
+        // floor) when higher; the period rule applies to the df = 1 tests (a block has no sign to agree on)
         long nPassed = 0, nLeak = 0;
         final Map<String, Double> passedBest = new HashMap<>();
         for (int i = 0; i < records.size(); i++) {
@@ -395,12 +664,16 @@ public final class ScreenReport {
             final Stats st = effective.get(i);
             final boolean placebo = (Boolean) r.get("placebo");
             final long[] agreement = effectiveAgree.get(i);
+            final double kindThreshold = thresholds.get(ScreenSpec.kind((String) r.get("transform")));
+            final double gainCut = spec.gainCut(kindThreshold);
             final boolean passed = !placebo && !st.degenerate && !Double.isNaN(gainCut) && st.estGain > gainCut
-                    && spec.periodsAgree(agreement[0], agreement[1]);
-            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned)
-            final double flagZ = leakOnPartial ? st.z() : (Double) r.get("z");
+                    && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
+            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned);
+            // a block test has no z, so the leak flag does not read it
+            final Double marginalZ = (Double) r.get("z");
+            final double flagZ = marginalZ == null ? Double.NaN : leakOnPartial ? st.z() : marginalZ;
             final boolean leak = spec.leakZ != null && Math.abs(flagZ) > spec.leakZ;
-            r.put("threshold", threshold);
+            r.put("threshold", kindThreshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);
             if (passed) {
@@ -426,6 +699,10 @@ public final class ScreenReport {
         summary.put("minGain", spec.minGain);
         summary.put("threshold", threshold);
         summary.put("thresholdTheoretical", thresholdTheoretical);
+        // the cut per statistic kind (df1 = the pooled df = 1 transforms; binned = the block test)
+        summary.put("thresholds", new LinkedHashMap<>(thresholds));
+        summary.put("thresholdsTheoretical", new LinkedHashMap<>(thresholdsTheoretical));
+        summary.put("bins", spec.hasBinned() ? spec.binsEdges + "/" + spec.binsK : null);
         summary.put("quantile", spec.quantile);
         summary.put("seed", spec.seed);
         summary.put("nRows", (long) b[ScoreAccumulator.ROWS_IN]);
@@ -440,7 +717,7 @@ public final class ScreenReport {
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
         summary.put("nPassed", nPassed);
-        summary.put("nPlacebo", (long) placeboGains.size());
+        summary.put("nPlacebo", placeboGains.values().stream().mapToLong(List::size).sum());
         summary.put("nLeakSuspect", nLeak);
         summary.put("leakOn", spec.leakZ == null ? null : leakOnPartial ? ScreenSpec.LEAK_ON_PARTIAL : ScreenSpec.LEAK_ON_MARGINAL);
         summary.put("timeField", spec.timeField);
@@ -491,6 +768,11 @@ public final class ScreenReport {
         // NaN (no scored unit) is not JSON: written as null
         o.addProperty("threshold", finiteOrNull((Double) summary.get("threshold")));
         o.addProperty("thresholdTheoretical", finiteOrNull((Double) summary.get("thresholdTheoretical")));
+        // the cut per statistic kind (the scalar threshold is the df1 one)
+        final JsonObject kinds = new JsonObject();
+        for (final Map.Entry<?, ?> e : ((Map<?, ?>) summary.get("thresholds")).entrySet()) kinds.addProperty((String) e.getKey(), finiteOrNull((Double) e.getValue()));
+        o.add("thresholds", kinds);
+        o.addProperty("bins", (String) summary.get("bins"));
         o.addProperty("quantile", spec.quantile);
         o.addProperty("nCandidates", (Long) summary.get("nCandidates"));
         o.addProperty("nPassed", (Long) summary.get("nPassed"));
@@ -556,6 +838,12 @@ public final class ScreenReport {
                 .withField("H", Schema.FieldType.FLOAT64)
                 .withField("n", Schema.FieldType.INT64)
                 .build();
+        final Schema bin = Schema.builder()
+                .withField("bin", Schema.FieldType.INT64)
+                .withField("S", Schema.FieldType.FLOAT64)
+                .withField("H", Schema.FieldType.FLOAT64)
+                .withField("n", Schema.FieldType.FLOAT64)
+                .build();
         return Schema.builder()
                 .withField("candidate", Schema.FieldType.STRING)
                 .withField("transform", Schema.FieldType.STRING)
@@ -575,6 +863,7 @@ public final class ScreenReport {
                 .withField("periods_agree", Schema.FieldType.INT64)
                 .withField("n_periods", Schema.FieldType.INT64)
                 .withField("period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
+                .withField("bin_stats", Schema.FieldType.array(Schema.FieldType.element(bin)))
                 .withField("r2_F", Schema.FieldType.FLOAT64)
                 .withField("partial_S", Schema.FieldType.FLOAT64)
                 .withField("partial_H", Schema.FieldType.FLOAT64)
@@ -582,6 +871,7 @@ public final class ScreenReport {
                 .withField("partial_z", Schema.FieldType.FLOAT64)
                 .withField("partial_gain", Schema.FieldType.FLOAT64)
                 .withField("partial_pValue", Schema.FieldType.FLOAT64)
+                .withField("partial_df", Schema.FieldType.INT64)
                 .withField("partial_periods_agree", Schema.FieldType.INT64)
                 .withField("partial_n_periods", Schema.FieldType.INT64)
                 .withField("partial_period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
@@ -608,6 +898,9 @@ public final class ScreenReport {
                 .withField("minGain", Schema.FieldType.FLOAT64)
                 .withField("threshold", Schema.FieldType.FLOAT64)
                 .withField("thresholdTheoretical", Schema.FieldType.FLOAT64)
+                .withField("thresholds", Schema.FieldType.map(Schema.FieldType.FLOAT64))
+                .withField("thresholdsTheoretical", Schema.FieldType.map(Schema.FieldType.FLOAT64))
+                .withField("bins", Schema.FieldType.STRING)
                 .withField("quantile", Schema.FieldType.FLOAT64)
                 .withField("seed", Schema.FieldType.INT64)
                 .withField("nRows", Schema.FieldType.INT64)
@@ -656,7 +949,7 @@ public final class ScreenReport {
         if (spec.timeField != null) parts.add("time=" + spec.timeField + (spec.timeFrom != null ? " from " + spec.timeFrom : "") + (spec.timeTo != null ? " to " + spec.timeTo : ""));
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
-        parts.add("transforms=" + spec.transforms);
+        parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

@@ -45,11 +45,43 @@ public final class ScoreAccumulator implements Serializable {
     final TreeMap<String, double[]> periods = new TreeMap<>();
     long maxTime = Long.MIN_VALUE;
     long minTime = Long.MAX_VALUE;
+    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §6.1); null until fed */
+    double[] extra;
 
     public ScoreAccumulator() {}
 
     public double[] getTotal() {
         return total;
+    }
+
+    /** The window's variable-length sums (null when the key carries none). */
+    public double[] getExtra() {
+        return extra;
+    }
+
+    /**
+     * The window's variable-length sums for in-place adds (a sparse contribution touches only its entries),
+     * allocated at {@code length} on first use.
+     */
+    double[] extra(final int length) {
+        if (extra == null) {
+            extra = new double[length];
+        } else if (extra.length != length) {
+            throw new IllegalStateException("extra sums of " + extra.length + " and " + length + " values cannot merge");
+        }
+        return extra;
+    }
+
+    /** Adds a variable-length contribution element-wise (the first one sets the length). */
+    public ScoreAccumulator addExtra(final double[] contribution) {
+        if (contribution == null) return this;
+        if (extra == null) {
+            extra = contribution.clone();
+        } else {
+            if (extra.length != contribution.length) throw new IllegalStateException("extra sums of " + extra.length + " and " + contribution.length + " values cannot merge");
+            for (int i = 0; i < extra.length; i++) extra[i] += contribution[i];
+        }
+        return this;
     }
 
     public Map<String, double[]> getPeriods() {
@@ -88,6 +120,7 @@ public final class ScoreAccumulator implements Serializable {
         }
         if (other.maxTime > maxTime) maxTime = other.maxTime;
         if (other.minTime < minTime) minTime = other.minTime;
+        addExtra(other.extra);
         return this;
     }
 
@@ -109,6 +142,8 @@ public final class ScoreAccumulator implements Serializable {
             }
             LONG.encode(value.maxTime, out);
             LONG.encode(value.minTime, out);
+            INT.encode(value.extra == null ? 0 : value.extra.length, out);
+            if (value.extra != null) for (final double d : value.extra) DOUBLE.encode(d, out);
         }
 
         @Override
@@ -124,6 +159,11 @@ public final class ScoreAccumulator implements Serializable {
             }
             acc.maxTime = LONG.decode(in);
             acc.minTime = LONG.decode(in);
+            final int extra = INT.decode(in);
+            if (extra > 0) {
+                acc.extra = new double[extra];
+                for (int i = 0; i < extra; i++) acc.extra[i] = DOUBLE.decode(in);
+            }
             return acc;
         }
     }

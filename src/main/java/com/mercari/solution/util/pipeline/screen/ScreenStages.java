@@ -345,7 +345,7 @@ public final class ScreenStages {
     }
 
     /**
-     * The window quantile pre-pass (independent rows with rank / absdev): every candidate value of the rows
+     * The window quantile pre-pass (independent rows with rank / absdev, the binned test's value edges): every candidate value of the rows
      * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
      * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
      * and window (combined globally).
@@ -367,7 +367,8 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size())).update(row.x);
+            // the candidates and, for the binned test's shuffle placebos, the shuffle reference (the next column of x)
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size() + (spec.hasShuffle() ? 1 : 0))).update(row.x);
         }
 
         @FinishBundle

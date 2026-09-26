@@ -231,16 +231,25 @@ public class ScreenTransformTest {
                       label: {expr: "sold > 0 ? 1 : 0"}
                       time: {field: session_time, to: "2024-06-30T23:59:59Z"}
                       candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids", "s_supp"]}
-                      transforms: [raw, rank, absdev]
+                      transforms: [raw, rank, absdev, binned]
+                      bins: 5
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = byKey(rows);
-            // independent rows: rank / absdev read the window quantile sketch (one pre-pass); sold / session_time
-            // are roles, p_model / start_price excluded by name
-            Assertions.assertEquals((3 + 10) * 3, records.size());
+            // independent rows: rank / absdev and the value bins read the window quantile sketch (one pre-pass);
+            // sold / session_time are roles, p_model / start_price excluded by name
+            Assertions.assertEquals((3 + 10) * 4, records.size());
+            final MElement binned = records.get("f_extra:binned");
+            Assertions.assertEquals(4L, binned.getAsLong("df"));   // 5 value bins, the missing bin empty
+            Assertions.assertTrue(binned.getAsDouble("chi2") > 4, "binned chi2 of f_extra: " + binned.getAsDouble("chi2"));
+            Assertions.assertNull(binned.getAsDouble("z"));
+            Assertions.assertNull(binned.getPrimitiveValue("period_z"));
+            Assertions.assertEquals(6, ((List<?>) binned.getPrimitiveValue("bin_stats")).size());
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), binned.getAsDouble("threshold"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("__noise_0:binned").getPrimitiveValue("degenerate"));
             Assertions.assertTrue(records.containsKey("f_extra:raw"));
             Assertions.assertFalse(records.containsKey("p_model:raw"));
             final MElement signal = records.get("f_extra:raw");
@@ -266,7 +275,9 @@ public class ScreenTransformTest {
             Assertions.assertEquals(273L, summary.getAsLong("nUnits"));
             Assertions.assertNull(summary.getAsString("baseline"));
             Assertions.assertEquals("2024-06-30T23:59:59Z", summary.getAsString("timeTo"));
-            Assertions.assertEquals(List.of("raw", "rank", "absdev"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertEquals(List.of("raw", "rank", "absdev", "binned"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertEquals("value/5", summary.getAsString("bins"));
+            Assertions.assertEquals(2, ((Map<?, ?>) summary.getPrimitiveValue("thresholds")).size());
             Assertions.assertTrue(String.valueOf(summary.getPrimitiveValue("notes")).contains("quantile sketch"), String.valueOf(summary.getPrimitiveValue("notes")));
             return null;
         });
@@ -334,7 +345,8 @@ public class ScreenTransformTest {
                       label: sold
                       time: {field: session_time}
                       candidates: {include: ["f_*"]}
-                      transforms: [raw, rank]
+                      transforms: [raw, rank, binned]
+                      bins: {k: 4, edges: rank}
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
                       flags: {leakZ: {z: 5, on: partial}}
@@ -342,7 +354,24 @@ public class ScreenTransformTest {
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = byKey(rows);
-            Assertions.assertEquals((3 + 30) * 2, records.size());
+            Assertions.assertEquals((3 + 30) * 3, records.size());
+            // the binned block (position bins within the session): df = 3, no sign, its own threshold kind; the
+            // conditioning explains f_known's block (r2_F ≈ 1) and leaves f_extra's partial block significant
+            final MElement knownBinned = records.get("f_known:binned");
+            Assertions.assertEquals(3L, knownBinned.getAsLong("df"));
+            Assertions.assertNull(knownBinned.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.FALSE, knownBinned.getPrimitiveValue("leakSuspect"));
+            // F = f_known explains the block's linear direction only (one of its three): part of the trace and
+            // most of the statistic go, the curvature directions stay
+            Assertions.assertTrue(knownBinned.getAsDouble("r2_F") > 0.2, "r2_F of f_known binned: " + knownBinned.getAsDouble("r2_F"));
+            Assertions.assertTrue(knownBinned.getAsDouble("partial_chi2") < knownBinned.getAsDouble("chi2") / 2,
+                    "binned chi2 of f_known: " + knownBinned.getAsDouble("chi2") + " partial " + knownBinned.getAsDouble("partial_chi2"));
+            final MElement extraBinned = records.get("f_extra:binned");
+            Assertions.assertTrue(extraBinned.getAsDouble("chi2") > 20, "binned chi2 of f_extra: " + extraBinned.getAsDouble("chi2"));
+            Assertions.assertTrue(extraBinned.getAsDouble("partial_pValue") < 0.01, "binned partial p of f_extra: " + extraBinned.getAsDouble("partial_pValue"));
+            Assertions.assertTrue(extraBinned.getAsLong("partial_df") >= 1);
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), extraBinned.getAsDouble("threshold"));
+            Assertions.assertEquals(5, ((List<?>) extraBinned.getPrimitiveValue("bin_stats")).size());
             final MElement known = records.get("f_known:raw");
             final MElement extra = records.get("f_extra:raw");
             final MElement noise = records.get("f_noise:raw");
