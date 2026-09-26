@@ -31,7 +31,7 @@ public final class GroupScorer implements Serializable {
     private final int shuffleRef;
     /** {@code baseline.invalid: dropRow}: the invalid rows leave their unit before it is prepared */
     private final boolean dropsRows;
-    /** the window's quantile sketches, set per bundle from the side input: the rank / absdev reference of independent rows and the binned test's value edges */
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges), set per bundle from the side input */
     private transient WindowQuantiles quantiles;
     /** the binned test's value edges per column, derived once from the sketches (reset with them) */
     private transient double[][] edgesCache;
@@ -44,9 +44,12 @@ public final class GroupScorer implements Serializable {
         this.dropsRows = spec.baselineDropsRows();
     }
 
-    /** Sets the window's quantile sketches (the rank / absdev reference of independent rows); null = within-unit transforms. */
+    /** Sets the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges). */
     public GroupScorer withWindowQuantiles(final WindowQuantiles quantiles) {
-        if (this.quantiles != quantiles) edgesCache = null;
+        if (this.quantiles != quantiles) {
+            edgesCache = null;
+            gridEdgesCache = null;
+        }
         this.quantiles = quantiles;
         return this;
     }
@@ -374,6 +377,30 @@ public final class GroupScorer implements Serializable {
         return out;
     }
 
+    /** the pair grids' value edges per x column (the members' sketches), cached while the sketches are set */
+    private transient Map<Integer, double[]> gridEdgesCache;
+
+    /**
+     * The {@code pairs.shape − 1} value edges of x column {@code xIndex} (a pair member's conditioning column) from the
+     * window sketches (DSL doc §8.7); null without a sketch value.
+     */
+    double[] gridEdges(final int xIndex) {
+        if (quantiles == null || xIndex >= quantiles.columns() || quantiles.count(xIndex) == 0 || spec.pairShapeBins < 2) return null;
+        if (gridEdgesCache == null) gridEdgesCache = new HashMap<>();
+        return gridEdgesCache.computeIfAbsent(xIndex, i -> quantiles.edges(i, spec.pairShapeBins));
+    }
+
+    /**
+     * The value bin of {@code v} among {@code edges} (bin i = (edge_{i−1}, edge_i]: a value equal to an edge falls
+     * below it) — the binned test's and the pair grids' rule; −1 for a non-finite value.
+     */
+    static int gridBin(final double[] edges, final double v) {
+        if (!StatMath.isFinite(v)) return -1;
+        int b = 0;
+        while (b < edges.length && edges[b] < v) b++;
+        return b;
+    }
+
     /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
     public double[] binEdges(final int column) {
         return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
@@ -511,13 +538,8 @@ public final class GroupScorer implements Serializable {
         }
         final double[] edges = edges(column);
         for (int i = 0; i < v.length; i++) {
-            if (!StatMath.isFinite(v[i]) || edges == null) {
-                out[i] = spec.missingBin();
-                continue;
-            }
-            int b = 0;
-            while (b < edges.length && edges[b] < v[i]) b++;
-            out[i] = b;
+            final int b = edges == null ? -1 : gridBin(edges, v[i]);
+            out[i] = b < 0 ? spec.missingBin() : b;
         }
         return out;
     }
@@ -615,11 +637,11 @@ public final class GroupScorer implements Serializable {
     }
 
     /**
-     * Applies a transform variant to column {@code column} of a unit: within the unit for a grouped run (or when
-     * {@code quantiles} is null), else against the window's sketches (independent rows, DSL doc §6) — a candidate's
-     * rank is its mid-rank among the window's finite values and its absdev the distance to the window median;
-     * a noise placebo, standard normal by construction, takes the exact normal cdf and |x| (its median is 0). A
-     * grouped run holds the sketches only for the binned test's value edges: its rank / absdev stay within the unit.
+     * Applies a transform variant to column {@code column} of a unit: within the unit for a grouped run (the
+     * sketches a grouped run may carry are the value bins' and the pair grids' edges, never its rank reference) or
+     * without sketches, else against the window's sketches (independent rows, DSL doc §6) — a candidate's rank is
+     * its mid-rank among the window's finite values and its absdev the distance to the window median; a noise
+     * placebo, standard normal by construction, takes the exact normal cdf and |x| (its median is 0).
      */
     static double[] transform(final ScreenSpec spec, final WindowQuantiles quantiles, final int column, final String transform, final double[] v) {
         if (quantiles == null || spec.isGrouped() || ScreenSpec.TRANSFORM_RAW.equals(transform)) return transform(transform, v);

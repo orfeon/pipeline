@@ -111,8 +111,9 @@ public final class ScreenStages {
             units = rows.apply("Units", ParDo.of(new SingletonUnitDoFn())).setCoder(unitCoder);
         }
 
-        // independent rows with rank / absdev: one pre-pass sketches every candidate over the window (per window
-        // under a windowing strategy; the singleton view carries the Combine's default on an empty window)
+        // independent rows with rank / absdev, value bins, a pair's 2-D grid: one pre-pass sketches the columns they
+        // read over the window (per window under a windowing strategy; the singleton view carries the Combine's
+        // default on an empty window)
         PCollectionView<WindowQuantiles> quantilesView = null;
         final List<PCollectionView<?>> scoreSideInputs = new ArrayList<>();
         if (spec.needsWindowQuantiles()) {
@@ -181,14 +182,16 @@ public final class ScreenStages {
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final TupleTag<MElement> suggestionTag = new TupleTag<>() {};
-        // the suggestions read the bins' value edges from the window sketches (nothing else in the finalize step does)
-        if (spec.suggestionsOn && quantilesView != null) finalizeSideInputs.add(quantilesView);
+        // the finalize step reads the window sketches for the suggestions' bin representatives and the pair grids'
+        // edges (the interaction shapes); nothing else there does
+        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape()) && quantilesView != null;
+        if (finalizeReadsSketches) finalizeSideInputs.add(quantilesView);
         // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
         final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
                 Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER)));
         final PCollectionTuple finalized = combined
                 .apply("Gather", combined.getWindowingStrategy().getWindowFn() instanceof GlobalWindows ? gather : gather.withoutDefaults())
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, suggestionTag, fitView, partialView, spec.suggestionsOn ? quantilesView : null))
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, suggestionTag, fitView, partialView, finalizeReadsSketches ? quantilesView : null))
                         .withSideInputs(finalizeSideInputs)
                         .withOutputTags(recordTag, TupleTagList.of(summaryTag).and(suggestionTag)));
         return new Outputs(finalized.get(recordTag), finalized.get(summaryTag), finalized.get(suggestionTag), prepared.get(failureTag));
@@ -355,17 +358,23 @@ public final class ScreenStages {
     }
 
     /**
-     * The window quantile pre-pass (independent rows with rank / absdev, the binned test's value edges): every candidate value of the rows
-     * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
-     * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
-     * and window (combined globally).
+     * The window quantile pre-pass (independent rows with rank / absdev, value bins, a pair's 2-D grid): the
+     * sketched columns ({@link ScreenSpec#sketchedColumns}) of the rows that will be scored — a row whose baseline
+     * is invalid for its form is skipped whole or dropped ({@code baseline.invalid}), so it enters no sketch — into
+     * per-bundle sketches, one output per bundle and window (combined globally).
      */
     static class QuantilesDoFn extends DoFn<KV<String, ScreenRow>, WindowQuantiles> {
         private final ScreenSpec spec;
+        private transient int[] sketched;
         private transient Map<BoundedWindow, WindowQuantiles> partials;
 
         QuantilesDoFn(final ScreenSpec spec) {
             this.spec = spec;
+        }
+
+        @Setup
+        public void setup() {
+            sketched = spec.sketchedColumns();
         }
 
         @StartBundle
@@ -377,8 +386,9 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
-            // the candidates and, for the binned test's shuffle placebos, the shuffle reference (the next column of x)
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size() + (spec.hasShuffle() ? 1 : 0))).update(row.x);
+            // the candidates and the shuffle reference when their sketches are read (rank / absdev of independent rows,
+            // the value bins) and, for a pair's 2-D grid, its members' conditioning columns — a sketch index is the x column
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x, sketched);
         }
 
         @FinishBundle
@@ -404,7 +414,7 @@ public final class ScreenStages {
      */
     static class ScoreUnitsDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, ScoreAccumulator>> {
         private final ScreenSpec spec;
-        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        /** the window quantile sketches (null without the pre-pass, see {@link ScreenSpec#needsWindowQuantiles}) */
         private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer scorer;
         private transient Map<BoundedWindow, Map<Integer, ScoreAccumulator>> partials;
@@ -583,7 +593,7 @@ public final class ScreenStages {
         private final ScreenSpec spec;
         private final PCollectionView<VectorAccumulator> momentsView;
         private final PCollectionView<FitState> stateView;
-        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        /** the window quantile sketches (null without the pre-pass, see {@link ScreenSpec#needsWindowQuantiles}) */
         private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer groups;
         private transient ConditioningScorer scorer;
@@ -669,9 +679,9 @@ public final class ScreenStages {
             }
             // the bins' geometry: the suggestions' representatives and the pass list's edges of a passing block
             ScreenReport.Bins bins = null;
-            if (spec.hasBinned()) {
+            if (spec.hasBinned() || spec.hasPairShape()) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
-                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges);
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges);
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {

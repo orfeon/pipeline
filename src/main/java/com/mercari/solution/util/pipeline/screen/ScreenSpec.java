@@ -105,12 +105,52 @@ public final class ScreenSpec implements Serializable {
     /** pairs.fields: declared pairs of conditioning fields (names); pairs.among: fields whose every pair is tested */
     public List<String[]> pairFields = new ArrayList<>();
     public List<String> pairAmong = new ArrayList<>();
-    /** pairs.maxPairs: the bound on the pairs a run tests (each costs 2 + k doubles per partial key) */
+    /** pairs.maxPairs: the bound on the pairs a run tests (each costs 2 + k doubles per partial key, plus its 2-D grid) */
     public int pairMaxPairs = PAIRS_MAX_DEFAULT;
     /** pairs.placebo: noise placebos per pair (member × noise column), the pair kind's calibration */
     public int pairPlacebo = PAIR_PLACEBO_DEFAULT;
     /** the resolved pairs as indices into {@link #conditioningFields} (DSL doc §8.6) */
     public List<int[]> pairs = new ArrayList<>();
+    /** pairs.shape: value bins per member of the pair's 2-D grid (the interaction shape, DSL doc §8.7); 0 = off */
+    public int pairShapeBins = PAIR_SHAPE_BINS_DEFAULT;
+
+    public static final int PAIR_SHAPE_BINS_DEFAULT = 4;
+
+    public boolean hasPairShape() {
+        return hasPairs() && pairShapeBins > 0;
+    }
+
+    /** The partial-pass key of a real pair's 2-D grid: after every pair key. */
+    public int pairGridKey(final int pair) {
+        return pairKey(pairCount()) + pair;
+    }
+
+    /** The x column of conditioning field {@code member}. */
+    public int conditioningColumn(final int member) {
+        return conditioningOffset() + member;
+    }
+
+    /**
+     * The number of sketches of the window pre-pass: the leading columns of {@link ScreenRow#x} up to the last one it
+     * feeds ({@link #sketchedColumns}), so a sketch index is the x column.
+     */
+    public int sketchColumns() {
+        final int[] fed = sketchedColumns();
+        return fed.length == 0 ? 0 : fed[fed.length - 1] + 1;
+    }
+
+    /**
+     * The x columns the window sketch pre-pass feeds, ascending: the candidates and the shuffle reference when their
+     * sketches are read ({@link #needsCandidateSketches}: rank / absdev of independent rows, value bins), plus the
+     * members of the real pairs when their 2-D grids need value edges — not every candidate for a pair shape alone.
+     */
+    public int[] sketchedColumns() {
+        final java.util.TreeSet<Integer> fed = new java.util.TreeSet<>();
+        if (needsCandidateSketches()) for (int c = 0; c < conditioningOffset(); c++) fed.add(c);
+        if (hasPairShape()) for (final int[] pair : pairs) for (final int member : pair) fed.add(conditioningColumn(member));
+        return fed.stream().mapToInt(Integer::intValue).toArray();
+    }
+
     /**
      * the resolved placebo pairs {@code [member, noise column]}: up to {@code pairPlacebo} per pair, its first member
      * times a noise column that member is not already paired with (pairs sharing a member never repeat a placebo)
@@ -353,17 +393,26 @@ public final class ScreenSpec implements Serializable {
     }
 
     /**
-     * Whether the run needs the window quantile sketches (engine doc §2): independent rows (no group) with a
-     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row; or the binned test's
-     * value edges (grouped or not). A grouped run reads the sketches for the edges only: its rank / absdev stay
-     * within the unit ({@link GroupScorer#transform}).
+     * Whether the run needs the window quantile sketches (engine doc §2): the candidates' ({@link #needsCandidateSketches}),
+     * or the pair members' for the 2-D grids of the interaction shape (DSL doc §8.7).
      */
     public boolean needsWindowQuantiles() {
-        return needsRankReference() || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+        return needsCandidateSketches() || hasPairShape();
     }
 
-    /** Independent rows with {@code rank} / {@code absdev}: the transforms read the window's sketches. */
-    private boolean needsRankReference() {
+    /**
+     * Whether the candidates' sketches are read: independent rows (no group) with a {@code rank} or {@code absdev}
+     * transform, whose "within the unit" would be a single row, or the binned test's value edges.
+     */
+    public boolean needsCandidateSketches() {
+        return windowTransforms() || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+    }
+
+    /**
+     * Whether rank / absdev are taken against the window's sketches: independent rows only — a grouped run keeps
+     * them within the group even when the sketches are there for the value bins or a pair's grid.
+     */
+    public boolean windowTransforms() {
         return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
     }
 
@@ -626,6 +675,19 @@ public final class ScreenSpec implements Serializable {
                     if (placebo < 0 || placebo != Math.rint(placebo)) errors.add("pairs.placebo must be a non-negative integer");
                     else s.pairPlacebo = placebo.intValue();
                 }
+                final JsonElement shape = o.get("shape");
+                if (shape != null && !shape.isJsonNull()) {
+                    if (shape.isJsonPrimitive() && shape.getAsJsonPrimitive().isBoolean()) {
+                        if (!shape.getAsBoolean()) s.pairShapeBins = 0;
+                    } else if (shape.isJsonPrimitive() && shape.getAsJsonPrimitive().isNumber()) {
+                        final double k = shape.getAsDouble();
+                        // one bin per member has no edge to split at: no grid (and no shape) would come out of it
+                        if (k < 0 || k == 1 || k > 20 || k != Math.rint(k)) errors.add("pairs.shape must be 0 (off) or an integer in [2, 20] (value bins per member of the 2-D grid)");
+                        else s.pairShapeBins = (int) k;
+                    } else {
+                        errors.add("pairs.shape must be a boolean or the number of bins per member");
+                    }
+                }
                 if (s.pairFields.isEmpty() && s.pairAmong.isEmpty()) errors.add("pairs needs fields ([[a, b], ...]) or among ([names / globs])");
             } else {
                 errors.add("pairs must be an object {fields: [[a, b], ...], among: [...], maxPairs, placebo}");
@@ -858,7 +920,7 @@ public final class ScreenSpec implements Serializable {
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
-            if (needsRankReference()) {
+            if (windowTransforms()) {
                 notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%, randomised compaction: beyond k values a re-run can shift them within that error; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
@@ -988,7 +1050,7 @@ public final class ScreenSpec implements Serializable {
             }
             // among matching a single field (and no declared pair) would silently test nothing
             if (pairs.isEmpty() && errors.size() == pairErrors) errors.add("pairs resolved to no pair: among needs at least two matching conditioning fields (" + conditioningFields + ")");
-            if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key; declare fewer members or raise the bound)");
+            if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key, and its 2-D grid 2 K doubles — plus K² for groupedMultinomial — with K = pairs.shape²; declare fewer members or raise the bound)");
             // the placebo pairs: each pair's first member times a noise column it is not already paired with, spread
             // over the noise columns, so pairs sharing a member never repeat a placebo (an identical column would
             // duplicate a record name and a calibration sample); a member already paired with every noise column

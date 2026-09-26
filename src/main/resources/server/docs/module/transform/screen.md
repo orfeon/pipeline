@@ -262,8 +262,23 @@ missing either member is missing for the product (as the fragment `a * b` would 
 product of the conditioning fill. A
 passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
 apart (counted in `nPairsPassed`, not `nPassed`), each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
-doubles per partial key (times `1 + placebo`); `maxPairs` bounds a run. The members of a pure interaction
-have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect.
+doubles per partial key (times `1 + placebo`), and with `shape` each real pair's grid `2 K` more (`2 K + K²`
+for `groupedMultinomial`, K = `shape`²); `maxPairs` bounds a run. The members of a pure interaction
+have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect (the
+pHd directions of [`joint`](#several-candidates-joint) name the members).
+
+**The interaction shape.** The pair test says whether the product adds information; `pairs.shape` (default
+4 bins per member, at least 2; `false` / 0 = off) says what shape it has. Each declared pair also keeps a
+2-D grid of its members' value bins at the fitted means (their value quantiles come from the sketch pre-pass:
+one more read of the input, over the pair members' columns only), and the `suggestions` output gets one
+`interaction` record per pair: the best
+depth-2 tree over the grid (a first cut on one member, then the other member's best cut on each side) with
+`share` (the tree's gain over the grid's block χ²), `cut` / `direction` (the first member's cut and the side
+where the other member matters), `fill` (the other member's cut on that side), `consistency` (the two sides'
+second-level gains, smaller over larger: near 0 the other member matters on one side only — "b matters only
+when a > c" — near 1 on both; null, with no `direction` / `fill`, when no cut of the other member adds
+anything on either side) and `fragment` (the two row `bin` ops crossed, or the conditional expression
+`a > c ? b : 0` when the shape is one-sided). In-sample, a diagnostic: read it for the pairs that passed.
 
 ## Input contract
 
@@ -323,7 +338,7 @@ is an assembly error.
 | bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
 | heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
 | suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
-| pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`). Needs `conditioning` holding both members of every pair. |
+| pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`), `shape` (value bins per member of the pair's 2-D grid for the interaction shape, default 4; `false` / 0 = off). Needs `conditioning` holding both members of every pair. |
 | joint | optional | Boolean or Object | The candidates' joint sums for the several-candidate suggestions (see [Several candidates](#several-candidates-joint)): `true`, or `{include: [globs / selectors] (default every candidate), maxColumns (default 200), noise (noise columns carried for the null scale, default 10), directions (pHd directions, default 3), redundancy (|correlation| of a cluster, default 0.95), select (forward-selection steps, default 10)}`. O(m²) per row: opt-in, bounded. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |

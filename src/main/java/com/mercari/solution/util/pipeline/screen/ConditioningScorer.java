@@ -199,7 +199,7 @@ public final class ConditioningScorer implements Serializable {
         return 2 + k;
     }
 
-    /** the window's quantile sketches (the rank / absdev reference of independent rows, the binned test's value edges), set per bundle from the side input */
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges), set per bundle from the side input */
     private transient WindowQuantiles quantiles;
 
     /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
@@ -209,12 +209,16 @@ public final class ConditioningScorer implements Serializable {
         return this;
     }
 
-    /** the binned test's bin assignment (the marginal scorer's rule and edge cache) */
+    /** the binned test's bin assignment and the pair grids' edges (the marginal scorer's rules and edge caches) */
     private transient GroupScorer binner;
 
-    private int[] bins(final int column, final double[] v) {
+    private GroupScorer binner() {
         if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
-        return binner.bins(column, v);
+        return binner;
+    }
+
+    private int[] bins(final int column, final double[] v) {
+        return binner().bins(column, v);
     }
 
     /**
@@ -324,6 +328,11 @@ public final class ConditioningScorer implements Serializable {
             for (int q = 0; q < spec.pairCount(); q++) {
                 into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, unit, f, cols)));
             }
+            // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
+            for (int q = 0; q < spec.pairs.size(); q++) {
+                final double[] grid = pairGrid(unit, q, p);
+                if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
+            }
             return;
         }
         // row families: every row is its own period and modifier level; the rows are bucketed once into (period, level)
@@ -361,6 +370,60 @@ public final class ConditioningScorer implements Serializable {
         for (int q = 0; q < spec.pairCount(); q++) {
             into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, unit, f, cols), null));
         }
+        // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
+        for (int q = 0; q < spec.pairs.size(); q++) {
+            final double[] grid = pairGrid(unit, q, p);
+            if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
+        }
+    }
+
+    /**
+     * A real pair's 2-D grid at the fitted means (DSL doc §8.7): the members' raw values binned by their window
+     * quantile edges (k = pairs.shape per member, cell = a_bin × k + b_bin; a row with a missing member left out),
+     * as the one-hot block of K = k² cells — row families {@code [Σ w (y − p̂) per cell, Σ w v̂ per cell]}, grouped
+     * {@code [S_cell, P_cell, (P P')]} scaled by the unit weight. Null without both members' edges or any cell hit.
+     */
+    private double[] pairGrid(final GroupScorer.Unit unit, final int pair, final double[] p) {
+        if (!spec.hasPairShape()) return null;
+        final int[] members = spec.pairMembers(pair);
+        // the edges by sketch (the full row's x column), the values at this scorer's offset
+        final double[] ea = binner().gridEdges(spec.conditioningColumn(members[0]));
+        final double[] eb = binner().gridEdges(spec.conditioningColumn(members[1]));
+        if (ea == null || eb == null) return null;
+        final int kk = spec.pairShapeBins, cells = kk * kk, n = unit.size();
+        final int[] cell = new int[n];
+        boolean any = false;
+        for (int i = 0; i < n; i++) {
+            final double[] x = unit.rows.get(i).x;
+            final int a = GroupScorer.gridBin(ea, x[offset + members[0]]);
+            final int b = GroupScorer.gridBin(eb, x[offset + members[1]]);
+            cell[i] = a < 0 || b < 0 ? -1 : a * kk + b;
+            any |= cell[i] >= 0;
+        }
+        if (!any) return null;
+        if (spec.isGroupedMultinomial()) {
+            final double[] s = new double[cells], pc = new double[cells];
+            for (int i = 0; i < n; i++) {
+                if (cell[i] < 0) continue;
+                s[cell[i]] += unit.y[i] - p[i];
+                pc[cell[i]] += p[i];
+            }
+            final double w = unit.unitWeight;
+            final double[] out = new double[2 * cells + cells * cells];
+            for (int c = 0; c < cells; c++) {
+                out[c] = w * s[c];
+                out[cells + c] = w * pc[c];
+                for (int d = 0; d < cells; d++) out[2 * cells + c * cells + d] = w * pc[c] * pc[d];
+            }
+            return out;
+        }
+        final double[] out = new double[2 * cells];
+        for (int i = 0; i < n; i++) {
+            if (cell[i] < 0) continue;
+            out[cell[i]] += unit.w[i] * (unit.y[i] - p[i]);
+            out[cells + cell[i]] += unit.w[i] * spec.fisherWeight(p[i]);
+        }
+        return out;
     }
 
     /**

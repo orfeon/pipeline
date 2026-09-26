@@ -413,7 +413,27 @@ a passing pair is a recipe, never a column of the pass list: the summary and the
 `nPairsPassed`, not `nPassed`). Without an
 accepted fit the pair records are degenerate (a note says so). `among` expands a set into every pair
 (the members of a pure interaction have no marginal effect, so a ranking-based pre-selection would miss
-exactly them: declare the set, or read the pHd loadings of §12.1 once built).
+exactly them: declare the set, or read the pHd loadings of §9.5).
+
+### 8.7 The interaction shape of a pair
+
+A pair's test says *whether* the product adds information; `pairs.shape` (default 4, `false` / 0 = off) says
+*what shape* the interaction has. For every real pair the partial pass keeps a 2-D grid at the fitted means:
+the members' raw values binned by their window quantile edges (the sketch pre-pass covers the pair members'
+columns when a shape is asked for, k = `shape` ≥ 2 bins per member, K = k² cells, a row with a missing member
+left out), as the one-hot block of the cells — row families `[Σ w (y − p̂), Σ w v̂]` per cell, grouped the
+`[S, P, PP']` block scaled by the unit weight (gaussian divides by σ² at the fit). The report reads the grid as
+a depth-2 tree: a first split on one member at an edge, then in each side the best split on the other member;
+every split gain is `G_L² / H_L + G_R² / H_R − G² / H` with the node's intercept profiled and diagonal
+information (a boosting round's reading), the tree's gain is bounded by the grid's block χ² (its `share`; for
+the row families the diagonal block with the intercept profiled, `Σ S_c² / H_c − (Σ S)² / Σ H`), and the *asymmetry* of the
+two sides' second-level gains (`consistency`: their smaller over their larger) reads the shape — near 0 the
+other member matters on one side only ("b matters only when a > c"), near 1 on both (no conditional shape,
+the product's own reading stands). The `interaction` suggestion record carries the first member and its cut
+(`name`, `cut`, `direction` = the side where the other member matters), the other member's cut on that side
+(`fill`), and the recipe: the crossed bins, or a conditional expression when the shape is one-sided
+(`{scope: row, expr: "a > c ? b : 0"}`). In-sample, a diagnostic (`passed` null), for the pairs a run
+declares — read it for the pairs that passed.
 
 ## 9. Outputs
 
@@ -731,7 +751,8 @@ test of §7.1). Still open:
 | information | needs | suggestion |
 |---|---|---|
 | ratios and differences | the two-dimensional Newton direction of a pair, on log-transformed candidates | coefficients ≈ (+1, −1) → x_i / x_j; on the raw scale ≈ equal and opposite → x_i − x_j; suggested only when the pair's joint χ² clearly exceeds the better single one |
-| interaction shape | a two-dimensional histogram of a selected pair (O(k²), a depth-2 tree) | "x_j matters only when x_i > c" → a conditional feature or crossed bins |
+
+The interaction shape (a two-dimensional histogram of a declared pair, a depth-2 tree) is built as §8.7.
 
 **Parameter families.** When the feature transform emits a family (a window of 7 / 30 / 90 days), gain
 against the parameter gives the best value and the point where the gain saturates. The lineage today
@@ -776,7 +797,7 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    per-row arithmetic of steps 1–2 dominating the read.
 5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
    several-candidate suggestions (redundancy clusters, forward selection, composite) — built over the joint
-   sums (§9.5). Still open: the sketch pre-selection of pairs, ratios / differences, the two-dimensional
-   interaction shape.
+   sums (§9.5); the interaction shape of a declared pair — built (§8.7). Still open: the sketch
+   pre-selection of pairs, ratios / differences.
 6. **Categorical candidates** read natively.
 7. **Parameter families**, once the feature lineage carries op and arguments.

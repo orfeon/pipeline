@@ -49,6 +49,11 @@ public final class WindowQuantiles implements Serializable {
         for (int c = 0; c < sketches.length && c < x.length; c++) sketches[c].update(x[c]);
     }
 
+    /** Feeds one row's values of the given columns only (the others' sketches stay empty; non-finite values are skipped). */
+    public void update(final double[] x, final int[] columns) {
+        for (final int c : columns) if (c < sketches.length && c < x.length) sketches[c].update(x[c]);
+    }
+
     public boolean isEmpty() {
         for (final SketchAccumulator s : sketches) if (!s.isEmpty()) return false;
         return true;

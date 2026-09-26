@@ -769,8 +769,13 @@ public class GroupScorerTest {
             for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, null, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
             units.add(rows);
         }
-        final GroupScorer groups = new GroupScorer(spec);
-        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        // the pair's 2-D grid needs the members' value edges: the sketch pre-pass covers the conditioning columns too
+        Assertions.assertTrue(spec.hasPairShape() && spec.needsWindowQuantiles());
+        Assertions.assertEquals(3, spec.sketchColumns());
+        final WindowQuantiles quantiles = new WindowQuantiles(spec.sketchColumns());
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) quantiles.update(r.x);
+        final GroupScorer groups = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        final ConditioningScorer scorer = new ConditioningScorer(spec).withWindowQuantiles(quantiles);
         final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
         for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
         com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
@@ -788,7 +793,23 @@ public class GroupScorerTest {
             groups.score(rows, rows.get(0).getGroup(), marginal);
         }
         Assertions.assertTrue(partials.containsKey(spec.pairKey(0)) && partials.containsKey(spec.pairKey(2)));
-        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state);
+        Assertions.assertTrue(partials.containsKey(spec.pairGridKey(0)));
+        Assertions.assertEquals(2 * 16 + 16 * 16, partials.get(spec.pairGridKey(0)).getTotal().length);   // 4 x 4 cells, grouped block
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        // the pair's interaction shape from its 2-D grid: a depth-2 tree over the cells, its share of the grid's block
+        final List<Map<String, Object>> shapes = result.suggestions().stream().filter(s -> "interaction".equals(s.get("kind"))).toList();
+        Assertions.assertEquals(1, shapes.size(), result.suggestions().toString());
+        final Map<String, Object> shape = shapes.get(0);
+        Assertions.assertEquals("x*x2", shape.get("candidate"));
+        Assertions.assertTrue((Double) shape.get("share") > 0 && (Double) shape.get("share") <= 1.0 + 1e-9, shape.toString());
+        Assertions.assertTrue((Double) shape.get("consistency") >= 0 && (Double) shape.get("consistency") <= 1.0, shape.toString());
+        Assertions.assertTrue(Double.isFinite((Double) shape.get("cut")), shape.toString());
+        Assertions.assertTrue(List.of(">", "<=").contains(shape.get("direction")), shape.toString());
+        // the recipe: the two row bin ops at the next double above each cut (the screen's partition exactly), crossed
+        Assertions.assertTrue(((String) shape.get("fragment")).contains("cross of {scope: row, type: bin, input: "), shape.toString());
+        Assertions.assertTrue(((String) shape.get("fragment")).contains("edges: [" + Math.nextUp((Double) shape.get("cut")) + "]"), shape.toString());
+        Assertions.assertNull(shape.get("passed"));
+        Assertions.assertTrue(ScreenReport.describe(spec).contains("shape=4x4"));
         final Map<String, Map<String, Object>> byKey = new HashMap<>();
         for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
         Assertions.assertEquals(3 + 3, result.records().size(), byKey.keySet().toString());   // x, 2 noise; the pair + 2 placebo pairs
@@ -830,12 +851,90 @@ public class GroupScorerTest {
         final ScreenSpec among = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: ['x*'], placebo: 0}}");
         Assertions.assertEquals(1, among.pairs.size());
         Assertions.assertEquals(1, among.pairCount());
+        // pairs.shape: one bin per member has no edge to split at; false turns the grid (and its pre-pass) off
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], shape: 1}}"));
+        final ScreenSpec off = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], shape: false}}");
+        Assertions.assertFalse(off.hasPairShape() || off.needsWindowQuantiles());
         // among resolving to a single field tests nothing: an error, not a silent no-op
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: [x2]}}"));
         // a null / object member is a configuration error (not an escaping UnsupportedOperationException)
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, null]]}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: 'x', among: ['x*']}}"));
     }
+
+    @Test
+    public void testPairSketchesLeaveGroupedTransformsWithinTheGroup() throws Exception {
+        // a grouped run with the default transforms (raw, rank, absdev) and a pair: the pre-pass sketches the pair's
+        // members only (their grid edges), and rank / absdev stay within the group — the window's sketches are the
+        // independent rows' reference, never a grouped run's
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], placebo: 0}}");
+        Assertions.assertTrue(spec.transforms.contains("rank") && spec.transforms.contains("absdev"));
+        Assertions.assertTrue(spec.needsWindowQuantiles());
+        Assertions.assertFalse(spec.needsCandidateSketches());
+        Assertions.assertArrayEquals(new int[]{1, 2}, spec.sketchedColumns());
+        Assertions.assertEquals(3, spec.sketchColumns());
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns());
+        for (int i = 0; i < 50; i++) q.update(new double[]{i, i, -i}, spec.sketchedColumns());
+        Assertions.assertEquals(0, q.count(0));
+        Assertions.assertEquals(50, q.count(1));
+        final double[] v = {3, 1, 2};
+        Assertions.assertArrayEquals(GroupScorer.transform("rank", v), GroupScorer.transform(spec, q, 0, "rank", v), 0d);
+        Assertions.assertArrayEquals(GroupScorer.transform("absdev", v), GroupScorer.transform(spec, q, 0, "absdev", v), 0d);
+        // independent rows asking for a pair shape only: no rank / absdev note, no candidate sketch
+        final ScreenSpec independent = spec("{family: binomial, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], placebo: 0}}");
+        Assertions.assertTrue(independent.needsWindowQuantiles() && !independent.needsCandidateSketches());
+        Assertions.assertTrue(independent.notes.stream().noneMatch(n -> n.contains("rank / absdev")), independent.notes.toString());
+    }
+
+    @Test
+    public void testPairShapeOfRowFamilies() throws Exception {
+        // independent gaussian rows with a product interaction: the shape's statistics are label-scale free (the sums
+        // are divided by the residual variance at the fit) and its share is a share of the profiled grid χ², below 1
+        final ScreenSpec spec = spec("{family: gaussian, label: y, candidates: [x], transforms: [raw], placebo: {noise: 2, seed: 7}, "
+                + "conditioning: {fields: [x, x2], l2: 1.0e-4, maxIter: 4}, pairs: {fields: [[x, x2]], placebo: 2}}");
+        final java.util.Random random = new java.util.Random(5);
+        final List<ScreenRow> rows = new java.util.ArrayList<>(), scaled = new java.util.ArrayList<>();
+        for (int i = 0; i < 300; i++) {
+            final double x = random.nextGaussian(), x2 = random.nextGaussian();
+            final double y = x + x2 + 1.5 * x * x2 + random.nextGaussian();
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{x, x, x2}));
+            scaled.add(new ScreenRow("r" + i, "r" + i, i, null, 10 * y, Double.NaN, 1, new double[]{x, x, x2}));
+        }
+        final WindowQuantiles quantiles = new WindowQuantiles(spec.sketchColumns());
+        for (final ScreenRow r : rows) quantiles.update(r.x, spec.sketchedColumns());
+        final Map<String, Object> shape = rowFamilyShape(spec, rows, quantiles);
+        final Map<String, Object> shapeScaled = rowFamilyShape(spec, scaled, quantiles);
+        Assertions.assertNotNull(shape);
+        Assertions.assertEquals("x*x2", shape.get("candidate"));
+        Assertions.assertEquals((Double) shape.get("chi2"), (Double) shapeScaled.get("chi2"), 1e-6 * (Double) shape.get("chi2"));
+        Assertions.assertEquals((Double) shape.get("share"), (Double) shapeScaled.get("share"), 1e-9);
+        Assertions.assertTrue((Double) shape.get("share") > 0 && (Double) shape.get("share") < 1, shape.toString());
+    }
+
+    /** The interaction record of a row-family pair run over independent rows (one row per unit); null when none. */
+    private static Map<String, Object> rowFamilyShape(final ScreenSpec spec, final List<ScreenRow> rows, final WindowQuantiles quantiles) {
+        final GroupScorer groups = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        final ConditioningScorer scorer = new ConditioningScorer(spec).withWindowQuantiles(quantiles);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k, scorer.initialTheta(moments.getValues()));
+        for (int it = 0; it < spec.conditioningMaxIter && !state.converged; it++) {
+            final com.mercari.solution.util.pipeline.glm.VectorAccumulator eval = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+            for (final ScreenRow r : rows) eval.add(scorer.evaluate(groups.prepare(List.of(r), r.getIdentity()), state.proposal, moments.getValues()));
+            state.advance(eval.getValues(), spec.conditioningL2, spec.conditioningTol);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final ScreenRow r : rows) {
+            final GroupScorer.Unit unit = groups.prepare(List.of(r), r.getIdentity());
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partials);
+            groups.score(List.of(r), r.getIdentity(), marginal);
+        }
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        return result.suggestions().stream().filter(s -> "interaction".equals(s.get("kind"))).findFirst().orElse(null);
+    }
+
 
     @Test
     public void testPairPlacebosAreDistinct() {
