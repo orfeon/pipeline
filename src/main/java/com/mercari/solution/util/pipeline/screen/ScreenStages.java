@@ -69,7 +69,7 @@ public final class ScreenStages {
 
     private static final String SEP = String.valueOf((char) 1);
 
-    public record Outputs(PCollection<MElement> records, PCollection<MElement> summary, PCollection<BadRecord> failures) {}
+    public record Outputs(PCollection<MElement> records, PCollection<MElement> summary, PCollection<MElement> suggestions, PCollection<BadRecord> failures) {}
 
     /** Engine rejections that only the input can tell (called by the module before wiring). */
     public static List<String> engineConstraints(final PCollection<MElement> input, final ScreenSpec spec) {
@@ -180,15 +180,18 @@ public final class ScreenStages {
 
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
+        final TupleTag<MElement> suggestionTag = new TupleTag<>() {};
+        // the suggestions read the bins' value edges from the window sketches (nothing else in the finalize step does)
+        if (spec.suggestionsOn && quantilesView != null) finalizeSideInputs.add(quantilesView);
         // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
         final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
                 Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER)));
         final PCollectionTuple finalized = combined
                 .apply("Gather", combined.getWindowingStrategy().getWindowFn() instanceof GlobalWindows ? gather : gather.withoutDefaults())
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, fitView, partialView))
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, suggestionTag, fitView, partialView, spec.suggestionsOn ? quantilesView : null))
                         .withSideInputs(finalizeSideInputs)
-                        .withOutputTags(recordTag, TupleTagList.of(summaryTag)));
-        return new Outputs(finalized.get(recordTag), finalized.get(summaryTag), prepared.get(failureTag));
+                        .withOutputTags(recordTag, TupleTagList.of(summaryTag).and(suggestionTag)));
+        return new Outputs(finalized.get(recordTag), finalized.get(summaryTag), finalized.get(suggestionTag), prepared.get(failureTag));
     }
 
     /** Reads one element into a {@link ScreenRow}, applying the time window and the validity rules. */
@@ -633,16 +636,22 @@ public final class ScreenStages {
         private final ScreenSpec spec;
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
+        private final TupleTag<MElement> suggestionTag;
         private final PCollectionView<FitState> fitView;
         private final PCollectionView<Map<Integer, PartialAccumulator>> partialView;
+        /** the window sketches (the suggestions' bin representatives and edges; null without the pre-pass) */
+        private final PCollectionView<WindowQuantiles> quantilesView;
 
         FinalizeDoFn(final ScreenSpec spec, final TupleTag<MElement> recordTag, final TupleTag<MElement> summaryTag,
-                     final PCollectionView<FitState> fitView, final PCollectionView<Map<Integer, PartialAccumulator>> partialView) {
+                     final TupleTag<MElement> suggestionTag, final PCollectionView<FitState> fitView,
+                     final PCollectionView<Map<Integer, PartialAccumulator>> partialView, final PCollectionView<WindowQuantiles> quantilesView) {
             this.spec = spec;
             this.recordTag = recordTag;
             this.summaryTag = summaryTag;
+            this.suggestionTag = suggestionTag;
             this.fitView = fitView;
             this.partialView = partialView;
+            this.quantilesView = quantilesView;
         }
 
         @ProcessElement
@@ -658,11 +667,19 @@ public final class ScreenStages {
                 // Combine.perKey in the global window: exactly one accumulator per key
                 partials = new HashMap<>(c.sideInput(partialView));
             }
-            final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit);
+            ScreenReport.Bins bins = null;
+            if (spec.suggestionsOn) {
+                final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges);
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {
                 c.output(recordTag, MElement.of(record, c.timestamp()));
             }
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
+            for (final Map<String, Object> suggestion : result.suggestions()) {
+                c.output(suggestionTag, MElement.of(suggestion, c.timestamp()));
+            }
             if (spec.selectionUri != null) {
                 // the pass list is a primary deliverable: a write failure fails the step (no silent partial run)
                 ResourceUtil.writeString(spec.selectionUri, SELECTION_GSON.toJson(ScreenReport.selection(spec, result)));

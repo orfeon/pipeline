@@ -157,6 +157,8 @@ public final class GroupScorer implements Serializable {
         final String unitLevel = spec.isGroupedMultinomial() ? unit.level() : null;
         final int nTransforms = spec.transforms.size();
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
+        // the suggestions' half of this unit: one seeded hash per unit, not per column
+        final boolean inDiscovery = spec.suggestionsOn && discovery(unit.key);
         for (int c = 0; c < nColumns; c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
@@ -167,7 +169,19 @@ public final class GroupScorer implements Serializable {
                     Arrays.fill(contribution, 0d);
                     contribution[ScoreAccumulator.N_OBS] = observed(cols[c]);
                     acc.add(null, contribution);
-                    if (spec.isGroupedMultinomial()) {
+                    final int len = spec.isGroupedMultinomial() ? binnedGroupedLength() : binnedRowLength();
+                    if (spec.suggestionsOn) {
+                        // the suggestions' honest gain: the window's sums, then the discovery half's (a seeded hash of
+                        // the unit); the confirmation half is the difference
+                        final double[] sums = new double[len];
+                        if (spec.isGroupedMultinomial()) binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight, sums);
+                        else binnedRowContribution(bins, unit.y, unit.p, unit.w, prior, sums);
+                        final double[] both = acc.extra(2 * len);
+                        for (int i = 0; i < len; i++) {
+                            both[i] += sums[i];
+                            if (inDiscovery) both[len + i] += sums[i];
+                        }
+                    } else if (spec.isGroupedMultinomial()) {
                         binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight, acc.extra(binnedGroupedLength()));
                     } else {
                         binnedRowContribution(bins, unit.y, unit.p, unit.w, prior, acc.extra(binnedRowLength()));
@@ -315,6 +329,43 @@ public final class GroupScorer implements Serializable {
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
         for (final Map.Entry<String, double[]> e : byLevel.entrySet()) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + e.getKey(), e.getValue());
+    }
+
+    /** Whether a unit belongs to the suggestions' discovery half: a seeded hash of the unit key (the placebo derivation). */
+    boolean discovery(final String unitKey) {
+        return FeatureValues.seededRandom(spec.seed, unitKey + SEP + "split").nextBoolean();
+    }
+
+    /**
+     * A representative value per bin of column {@code column} (the binned test's k value bins, the missing bin
+     * excluded), for the suggestions' shapes: the midpoint of (edge_{i−1}, edge_i], the outer bins reaching to the
+     * sketch's min / max (a noise placebo: the normal quantile mids); position bins take the position's centre
+     * (b + 0.5) / k. Null without an edge (no sketch value for the column).
+     */
+    double[] binRepresentatives(final int column) {
+        final int k = spec.binsK;
+        final double[] out = new double[k];
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            for (int b = 0; b < k; b++) out[b] = (b + 0.5) / k;
+            return out;
+        }
+        final double[] edges = edges(column);
+        if (edges == null) return null;
+        final boolean candidate = column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise);
+        final int sketch = column < nCandidates ? column : shuffleRef;
+        final double lo = candidate ? quantiles.min(sketch) : StatMath.inverseNormal(0.5 / k);
+        final double hi = candidate ? quantiles.max(sketch) : StatMath.inverseNormal(1 - 0.5 / k);
+        for (int b = 0; b < k; b++) {
+            final double left = b == 0 ? lo : edges[b - 1];
+            final double right = b == k - 1 ? hi : edges[b];
+            out[b] = 0.5 * (left + right);
+        }
+        return out;
+    }
+
+    /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
+    public double[] binEdges(final int column) {
+        return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
     }
 
     /** Finite values of a column (the binned test's n_obs). */

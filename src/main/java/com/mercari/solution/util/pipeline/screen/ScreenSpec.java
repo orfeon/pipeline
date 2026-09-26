@@ -100,6 +100,9 @@ public final class ScreenSpec implements Serializable {
     /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its first row) for the grouped family */
     public String heterogeneityField;
 
+    /** suggestions: the one-candidate derivation suggestions from the binned sums (DSL doc §9.4; needs the binned transform) */
+    public boolean suggestionsOn;
+
     public boolean hasHeterogeneity() {
         return heterogeneityBy != null;
     }
@@ -480,6 +483,27 @@ public final class ScreenSpec implements Serializable {
                 }
             } else {
                 errors.add("heterogeneity must be periods, a field name, or an object {by, field}");
+            }
+        }
+        final JsonElement suggestions = p.get("suggestions");
+        if (suggestions != null && !suggestions.isJsonNull()) {
+            if (suggestions.isJsonPrimitive() && suggestions.getAsJsonPrimitive().isBoolean()) {
+                s.suggestionsOn = suggestions.getAsBoolean();
+            } else if (suggestions.isJsonObject()) {
+                // {enabled} (absent / null = on); a non-boolean is an error, not a silent false or an unchecked exception
+                final JsonElement enabled = suggestions.getAsJsonObject().get("enabled");
+                if (enabled == null || enabled.isJsonNull()) {
+                    s.suggestionsOn = true;
+                } else if (enabled.isJsonPrimitive() && enabled.getAsJsonPrimitive().isBoolean()) {
+                    s.suggestionsOn = enabled.getAsBoolean();
+                } else {
+                    errors.add("suggestions.enabled must be a boolean");
+                }
+            } else {
+                errors.add("suggestions must be a boolean or an object {enabled}");
+            }
+            if (s.suggestionsOn && !s.transforms.contains(TRANSFORM_BINNED)) {
+                errors.add("suggestions read the binned sums: add binned to transforms");
             }
         }
         s.transformsExplicit = !s.transforms.isEmpty();

@@ -424,6 +424,40 @@ The closed loop is two configs sharing a version argument: the screen reads the 
 (`candidates.manifest`) and writes the pass list; the next feature run reads it (`output.include`) and writes
 its manifest.
 
+### 9.4 Suggestions (`<name>.suggestions`)
+
+`suggestions: true` (needs the `binned` transform) reads the binned sums of §6.1 as estimates rather than a
+ranking — the per-bin (S_b, H_b) are the gradient / Hessian histograms of a boosting round on the baseline,
+so the screen already holds where the next tree would cut — and emits, per scorable candidate (placebos
+included), recipes in the feature transform's vocabulary:
+
+| kind | read from | record |
+|---|---|---|
+| `shape` | the df = 1 score test along each bin-constant contrast φ (φ centred by the H-weighted mean, S_φ = φ_c'S, H_φ = φ_c'Hφ_c) for linear / log / sqrt / rank (the bin index) / step, hinge and \|x − c\| at every edge, each scored by the *share* S_φ² / H_φ of the value bins' block χ² it captures — in [0, 1], the block being the maximum over its contrasts | `name`, `cut`, `direction`, `share`, `fragment` (`log(x)`, `max(0, x − c)`, `abs(x − c)`, `x > c ? 1 : 0`, …) |
+| `cut` | the best single step (a boosting round's first split) | `cut`, `direction`, a row `bin` with that edge |
+| `missing` | the missing bin against the rest (present when the missing bin holds information), and the value bin whose effect S_b / H_b is closest to the missing bin's | `direction`, `fill`, an `isnull` indicator or the fill value |
+| `monotone` | the H-weighted isotonic fit (pool-adjacent-violators) of the bin effects in the better direction, and the sign consistency of the adjacent effect differences | `name` (increasing / decreasing), `consistency`, `share` |
+
+Shapes use a representative value per bin (the midpoint of the bin's edges, the outer bins reaching the
+sketch's min / max; position bins the position's centre, with cuts as rank fractions).
+
+**Honest gain.** A shape chosen and scored on the same data is optimistic. A seeded hash of the unit key
+(the placebo derivation) splits the window into a discovery and a confirmation half — the binned key's
+sums are kept twice, the window's and the discovery half's, the confirmation half being the difference —
+and every choice (the best shape, the best cut, the fill, the direction) is made on the discovery half,
+while `confirmation_chi2 / share / gain / pValue` report the chosen contrast on the confirmation half (the
+gain over the half's unit mass, in proportion to its weight). `share` and `chi2` are the discovery values.
+
+**Calibration.** Placebo columns go through the same search, so each kind takes the placebo quantile of the
+placebo columns' confirmation gains as its cut (`threshold`, lifted to `pass.minGain`; the theoretical χ²(1)
+quantile / 2N of the half without placebos), and `passed` compares the confirmation gain with it.
+
+**Hypotheses, not decisions.** The score test is local to β = 0 and a shape with a large effect is
+approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
+transform, never applied automatically. The suggestions read the marginal binned sums (what the baseline
+misses), not the partial block: a shape's redundancy with F is read off the block's `r2_F`. The summary
+counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nScored`).
+
 ## 10. Constraints and diagnostics
 
 Assembly errors (every message names the parameter and what is available): an unknown family or a form not
@@ -626,15 +660,13 @@ G_L² / H_L + G_R² / H_R − G² / H is the binned score test restricted to one
 computes where the next tree over the baseline would cut. Read as estimates rather than a ranking, the sums
 give recipes in the feature transform's vocabulary.
 
-**One candidate — how to transform it** (from the binned sums, no further pass):
+**One candidate — how to transform it** — built (§9.4: shape / cut / missing / monotone from the binned
+sums, the discovery / confirmation split, per-kind placebo cuts, the `<name>.suggestions` output). Still
+open from this table:
 
 | information | read from | suggestion |
 |---|---|---|
-| effect shape | S_b / H_b per bin, the one-step partial-residual curve; each shape (linear, log, sqrt, rank, step at c, hinge max(0, x − c), \|x − c\|) scored by the share of the full binned χ² it captures (the binned test bounds every bin-constant contrast, so the share lies in [0, 1] for the step / bin shapes; a smooth shape is evaluated at the bin representatives and its share is approximate) | "log(x) captures 95 %", "no effect above c → clip at c" |
-| cut points | the best split gain (a boosting round's first split) | a row `bin` with the edges, an indicator x > c |
-| missingness | the missing bin's S / H against the other bins | an `_isnull` indicator, or the fill value whose bin matches the missing effect |
-| monotonicity | sign consistency of the bin effects, the isotonic fit's share | a monotone constraint for a boosted model, with its direction |
-| categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
+| categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) — needs the categorical candidates of §12.1 | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
 
 **Several candidates — how to combine them:**
 
@@ -653,14 +685,15 @@ against the parameter gives the best value and the point where the gain saturate
 (scope / block / derivedFrom / evidence / kind — `FeatureLineage.Entry`) and the manifest carry no op or
 arguments, so this needs the feature transform to expose them first; it is the last step of §12.4.
 
-Guards:
+Guards (the first three are built for the one-candidate suggestions, §9.4, and apply as they are to the
+several-candidate ones):
 
 - **Honest gain.** A shape chosen and scored on the same data is optimistic. A seeded hash of the unit splits
   the window into a discovery and a confirmation half, each with its own sums (twice the state): the shape is
   chosen on the first, its gain reported on the second.
 - **Calibration.** Placebo columns go through the same search, maxima included; thresholds are per suggestion
   kind (§12.1).
-- **Output.** A `<name>.suggestions` output: kind, inputs, parameters (edges, cut, coefficients), a feature
+- **Output.** The `<name>.suggestions` output: kind, inputs, parameters (edges, cut, coefficients), a feature
   DSL fragment, the captured share, the gain over the best single candidate, the confirmation-half gain.
 - **Hypotheses, not decisions.** The score test is local to β = 0; a composite with a large effect is
   approximate. Suggestions are never applied automatically: they go into a feature spec and are checked by
@@ -683,7 +716,9 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    block partial test); the **heterogeneity test** — built (§7.1: `periods` and a declared field,
    marginal and partial). Still open from this position: the edges in the pass list, a built-in baseline-bin
    modifier.
-3. **One-candidate suggestions** with the discovery / confirmation split and the `<name>.suggestions` output.
+3. **One-candidate suggestions** — built (§9.4: shape / cut / missing / monotone, the discovery /
+   confirmation split, per-kind placebo cuts, the `<name>.suggestions` output). Open: the categorical
+   grouping (with step 6), the edges in the pass list.
 4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
    per-row arithmetic of steps 1–2 dominating the read.
 5. **Pairs** on the conditioning fit's p̂, `maxPairs` with a declared list or the sketch; **pHd**; the

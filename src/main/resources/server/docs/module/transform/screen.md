@@ -127,6 +127,28 @@ effect that flips sign across segments or periods — invisible to the window st
   value of the group's first row). "Does the effect depend on the predicted level" is the same test on a
   field that bins the baseline upstream.
 
+### Suggestions
+
+`suggestions: true` (with `binned` in `transforms`) reads the binned sums as estimates and writes, per
+scorable candidate, recipes in the feature transform's vocabulary to the `<name>.suggestions` output:
+
+| kind | what it says | fields |
+|---|---|---|
+| `shape` | which univariate shape captures the effect: `linear`, `log`, `sqrt`, `rank`, `step` / `hinge` / `abs` at a cut — scored by the share of the block's χ² the shape's contrast captures (in [0, 1]) | `name`, `cut`, `direction`, `share`, `fragment` (e.g. `{scope: row, expr: "abs(x - 20)"}`) |
+| `cut` | the best single split (a boosting round's first split) | `cut`, `direction`, `fragment` (a row `bin` with that edge) |
+| `missing` | the missing values' own effect against the rest, and the fill value whose bin behaves like them (only when values are missing) | `direction`, `fill`, `fragment` (an `x == null` indicator, or the fill) |
+| `monotone` | whether the effect is monotone (the isotonic fit's share) and in which direction, with the sign consistency of the bin effects | `name` (increasing / decreasing), `consistency`, `share` |
+
+- **Honest gain.** Every choice is made on a discovery half of the units (a seeded hash, as the placebo
+  columns) and reported on the other half: `share` / `chi2` are the discovery values, `confirmation_chi2` /
+  `confirmation_share` / `confirmation_gain` / `confirmation_pValue` the chosen recipe's on the confirmation
+  half — the numbers to trust.
+- **Calibrated.** Placebo columns go through the same search; each kind's `threshold` is the placebo quantile
+  of their confirmation gains (lifted to `pass.minGain`), and `passed` compares the confirmation gain with it.
+- **Hypotheses.** A suggestion goes into a feature spec and is checked by the next screen or the `evaluation`
+  transform; nothing is applied automatically. A shape's redundancy with the conditioning set is read off the
+  block record's `r2_F`.
+
 ### Periods, time window and leak flags
 
 - `periods` computes S and z per calendar bucket of a time field; `periods_agree / n_periods` counts the buckets
@@ -256,7 +278,8 @@ is an assembly error.
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
 | transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`, `binned`. Default: the first three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). `binned` (the block test, see [Binned block test](#binned-block-test)) is never in the default list. |
 | bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
-| heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. Needs a `raw` / `rank` / `absdev` transform (the `binned` block has no direction). A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
+| heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
+| suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -267,7 +290,8 @@ is an assembly error.
 ## Outputs
 
 The default output (`<name>`) holds one scoring record per column × transform, placebo columns included.
-`<name>.summary` holds one record per run (per window under a windowing strategy).
+`<name>.summary` holds one record per run (per window under a windowing strategy). `<name>.suggestions` holds
+the derivation suggestions under `suggestions: true` (see [Suggestions record](#suggestions-record-namesuggestions-with-suggestions-true)).
 
 ### Scoring record
 
@@ -312,6 +336,16 @@ names with a passing transform, best gain first — the list to feed back into t
 `output.include`), `conditioningFields`, `conditioningK`, `conditioningIterations`, `conditioningRejectedSteps`,
 `conditioningConverged`, `conditioningGain`, `conditioningL2` (null without conditioning), `notes` (role defaults
 applied, columns excluded by lineage, a skipped share of units above 1% with its reasons, dropped rows).
+
+### Suggestions record (`<name>.suggestions`, with `suggestions: true`)
+
+One record per candidate × kind (`shape` / `cut` / `missing` / `monotone`, see [Suggestions](#suggestions)):
+`candidate`, `kind`, `name`, `cut`, `direction` (`+` / `-`, the sign of the label's response along the recipe),
+`fill`, `consistency`, `share` and `chi2` (discovery half), `confirmation_chi2`, `confirmation_share`,
+`confirmation_gain`, `confirmation_pValue` (confirmation half), `threshold` (the kind's placebo cut),
+`passed`, `placebo`, `fragment` (the recipe in the feature transform's row vocabulary, or a description when it
+has no row op — a monotone constraint, a within-unit rank). Placebo columns get records too (`placebo: true`,
+never `passed`); the summary counts the candidates' records (`nSuggestions`, placebo records excluded).
 
 ## Examples
 

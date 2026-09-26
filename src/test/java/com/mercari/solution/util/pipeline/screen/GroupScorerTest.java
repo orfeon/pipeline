@@ -607,6 +607,106 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testSuggestionsFromBinnedSums() throws Exception {
+        // 200 independent binomial rows: x = 1..180 with a band effect (label 1 for 75 <= x <= 125), then 20 rows
+        // with x missing and the label 1 — the missing bin carries its own effect. Four value bins from the window
+        // sketch; the shapes are chosen on the discovery half (a seeded split) and reported on the confirmation half.
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, binned], bins: {k: 4}, suggestions: true, placebo: {noise: 0}}");
+        Assertions.assertTrue(spec.suggestionsOn);
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 200; i++) {
+            final boolean missing = i > 180;
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, missing || (i >= 75 && i <= 125) ? 1 : 0, Double.NaN, 1, new double[]{missing ? Double.NaN : i}));
+        }
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final ScreenRow r : rows) q.update(r.x);
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        int discovery = 0;
+        for (final ScreenRow r : rows) {
+            scorer.score(List.of(r), r.getIdentity(), acc);
+            if (scorer.discovery(r.getIdentity())) discovery++;
+        }
+        Assertions.assertTrue(discovery > 60 && discovery < 140, "discovery half " + discovery);
+        // the binned key carries the window sums and the discovery half's (twice the length)
+        final double[] extra = acc.get(spec.key(0, 1)).getExtra();
+        Assertions.assertEquals(2 * (3 * 5 + 3), extra.length);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
+        final Map<String, Map<String, Object>> byKind = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) byKind.put((String) s.get("kind"), s);
+        Assertions.assertEquals(4, result.suggestions().size(), result.suggestions().toString());
+        Assertions.assertEquals(4L, result.summary().get("nSuggestions"));
+        // the shape: a band is a distance to its centre (or a hinge / step near it), not a line
+        final Map<String, Object> shape = byKind.get("shape");
+        Assertions.assertTrue(List.of("abs", "hinge", "step").contains(shape.get("name")), shape.toString());
+        Assertions.assertTrue((Double) shape.get("share") > 0.5 && (Double) shape.get("share") <= 1.0 + 1e-9, shape.toString());
+        Assertions.assertTrue((Double) shape.get("confirmation_share") > 0.3, shape.toString());
+        Assertions.assertTrue((Double) shape.get("cut") > 40 && (Double) shape.get("cut") < 140, shape.toString());
+        Assertions.assertEquals(Boolean.TRUE, shape.get("passed"));
+        Assertions.assertTrue(((String) shape.get("fragment")).contains("x"), shape.toString());
+        // the cut: a step at one of the edges (45 / 90 / 135)
+        final Map<String, Object> cut = byKind.get("cut");
+        Assertions.assertEquals("step", cut.get("name"));
+        Assertions.assertTrue((Double) cut.get("cut") > 40 && (Double) cut.get("cut") < 140, cut.toString());
+        Assertions.assertTrue(((String) cut.get("fragment")).contains("type: bin"), cut.toString());
+        // missingness: the missing rows are all positive — an effect of its own, matched by a value bin inside the band
+        final Map<String, Object> missing = byKind.get("missing");
+        Assertions.assertEquals("+", missing.get("direction"));
+        Assertions.assertTrue((Double) missing.get("chi2") > 5, missing.toString());
+        Assertions.assertTrue((Double) missing.get("fill") > 40 && (Double) missing.get("fill") < 140, missing.toString());
+        Assertions.assertTrue(((String) missing.get("fragment")).contains("== null"), missing.toString());
+        // monotone: a band is not monotone — the isotonic fit keeps a share, the sign consistency is partial
+        final Map<String, Object> monotone = byKind.get("monotone");
+        Assertions.assertTrue((Double) monotone.get("consistency") < 1.0, monotone.toString());
+        Assertions.assertTrue((Double) monotone.get("share") >= 0 && (Double) monotone.get("share") <= 1.0 + 1e-9, monotone.toString());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertEquals("x", s.get("candidate"));
+            Assertions.assertEquals(Boolean.FALSE, s.get("placebo"));
+            Assertions.assertNotNull(s.get("threshold"));
+            Assertions.assertTrue((Double) s.get("confirmation_pValue") >= 0 && (Double) s.get("confirmation_pValue") <= 1);
+        }
+        // the isotonic fit itself
+        Assertions.assertArrayEquals(new double[]{1, 2.5, 2.5, 4}, ScreenReport.isotonic(new double[]{1, 3, 2, 4}, new double[]{1, 1, 1, 1}, true), 1e-12);
+        Assertions.assertArrayEquals(new double[]{4, 2.5, 2.5, 1}, ScreenReport.isotonic(new double[]{4, 2, 3, 1}, new double[]{1, 1, 1, 1}, false), 1e-12);
+        // without the discovery split (suggestions off) the block reads the plain sums, and no suggestion is produced
+        Assertions.assertTrue(ScreenReport.build(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], placebo: {noise: 0}}"), new HashMap<>()).suggestions().isEmpty());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], suggestions: true}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {enabled: {}}}"));
+        Assertions.assertTrue(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {}}").suggestionsOn);
+    }
+
+    @Test
+    public void testSuggestionShareBoundedByContrasts() throws Exception {
+        // a pure step at the median (binomial, no baseline): the step contrast carries the whole effect. The share is
+        // read against the maximum over the centred contrasts, so it stays in [0, 1] — against the block χ² with a
+        // reference bin dropped from a diagonal H it would exceed 1 (about 1.25 here)
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 4}, suggestions: true, placebo: {noise: 0}}");
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 400; i++) {
+            final double y = i > 200 ? (i % 5 == 0 ? 0 : 1) : (i % 5 == 0 ? 1 : 0);
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{i}));
+        }
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final ScreenRow r : rows) q.update(r.x);
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
+        Assertions.assertFalse(result.suggestions().isEmpty());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("share") >= 0 && (Double) s.get("share") <= 1 + 1e-9, s.toString());
+            Assertions.assertTrue((Double) s.get("confirmation_share") >= 0 && (Double) s.get("confirmation_share") <= 1 + 1e-9, s.toString());
+            // a hinge names its side: one expression, not both
+            if ("hinge".equals(s.get("name"))) Assertions.assertFalse(((String) s.get("fragment")).contains(" or "), s.toString());
+        }
+        for (final Map<String, Object> s : result.suggestions()) {
+            if (!"cut".equals(s.get("kind"))) continue;
+            Assertions.assertEquals(200d, (Double) s.get("cut"), 1e-9);
+            Assertions.assertTrue((Double) s.get("share") > 0.95, s.toString());
+        }
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

@@ -19,6 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntFunction;
 
 /**
  * Turns the combined accumulators into the scoring records and the run summary. Pure: the statistics,
@@ -42,7 +43,11 @@ public final class ScreenReport {
     public record Partial(Stats stats, double r2) {}
 
     /** Result of {@link #build}: the scoring records and the summary, as output-schema maps. */
-    public record Result(List<Map<String, Object>> records, Map<String, Object> summary) {}
+    public record Result(List<Map<String, Object>> records, Map<String, Object> summary, List<Map<String, Object>> suggestions) {
+        public Result(final List<Map<String, Object>> records, final Map<String, Object> summary) {
+            this(records, summary, List.of());
+        }
+    }
 
     /**
      * Relative floor of Σ x̃² for the row families, whose centring is a difference of moment sums
@@ -196,9 +201,9 @@ public final class ScreenReport {
      * intercept profiled out — χ²(df) with df = active bins − 1, no sign (z is NaN) — and its per-bin score S_b,
      * information H_bb and weight mass n_b for the report.
      */
-    public record Block(Stats stats, int df, double[] s, double[] h, double[] n) {
+    public record Block(Stats stats, int df, double[] s, double[] h, double[] n, double[][] hFull) {
         static Block degenerate(final long nObs, final int nb) {
-            return new Block(Stats.degenerate(nObs), 0, new double[nb], new double[nb], new double[nb]);
+            return new Block(Stats.degenerate(nObs), 0, new double[nb], new double[nb], new double[nb], new double[nb][nb]);
         }
     }
 
@@ -256,7 +261,7 @@ public final class ScreenReport {
             }
             df = blockChi2(sp, h, hd, nUnits, nObs, out);
         }
-        return new Block(out[0], df, s, hd, n);
+        return new Block(out[0], df, s, hd, n, h);
     }
 
     /**
@@ -422,16 +427,411 @@ public final class ScreenReport {
         r.put(prefix + "het_levels", het == null ? null : (long) het.levels);
     }
 
+    /** The bins' geometry the suggestions read: a representative value per value bin, and the k − 1 edges (null for position bins). */
+    public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges) {}
+
+    /**
+     * A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none), and for a
+     * hinge which side of the cut it rises on ({@code below}: max(0, c − x), else max(0, x − c)).
+     */
+    private record Shape(String name, double[] phi, double cut, boolean below) {
+        Shape(final String name, final double[] phi, final double cut) {
+            this(name, phi, cut, false);
+        }
+    }
+
+    /**
+     * The one-candidate derivation suggestions (DSL doc §9.4) from the binned sums: the shapes (linear / log /
+     * sqrt / rank / step / hinge / abs) scored by the share of the block's χ² their contrast captures, the best
+     * cut (the split gain), the missing bin's own effect and the fill value that matches it, and the isotonic
+     * (monotone) fit with its sign consistency. Every choice is made on the discovery half's sums and its gain
+     * reported on the confirmation half's (the seeded split in {@link GroupScorer#discovery}); placebo columns
+     * go through the same search and give each kind its cut.
+     */
+    static List<Map<String, Object>> suggestions(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
+                                                 final double nUnits, final Bins bins) {
+        final List<Map<String, Object>> out = new ArrayList<>();
+        if (!spec.suggestionsOn || bins == null) return out;
+        final int t = spec.transforms.indexOf(ScreenSpec.TRANSFORM_BINNED);
+        if (t < 0) return out;
+        final List<String> names = spec.columnNames();
+        final int nb = spec.binCount();
+        final int k = spec.binsK;
+        final Map<String, List<Double>> placeboGains = new LinkedHashMap<>();
+        final List<Map<String, Object>> candidates = new ArrayList<>();
+        for (int c = 0; c < names.size(); c++) {
+            final ScoreAccumulator acc = accumulators.get(spec.key(c, t));
+            final double[] extra = acc == null ? null : acc.getExtra();
+            if (extra == null || extra.length % 2 != 0) continue;
+            final int len = extra.length / 2;
+            final double[] full = Arrays.copyOfRange(extra, 0, len);
+            final double[] disc = Arrays.copyOfRange(extra, len, 2 * len);
+            final double[] conf = new double[len];
+            for (int i = 0; i < len; i++) conf[i] = full[i] - disc[i];
+            // the halves' unit counts, in proportion to their weight mass
+            final double massFull = mass(spec, full), massDisc = mass(spec, disc);
+            if (!(massFull > 0)) continue;
+            final double nDisc = nUnits * massDisc / massFull, nConf = nUnits - nDisc;
+            final long nObs = (long) acc.getTotal()[ScoreAccumulator.N_OBS];
+            final Block bd = binnedStats(spec, disc, nDisc, nObs);
+            final Block bc = binnedStats(spec, conf, nConf, nObs);
+            if (bd.stats.degenerate || bc.stats.degenerate) continue;
+            final double[] x = bins.representatives.apply(c);
+            final double[] edges = bins.edges.apply(c);
+            final boolean position = ScreenSpec.EDGES_RANK.equals(spec.binsEdges);
+            final boolean placebo = spec.isPlacebo(c);
+            final String name = names.get(c);
+            // the bound over the value bins alone (the missing bin is its own suggestion)
+            final double blockDisc = contrastBound(bd, k), blockConf = contrastBound(bc, k);
+            if (blockDisc > 0 && blockConf > 0) {
+                // shapes: chosen on discovery, reported on confirmation
+                final List<Shape> shapes = shapes(x, edges, k, position);
+                Shape best = null;
+                double bestChi2 = -1;
+                Shape bestStep = null;
+                double bestStepChi2 = -1;
+                for (final Shape sh : shapes) {
+                    final double chi2 = contrastChi2(bd, sh.phi, k);
+                    if (chi2 > bestChi2) {
+                        bestChi2 = chi2;
+                        best = sh;
+                    }
+                    if (sh.name.equals("step") && chi2 > bestStepChi2) {
+                        bestStepChi2 = chi2;
+                        bestStep = sh;
+                    }
+                }
+                if (best != null) {
+                    candidates.add(suggestion(name, placebo, "shape", best.name, best.cut, direction(bd, best.phi, k), Double.NaN, Double.NaN,
+                            bestChi2 / blockDisc, bestChi2, bc, best.phi, k, blockConf, nConf, fragment(name, best, position), placeboGains));
+                }
+                if (bestStep != null) {
+                    candidates.add(suggestion(name, placebo, "cut", "step", bestStep.cut, direction(bd, bestStep.phi, k), Double.NaN, Double.NaN,
+                            bestStepChi2 / blockDisc, bestStepChi2, bc, bestStep.phi, k, blockConf, nConf,
+                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : "{scope: row, type: bin, input: " + name + ", edges: [" + fmt(bestStep.cut) + "]}", placeboGains));
+                }
+                // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction
+                final double[] effects = new double[k], weights = new double[k];
+                for (int b = 0; b < k; b++) {
+                    weights[b] = bd.h[b];
+                    effects[b] = bd.h[b] > 0 ? bd.s[b] / bd.h[b] : 0d;
+                }
+                final double[] up = isotonic(effects, weights, true), down = isotonic(effects, weights, false);
+                final double chiUp = contrastChi2(bd, up, k), chiDown = contrastChi2(bd, down, k);
+                final boolean increasing = chiUp >= chiDown;
+                final double[] phi = increasing ? up : down;
+                // adjacent among the bins with information: an empty bin (tied edges) does not break the chain
+                int consistent = 0, pairs = 0, previous = -1;
+                for (int b = 0; b < k; b++) {
+                    if (!(weights[b] > 0)) continue;
+                    if (previous >= 0) {
+                        pairs++;
+                        final double d = effects[b] - effects[previous];
+                        if (increasing ? d >= 0 : d <= 0) consistent++;
+                    }
+                    previous = b;
+                }
+                if (pairs > 0) {
+                    candidates.add(suggestion(name, placebo, "monotone", increasing ? "increasing" : "decreasing", Double.NaN, increasing ? "+" : "-", Double.NaN,
+                            (double) consistent / pairs, Math.max(chiUp, chiDown) / blockDisc, Math.max(chiUp, chiDown), bc, phi, k, blockConf, nConf,
+                            "a monotone " + (increasing ? "increasing" : "decreasing") + " constraint on " + name, placeboGains));
+                }
+            }
+            // missingness: the missing bin against the rest, and the value bin whose effect matches it
+            if (bd.h[k] > 0 && bc.h[k] > 0) {
+                final double[] phiMiss = new double[nb];
+                phiMiss[k] = 1;
+                final double chiDisc = contrastChi2(bd, phiMiss, nb);
+                final double blockAllDisc = contrastBound(bd, nb), blockAllConf = contrastBound(bc, nb);
+                final double missEffect = bd.s[k] / bd.h[k];
+                double fill = Double.NaN, gap = Double.POSITIVE_INFINITY;
+                for (int b = 0; b < k; b++) {
+                    if (!(bd.h[b] > 0) || x == null) continue;
+                    final double g = Math.abs(bd.s[b] / bd.h[b] - missEffect);
+                    if (g < gap) {
+                        gap = g;
+                        fill = x[b];
+                    }
+                }
+                // the direction of the missing-vs-rest contrast (not the missing bin's raw effect, which an offset
+                // miscalibrated overall would carry)
+                final String fillText = Double.isNaN(fill) ? ""
+                        : position ? ", or place it at rank " + fmt(fill) + " within the unit" : ", or fill with " + fmt(fill);
+                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, direction(bd, phiMiss, nb), fill, Double.NaN,
+                        blockAllDisc > 0 ? chiDisc / blockAllDisc : 0d, chiDisc, bc, phiMiss, nb, blockAllConf, nConf,
+                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains));
+            }
+        }
+        // the cut per kind from the placebo columns' confirmation gains, else the theoretical chi2(1) / 2N of the half
+        final Map<String, Double> thresholds = new LinkedHashMap<>();
+        for (final Map<String, Object> s : candidates) {
+            final String kind = (String) s.get("kind");
+            if (thresholds.containsKey(kind)) continue;
+            final List<Double> gains = placeboGains.getOrDefault(kind, List.of());
+            final double nConf = (Double) s.get("_nConf");
+            thresholds.put(kind, gains.isEmpty() ? (nConf > 0 ? StatMath.chiSquare1Quantile(spec.quantile) / (2 * nConf) : Double.NaN)
+                    : StatMath.quantile(gains.stream().mapToDouble(Double::doubleValue).sorted().toArray(), spec.quantile));
+        }
+        for (final Map<String, Object> s : candidates) {
+            final double cut = spec.gainCut(thresholds.get((String) s.get("kind")));
+            final double gain = (Double) s.get("confirmation_gain");
+            s.remove("_nConf");
+            s.put("threshold", cut);
+            s.put("passed", !(Boolean) s.get("placebo") && !Double.isNaN(cut) && gain > cut);
+            out.add(s);
+        }
+        return out;
+    }
+
+    /** One suggestion record; the confirmation statistics come from the confirmation block along the chosen contrast. */
+    private static Map<String, Object> suggestion(final String candidate, final boolean placebo, final String kind, final String name, final double cut,
+                                                  final String direction, final double fill, final double consistency, final double share,
+                                                  final double chi2, final Block confirmation, final double[] phi, final int over, final double blockConf,
+                                                  final double nConf, final String fragment, final Map<String, List<Double>> placeboGains) {
+        final double chiConf = contrastChi2(confirmation, phi, over);
+        final double gainConf = nConf > 0 ? chiConf / (2 * nConf) : Double.NaN;
+        final Map<String, Object> s = new LinkedHashMap<>();
+        s.put("candidate", candidate);
+        s.put("kind", kind);
+        s.put("name", name);
+        s.put("cut", Double.isNaN(cut) ? null : cut);
+        s.put("direction", direction);
+        s.put("fill", Double.isNaN(fill) ? null : fill);
+        s.put("consistency", Double.isNaN(consistency) ? null : consistency);
+        s.put("share", share);
+        s.put("chi2", chi2);
+        s.put("confirmation_chi2", chiConf);
+        s.put("confirmation_share", blockConf > 0 ? chiConf / blockConf : 0d);
+        s.put("confirmation_gain", gainConf);
+        s.put("confirmation_pValue", StatMath.chiSquare1UpperTail(chiConf));
+        s.put("threshold", null);
+        s.put("passed", null);
+        s.put("placebo", placebo);
+        s.put("fragment", fragment);
+        s.put("_nConf", nConf);
+        if (placebo) placeboGains.computeIfAbsent(kind, key -> new ArrayList<>()).add(Double.isNaN(gainConf) ? 0d : gainConf);
+        return s;
+    }
+
+    /** The weight mass of a binned sum vector (the row families' Σ w total, the grouped family's Σ_b P_b). */
+    private static double mass(final ScreenSpec spec, final double[] v) {
+        final int nb = spec.binCount();
+        if (spec.isGroupedMultinomial()) {
+            double m = 0;
+            for (int b = 0; b < nb; b++) m += v[nb + b];
+            return m;
+        }
+        return v[3 * nb];
+    }
+
+    /**
+     * The bound the shares are read against: the maximum of {@link #contrastChi2} over every contrast φ on the first
+     * {@code over} bins. S and H go through the same H-weighted centring P = I − 1w' (w_b = H_bb / Σ H_bb over the
+     * bins with information): S̃ = P'S, H̃ = P'HP, then S̃'H̃⁺S̃ — 1 spans H̃'s null space and S̃ ⊥ 1, so one
+     * reference bin is dropped exactly. The block's own χ² is not that bound: a row family's H is diagonal (the
+     * intercept is not profiled out of it), and the value bins alone leave the missing bin's coupling out, so a
+     * single contrast could exceed it (a share above 1).
+     */
+    private static double contrastBound(final Block block, final int over) {
+        double hsum = 0, ssum = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            hsum += block.h[b];
+            ssum += block.s[b];
+        }
+        if (!(hsum > 0)) return 0d;
+        // w: the centring weights; r = H1 and t = 1'H1 over the bins with information
+        final double[] w = new double[over], r = new double[over];
+        double t = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            w[b] = block.h[b] / hsum;
+            for (int c = 0; c < over; c++) if (block.h[c] > 0) r[b] += block.hFull[b][c];
+            t += r[b];
+        }
+        final double[] s = new double[over], diag = new double[over];
+        final double[][] h = new double[over][over];
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            s[b] = block.s[b] - w[b] * ssum;
+            for (int c = 0; c < over; c++) {
+                if (block.h[c] > 0) h[b][c] = block.hFull[b][c] - r[b] * w[c] - w[b] * r[c] + w[b] * w[c] * t;
+            }
+            diag[b] = h[b][b];
+        }
+        final Stats[] out = new Stats[1];
+        final int df = blockChi2(s, h, diag, 1, 2, out);
+        return df < 1 ? 0d : out[0].chi2;
+    }
+
+    /**
+     * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
+     * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information carry
+     * nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
+     */
+    private static double contrastChi2(final Block block, final double[] phi, final int over) {
+        double hsum = 0, hphi = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0) || !Double.isFinite(phi[b])) continue;
+            hsum += block.h[b];
+            hphi += block.h[b] * phi[b];
+        }
+        if (!(hsum > 0)) return 0d;
+        final double mean = hphi / hsum;
+        final double[] pc = new double[over];
+        for (int b = 0; b < over; b++) pc[b] = block.h[b] > 0 && Double.isFinite(phi[b]) ? phi[b] - mean : 0d;
+        double s = 0, h = 0;
+        for (int b = 0; b < over; b++) {
+            s += pc[b] * block.s[b];
+            for (int c = 0; c < over; c++) h += pc[b] * block.hFull[b][c] * pc[c];
+        }
+        if (!(h > 1e-300)) return 0d;
+        final double chi2 = s * s / h;
+        return Double.isFinite(chi2) ? chi2 : 0d;
+    }
+
+    /** The sign of the contrast's score on the discovery block: "+" when the label rises with φ. */
+    private static String direction(final Block block, final double[] phi, final int over) {
+        double hsum = 0, hphi = 0;
+        for (int b = 0; b < over; b++) if (block.h[b] > 0) {
+            hsum += block.h[b];
+            hphi += block.h[b] * phi[b];
+        }
+        final double mean = hsum > 0 ? hphi / hsum : 0d;
+        double s = 0;
+        for (int b = 0; b < over; b++) if (block.h[b] > 0) s += (phi[b] - mean) * block.s[b];
+        return s >= 0 ? "+" : "-";
+    }
+
+    /** The shapes tried on the value bins: the smooth ones on the representatives, the cut ones at every edge. */
+    private static List<Shape> shapes(final double[] x, final double[] edges, final int k, final boolean position) {
+        final List<Shape> out = new ArrayList<>();
+        final double[] index = new double[k];
+        for (int b = 0; b < k; b++) index[b] = b;
+        out.add(new Shape("rank", index, Double.NaN));
+        if (x != null) {
+            // position bins: the representatives are the rank positions, so linear would repeat rank exactly
+            if (!position) out.add(new Shape("linear", x.clone(), Double.NaN));
+            boolean positive = true, nonNegative = true;
+            for (final double v : x) {
+                if (!(v > 0)) positive = false;
+                if (!(v >= 0)) nonNegative = false;
+            }
+            if (positive) {
+                final double[] lg = new double[k];
+                for (int b = 0; b < k; b++) lg[b] = Math.log(x[b]);
+                out.add(new Shape("log", lg, Double.NaN));
+            }
+            if (nonNegative) {
+                final double[] sq = new double[k];
+                for (int b = 0; b < k; b++) sq[b] = Math.sqrt(x[b]);
+                out.add(new Shape("sqrt", sq, Double.NaN));
+            }
+        }
+        for (int j = 0; j < k - 1; j++) {
+            final double cut = position ? (double) (j + 1) / k : edges == null ? Double.NaN : edges[j];
+            final double[] step = new double[k];
+            for (int b = 0; b < k; b++) step[b] = b > j ? 1 : 0;
+            out.add(new Shape("step", step, cut));
+            if (x == null || Double.isNaN(cut)) continue;
+            final double[] up = new double[k], down = new double[k], abs = new double[k];
+            for (int b = 0; b < k; b++) {
+                up[b] = Math.max(0, x[b] - cut);
+                down[b] = Math.max(0, cut - x[b]);
+                abs[b] = Math.abs(x[b] - cut);
+            }
+            out.add(new Shape("hinge", up, cut, false));
+            out.add(new Shape("hinge", down, cut, true));
+            out.add(new Shape("abs", abs, cut));
+        }
+        return out;
+    }
+
+    /** Pool-adjacent-violators: the weighted isotonic fit of {@code y} (increasing, or decreasing when {@code up} is false). */
+    static double[] isotonic(final double[] y, final double[] w, final boolean up) {
+        final int n = y.length;
+        final double[] value = new double[n], weight = new double[n];
+        final int[] size = new int[n];
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            value[m] = up ? y[i] : -y[i];
+            weight[m] = Math.max(w[i], 0);
+            size[m] = 1;
+            m++;
+            while (m > 1 && value[m - 2] > value[m - 1]) {
+                final double tw = weight[m - 2] + weight[m - 1];
+                value[m - 2] = tw > 0 ? (value[m - 2] * weight[m - 2] + value[m - 1] * weight[m - 1]) / tw : 0.5 * (value[m - 2] + value[m - 1]);
+                weight[m - 2] = tw;
+                size[m - 2] += size[m - 1];
+                m--;
+            }
+        }
+        final double[] out = new double[n];
+        int pos = 0;
+        for (int b = 0; b < m; b++) for (int i = 0; i < size[b]; i++) out[pos++] = up ? value[b] : -value[b];
+        return out;
+    }
+
+    private static String fragment(final String name, final Shape shape, final boolean position) {
+        final String c = fmt(shape.cut);
+        return switch (shape.name) {
+            case "linear" -> name + " as is";
+            // position bins: the shape is of the within-unit rank, not of the raw value
+            case "log" -> position ? "the log of the rank of " + name + " within the unit" : "{scope: row, expr: \"log(" + name + ")\"}";
+            case "sqrt" -> position ? "the square root of the rank of " + name + " within the unit" : "{scope: row, expr: \"sqrt(" + name + ")\"}";
+            case "rank" -> position ? "the rank of " + name + " within the unit" : "the rank of " + name + " over the window (a quantile transform upstream)";
+            case "step" -> position ? "the rows above rank " + c + " within the unit" : "{scope: row, expr: \"" + name + " > " + c + " ? 1 : 0\"}";
+            case "hinge" -> position
+                    ? "a hinge " + (shape.below ? "below" : "above") + " rank " + c + " of " + name + " within the unit"
+                    : "{scope: row, expr: \"" + (shape.below ? "max(0, " + c + " - " + name + ")" : "max(0, " + name + " - " + c + ")") + "\"}";
+            case "abs" -> position ? "the distance to rank " + c + " of " + name + " within the unit" : "{scope: row, expr: \"abs(" + name + " - " + c + ")\"}";
+            default -> shape.name;
+        };
+    }
+
+    private static String fmt(final double v) {
+        if (Double.isNaN(v)) return "";
+        return v == Math.rint(v) && Math.abs(v) < 1e15 ? String.valueOf((long) v) : String.format(java.util.Locale.ROOT, "%.6g", v);
+    }
+
+    public static Schema suggestionSchema() {
+        return Schema.builder()
+                .withField("candidate", Schema.FieldType.STRING)
+                .withField("kind", Schema.FieldType.STRING)
+                .withField("name", Schema.FieldType.STRING)
+                .withField("cut", Schema.FieldType.FLOAT64)
+                .withField("direction", Schema.FieldType.STRING)
+                .withField("fill", Schema.FieldType.FLOAT64)
+                .withField("consistency", Schema.FieldType.FLOAT64)
+                .withField("share", Schema.FieldType.FLOAT64)
+                .withField("chi2", Schema.FieldType.FLOAT64)
+                .withField("confirmation_chi2", Schema.FieldType.FLOAT64)
+                .withField("confirmation_share", Schema.FieldType.FLOAT64)
+                .withField("confirmation_gain", Schema.FieldType.FLOAT64)
+                .withField("confirmation_pValue", Schema.FieldType.FLOAT64)
+                .withField("threshold", Schema.FieldType.FLOAT64)
+                .withField("passed", Schema.FieldType.BOOLEAN)
+                .withField("placebo", Schema.FieldType.BOOLEAN)
+                .withField("fragment", Schema.FieldType.STRING)
+                .build();
+    }
+
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
         return build(spec, accumulators, null, null);
+    }
+
+    public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
+                               final Map<Integer, PartialAccumulator> partials, final FitState fit) {
+        return build(spec, accumulators, partials, fit, null);
     }
 
     /**
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
+     * @param bins     the bins' geometry for the suggestions (null = no suggestions)
      */
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
-                               final Map<Integer, PartialAccumulator> partials, final FitState fit) {
+                               final Map<Integer, PartialAccumulator> partials, final FitState fit, final Bins bins) {
         final ScoreAccumulator book = accumulators.getOrDefault(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator());
         final double[] b = book.getTotal();
         final double nUnits = b[ScoreAccumulator.UNITS_SCORED];
@@ -846,7 +1246,10 @@ public final class ScreenReport {
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
         summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
         summary.put("notes", notes);
-        return new Result(records, summary);
+        final List<Map<String, Object>> suggested = suggestions(spec, accumulators, nUnits, bins);
+        // the candidates' suggestions (placebo records excluded, as nScored)
+        summary.put("nSuggestions", spec.suggestionsOn ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
+        return new Result(records, summary, suggested);
     }
 
     /**
@@ -1051,6 +1454,7 @@ public final class ScreenReport {
                 .withField("nLeakSuspect", Schema.FieldType.INT64)
                 .withField("nHetPassed", Schema.FieldType.INT64)
                 .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
+                .withField("nSuggestions", Schema.FieldType.INT64)
                 .withField("leakOn", Schema.FieldType.STRING)
                 .withField("timeField", Schema.FieldType.STRING)
                 .withField("timeFrom", Schema.FieldType.STRING)

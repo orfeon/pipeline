@@ -26,9 +26,9 @@ feature transform does (engine doc §1.2):
 | `PartialAccumulator` | one variable-length vector for the window plus the same per period and per heterogeneity level (`addSlice` under `LEVEL_PREFIX`, as the score accumulator) — the partial pass's shape; custom coder; `Fn` | coder + CombineFn |
 | `glm.FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
 | `glm.VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
-| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `heterogeneity` (the level slices' Σ S_l² / H_l − (Σ S_l)² / Σ H_l, marginal from the score slices and partial from the partial slices), `build` (records + summary, the placebo cut per statistic kind — df1 / binned / het), `selection` (the pass list), the output schemas, `describe` | no |
+| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `heterogeneity` (the level slices' Σ S_l² / H_l − (Σ S_l)² / Σ H_l, marginal from the score slices and partial from the partial slices), `suggestions` (the one-candidate recipes from the binned sums: `contrastChi2` along a bin-constant contrast, `shapes`, `isotonic`, the discovery / confirmation halves of the doubled `extra` vector, per-kind placebo cuts; `Bins` = the representatives / edges callbacks the finalize step builds from the sketches), `build` (records + summary + suggestions, the placebo cut per statistic kind — df1 / binned / het), `selection` (the pass list), the output schemas, `describe` | no |
 | `ScreenStages` | the graph (§2–§4) and its DoFns | yes |
-| `ScreenTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, two outputs | module |
+| `ScreenTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, three outputs (records, `summary`, `suggestions`) | module |
 
 Invariant: nothing Beam-specific reaches the pure classes, and the pure classes are what the hand-computed
 tests pin (§7). The `glm` package and `FeatureLineage` are the parts the evaluation transform shares: the
@@ -70,9 +70,10 @@ input ─ Prepare ─┬─ rows KV<unitKey, ScreenRow> ─ Group (GBK) or Units
   combiner distribute.
 - **Gather** collects the few combined accumulators into one list (`Combine.globally`; in the global window
   the default empty list still fires, so the summary is emitted on an empty input) and **Finalize** runs
-  `ScreenReport.build` once, emitting every scoring record to the default output and one summary to the
-  `summary` output, then writes the pass list when `output.selection` is set (`ResourceUtil.writeString`; a
-  failure fails the step).
+  `ScreenReport.build` once, emitting every scoring record to the default output, one summary to the
+  `summary` output and, under `suggestions: true`, the one-candidate suggestions to the `suggestions` output
+  (the finalize step reads the window sketches view for the bins' representatives and edges), then writes
+  the pass list when `output.selection` is set (`ResourceUtil.writeString`; a failure fails the step).
 
 ### 2.1 What the scorer computes
 
@@ -216,8 +217,9 @@ precision weights, a windowed marginal screen under a trigger, declared interact
 in-screen expansion (categorical score tests, a built-in baseline-bin modifier for the heterogeneity test —
 the test itself is built over the period buckets and a declared field — pairwise products on the
 conditioning fit's p̂, pHd), pruning between passes against the `pass.minGain` floor (the floor itself is
-built: `ScreenSpec.gainCut`, one comparison in the report), derivation suggestions (a `<name>.suggestions`
-output) — in the step order of DSL §12.4. Engine-side
+built: `ScreenSpec.gainCut`, one comparison in the report), the several-candidate derivation suggestions
+(the one-candidate ones — shape / cut / missing / monotone with the discovery / confirmation split — are
+built as the `suggestions` output) — in the step order of DSL §12.4. Engine-side
 refactors judged larger than their value so far: a `Family` enum in place of the string switches, σ² carried
 in `FitState` instead of the partial map, a typed summary record instead of the map the selection reads.
 Outside the repository: the numerical acceptance against the proposer's reference implementation and the
