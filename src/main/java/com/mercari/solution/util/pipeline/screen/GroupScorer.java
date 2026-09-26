@@ -95,29 +95,43 @@ public final class GroupScorer implements Serializable {
          * {@link #mixedLevels} says when it is not. Null without a modifier.
          */
         public String level() {
-            String best = null;
-            int bestCount = 0;
-            for (final ScreenRow r : rows) {
-                if (r.level == null) continue;
-                int count = 0;
-                for (final ScreenRow o : rows) if (r.level.equals(o.level)) count++;
-                if (count > bestCount || (count == bestCount && r.level.compareTo(best) < 0)) {
-                    best = r.level;
-                    bestCount = count;
-                }
-            }
-            return best;
+            readLevel();
+            return level;
         }
 
         /** Whether the unit's rows carry more than one modifier level (the modifier is not constant within the unit). */
         public boolean mixedLevels() {
-            String first = null;
+            readLevel();
+            return mixedLevels;
+        }
+
+        /** the unit's modifier level and whether its rows disagree, read once: O(n), no map for a constant unit */
+        private String level;
+        private boolean mixedLevels;
+        private boolean levelRead;
+
+        private void readLevel() {
+            if (levelRead) return;
+            levelRead = true;
             for (final ScreenRow r : rows) {
                 if (r.level == null) continue;
-                if (first == null) first = r.level;
-                else if (!first.equals(r.level)) return true;
+                if (level == null) level = r.level;
+                else if (!level.equals(r.level)) {
+                    mixedLevels = true;
+                    break;
+                }
             }
-            return false;
+            if (!mixedLevels) return;
+            final Map<String, Integer> counts = new HashMap<>();
+            for (final ScreenRow r : rows) if (r.level != null) counts.merge(r.level, 1, Integer::sum);
+            int bestCount = 0;
+            for (final Map.Entry<String, Integer> e : counts.entrySet()) {
+                final int count = e.getValue();
+                if (count > bestCount || (count == bestCount && e.getKey().compareTo(level) < 0)) {
+                    level = e.getKey();
+                    bestCount = count;
+                }
+            }
         }
     }
 
@@ -309,19 +323,12 @@ public final class GroupScorer implements Serializable {
     static void groupedContribution(final double[] v, final double[] y, final double[] p, final double weight, final double[] out) {
         final int n = v.length;
         final double pivot = pivot(v);
-        double pm = 0, psum = 0;
+        final double mean = pWeightedMean(v, p, pivot);
+        double s = 0, h = 0, px = 0;
         int nObs = 0;
         for (int i = 0; i < n; i++) {
-            if (StatMath.isFinite(v[i])) {
-                pm += p[i] * (v[i] - pivot);
-                psum += p[i];
-                nObs++;
-            }
-        }
-        final double mean = psum > 0 ? pm / psum : 0d;
-        double s = 0, h = 0, px = 0;
-        for (int i = 0; i < n; i++) {
             if (!StatMath.isFinite(v[i])) continue;
+            nObs++;
             final double xt = v[i] - pivot - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
@@ -343,6 +350,20 @@ public final class GroupScorer implements Serializable {
     static double pivot(final double[] v) {
         for (final double x : v) if (StatMath.isFinite(x)) return x;
         return 0d;
+    }
+
+    /**
+     * The p-weighted mean of {@code v − pivot} over the unit's observed (finite) rows, 0 when they carry no p mass:
+     * the grouped centre, shared by the marginal test and the joint sums so a missing value centres to 0 in both.
+     */
+    static double pWeightedMean(final double[] v, final double[] p, final double pivot) {
+        double pm = 0, psum = 0;
+        for (int i = 0; i < v.length; i++) {
+            if (!StatMath.isFinite(v[i])) continue;
+            pm += p[i] * (v[i] - pivot);
+            psum += p[i];
+        }
+        return psum > 0 ? pm / psum : 0d;
     }
 
     /**
@@ -398,10 +419,11 @@ public final class GroupScorer implements Serializable {
 
     /**
      * A representative value per bin of column {@code column} (the binned test's k value bins, the missing bin
-     * excluded), for the suggestions' shapes and the missing fill: the bin's median — the sketch's quantile at
-     * (b + 0.5) / k, which an outer bin's outliers or a skewed bin do not pull the way a midpoint of the edges would
-     * (a noise placebo: the normal quantile at the same rank); position bins take the position's centre
-     * (b + 0.5) / k. Null without an edge (no sketch value for the column).
+     * excluded), for the suggestions' shapes and the missing fill: the bin's median — the sketch's quantile at the
+     * middle of the bin's rank interval, which an outer bin's outliers or a skewed bin do not pull the way a midpoint
+     * of the edges would, and which stays inside its bin when tied values collapse edges (a noise placebo: the normal
+     * quantile at (b + 0.5) / k); position bins take the position's centre (b + 0.5) / k. Null without an edge (no
+     * sketch value for the column).
      */
     double[] binRepresentatives(final int column) {
         final int k = spec.binsK;
@@ -410,10 +432,12 @@ public final class GroupScorer implements Serializable {
             for (int b = 0; b < k; b++) out[b] = (b + 0.5) / k;
             return out;
         }
-        if (edges(column) == null) return null;
-        final boolean candidate = column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise);
-        final int sketch = column < nCandidates ? column : shuffleRef;
-        for (int b = 0; b < k; b++) out[b] = candidate ? quantiles.quantile(sketch, (b + 0.5) / k) : StatMath.inverseNormal((b + 0.5) / k);
+        final double[] edges = edges(column);
+        if (edges == null) return null;
+        if (column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise)) {
+            return quantiles.binMedians(column < nCandidates ? column : shuffleRef, edges);
+        }
+        for (int b = 0; b < k; b++) out[b] = StatMath.inverseNormal((b + 0.5) / k);
         return out;
     }
 
@@ -517,13 +541,7 @@ public final class GroupScorer implements Serializable {
             for (int j = 0; j < m; j++) {
                 final double[] col = cols[spec.jointColumn(j)];
                 final double pivot = pivot(col);
-                double pm = 0, psum = 0;
-                for (int i = 0; i < n; i++) {
-                    if (!StatMath.isFinite(col[i])) continue;
-                    pm += unit.p[i] * (col[i] - pivot);
-                    psum += unit.p[i];
-                }
-                final double mean = psum > 0 ? pm / psum : 0d;
+                final double mean = pWeightedMean(col, unit.p, pivot);
                 for (int i = 0; i < n; i++) {
                     if (StatMath.isFinite(col[i])) xt[i][j] = col[i] - pivot - mean;
                     else filled = true;
@@ -587,8 +605,10 @@ public final class GroupScorer implements Serializable {
     private transient double[] jointMeansCache;
 
     /**
-     * The window mean of every joint column from the sketches (DSL doc §9.5): NaN where the column has no sketch or no
-     * value (a noise column, which is never missing), null without a sketch view.
+     * The window mean of every joint column from the sketches (DSL doc §9.5): 0 for a candidate with no value in the
+     * window (every row is then a fill — a window-constant column the report drops as degenerate — instead of every
+     * row leaving the joint sums), NaN where the column has no sketch (a noise column, which is never missing), null
+     * without a sketch view.
      */
     double[] jointMeans() {
         if (quantiles == null) return null;
@@ -597,7 +617,7 @@ public final class GroupScorer implements Serializable {
             final double[] means = new double[m];
             for (int j = 0; j < m; j++) {
                 final int c = spec.jointColumn(j);
-                means[j] = c < nCandidates && c < quantiles.columns() ? quantiles.mean(c) : Double.NaN;
+                means[j] = c < nCandidates && c < quantiles.columns() ? (quantiles.count(c) == 0 ? 0d : quantiles.mean(c)) : Double.NaN;
             }
             jointMeansCache = means;
         }
