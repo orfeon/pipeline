@@ -8,6 +8,7 @@ import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.datasketches.kll.KllDoublesSketch;
 import org.apache.datasketches.memory.Memory;
+import org.apache.datasketches.quantilescommon.DoublesSortedView;
 import org.apache.datasketches.quantilescommon.QuantileSearchCriteria;
 
 import java.io.IOException;
@@ -16,8 +17,10 @@ import java.io.OutputStream;
 import java.io.Serializable;
 
 /**
- * A mergeable KLL quantile sketch of one value stream (the quantile-binned calibration tables: one per
- * split × prediction set × table). Serialised as the sketch's own bytes; an empty accumulator is the identity.
+ * A mergeable KLL quantile sketch of one value stream (the evaluation transform's quantile-binned calibration
+ * tables and discovery dimensions; the screen transform's window reference of independent-row rank / absdev).
+ * Serialised as the sketch's own bytes; an empty accumulator is the identity. The sketch's compaction is
+ * randomised (datasketches' unseeded generator), so beyond k values a re-run can differ within the rank error.
  */
 public final class SketchAccumulator implements Serializable {
 
@@ -25,6 +28,12 @@ public final class SketchAccumulator implements Serializable {
     public static final int K = 400;
 
     private transient KllDoublesSketch sketch;
+    /**
+     * The sketch's sorted view, built once on the first read and immutable: a sketch shared through a side input
+     * is read from several bundles at once, and the sketch's own lazily cached view must not be built twice
+     * concurrently (the concurrent build corrupts the sort). Reset by {@link #update} / {@link #merge}.
+     */
+    private transient volatile DoublesSortedView view;
 
     public SketchAccumulator() {
         this(K);
@@ -44,7 +53,22 @@ public final class SketchAccumulator implements Serializable {
     }
 
     public void update(final double v) {
-        if (Double.isFinite(v)) sketch.update(v);
+        if (Double.isFinite(v)) {
+            sketch.update(v);
+            view = null;
+        }
+    }
+
+    /** The immutable sorted view (built once under the accumulator's lock; the caller checks non-emptiness). */
+    private DoublesSortedView view() {
+        DoublesSortedView v = view;
+        if (v == null) {
+            synchronized (this) {
+                v = view;
+                if (v == null) view = v = sketch.getSortedView();
+            }
+        }
+        return v;
     }
 
     public boolean isEmpty() {
@@ -71,28 +95,32 @@ public final class SketchAccumulator implements Serializable {
      */
     public double rank(final double v) {
         if (!Double.isFinite(v) || sketch.isEmpty()) return Double.NaN;
-        synchronized (this) {
-            return 0.5 * (sketch.getRank(v, QuantileSearchCriteria.EXCLUSIVE) + sketch.getRank(v, QuantileSearchCriteria.INCLUSIVE));
-        }
+        final DoublesSortedView sv = view();
+        return 0.5 * (sv.getRank(v, QuantileSearchCriteria.EXCLUSIVE) + sv.getRank(v, QuantileSearchCriteria.INCLUSIVE));
     }
 
     /** The value at normalized rank {@code q} (inclusive search); NaN on an empty sketch. */
     public double quantile(final double q) {
         if (sketch.isEmpty()) return Double.NaN;
-        synchronized (this) {
-            return sketch.getQuantile(q, QuantileSearchCriteria.INCLUSIVE);
-        }
+        return view().getQuantile(q, QuantileSearchCriteria.INCLUSIVE);
+    }
+
+    /**
+     * The median: the mean of the inclusive and exclusive quantiles at 1/2 — below k values the type-7 sample
+     * median (the middle value, or the mean of the two middle values of an even count) like
+     * {@link StatMath#medianFinite}; NaN on an empty sketch.
+     */
+    public double median() {
+        if (sketch.isEmpty()) return Double.NaN;
+        final DoublesSortedView sv = view();
+        return 0.5 * (sv.getQuantile(0.5, QuantileSearchCriteria.INCLUSIVE) + sv.getQuantile(0.5, QuantileSearchCriteria.EXCLUSIVE));
     }
 
     /** The {@code bins − 1} interior boundaries at ranks i / bins (inclusive search). */
     public double[] edges(final int bins) {
         final double[] edges = new double[bins - 1];
-        // getQuantile lazily builds and caches the sketch's sorted view, so a sketch shared through a side input
-        // must not be read from two bundles at once (the concurrent build corrupts the sort). The lock is the
-        // accumulator: merge may replace the sketch field.
-        synchronized (this) {
-            for (int i = 1; i < bins; i++) edges[i - 1] = sketch.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
-        }
+        final DoublesSortedView sv = view();
+        for (int i = 1; i < bins; i++) edges[i - 1] = sv.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
         return edges;
     }
 
@@ -107,6 +135,7 @@ public final class SketchAccumulator implements Serializable {
         } else {
             sketch.merge(other.sketch);
         }
+        view = null;
         return this;
     }
 

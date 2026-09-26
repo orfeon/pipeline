@@ -34,7 +34,8 @@ the per-period statistics say since when.
 - **Calibrated by construction, not by an absolute threshold.** A squared statistic is positive under the
   null; the pass threshold is read off placebo columns that went through the same pipeline (§5).
 - **Deterministic.** Every random draw derives from the declared seed and a row / unit identity, so a rerun
-  on any runner reproduces the placebo columns and therefore the pass list.
+  on any runner reproduces the placebo columns and therefore the pass list (the one approximation that is
+  not bit-reproducible, the window sketch of independent-row `rank` / `absdev`, is recorded in §6).
 - **Same vocabulary as the feature transform.** Roles, lineage selectors, the manifest and the pass list are
   the feature transform's contract; nothing had to be added on the feature side to close the loop.
 - **A ranking device, not an acceptance test.** The probe is linear and univariate (§11); the output is an
@@ -190,6 +191,11 @@ count — (values below + half the values equal, itself included) / n, in (0, 1)
 distance to the window median. A noise placebo is standard normal by construction, so its rank is the exact
 normal cdf and its absdev |x|: the sketch's approximation touches only the candidates, as a slightly
 perturbed monotone re-encoding that creates no alignment with the label, and the placebo calibration holds.
+The one exception to §5's determinism: the KLL compaction is randomised (the library's unseeded generator)
+and the merge order follows the bundles, so beyond k values per column a re-run can move a candidate's
+window `rank` / `absdev` within the rank error — and a candidate at the threshold can flip; the placebo
+columns and every grouped transform stay exact. Session (merging) windows cannot carry the window reference
+as a side input and are rejected at assembly.
 The sketches are the value-bin edges of §6.1 too. Default: all three with `group`, `raw` without (the
 pre-pass is one more read of the input); an explicit list is never widened. A fourth, explicit-only
 transform is the binned block test (§6.1).
@@ -245,10 +251,12 @@ partial-residual curve the derivation suggestions of §12.3 read.
 - **Pass rule.** `pass: {minPeriodsAgree}` adds the period agreement of the effective test to the cut: a share
   (≤ 1) of its usable periods or a count (> 1); no usable period never passes. `pass: {minGain}` puts a
   practical floor under the cut: `passed` needs the effective gain above `max(threshold, minGain)`. The placebo
-  threshold is a significance cut — roughly constant on the χ² scale (≈ 3.3 at q99 for one variant) and so
-  ≈ 3.3 / (2N) on the gain scale — and on a large window it admits columns whose gain is real but too small
-  to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the scale
-  a trained model's excess log score is reported on, so it means the same thing whatever N. Both rules tighten
+  threshold is a significance cut — roughly constant on the χ² scale (≈ 6.6, the χ²(1) quantile at q99) and so
+  ≈ 6.6 / (2N) ≈ 3.3 / N on the gain scale — and on a large window it admits columns whose gain is real but too
+  small to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the
+  scale a trained model's excess log score is reported on, so it means the same thing whatever N. With
+  `weight` (§3.4) S and H carry the weights while the gain divides by the unit count, so the floor reads the
+  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected). Both rules tighten
   the placebo cut and are not themselves placebo-calibrated; the record's `threshold` stays the placebo cut,
   and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`).
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
@@ -264,7 +272,7 @@ partial-residual curve the derivation suggestions of §12.3 read.
   its own over F, and the bound would move with whatever F holds. Without a partial test (no accepted fit, or
   a gaussian fit without residual variance) the flag reads the marginal z and a note says so.
 - **q-values.** Benjamini–Hochberg over the candidate records' p-values (of the effective test, §8.5) gives
-  the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`). Making `passed`
+  the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`, tightened by `pass`). Making `passed`
   follow the q-value is an extension position (§12).
 
 ### 7.1 Heterogeneity across a modifier
@@ -477,7 +485,7 @@ quantile / 2N of the half without placebos), and `passed` compares the confirmat
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
 transform, never applied automatically. The suggestions read the marginal binned sums (what the baseline
 misses), not the partial block: a shape's redundancy with F is read off the block's `r2_F`. The summary
-counts them (`nSuggestions`).
+counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nScored`).
 
 ## 10. Constraints and diagnostics
 
@@ -486,10 +494,11 @@ valid for the family; `groupedMultinomial` without `group`; `rank` / `absdev` / 
 without `group`; a role or candidate field missing from the input schema, or a non-numeric shuffle
 reference; a lineage selector without lineage; no candidate left; a conditioning pattern matching nothing
 or naming a role / the baseline, or more than 500 columns; `time.from` / `time.to` without `time.field`; an
-empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a
-`bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
+empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a `pass.minGain` that is
+not a positive finite number; a `bins` block without the `binned` transform, `bins.k` outside [2, 100], an unknown `bins.edges`, or
 `bins.edges: rank` without `group`; `heterogeneity: periods` without `periods`, an unknown `heterogeneity.by`,
-`by: field` without a field, or a modifier field missing from the input schema; `pairs` without
+`by: field` without a field, a `field` with `by: periods`, a modifier field missing from the input schema, or
+a heterogeneity modifier whose transforms are all `binned` (the block has no direction); `pairs` without
 `conditioning`, a pair member that is not a conditioning field, a pair of one field, `among` resolving to no
 pair (fewer than two matching fields), more pairs than
 `pairs.maxPairs`, `pairs.placebo` above `placebo.noise`, `suggestions` without the `binned` transform; a triggered input (every Combine would fire per pane); a non-global window with
@@ -632,8 +641,9 @@ threshold.
   per-row, per-candidate arithmetic dominates the read; for `raw` marginals alone it does not. Whether it
   does for the expensive paths is measured on Dataflow before the pass is built (*review*).
 - **Not against the significance threshold.** The placebo threshold is roughly constant on the χ² scale
-  (≈ 10 for the pooled variants) whatever N: a candidate that just passes has a non-centrality near 10, so a
-  10 % sample sees about 1 — indistinguishable from the null. Sampling cannot prune near a significance cut.
+  (≈ 6.6 at q99 — pooling the variants does not move the quantile of their χ²(1) draws, §5) whatever N: a
+  candidate that just passes has a non-centrality near 6.6, so a 10 % sample sees about 0.7 —
+  indistinguishable from the null. Sampling cannot prune near a significance cut.
 - **Against the practical floor.** With `pass.minGain` (g_min, §7) the floor's non-centrality is 2N · g_min,
   growing with N. Example: N = 1e7 rows, g_min = 1e-5 gives λ = 200 on the full window and 20 on a 10 %
   sample; pruning at a sample χ² below 4.6 loses a candidate sitting exactly at the floor with probability
