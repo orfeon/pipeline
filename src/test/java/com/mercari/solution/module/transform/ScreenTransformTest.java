@@ -479,6 +479,16 @@ public class ScreenTransformTest {
             Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), pair.getAsDouble("threshold"));
             return null;
         });
+        PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
+            // the pair's interaction shape from its 2-D grid (pairs.shape defaults to 4 bins per member)
+            final List<MElement> shapes = new java.util.ArrayList<>();
+            for (final MElement e : rows) if ("interaction".equals(e.getAsString("kind"))) shapes.add(e);
+            Assertions.assertEquals(1, shapes.size());
+            Assertions.assertEquals("f_known*f_extra", shapes.get(0).getAsString("candidate"));
+            Assertions.assertTrue(shapes.get(0).getAsDouble("share") <= 1.0 + 1e-9);
+            Assertions.assertTrue(shapes.get(0).getAsString("fragment").contains("cross of bin("));
+            return null;
+        });
         PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
             final MElement summary = rows.iterator().next();
             Assertions.assertEquals(1L, summary.getAsLong("nPairs"));

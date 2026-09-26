@@ -45,7 +45,10 @@ public final class GroupScorer implements Serializable {
 
     /** Sets the window's quantile sketches (the rank / absdev reference of independent rows); null = within-unit transforms. */
     public GroupScorer withWindowQuantiles(final WindowQuantiles quantiles) {
-        if (this.quantiles != quantiles) edgesCache = null;
+        if (this.quantiles != quantiles) {
+            edgesCache = null;
+            gridEdgesCache = null;
+        }
         this.quantiles = quantiles;
         return this;
     }
@@ -363,6 +366,27 @@ public final class GroupScorer implements Serializable {
             out[b] = 0.5 * (left + right);
         }
         return out;
+    }
+
+    /** the pair grids' value edges per x column (the members' sketches), cached while the sketches are set */
+    private transient Map<Integer, double[]> gridEdgesCache;
+
+    /**
+     * The {@code pairs.shape − 1} value edges of x column {@code xIndex} (a pair member's conditioning column) from the
+     * window sketches (DSL doc §8.7); null without a sketch value.
+     */
+    double[] gridEdges(final int xIndex) {
+        if (quantiles == null || xIndex >= quantiles.columns() || quantiles.count(xIndex) == 0 || spec.pairShapeBins < 2) return null;
+        if (gridEdgesCache == null) gridEdgesCache = new HashMap<>();
+        return gridEdgesCache.computeIfAbsent(xIndex, i -> quantiles.edges(i, spec.pairShapeBins));
+    }
+
+    /** The bin of {@code v} among {@code edges} (bin i = (edge_{i−1}, edge_i]); −1 for a non-finite value. */
+    static int gridBin(final double[] edges, final double v) {
+        if (!StatMath.isFinite(v)) return -1;
+        int b = 0;
+        while (b < edges.length && edges[b] < v) b++;
+        return b;
     }
 
     /** The k − 1 value edges of a column (null for position bins or without a sketch value). */

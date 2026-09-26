@@ -374,8 +374,9 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
-            // the candidates and, for the binned test's shuffle placebos, the shuffle reference (the next column of x)
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size() + (spec.hasShuffle() ? 1 : 0))).update(row.x);
+            // the candidates, the shuffle reference (the binned test's shuffle placebos) and, for a pair's 2-D grid,
+            // the conditioning columns — the leading columns of x in that order
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x);
         }
 
         @FinishBundle
@@ -665,9 +666,9 @@ public final class ScreenStages {
             }
             // the bins' geometry: the suggestions' representatives and the pass list's edges of a passing block
             ScreenReport.Bins bins = null;
-            if (spec.hasBinned()) {
+            if (spec.hasBinned() || spec.hasPairShape()) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
-                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges);
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges);
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {

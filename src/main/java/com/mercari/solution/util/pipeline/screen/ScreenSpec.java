@@ -113,6 +113,32 @@ public final class ScreenSpec implements Serializable {
     public int pairPlacebo = PAIR_PLACEBO_DEFAULT;
     /** the resolved pairs as indices into {@link #conditioningFields} (DSL doc §8.6) */
     public List<int[]> pairs = new ArrayList<>();
+    /** pairs.shape: value bins per member of the pair's 2-D grid (the interaction shape, DSL doc §8.7); 0 = off */
+    public int pairShapeBins = PAIR_SHAPE_BINS_DEFAULT;
+
+    public static final int PAIR_SHAPE_BINS_DEFAULT = 4;
+
+    public boolean hasPairShape() {
+        return hasPairs() && pairShapeBins > 0;
+    }
+
+    /** The partial-pass key of a real pair's 2-D grid: after every pair key. */
+    public int pairGridKey(final int pair) {
+        return pairKey(pairCount()) + pair;
+    }
+
+    /** The x column of conditioning field {@code member}. */
+    public int conditioningColumn(final int member) {
+        return conditioningOffset() + member;
+    }
+
+    /**
+     * The columns of {@link ScreenRow#x} the window sketch pre-pass covers: the candidates and the shuffle reference
+     * (their rank / absdev / value bins), plus the conditioning columns when a pair's 2-D grid needs their edges.
+     */
+    public int sketchColumns() {
+        return candidates.size() + (hasShuffle() ? 1 : 0) + (hasPairShape() ? conditioningFields.size() : 0);
+    }
 
     public static final int PAIRS_MAX_DEFAULT = 200;
     public static final int PAIR_PLACEBO_DEFAULT = 5;
@@ -354,7 +380,8 @@ public final class ScreenSpec implements Serializable {
      */
     public boolean needsWindowQuantiles() {
         return (group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV)))
-                || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+                || (hasBinned() && EDGES_VALUE.equals(binsEdges))
+                || hasPairShape();
     }
 
     public boolean hasBinned() {
@@ -603,6 +630,18 @@ public final class ScreenSpec implements Serializable {
                 if (placebo != null) {
                     if (placebo < 0 || placebo != Math.rint(placebo)) errors.add("pairs.placebo must be a non-negative integer");
                     else s.pairPlacebo = placebo.intValue();
+                }
+                final JsonElement shape = o.get("shape");
+                if (shape != null && !shape.isJsonNull()) {
+                    if (shape.isJsonPrimitive() && shape.getAsJsonPrimitive().isBoolean()) {
+                        if (!shape.getAsBoolean()) s.pairShapeBins = 0;
+                    } else if (shape.isJsonPrimitive() && shape.getAsJsonPrimitive().isNumber()) {
+                        final double k = shape.getAsDouble();
+                        if (k < 0 || k > 20 || k != Math.rint(k)) errors.add("pairs.shape must be an integer in [0, 20] (value bins per member of the 2-D grid; 0 = off)");
+                        else s.pairShapeBins = (int) k;
+                    } else {
+                        errors.add("pairs.shape must be a boolean or the number of bins per member");
+                    }
                 }
                 if (s.pairFields.isEmpty() && s.pairAmong.isEmpty()) errors.add("pairs needs fields ([[a, b], ...]) or among ([names / globs])");
             } else {

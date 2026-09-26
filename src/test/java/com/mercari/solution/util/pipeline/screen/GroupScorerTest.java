@@ -608,8 +608,13 @@ public class GroupScorerTest {
             for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, null, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
             units.add(rows);
         }
-        final GroupScorer groups = new GroupScorer(spec);
-        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        // the pair's 2-D grid needs the members' value edges: the sketch pre-pass covers the conditioning columns too
+        Assertions.assertTrue(spec.hasPairShape() && spec.needsWindowQuantiles());
+        Assertions.assertEquals(3, spec.sketchColumns());
+        final WindowQuantiles quantiles = new WindowQuantiles(spec.sketchColumns());
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) quantiles.update(r.x);
+        final GroupScorer groups = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        final ConditioningScorer scorer = new ConditioningScorer(spec).withWindowQuantiles(quantiles);
         final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
         for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
         com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
@@ -627,7 +632,20 @@ public class GroupScorerTest {
             groups.score(rows, rows.get(0).getGroup(), marginal);
         }
         Assertions.assertTrue(partials.containsKey(spec.pairKey(0)) && partials.containsKey(spec.pairKey(2)));
-        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state);
+        Assertions.assertTrue(partials.containsKey(spec.pairGridKey(0)));
+        Assertions.assertEquals(2 * 16 + 16 * 16, partials.get(spec.pairGridKey(0)).getTotal().length);   // 4 x 4 cells, grouped block
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        // the pair's interaction shape from its 2-D grid: a depth-2 tree over the cells, its share of the grid's block
+        final List<Map<String, Object>> shapes = result.suggestions().stream().filter(s -> "interaction".equals(s.get("kind"))).toList();
+        Assertions.assertEquals(1, shapes.size(), result.suggestions().toString());
+        final Map<String, Object> shape = shapes.get(0);
+        Assertions.assertEquals("x*x2", shape.get("candidate"));
+        Assertions.assertTrue((Double) shape.get("share") > 0 && (Double) shape.get("share") <= 1.0 + 1e-9, shape.toString());
+        Assertions.assertTrue((Double) shape.get("consistency") >= 0 && (Double) shape.get("consistency") <= 1.0, shape.toString());
+        Assertions.assertTrue(Double.isFinite((Double) shape.get("cut")), shape.toString());
+        Assertions.assertTrue(List.of(">", "<=").contains(shape.get("direction")), shape.toString());
+        Assertions.assertTrue(((String) shape.get("fragment")).contains("cross of bin("), shape.toString());
+        Assertions.assertNull(shape.get("passed"));
         final Map<String, Map<String, Object>> byKey = new HashMap<>();
         for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
         Assertions.assertEquals(3 + 3, result.records().size(), byKey.keySet().toString());   // x, 2 noise; the pair + 2 placebo pairs
