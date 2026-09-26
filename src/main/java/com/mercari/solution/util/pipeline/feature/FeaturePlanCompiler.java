@@ -3770,6 +3770,13 @@ public final class FeaturePlanCompiler {
                                     + " include rows AFTER it), and a row of a later block reads the blocks before its own whose targets were known at predictAt (forward, no cross-fit) - one batch"
                                     + " yields the out-of-fold training values and the walk-forward evaluation values")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+            if (fitSpec.untilMillis != null) {
+                diagnostics.info("fit.fold.until.crossFit", loc, "fit.fold.until gives the training rows cross-fit values and the later rows forward values:"
+                        + " within a key a cross-fit value varies only by the outcomes of the blocks the row leaves out - its own among them - so it moves"
+                        + " against the row's own outcome (the leave-one-out encoding leak, strongest for keys with many rows and a stable rate), which the forward"
+                        + " rows do not have; a model trained on the training rows and evaluated on the later ones sees two distributions."
+                        + " Use fit.mode forward when the column must behave the same on every row");
+            }
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
                     + (groupBy == null ? "row identity (time.field + orderTieBreak)" : "entity " + groupBy) + "): a row never sees its own fold, "

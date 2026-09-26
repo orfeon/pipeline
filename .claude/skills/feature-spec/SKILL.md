@@ -270,7 +270,12 @@ The three forward knobs, all in the plan hash:
   embargo): make the blocks about as long as the purge. `until` ends the training period — the cross-fit stays
   within the blocks up to it, and a row after it reads forward — so a training set with out-of-fold values and an
   evaluation set with walk-forward values come out of one batch; without `until` every row, evaluation rows
-  included, reads later blocks (a leak for a backtest).
+  included, reads later blocks (a leak for a backtest). **The two halves are not the same feature**: within a key a
+  cross-fit value differs from row to row only by the outcomes of the blocks the row leaves out — its own among them
+  — so it moves against the row's own outcome (the leave-one-out encoding leak; strongest for keys with many rows
+  and a stable rate), and a model that recognises the key through other columns learns that on the training rows and
+  loses it on the forward ones. A linear screen reads it as a strong signal too. When the model is trained and
+  evaluated in time order, use `mode: forward` (or the expanding default) instead (info `fit.fold.until.crossFit`).
 - `window: P2Y` — the fit forgets: only the blocks within the window are read (rounded up to whole blocks). Use it
   when old regimes should stop shaping today's ranks / components; leave it out to use all history. For an encoding
   it is the default of keySets without their own `maxAge`.
