@@ -537,7 +537,7 @@ The report reads them as the several-candidate suggestions of §12.3, written to
 | `redundant` | single linkage at \|H_ij\| / √(H_ii H_jj) ≥ `redundancy` (default 0.95) among the candidates | one record per cluster of two or more: `candidate` the member with the largest marginal χ², `share` the cluster's smallest pairwise \|correlation\|, `fragment` the others — keep one, or average / project them |
 | `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `threshold` the cut, `fragment` "given [A]" |
 | `composite` | β = H_AA⁻¹ S_A over the selected set and the joint χ² = S_A' H_AA⁻¹ S_A | `fragment` the row expression Σ β_j x_j, `chi2`, `share` its gain |
-| `difference` | every pair of candidates: the two-dimensional Newton direction β = H₂⁻¹ S₂ — kept when the pair's joint χ² exceeds the better single one by `excess` (default 1.5) and the standardised coefficients β_i √H_ii, β_j √H_jj are opposite in sign and within a factor of two of each other; the `pairs` (default 10) largest excesses | `name` a − b, `fragment` `{scope: row, expr: "a - r*b"}` with r the raw-scale coefficient ratio, `chi2` the joint χ², `share` the excess, `consistency` the magnitudes' ratio |
+| `difference` | every pair of candidates: the two-dimensional Newton direction β = H₂⁻¹ S₂ — kept when the pair's joint χ² exceeds the better single one by `excess` (default 1.5), the increment over it (the other member's score test given the better one) clears the df = 1 cut, and the standardised coefficients β_i √H_ii, β_j √H_jj are opposite in sign and within a factor of two of each other; the `pairs` (default 10) largest excesses | `name` a − b, `fragment` `{scope: row, expr: "a - r*b"}` with r the raw-scale coefficient ratio, `chi2` the joint χ², `share` the excess, `consistency` the magnitudes' ratio |
 | `ratio` | the same pair when both columns are positive over the window (the sketch minima): the difference's log-scale reading, approximate | `fragment` `{scope: row, expr: "a / b"}` |
 
 One-step, in-sample, at β = 0 (a composite with a large effect is approximate): hypotheses for a feature
@@ -797,6 +797,6 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
 5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
    several-candidate suggestions (redundancy clusters, forward selection, composite) — built over the joint
    sums (§9.5); the interaction shape of a declared pair — built (§8.7); ratios / differences — built
-   (§9.5). Still open: the sketch pre-selection of pairs beyond `joint.maxColumns`.
+   (§9.5). Still open: a pre-selection of pairs beyond a declared set (the sketch route of §12.2).
 6. **Categorical candidates** read natively.
 7. **Parameter families**, once the feature lineage carries op and arguments.
