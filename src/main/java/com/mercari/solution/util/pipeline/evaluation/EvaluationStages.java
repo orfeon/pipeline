@@ -1,6 +1,5 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
-import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.google.common.hash.Hashing;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.module.Logging;
@@ -11,6 +10,7 @@ import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.GatherFn;
+import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import org.apache.beam.sdk.coders.Coder;

@@ -43,7 +43,7 @@ public final class ScreenSpec implements Serializable {
     public static final String TRANSFORM_RANK = "rank";
     public static final String TRANSFORM_ABSDEV = "absdev";
     public static final List<String> TRANSFORMS = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV);
-    /** the binned score test (DSL doc §12.1): a df = k − 1 block, never in the default list */
+    /** the binned score test (DSL doc §6.1): a df = k − 1 block, never in the default list */
     public static final String TRANSFORM_BINNED = "binned";
     public static final List<String> TRANSFORMS_AVAILABLE = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV, TRANSFORM_BINNED);
     /** bins.edges: window value quantiles (the sketch pre-pass) or the within-unit rank (grouped only) */
@@ -95,8 +95,6 @@ public final class ScreenSpec implements Serializable {
     public int binsK = BINS_DEFAULT;
     /** bins.edges: {@link #EDGES_VALUE} (window quantiles) or {@link #EDGES_RANK} (within-unit rank, grouped only) */
     public String binsEdges = EDGES_VALUE;
-    /** True when the config declares a {@code bins} block (which needs the binned transform). */
-    public boolean binsExplicit;
     /** heterogeneity.by: {@link #HET_PERIODS} / {@link #HET_FIELD} (null = no heterogeneity test) */
     public String heterogeneityBy;
     /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its first row) for the grouped family */
@@ -107,7 +105,7 @@ public final class ScreenSpec implements Serializable {
     /** pairs.fields: declared pairs of conditioning fields (names); pairs.among: fields whose every pair is tested */
     public List<String[]> pairFields = new ArrayList<>();
     public List<String> pairAmong = new ArrayList<>();
-    /** pairs.maxPairs: the bound on the pairs a run tests (each costs 2 + k doubles per partial key) */
+    /** pairs.maxPairs: the bound on the pairs a run tests (each costs 2 + k doubles per partial key, plus its 2-D grid) */
     public int pairMaxPairs = PAIRS_MAX_DEFAULT;
     /** pairs.placebo: noise placebos per pair (member × noise column), the pair kind's calibration */
     public int pairPlacebo = PAIR_PLACEBO_DEFAULT;
@@ -133,12 +131,31 @@ public final class ScreenSpec implements Serializable {
     }
 
     /**
-     * The columns of {@link ScreenRow#x} the window sketch pre-pass covers: the candidates and the shuffle reference
-     * (their rank / absdev / value bins), plus the conditioning columns when a pair's 2-D grid needs their edges.
+     * The number of sketches of the window pre-pass: the leading columns of {@link ScreenRow#x} up to the last one it
+     * feeds ({@link #sketchedColumns}), so a sketch index is the x column.
      */
     public int sketchColumns() {
-        return candidates.size() + (hasShuffle() ? 1 : 0) + (hasPairShape() ? conditioningFields.size() : 0);
+        final int[] fed = sketchedColumns();
+        return fed.length == 0 ? 0 : fed[fed.length - 1] + 1;
     }
+
+    /**
+     * The x columns the window sketch pre-pass feeds, ascending: the candidates and the shuffle reference when their
+     * sketches are read ({@link #needsCandidateSketches}: rank / absdev of independent rows, value bins), plus the
+     * members of the real pairs when their 2-D grids need value edges — not every candidate for a pair shape alone.
+     */
+    public int[] sketchedColumns() {
+        final java.util.TreeSet<Integer> fed = new java.util.TreeSet<>();
+        if (needsCandidateSketches()) for (int c = 0; c < conditioningOffset(); c++) fed.add(c);
+        if (hasPairShape()) for (final int[] pair : pairs) for (final int member : pair) fed.add(conditioningColumn(member));
+        return fed.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /**
+     * the resolved placebo pairs {@code [member, noise column]}: up to {@code pairPlacebo} per pair, its first member
+     * times a noise column that member is not already paired with (pairs sharing a member never repeat a placebo)
+     */
+    public List<int[]> pairPlacebos = new ArrayList<>();
 
     public static final int PAIRS_MAX_DEFAULT = 200;
     public static final int PAIR_PLACEBO_DEFAULT = 5;
@@ -180,10 +197,6 @@ public final class ScreenSpec implements Serializable {
     public int jointColumn(final int j) {
         return j < jointColumns.size() ? jointColumns.get(j) : candidates.size() + (j - jointColumns.size());
     }
-
-    public boolean isJointNoise(final int j) {
-        return j >= jointColumns.size();
-    }
     /** the pair test's own placebo kind and record transform */
     public static final String KIND_PAIR = "pair";
     public static final String TRANSFORM_PRODUCT = "product";
@@ -192,16 +205,21 @@ public final class ScreenSpec implements Serializable {
         return !pairs.isEmpty();
     }
 
-    /** The pair's record name: {@code a*b}; a placebo pair {@code a*__noise_<r>}. */
-    public String pairName(final int pair) {
-        if (pair < pairs.size()) return conditioningFields.get(pairs.get(pair)[0]) + "*" + conditioningFields.get(pairs.get(pair)[1]);
-        final int q = pair - pairs.size();
-        return conditioningFields.get(pairs.get(q / pairPlacebo)[0]) + "*" + NOISE_PREFIX + (q % pairPlacebo);
+    /** The member field names {@code [a, b]} of a (real) pair. */
+    public String[] pairFieldNames(final int pair) {
+        return new String[]{conditioningFields.get(pairs.get(pair)[0]), conditioningFields.get(pairs.get(pair)[1])};
     }
 
-    /** The real pairs, then {@code pairPlacebo} placebo pairs per real pair (its first member × a noise column). */
+    /** The pair's record name: {@code a*b}; a placebo pair {@code a*__noise_<r>}. */
+    public String pairName(final int pair) {
+        if (pair < pairs.size()) return String.join("*", pairFieldNames(pair));
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return conditioningFields.get(placebo[0]) + "*" + NOISE_PREFIX + placebo[1];
+    }
+
+    /** The real pairs, then the placebo pairs ({@link #pairPlacebos}: a first member × a noise column). */
     public int pairCount() {
-        return pairs.size() * (1 + pairPlacebo);
+        return pairs.size() + pairPlacebos.size();
     }
 
     public boolean isPlaceboPair(final int pair) {
@@ -216,8 +234,8 @@ public final class ScreenSpec implements Serializable {
     /** The conditioning-field indices of a pair's members; for a placebo pair the first member and the noise column index (as the second value, negative: −1 − r). */
     public int[] pairMembers(final int pair) {
         if (pair < pairs.size()) return pairs.get(pair);
-        final int q = pair - pairs.size();
-        return new int[]{pairs.get(q / pairPlacebo)[0], -1 - (q % pairPlacebo)};
+        final int[] placebo = pairPlacebos.get(pair - pairs.size());
+        return new int[]{placebo[0], -1 - placebo[1]};
     }
 
     public boolean hasHeterogeneity() {
@@ -379,13 +397,27 @@ public final class ScreenSpec implements Serializable {
     }
 
     /**
-     * Whether the run needs the window quantile sketches (engine doc §2): independent rows (no group) with a
-     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row.
+     * Whether the run needs the window quantile sketches (engine doc §2): the candidates' ({@link #needsCandidateSketches}),
+     * or the pair members' for the 2-D grids of the interaction shape (DSL doc §8.7).
      */
     public boolean needsWindowQuantiles() {
-        return (group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV)))
-                || (hasBinned() && EDGES_VALUE.equals(binsEdges))
-                || hasPairShape();
+        return needsCandidateSketches() || hasPairShape();
+    }
+
+    /**
+     * Whether the candidates' sketches are read: independent rows (no group) with a {@code rank} or {@code absdev}
+     * transform, whose "within the unit" would be a single row, or the binned test's value edges.
+     */
+    public boolean needsCandidateSketches() {
+        return windowTransforms() || (hasBinned() && EDGES_VALUE.equals(binsEdges));
+    }
+
+    /**
+     * Whether rank / absdev are taken against the window's sketches: independent rows only — a grouped run keeps
+     * them within the group even when the sketches are there for the value bins or a pair's grid.
+     */
+    public boolean windowTransforms() {
+        return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
     }
 
     public boolean hasBinned() {
@@ -433,8 +465,8 @@ public final class ScreenSpec implements Serializable {
      * lifted to {@code pass.minGain} when that is declared and higher. NaN stays NaN (no scorable unit).
      */
     public double gainCut(final double threshold) {
-        if (minGain == null || Double.isNaN(threshold)) return threshold;
-        return Math.max(threshold, minGain);
+        // Math.max propagates a NaN threshold
+        return minGain == null ? threshold : Math.max(threshold, minGain);
     }
 
 
@@ -541,7 +573,6 @@ public final class ScreenSpec implements Serializable {
         }
         final JsonElement bins = p.get("bins");
         if (bins != null && !bins.isJsonNull()) {
-            s.binsExplicit = true;
             if (bins.isJsonObject()) {
                 final JsonObject o = bins.getAsJsonObject();
                 final Double k = number(o, "k");
@@ -585,6 +616,7 @@ public final class ScreenSpec implements Serializable {
                         errors.add("heterogeneity must name a modifier: periods, or {field: <name>}");
                     }
                 } else if (HET_PERIODS.equals(by)) {
+                    if (field != null) errors.add("heterogeneity.field is read with by: field only (by: periods takes the period buckets as the levels)");
                     s.heterogeneityBy = HET_PERIODS;
                 } else if (HET_FIELD.equals(by)) {
                     if (field == null) errors.add("heterogeneity.by field needs heterogeneity.field");
@@ -602,8 +634,15 @@ public final class ScreenSpec implements Serializable {
             if (suggestions.isJsonPrimitive() && suggestions.getAsJsonPrimitive().isBoolean()) {
                 s.suggestionsOn = suggestions.getAsBoolean();
             } else if (suggestions.isJsonObject()) {
-                final Boolean enabled = suggestions.getAsJsonObject().has("enabled") ? suggestions.getAsJsonObject().get("enabled").getAsBoolean() : Boolean.TRUE;
-                s.suggestionsOn = enabled;
+                // {enabled} (absent / null = on); a non-boolean is an error, not a silent false or an unchecked exception
+                final JsonElement enabled = suggestions.getAsJsonObject().get("enabled");
+                if (enabled == null || enabled.isJsonNull()) {
+                    s.suggestionsOn = true;
+                } else if (enabled.isJsonPrimitive() && enabled.getAsJsonPrimitive().isBoolean()) {
+                    s.suggestionsOn = enabled.getAsBoolean();
+                } else {
+                    errors.add("suggestions.enabled must be a boolean");
+                }
             } else {
                 errors.add("suggestions must be a boolean or an object {enabled}");
             }
@@ -615,9 +654,14 @@ public final class ScreenSpec implements Serializable {
         if (pairs != null && !pairs.isJsonNull()) {
             if (pairs.isJsonObject()) {
                 final JsonObject o = pairs.getAsJsonObject();
-                if (o.has("fields") && o.get("fields").isJsonArray()) {
-                    for (final JsonElement e : o.getAsJsonArray("fields")) {
-                        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2) {
+                final JsonElement fields = o.get("fields");
+                if (fields != null && !fields.isJsonNull() && !fields.isJsonArray()) {
+                    errors.add("pairs.fields must be a list of [a, b] pairs of field names");
+                } else if (fields != null && fields.isJsonArray()) {
+                    for (final JsonElement e : fields.getAsJsonArray()) {
+                        // both members field names (a null / object member would throw from getAsString)
+                        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2
+                                || !e.getAsJsonArray().get(0).isJsonPrimitive() || !e.getAsJsonArray().get(1).isJsonPrimitive()) {
                             errors.add("pairs.fields must be a list of [a, b] pairs of field names");
                             continue;
                         }
@@ -641,7 +685,8 @@ public final class ScreenSpec implements Serializable {
                         if (!shape.getAsBoolean()) s.pairShapeBins = 0;
                     } else if (shape.isJsonPrimitive() && shape.getAsJsonPrimitive().isNumber()) {
                         final double k = shape.getAsDouble();
-                        if (k < 0 || k > 20 || k != Math.rint(k)) errors.add("pairs.shape must be an integer in [0, 20] (value bins per member of the 2-D grid; 0 = off)");
+                        // one bin per member has no edge to split at: no grid (and no shape) would come out of it
+                        if (k < 0 || k == 1 || k > 20 || k != Math.rint(k)) errors.add("pairs.shape must be 0 (off) or an integer in [2, 20] (value bins per member of the 2-D grid)");
                         else s.pairShapeBins = (int) k;
                     } else {
                         errors.add("pairs.shape must be a boolean or the number of bins per member");
@@ -806,9 +851,13 @@ public final class ScreenSpec implements Serializable {
                     else if (s.minPeriodsAgree > 1 && s.minPeriodsAgree != Math.rint(s.minPeriodsAgree)) errors.add("pass.minPeriodsAgree above 1 is a count of periods and must be an integer");
                     if (s.periodsBucket == null) errors.add("pass.minPeriodsAgree needs periods (the sign agreement is read per period bucket)");
                 }
-                s.minGain = number(o, "minGain");
-                if (s.minGain != null && !(s.minGain > 0 && Double.isFinite(s.minGain))) {
-                    errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                // a declared but malformed floor (a list, an object, a non-numeric string) is an error, never silently no floor
+                final JsonElement minGain = o.get("minGain");
+                if (minGain != null && !minGain.isJsonNull()) {
+                    s.minGain = numeric(minGain);
+                    if (s.minGain == null || !(s.minGain > 0 && Double.isFinite(s.minGain))) {
+                        errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                    }
                 }
             } else {
                 errors.add("pass must be an object {minPeriodsAgree, minGain}");
@@ -885,8 +934,8 @@ public final class ScreenSpec implements Serializable {
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
-            if (needsWindowQuantiles()) {
-                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%; noise placebos use the exact normal cdf)");
+            if (windowTransforms()) {
+                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%, randomised compaction: beyond k values a re-run can shift them within that error; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
             if (hasBinned() && EDGES_RANK.equals(binsEdges)) errors.add("bins.edges rank needs group (the position bins read the within-unit rank); use edges: value for independent rows");
@@ -894,6 +943,9 @@ public final class ScreenSpec implements Serializable {
         }
         if (periodsBucket != null && periodsField == null) errors.add("periods needs a field (periods.field or time.field)");
         if (heterogeneityByPeriods() && periodsBucket == null) errors.add("heterogeneity: periods needs periods (the levels are the period buckets)");
+        if (hasHeterogeneity() && transforms.stream().allMatch(ScreenSpec::isBinned)) {
+            errors.add("heterogeneity needs a raw / rank / absdev transform (the binned block test has no direction to differ across the levels)");
+        }
         if (HET_FIELD.equals(heterogeneityBy) && heterogeneityField != null && isGroupedMultinomial()) {
             notes.add("heterogeneity by " + heterogeneityField + ": the grouped family reads the modifier per unit (the value of the unit's first row)");
         }
@@ -932,9 +984,7 @@ public final class ScreenSpec implements Serializable {
                 final String name = f.getName();
                 if (reserved.contains(name)) continue;
                 final FeatureLineage.Entry entry = l.columns.get(name);
-                boolean included = includes.stream().anyMatch(p -> p.matcher(name).matches());
-                if (!included) included = includeSelectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
-                if (!included) continue;
+                if (!included(includes, includeSelectors, name, entry)) continue;
                 boolean excluded = false;
                 for (final String pattern : candidateExclude) {
                     if (FeatureLineage.isSelector(pattern)) {
@@ -981,7 +1031,9 @@ public final class ScreenSpec implements Serializable {
         // pairs: every member is a conditioning field (the product is tested at the fitted means of a model holding
         // its members), declared as pairs or as a set whose every pair is tested, within the bound
         pairs = new ArrayList<>();
+        pairPlacebos = new ArrayList<>();
         if (!pairFields.isEmpty() || !pairAmong.isEmpty()) {
+            final int pairErrors = errors.size();
             if (conditioningFields.isEmpty()) errors.add("pairs need conditioning: a product is tested at the fitted means of a model holding both members (declare them in conditioning.fields)");
             // the placebo block may follow pairs in the parameters: checked once both are read
             if (pairPlacebo > noise) errors.add("pairs.placebo (" + pairPlacebo + ") exceeds placebo.noise (" + noise + "): a placebo pair is a member times a noise column");
@@ -1010,27 +1062,52 @@ public final class ScreenSpec implements Serializable {
                     if (seen.add(a + ":" + b)) pairs.add(new int[]{a, b});
                 }
             }
-            if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key; declare fewer members or raise the bound)");
+            // among matching a single field (and no declared pair) would silently test nothing
+            if (pairs.isEmpty() && errors.size() == pairErrors) errors.add("pairs resolved to no pair: among needs at least two matching conditioning fields (" + conditioningFields + ")");
+            if (pairs.size() > pairMaxPairs) errors.add("pairs: " + pairs.size() + " pairs exceed pairs.maxPairs " + pairMaxPairs + " (each costs 2 + k doubles per partial key, and its 2-D grid 2 K doubles — plus K² for groupedMultinomial — with K = pairs.shape²; declare fewer members or raise the bound)");
+            // the placebo pairs: each pair's first member times a noise column it is not already paired with, spread
+            // over the noise columns, so pairs sharing a member never repeat a placebo (an identical column would
+            // duplicate a record name and a calibration sample); a member already paired with every noise column
+            // brings no further placebo
+            if (pairPlacebo <= noise) {
+                final Set<Long> used = new HashSet<>();
+                for (int i = 0; i < pairs.size(); i++) {
+                    final int member = pairs.get(i)[0];
+                    for (int j = 0; j < pairPlacebo; j++) {
+                        for (int step = 0; step < noise; step++) {
+                            final int r = (int) (((long) i * pairPlacebo + j + step) % noise);
+                            if (used.add((long) member * noise + r)) {
+                                pairPlacebos.add(new int[]{member, r});
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         // joint columns: the candidates matching joint.include (every candidate by default), within the bound
         jointColumns = new ArrayList<>();
         if (jointOn) {
             final List<Pattern> globs = jointInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
             final List<String> selectors = jointInclude.stream().filter(FeatureLineage::isSelector).toList();
+            if (!selectors.isEmpty() && l.columns.isEmpty()) {
+                errors.add("joint.include uses lineage selectors " + selectors + " but no lineage is available: "
+                        + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
+            }
             for (int c = 0; c < candidates.size(); c++) {
                 final String name = candidates.get(c);
-                boolean in = jointInclude.isEmpty() || globs.stream().anyMatch(g -> g.matcher(name).matches());
-                if (!in && !selectors.isEmpty()) {
-                    final FeatureLineage.Entry entry = l.columns.get(name);
-                    in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
-                }
-                if (in) jointColumns.add(c);
+                if (jointInclude.isEmpty() || included(globs, selectors, name, l.columns.get(name))) jointColumns.add(c);
             }
             if (jointColumns.size() < 2) errors.add("joint needs at least two candidate columns (joint.include " + jointInclude + " kept " + jointColumns.size() + ")");
             if (jointColumns.size() > jointMaxColumns) errors.add("joint: " + jointColumns.size() + " columns exceed joint.maxColumns " + jointMaxColumns + " (the joint sums are m x m per bundle and O(m²) per row; narrow joint.include or raise the bound)");
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
+    }
+
+    /** Whether a column matches an include list: one of its name globs, or one of its lineage selectors (no entry: none). */
+    private static boolean included(final List<Pattern> globs, final List<String> selectors, final String name, final FeatureLineage.Entry entry) {
+        return globs.stream().anyMatch(g -> g.matcher(name).matches()) || selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
     }
 
     // ---- identity ------------------------------------------------------------------------------------------
