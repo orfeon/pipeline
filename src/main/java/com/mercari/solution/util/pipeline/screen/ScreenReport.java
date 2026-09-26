@@ -635,11 +635,13 @@ public final class ScreenReport {
                             bestStepChi2 / blockDisc, bestStepChi2, bc, bestStep.phi, k, blockConf, nConf,
                             position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : rowBinFragment(name, new double[]{bestStep.cut}), placeboGains));
                 }
-                // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction
+                // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction, over the bins
+                // with information (a bin without it would put an arbitrary effect into the fit)
+                final boolean[] useD = informative(bd, k);
                 final double[] effects = new double[k], weights = new double[k];
                 for (int b = 0; b < k; b++) {
-                    weights[b] = bd.h[b];
-                    effects[b] = bd.h[b] > 0 ? bd.s[b] / bd.h[b] : 0d;
+                    weights[b] = useD[b] ? bd.h[b] : 0d;
+                    effects[b] = useD[b] ? bd.s[b] / bd.h[b] : 0d;
                 }
                 final double[] up = isotonic(effects, weights, true), down = isotonic(effects, weights, false);
                 final double chiUp = contrastChi2(bd, up, k), chiDown = contrastChi2(bd, down, k);
@@ -662,8 +664,10 @@ public final class ScreenReport {
                             "a monotone " + (increasing ? "increasing" : "decreasing") + " constraint on " + name, placeboGains));
                 }
             }
-            // missingness: the missing bin against the rest, and the value bin whose effect matches it
-            if (bd.h[k] > 0 && bc.h[k] > 0) {
+            // missingness: the missing bin against the rest, and the value bin whose effect matches it (both halves
+            // holding the missing bin with information)
+            final boolean[] useDAll = informative(bd, nb), useCAll = informative(bc, nb);
+            if (useDAll[k] && useCAll[k]) {
                 final double[] phiMiss = new double[nb];
                 phiMiss[k] = 1;
                 final double chiDisc = contrastChi2(bd, phiMiss, nb);
@@ -671,7 +675,7 @@ public final class ScreenReport {
                 final double missEffect = bd.s[k] / bd.h[k];
                 double fill = Double.NaN, gap = Double.POSITIVE_INFINITY;
                 for (int b = 0; b < k; b++) {
-                    if (!(bd.h[b] > 0) || x == null) continue;
+                    if (!useDAll[b] || x == null) continue;
                     final double g = Math.abs(bd.s[b] / bd.h[b] - missEffect);
                     if (g < gap) {
                         gap = g;
@@ -764,9 +768,10 @@ public final class ScreenReport {
      * single contrast could exceed it (a share above 1).
      */
     private static double contrastBound(final Block block, final int over) {
+        final boolean[] use = informative(block, over);
         double hsum = 0, ssum = 0;
         for (int b = 0; b < over; b++) {
-            if (!(block.h[b] > 0)) continue;
+            if (!use[b]) continue;
             hsum += block.h[b];
             ssum += block.s[b];
         }
@@ -775,18 +780,18 @@ public final class ScreenReport {
         final double[] w = new double[over], r = new double[over];
         double t = 0;
         for (int b = 0; b < over; b++) {
-            if (!(block.h[b] > 0)) continue;
+            if (!use[b]) continue;
             w[b] = block.h[b] / hsum;
-            for (int c = 0; c < over; c++) if (block.h[c] > 0) r[b] += block.hFull[b][c];
+            for (int c = 0; c < over; c++) if (use[c]) r[b] += block.hFull[b][c];
             t += r[b];
         }
         final double[] s = new double[over], diag = new double[over];
         final double[][] h = new double[over][over];
         for (int b = 0; b < over; b++) {
-            if (!(block.h[b] > 0)) continue;
+            if (!use[b]) continue;
             s[b] = block.s[b] - w[b] * ssum;
             for (int c = 0; c < over; c++) {
-                if (block.h[c] > 0) h[b][c] = block.hFull[b][c] - r[b] * w[c] - w[b] * r[c] + w[b] * w[c] * t;
+                if (use[c]) h[b][c] = block.hFull[b][c] - r[b] * w[c] - w[b] * r[c] + w[b] * w[c] * t;
             }
             diag[b] = h[b][b];
         }
@@ -800,17 +805,35 @@ public final class ScreenReport {
      * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information carry
      * nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
      */
-    private static double contrastChi2(final Block block, final double[] phi, final int over) {
+    /** the share of a block's information below which a bin carries none for a contrast (DSL doc §9.4) */
+    static final double CONTRAST_H_FLOOR = 1e-9;
+
+    /**
+     * Whether each of the first {@code over} bins of a block carries information a contrast may read: H_b above
+     * {@link #CONTRAST_H_FLOOR} of the bins' total and a positive mass. A confirmation half is a difference of sums,
+     * so a bin it does not hold keeps a rounding residue of H (and of S) that a contrast isolating the bin would
+     * divide by; a lone row at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would do the same.
+     */
+    static boolean[] informative(final Block block, final int over) {
+        double hsum = 0;
+        for (int b = 0; b < over; b++) if (block.h[b] > 0) hsum += block.h[b];
+        final boolean[] use = new boolean[over];
+        for (int b = 0; b < over; b++) use[b] = block.h[b] > CONTRAST_H_FLOOR * hsum && block.n[b] > 0;
+        return use;
+    }
+
+    static double contrastChi2(final Block block, final double[] phi, final int over) {
+        final boolean[] use = informative(block, over);
         double hsum = 0, hphi = 0;
         for (int b = 0; b < over; b++) {
-            if (!(block.h[b] > 0) || !Double.isFinite(phi[b])) continue;
+            if (!use[b] || !Double.isFinite(phi[b])) continue;
             hsum += block.h[b];
             hphi += block.h[b] * phi[b];
         }
         if (!(hsum > 0)) return 0d;
         final double mean = hphi / hsum;
         final double[] pc = new double[over];
-        for (int b = 0; b < over; b++) pc[b] = block.h[b] > 0 && Double.isFinite(phi[b]) ? phi[b] - mean : 0d;
+        for (int b = 0; b < over; b++) pc[b] = use[b] && Double.isFinite(phi[b]) ? phi[b] - mean : 0d;
         double s = 0, h = 0;
         for (int b = 0; b < over; b++) {
             s += pc[b] * block.s[b];
@@ -823,14 +846,15 @@ public final class ScreenReport {
 
     /** The sign of the contrast's score on the discovery block: "+" when the label rises with φ. */
     private static String direction(final Block block, final double[] phi, final int over) {
+        final boolean[] use = informative(block, over);
         double hsum = 0, hphi = 0;
-        for (int b = 0; b < over; b++) if (block.h[b] > 0) {
+        for (int b = 0; b < over; b++) if (use[b]) {
             hsum += block.h[b];
             hphi += block.h[b] * phi[b];
         }
         final double mean = hsum > 0 ? hphi / hsum : 0d;
         double s = 0;
-        for (int b = 0; b < over; b++) if (block.h[b] > 0) s += (phi[b] - mean) * block.s[b];
+        for (int b = 0; b < over; b++) if (use[b]) s += (phi[b] - mean) * block.s[b];
         return s >= 0 ? "+" : "-";
     }
 

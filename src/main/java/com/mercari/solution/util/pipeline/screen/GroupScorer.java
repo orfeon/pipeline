@@ -371,8 +371,9 @@ public final class GroupScorer implements Serializable {
 
     /**
      * A representative value per bin of column {@code column} (the binned test's k value bins, the missing bin
-     * excluded), for the suggestions' shapes: the midpoint of (edge_{i−1}, edge_i], the outer bins reaching to the
-     * sketch's min / max (a noise placebo: the normal quantile mids); position bins take the position's centre
+     * excluded), for the suggestions' shapes and the missing fill: the bin's median — the sketch's quantile at
+     * (b + 0.5) / k, which an outer bin's outliers or a skewed bin do not pull the way a midpoint of the edges would
+     * (a noise placebo: the normal quantile at the same rank); position bins take the position's centre
      * (b + 0.5) / k. Null without an edge (no sketch value for the column).
      */
     double[] binRepresentatives(final int column) {
@@ -382,17 +383,10 @@ public final class GroupScorer implements Serializable {
             for (int b = 0; b < k; b++) out[b] = (b + 0.5) / k;
             return out;
         }
-        final double[] edges = edges(column);
-        if (edges == null) return null;
+        if (edges(column) == null) return null;
         final boolean candidate = column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise);
         final int sketch = column < nCandidates ? column : shuffleRef;
-        final double lo = candidate ? quantiles.min(sketch) : StatMath.inverseNormal(0.5 / k);
-        final double hi = candidate ? quantiles.max(sketch) : StatMath.inverseNormal(1 - 0.5 / k);
-        for (int b = 0; b < k; b++) {
-            final double left = b == 0 ? lo : edges[b - 1];
-            final double right = b == k - 1 ? hi : edges[b];
-            out[b] = 0.5 * (left + right);
-        }
+        for (int b = 0; b < k; b++) out[b] = candidate ? quantiles.quantile(sketch, (b + 0.5) / k) : StatMath.inverseNormal((b + 0.5) / k);
         return out;
     }
 

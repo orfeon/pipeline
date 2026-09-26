@@ -143,7 +143,7 @@ scorable candidate, recipes in the feature transform's vocabulary to the `<name>
 |---|---|---|
 | `shape` | which univariate shape captures the effect: `linear`, `log`, `sqrt`, `rank`, `step` / `hinge` / `abs` at a cut — scored by the share of the block's χ² the shape's contrast captures (in [0, 1]) | `name`, `cut`, `direction`, `share`, `fragment` (e.g. `{scope: row, expr: "abs(x - 20)"}`) |
 | `cut` | the best single split (a boosting round's first split) | `cut`, `direction`, `fragment` (a row `bin` with that edge) |
-| `missing` | the missing values' own effect against the rest, and the fill value whose bin behaves like them (only when values are missing) | `direction`, `fill`, `fragment` (an `x == null` indicator, or the fill) |
+| `missing` | the missing values' own effect against the rest, and the fill value whose bin behaves like them (the bin's median; only when values are missing) | `direction`, `fill`, `fragment` (an `x == null` indicator, or the fill) |
 | `monotone` | whether the effect is monotone (the isotonic fit's share) and in which direction, with the sign consistency of the bin effects | `name` (increasing / decreasing), `consistency`, `share` |
 
 - **Honest gain.** Every choice is made on a discovery half of the units (a seeded hash, as the placebo

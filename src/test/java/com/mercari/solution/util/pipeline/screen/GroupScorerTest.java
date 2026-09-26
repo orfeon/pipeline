@@ -985,6 +985,58 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testContrastsIgnoreBinsWithoutInformation() {
+        // a block whose third bin holds a rounding residue (the confirmation half of a bin the discovery half held
+        // entirely): a contrast isolating that bin would divide S² ≈ 0.01 by H ≈ 1e-17; the guard leaves the bin out
+        final double[] s = {2, -1, 0.1, -1};
+        final double[] h = {10, 12, 1e-17, 9};
+        final double[] n = {20, 24, 0, 18};
+        final double[][] hFull = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull[b][b] = h[b];
+        final ScreenReport.Block block = new ScreenReport.Block(ScreenReport.Stats.degenerate(62), 2, s, h, n, hFull);
+        Assertions.assertArrayEquals(new boolean[]{true, true, false, true}, ScreenReport.informative(block, 4));
+        final double isolating = ScreenReport.contrastChi2(block, new double[]{0, 0, 1, 0}, 4);
+        Assertions.assertEquals(0d, isolating, 0d);
+        // a monotone contrast over the bins with information is unchanged by the residue bin's value
+        final double up = ScreenReport.contrastChi2(block, new double[]{0, 1, 2, 3}, 4);
+        final double upResidueFlipped = ScreenReport.contrastChi2(block, new double[]{0, 1, 1e9, 3}, 4);
+        Assertions.assertTrue(up > 0);
+        Assertions.assertEquals(up, upResidueFlipped, 1e-9 * up);
+        // a lone row at p̂ ≈ 0 (H ≈ 1e-12 of the block, |S| ≈ 1) is no information either; a small but real bin is
+        final double[] h2 = {10, 12, 1e-11, 9};
+        final double[] n2 = {20, 24, 1, 18};
+        final double[][] hFull2 = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull2[b][b] = h2[b];
+        Assertions.assertFalse(ScreenReport.informative(new ScreenReport.Block(ScreenReport.Stats.degenerate(63), 2, new double[]{2, -1, 1, -1}, h2, n2, hFull2), 4)[2]);
+        final double[] h3 = {10, 12, 1e-3, 9};
+        final double[][] hFull3 = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull3[b][b] = h3[b];
+        Assertions.assertTrue(ScreenReport.informative(new ScreenReport.Block(ScreenReport.Stats.degenerate(63), 2, s, h3, n2, hFull3), 4)[2]);
+    }
+
+    @Test
+    public void testBinRepresentativesAreTheBinMedians() {
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 4, edges: value}, placebo: {noise: 1, seed: 1}}");
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 0);
+        // 0..99 with one outlier at 10000: the top bin's midpoint of its edges would sit near 5000, its median near 87
+        for (int i = 0; i < 100; i++) q.update(new double[]{i == 99 ? 10000 : i}, spec.sketchedColumns());
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final double[] x = scorer.binRepresentatives(0);
+        Assertions.assertEquals(4, x.length);
+        Assertions.assertEquals(12, x[0], 2);
+        Assertions.assertEquals(37, x[1], 2);
+        Assertions.assertEquals(62, x[2], 2);
+        Assertions.assertEquals(87, x[3], 2);
+        // a noise placebo: the normal quantiles at the same ranks
+        final double[] noise = scorer.binRepresentatives(1);
+        Assertions.assertEquals(StatMath.inverseNormal(0.125), noise[0], 1e-12);
+        Assertions.assertEquals(StatMath.inverseNormal(0.875), noise[3], 1e-12);
+        // position bins: the positions' centres
+        final ScreenSpec rank = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [binned], bins: {k: 4, edges: rank}, placebo: {noise: 0}}");
+        Assertions.assertArrayEquals(new double[]{0.125, 0.375, 0.625, 0.875}, new GroupScorer(rank).binRepresentatives(0), 1e-12);
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S
