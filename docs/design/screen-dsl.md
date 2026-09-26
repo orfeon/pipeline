@@ -481,15 +481,18 @@ key, the candidates' *joint* sums over the joint columns — the candidates matc
 candidate by default, at most `maxColumns` = 200) and the first `noise` (default 10) noise placebo columns
 for the null scale: the score vector S = Σ w x̃ r, the m × m Fisher matrix H = Σ w v x̃x̃' and the pHd matrix
 M = Σ w r x̃x̃' (row families: raw moments centred at report time, a row with a missing joint value left out
-so the sums share one row set; grouped: centred by p̂ within the unit, the Fisher block diag(p) − pp', a unit
-with a missing joint value left out). O(m²) state and per-row work, hence the explicit opt-in and the bound.
+so the sums share one row set, r the residual with the intercept profiled out as in S — r − v Σ w r / Σ w v,
+so a miscalibrated baseline does not add its mean residual times H — gaussian S, H and M over σ² as in the
+marginal test, a column the raw moments cannot centre dropped as degenerate; grouped: centred by p̂ within the
+unit, the Fisher block diag(p) − pp', a unit with a missing joint value left out). O(m²) state and per-row
+work, hence the explicit opt-in and the bound.
 The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:
 
 | kind | read from | record |
 |---|---|---|
-| `phd` | the principal Hessian directions (Li 1992): the eigenpairs of H^(−1/2) M H^(−1/2) by \|eigenvalue\|, the directions mapped back through H^(−1/2) — residual curvature, quadratic effects and interactions in bulk, the loadings naming the candidates | `name` direction i, `candidate` the top loading, `chi2` the eigenvalue, `share` its \|λ\| over the sum, `consistency` the largest \|loading\| of a noise column (the null scale: a real direction loads on candidates, not noise), `fragment` the direction's top loadings — the projection v'x and its square are the recipe; a diagnostic, `passed` null |
+| `phd` | the principal Hessian directions (Li 1992): the eigenpairs of H^(−1/2) M H^(−1/2) by \|eigenvalue\|, the directions mapped back through H^(−1/2) — residual curvature, quadratic effects and interactions in bulk, the loadings naming the candidates — scale-free, v_j √H_jj, so a column's units do not decide its rank | `name` direction i, `candidate` the top loading, `chi2` the eigenvalue, `share` its \|λ\| over the sum, `consistency` the largest \|loading\| of a noise column (the null scale: a real direction loads on candidates, not noise; null without a noise column), `fragment` the top-loading candidates' coefficients in their own units — the projection v'x and its square are the recipe; a diagnostic, `passed` null |
 | `redundant` | single linkage at \|H_ij\| / √(H_ii H_jj) ≥ `redundancy` (default 0.95) among the candidates | one record per cluster of two or more: `candidate` the member with the largest marginal χ², `share` the cluster's smallest pairwise \|correlation\|, `fragment` the others — keep one, or average / project them |
-| `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `fragment` "given [A]" |
+| `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `threshold` the cut, `fragment` "given [A]" |
 | `composite` | β = H_AA⁻¹ S_A over the selected set and the joint χ² = S_A' H_AA⁻¹ S_A | `fragment` the row expression Σ β_j x_j, `chi2`, `share` its gain |
 
 One-step, in-sample, at β = 0 (a composite with a large effect is approximate): hypotheses for a feature

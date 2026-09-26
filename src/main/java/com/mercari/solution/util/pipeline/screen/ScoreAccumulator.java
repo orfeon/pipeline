@@ -73,6 +73,16 @@ public final class ScoreAccumulator implements Serializable {
         return this;
     }
 
+    /**
+     * The window's variable-length sums for a contribution added in place (the joint sums, O(m²) per row): zeros of
+     * {@code length} on first use.
+     */
+    double[] extra(final int length) {
+        if (extra == null) extra = new double[length];
+        else if (extra.length != length) throw new IllegalStateException("extra sums of " + extra.length + " values cannot take " + length);
+        return extra;
+    }
+
     public Map<String, double[]> getPeriods() {
         return periods;
     }

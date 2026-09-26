@@ -150,10 +150,6 @@ public final class ScreenSpec implements Serializable {
     public int jointColumn(final int j) {
         return j < jointColumns.size() ? jointColumns.get(j) : candidates.size() + (j - jointColumns.size());
     }
-
-    public boolean isJointNoise(final int j) {
-        return j >= jointColumns.size();
-    }
     /** the pair test's own placebo kind and record transform */
     public static final String KIND_PAIR = "pair";
     public static final String TRANSFORM_PRODUCT = "product";
@@ -879,9 +875,7 @@ public final class ScreenSpec implements Serializable {
                 final String name = f.getName();
                 if (reserved.contains(name)) continue;
                 final FeatureLineage.Entry entry = l.columns.get(name);
-                boolean included = includes.stream().anyMatch(p -> p.matcher(name).matches());
-                if (!included) included = includeSelectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
-                if (!included) continue;
+                if (!included(includes, includeSelectors, name, entry)) continue;
                 boolean excluded = false;
                 for (final String pattern : candidateExclude) {
                     if (FeatureLineage.isSelector(pattern)) {
@@ -964,20 +958,24 @@ public final class ScreenSpec implements Serializable {
         if (jointOn) {
             final List<Pattern> globs = jointInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
             final List<String> selectors = jointInclude.stream().filter(FeatureLineage::isSelector).toList();
+            if (!selectors.isEmpty() && l.columns.isEmpty()) {
+                errors.add("joint.include uses lineage selectors " + selectors + " but no lineage is available: "
+                        + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
+            }
             for (int c = 0; c < candidates.size(); c++) {
                 final String name = candidates.get(c);
-                boolean in = jointInclude.isEmpty() || globs.stream().anyMatch(g -> g.matcher(name).matches());
-                if (!in && !selectors.isEmpty()) {
-                    final FeatureLineage.Entry entry = l.columns.get(name);
-                    in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
-                }
-                if (in) jointColumns.add(c);
+                if (jointInclude.isEmpty() || included(globs, selectors, name, l.columns.get(name))) jointColumns.add(c);
             }
             if (jointColumns.size() < 2) errors.add("joint needs at least two candidate columns (joint.include " + jointInclude + " kept " + jointColumns.size() + ")");
             if (jointColumns.size() > jointMaxColumns) errors.add("joint: " + jointColumns.size() + " columns exceed joint.maxColumns " + jointMaxColumns + " (the joint sums are m x m per bundle and O(m²) per row; narrow joint.include or raise the bound)");
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
+    }
+
+    /** Whether a column matches an include list: one of its name globs, or one of its lineage selectors (no entry: none). */
+    private static boolean included(final List<Pattern> globs, final List<String> selectors, final String name, final FeatureLineage.Entry entry) {
+        return globs.stream().anyMatch(g -> g.matcher(name).matches()) || selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
     }
 
     // ---- identity ------------------------------------------------------------------------------------------

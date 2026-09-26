@@ -729,6 +729,91 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {maxColumns: 2}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['b']}}"));
         Assertions.assertEquals(List.of(1, 2), spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['x*'], noise: 0}}").jointColumns);
+        // a lineage selector in joint.include needs lineage, as in candidates.include
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['block:a']}}"));
+    }
+
+    @Test
+    public void testJointGroupedWithAUnitConstantColumn() {
+        // grouped units of four: x drives the choice, x2 is a large unit-level value (constant within each unit, so it
+        // carries no within-unit information): its Fisher block is exactly 0, it is never selected nor clustered
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x, x2], transforms: [raw], placebo: {noise: 2, seed: 1}, joint: {select: 2, directions: 1}}");
+        final java.util.Random random = new java.util.Random(7);
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (int u = 0; u < 200; u++) {
+            final double[] x = new double[4];
+            final double[] weights = new double[4];
+            double total = 0;
+            for (int i = 0; i < 4; i++) {
+                x[i] = random.nextGaussian();
+                weights[i] = Math.exp(1.5 * x[i]);
+                total += weights[i];
+            }
+            double draw = random.nextDouble() * total;
+            int winner = 3;
+            for (int i = 0; i < 4; i++) {
+                draw -= weights[i];
+                if (draw <= 0) {
+                    winner = i;
+                    break;
+                }
+            }
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 4; i++) rows.add(row("g" + u, i, i == winner ? 1 : 0, Double.NaN, x[i], 1e6 + u / 3d));
+            scorer.score(rows, "g" + u, acc);
+        }
+        final double[] e = acc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(4);
+        Assertions.assertEquals(0d, e[at.h() + GroupScorer.packed(4, 1, 1)]);   // x2's Fisher information: exactly 0
+        Assertions.assertEquals(200d, e[at.used()]);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        final List<Map<String, Object>> steps = result.suggestions().stream().filter(s -> "select".equals(s.get("kind"))).toList();
+        Assertions.assertFalse(steps.isEmpty(), result.suggestions().toString());
+        Assertions.assertEquals("x", steps.get(0).get("candidate"));
+        Assertions.assertTrue(steps.stream().noneMatch(s -> "x2".equals(s.get("candidate"))), steps.toString());
+        Assertions.assertTrue(result.suggestions().stream().noneMatch(s -> "redundant".equals(s.get("kind"))), result.suggestions().toString());
+    }
+
+    @Test
+    public void testJointGaussianOffsetScaleAndInterceptInvariance() {
+        // gaussian rows with a baseline and a label on a large scale (residual sd about 100): the forward selection's
+        // first step is the marginal score test on the same rows, so its gain equals the raw record's est_gain (both
+        // divided by the residual variance). Shifting the baseline by a constant (a miscalibrated baseline) moves the
+        // mean residual only: the intercept is profiled out of S, H and M alike, so nothing reported changes.
+        final ScreenSpec spec = spec("{family: gaussian, label: y, baseline: b, candidates: [x, x2], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, directions: 1, select: 2}}");
+        Assertions.assertEquals(List.of("x", "x2"), spec.candidates);
+        final List<List<Map<String, Object>>> runs = new java.util.ArrayList<>();
+        ScreenReport.Result first = null;
+        for (final double shift : new double[]{0d, 30d}) {
+            final java.util.Random random = new java.util.Random(11);
+            final GroupScorer scorer = new GroupScorer(spec);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (int i = 0; i < 300; i++) {
+                final double x = random.nextGaussian(), x2 = random.nextGaussian(), base = 5 * random.nextGaussian();
+                final double y = base + 40 * x + 15 * x * x2 + 100 * random.nextGaussian();
+                final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, base + shift, 1, new double[]{x, x2});
+                scorer.score(List.of(r), r.getIdentity(), acc);
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, acc);
+            if (first == null) first = result;
+            runs.add(result.suggestions());
+        }
+        final Map<String, Object> step1 = first.suggestions().stream().filter(s -> "select".equals(s.get("kind"))).findFirst().orElseThrow();
+        final Map<String, Object> marginal = first.records().stream().filter(r -> step1.get("candidate").equals(r.get("candidate"))).findFirst().orElseThrow();
+        Assertions.assertEquals((Double) marginal.get("est_gain"), (Double) step1.get("confirmation_gain"), 1e-9 * (Double) marginal.get("est_gain"), step1.toString());
+        Assertions.assertEquals(first.summary().get("threshold"), step1.get("threshold"));
+        // no noise column: no null scale to report
+        final Map<String, Object> phd = first.suggestions().stream().filter(s -> "phd".equals(s.get("kind"))).findFirst().orElseThrow();
+        Assertions.assertNull(phd.get("consistency"), phd.toString());
+        // the baseline shift changes nothing
+        Assertions.assertEquals(runs.get(0).size(), runs.get(1).size());
+        for (int i = 0; i < runs.get(0).size(); i++) {
+            final Map<String, Object> a = runs.get(0).get(i), b = runs.get(1).get(i);
+            Assertions.assertEquals(a.get("kind"), b.get("kind"));
+            Assertions.assertEquals(a.get("candidate"), b.get("candidate"));
+            Assertions.assertEquals((Double) a.get("chi2"), (Double) b.get("chi2"), 1e-6 * Math.abs((Double) a.get("chi2")) + 1e-12, a + " / " + b);
+        }
     }
 
     @Test
