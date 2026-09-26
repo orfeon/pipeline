@@ -233,9 +233,9 @@ partial-residual curve the derivation suggestions of §12.3 read.
   `[s (B), H (B × B), A (B × |F|)]` give Γ = (G + l2·n·I)⁻¹ A, S⊥ = s − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ and
   `partial_chi2 = S⊥' H⊥⁺ S⊥` over the bins the marginal block kept (`partial_df`), `r2_F = 1 − tr(H⊥) /
   tr(H)`. State per column B × (1 + B + |F|) (row families: B × (2 + |F|), the block is diagonal).
-- **No sign, no periods.** The block has no direction, so `period_z`, `periods_agree` and the leak flag do
-  not apply to it (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are
-  no per-period block sums.
+- **No sign, no periods.** The block has no direction, so `period_z` and `periods_agree` do not apply to it
+  (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are no per-period
+  block sums. The leak flag reads the block's tail instead of a z (§7).
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
   list.
@@ -255,8 +255,10 @@ partial-residual curve the derivation suggestions of §12.3 read.
 candidates — a level → (S, H) map instead of a one-hot or target encoding upstream. The sketch pre-pass
 (§6) counts every column's levels exactly (`level → count`; a column past 20,000 distinct levels fails the
 step: not a categorical candidate), and the dictionary the scorers and the report share names the
-`maxLevels` (default 32) most frequent levels, by count then name, folding the rest into one `(other)` level
-(a null value is its own level `(null)`, competing by count). The column is then the block test of §6.1 over
+`maxLevels` (default 32) most frequent levels, by count then name, folding the rest into one `(other)` level;
+a null value is always its own level `(null)`, outside the `maxLevels` count (a missing value is information,
+as the missing bin of §6.1 is — it never folds). `candidates.exclude` (globs and lineage selectors) applies
+to the categorical candidates as it does to the numeric ones. The column is then the block test of §6.1 over
 its levels — one χ²(df) statistic, df = active levels − 1, `transform: levels`, the partial block under
 conditioning — with each level's contrast against the rest in `level_z` (its signed z, S, H, n). Placebo:
 `placebo` (default 5) columns per candidate whose levels are redrawn from the window frequencies
@@ -304,7 +306,12 @@ seeded-hash dilution.
   explained by F, so it keeps its outsized partial z, while a strong legitimate candidate that overlaps F
   loses most of its z to the orthogonalisation. The partial flag assumes F does not leak: a candidate F explains
   (r²_F ≈ 1, including a conditioning column that also matches `candidates`) has a partial z near 0 and is never
-  flagged. A relative threshold (a ratio to the conditioning set's own marginal z) was considered and declined:
+  flagged. A block test (§6.1, §6.2: no z) is flagged on the same tail — its (partial) p-value below
+  P(|Z| > leakZ), the χ²(df) as unlikely under the null as a z of leakZ — so a leaking categorical or block is
+  marked like a leaking column. Separately, the resolution notes any pass-through input field the sources tag
+  as an outcome (`scope: input`, `kind: outcome`) left among the candidates, numeric or categorical: the
+  lineage cannot tell an outcome known before the event from one known after, so the note asks. A relative
+  threshold (a ratio to the conditioning set's own marginal z) was considered and declined:
   F's columns are scored only when they also match `candidates`, so the ratio would need a marginal pass of
   its own over F, and the bound would move with whatever F holds. Without a partial test (no accepted fit, or
   a gaussian fit without residual variance) the flag reads the marginal z and a note says so.

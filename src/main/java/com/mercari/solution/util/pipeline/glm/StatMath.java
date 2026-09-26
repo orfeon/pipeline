@@ -56,6 +56,20 @@ public final class StatMath {
         return regularizedGammaQ(df / 2d, chi2 / 2d);
     }
 
+    /**
+     * ln P(X > chi2) of a chi-square(df) statistic: {@link #chiSquareUpperTail} on the log scale, finite where the
+     * tail itself underflows to 0 (a df = 1 statistic past about 1,450, a z past about 38) — two extreme tails
+     * still compare.
+     */
+    public static double logChiSquareUpperTail(final double chi2, final int df) {
+        if (Double.isNaN(chi2)) return Double.NaN;
+        if (chi2 <= 0) return 0d;
+        if (df <= 1) return NormalDistribution.logErfc(Math.sqrt(chi2 / 2d));
+        final double a = df / 2d, x = chi2 / 2d;
+        if (x < a + 1) return Math.log(regularizedGammaQ(a, x));
+        return -x + a * Math.log(x) - logGamma(a) + Math.log(gammaQContinuedFraction(a, x));
+    }
+
     /** Quantile of a chi-square(df) distribution by bisection on the upper tail (df = 1 in closed form). */
     public static double chiSquareQuantile(final double q, final int df) {
         if (df <= 1) return chiSquare1Quantile(q);
@@ -83,7 +97,11 @@ public final class StatMath {
             }
             return 1d - sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
         }
-        // continued fraction for Q(a, x) (modified Lentz)
+        return Math.exp(-x + a * Math.log(x) - logGamma(a)) * gammaQContinuedFraction(a, x);
+    }
+
+    /** The continued fraction of Q(a, x) for x ≥ a + 1 (modified Lentz): Q = e^{−x} x^a / Γ(a) times it. */
+    private static double gammaQContinuedFraction(final double a, final double x) {
         final double tiny = 1e-300;
         double b = x + 1 - a, c = 1 / tiny, d = 1 / b, h = d;
         for (int i = 1; i < 1000; i++) {
@@ -98,7 +116,7 @@ public final class StatMath {
             h *= del;
             if (Math.abs(del - 1) < 1e-15) break;
         }
-        return Math.exp(-x + a * Math.log(x) - logGamma(a)) * h;
+        return h;
     }
 
     /** ln Γ(x) for x > 0 (Lanczos, g = 7). */

@@ -59,6 +59,8 @@ public final class ScreenSpec implements Serializable {
     public static final String HET_FIELD = "field";
     /** the level a null modifier value takes */
     public static final String LEVEL_NULL = "(null)";
+    /** the lineage kind of a source field declared as an outcome (the feature transform's sources contract) */
+    public static final String OUTCOME_KIND = "outcome";
     /** the heterogeneity test's own placebo kind */
     public static final String KIND_HET = "het";
 
@@ -1076,20 +1078,7 @@ public final class ScreenSpec implements Serializable {
                 if (reserved.contains(name)) continue;
                 final FeatureLineage.Entry entry = l.columns.get(name);
                 if (!included(includes, includeSelectors, name, entry)) continue;
-                boolean excluded = false;
-                for (final String pattern : candidateExclude) {
-                    if (FeatureLineage.isSelector(pattern)) {
-                        if (FeatureLineage.selectorMatches(pattern, entry)) {
-                            excluded = true;
-                            excludedByLineage.add(name + " (" + pattern + ")");
-                            break;
-                        }
-                    } else if (StatMath.glob(pattern).matcher(name).matches()) {
-                        excluded = true;
-                        break;
-                    }
-                }
-                if (!excluded) candidates.add(name);
+                if (!excluded(name, entry, excludedByLineage)) candidates.add(name);
             }
         }
         if (!excludedByLineage.isEmpty()) notes.add("excluded by lineage: " + excludedByLineage);
@@ -1191,24 +1180,43 @@ public final class ScreenSpec implements Serializable {
             if (jointColumns.size() < 2) errors.add("joint needs at least two candidate columns (joint.include " + jointInclude + " kept " + jointColumns.size() + ")");
             if (jointColumns.size() > jointMaxColumns) errors.add("joint: " + jointColumns.size() + " columns exceed joint.maxColumns " + jointMaxColumns + " (the joint sums are m x m per bundle and O(m²) per row; narrow joint.include or raise the bound)");
         }
-        // categorical candidates: the string fields matching categorical.include, never a role field
+        // categorical candidates: the string fields matching categorical.include, minus candidates.exclude (its globs
+        // and lineage selectors reach the categoricals too), never a role field
         categoricals = new ArrayList<>();
         if (!categoricalInclude.isEmpty() && inputSchema != null) {
             final List<Pattern> globs = categoricalInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
             final List<String> selectors = categoricalInclude.stream().filter(FeatureLineage::isSelector).toList();
+            final List<String> categoricalExcluded = new ArrayList<>();
             for (final Schema.Field f : inputSchema.getFields()) {
                 if (f.getFieldType().getType() != Schema.Type.string || reserved.contains(f.getName())) continue;
                 final String name = f.getName();
-                boolean in = globs.stream().anyMatch(g -> g.matcher(name).matches());
-                if (!in && !selectors.isEmpty()) in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, l.columns.get(name)));
-                if (in) categoricals.add(name);
+                final FeatureLineage.Entry entry = l.columns.get(name);
+                if (!included(globs, selectors, name, entry)) continue;
+                if (!excluded(name, entry, categoricalExcluded)) categoricals.add(name);
             }
-            if (categoricals.isEmpty()) errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates)");
+            if (!categoricalExcluded.isEmpty()) notes.add("categorical excluded by lineage: " + categoricalExcluded);
+            if (categoricals.isEmpty()) {
+                errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates"
+                        + (candidateExclude.isEmpty() ? "" : "; candidates.exclude applies to the categoricals too: " + candidateExclude) + ")");
+            }
             if (categoricalPlacebo > 0 && noise == 0) notes.add("categorical placebos redraw the levels from the window frequencies; they need no noise column");
             // the marginal / partial keys of the numeric columns and the pairs must stay below the categorical blocks'
             if (pairGridKey(pairs.size()) > CATEGORICAL_KEY_BASE) {
                 errors.add("categorical: " + pairGridKey(pairs.size()) + " column / pair keys reach the categorical key range (" + CATEGORICAL_KEY_BASE + "); narrow candidates.include or transforms");
             }
+        }
+        // pass-through input fields the sources tag as outcomes among the candidates (numeric or categorical): a leak
+        // unless the value is known before the event — the lineage cannot tell, so say so
+        final List<String> outcomeInputs = new ArrayList<>();
+        for (final List<String> columns : List.of(candidates, categoricals)) {
+            for (final String name : columns) {
+                final FeatureLineage.Entry entry = l.columns.get(name);
+                if (entry != null && "input".equals(entry.scope()) && OUTCOME_KIND.equals(entry.kind())) outcomeInputs.add(name);
+            }
+        }
+        if (!outcomeInputs.isEmpty()) {
+            notes.add("outcome-kind input candidates " + outcomeInputs + ": pass-through fields the sources declare as outcomes, a leak unless the value is known before the event"
+                    + " (candidates.exclude: [kind:" + OUTCOME_KIND + "] drops them, the categoricals too)");
         }
         // a screen of categorical candidates alone needs no numeric one
         if (candidates.isEmpty() && categoricals.isEmpty()) {
@@ -1217,6 +1225,24 @@ public final class ScreenSpec implements Serializable {
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
+    }
+
+    /**
+     * Whether {@code candidates.exclude} drops a column (numeric or categorical): one of its name globs, or one of its
+     * lineage selectors — a selector's exclusion is named in {@code byLineage} for the resolution notes.
+     */
+    private boolean excluded(final String name, final FeatureLineage.Entry entry, final List<String> byLineage) {
+        for (final String pattern : candidateExclude) {
+            if (FeatureLineage.isSelector(pattern)) {
+                if (FeatureLineage.selectorMatches(pattern, entry)) {
+                    byLineage.add(name + " (" + pattern + ")");
+                    return true;
+                }
+            } else if (StatMath.glob(pattern).matcher(name).matches()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether a column matches an include list: one of its name globs, or one of its lineage selectors (no entry: none). */

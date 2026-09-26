@@ -1644,7 +1644,8 @@ public final class ScreenReport {
                         nUnits > 0 ? bestGain / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         "group " + name + " into " + low + " (lower effect) vs " + high + " (higher): a level grouping, or one-hot the few strong levels and a shrunk encoding for the rest"));
             }
-            // strong single levels
+            // strong single levels (their indicator names unique within the column)
+            final Set<String> indicatorNames = new HashSet<>();
             for (int l = 0; l < nb; l++) {
                 if (!use[l]) continue;
                 final String level = levels.names().get(l);
@@ -1654,9 +1655,16 @@ public final class ScreenReport {
                 phi[l] = 1;
                 final double chi2 = contrastChi2(block, phi, nb);
                 if (chi2 < 9) continue;
+                String indicatorName = name + "_is_" + level.replaceAll("[^A-Za-z0-9_]", "_");
+                // levels that differ only in the replaced characters (non-ASCII names, "a-b" / "a b") would share a
+                // name: the later one takes its position as a suffix
+                if (!ScreenSpec.LEVEL_NULL.equals(level) && !indicatorNames.add(indicatorName)) {
+                    indicatorName = indicatorName + "_" + l;
+                    indicatorNames.add(indicatorName);
+                }
                 final String indicator = ScreenSpec.LEVEL_NULL.equals(level)
                         ? "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}"
-                        : "{name: " + name + "_is, scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
+                        : "{name: " + indicatorName + ", scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
                 out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
                         nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         indicator + " (z " + fmt(contrastSign(block, phi, nb) * Math.sqrt(chi2)) + ")"));
@@ -2179,12 +2187,16 @@ public final class ScreenReport {
         final Map<String, Double> passedBest = new HashMap<>();
         final Map<String, Double> hetPassedBest = new HashMap<>();
         final List<String> passedPairs = new ArrayList<>();
+        // the leak flag's tail, P(|Z| > leakZ), on the log scale: a block's χ²(df) tail is read against it there, as
+        // both underflow to 0 past a z of about 38 — where a large window's leak sits
+        final double leakLogTail = spec.leakZ == null ? Double.NaN : StatMath.logChiSquareUpperTail(spec.leakZ * spec.leakZ, 1);
         for (int i = 0; i < records.size(); i++) {
             final Map<String, Object> r = records.get(i);
             final Stats st = effective.get(i);
             final boolean placebo = (Boolean) r.get("placebo");
             final long[] agreement = effectiveAgree.get(i);
-            final double kindThreshold = thresholds.get(ScreenSpec.kind((String) r.get("transform")));
+            final String kind = ScreenSpec.kind((String) r.get("transform"));
+            final double kindThreshold = thresholds.get(kind);
             // the degrees of freedom of the marginal and the effective test (a block's partial df may be fewer)
             final double marginalDf = ((Long) r.get("df")).doubleValue();
             final double effectiveDf = conditioned && r.get("partial_df") != null ? ((Long) r.get("partial_df")).doubleValue() : marginalDf;
@@ -2195,11 +2207,22 @@ public final class ScreenReport {
             r.put("partial_excess_gain", partialGain == null || (conditioned && st.degenerate) ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
             final boolean passed = !placebo && !st.degenerate && spec.passesGain(st.estGain, effectiveDf, nUnits, kindThreshold)
                     && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
-            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned);
-            // a block test has no z, so the leak flag does not read it
+            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned).
+            // A df = 1 test is flagged on |z| > leakZ; a block (binned / levels: no z) on the same tail — its p-value
+            // below P(|Z| > leakZ), so a χ²(df) as unlikely under the null as a z of leakZ flags the block too. A pair
+            // (no marginal z) is not flagged: its members are conditioning columns, which the flag assumes do not leak
             final Double marginalZ = (Double) r.get("z");
-            final double flagZ = marginalZ == null ? Double.NaN : leakOnPartial ? st.z() : marginalZ;
-            final boolean leak = spec.leakZ != null && Math.abs(flagZ) > spec.leakZ;
+            final boolean leak;
+            if (spec.leakZ == null) {
+                leak = false;
+            } else if (ScreenSpec.KIND_BINNED.equals(kind) || ScreenSpec.KIND_LEVELS.equals(kind)) {
+                final boolean flagDegenerate = leakOnPartial ? st.degenerate : (Boolean) r.get("degenerate");
+                final double flagChi2 = leakOnPartial ? st.chi2() : (Double) r.get("chi2");
+                final int flagDf = (int) (leakOnPartial ? effectiveDf : marginalDf);
+                leak = !flagDegenerate && StatMath.logChiSquareUpperTail(flagChi2, flagDf) < leakLogTail;
+            } else {
+                leak = marginalZ != null && Math.abs(leakOnPartial ? st.z() : marginalZ) > spec.leakZ;
+            }
             r.put("threshold", kindThreshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);

@@ -1160,6 +1160,112 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testLeakFlagReadsABlockOnTheSameTail() {
+        // a strong effect: the raw column's |z| clears leakZ, and the binned block (no z) is flagged on the same
+        // tail — its p-value below P(|Z| > leakZ); a placebo column is flagged by neither
+        final java.util.Random random = new java.util.Random(23);
+        final List<ScreenRow> rows = new ArrayList<>();
+        for (int i = 0; i < 400; i++) {
+            final double x = random.nextGaussian();
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-2.5 * x)) ? 1 : 0;
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{x}));
+        }
+        for (final double leakZ : new double[]{4, 40}) {
+            final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, binned], bins: {k: 4, edges: value}, placebo: {noise: 2, seed: 5}, flags: {leakZ: " + leakZ + "}}");
+            final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 0);
+            for (final ScreenRow r : rows) q.update(r.x, spec.sketchedColumns());
+            final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+            final ScreenReport.Result result = ScreenReport.build(spec, acc);
+            final Map<String, Map<String, Object>> byKey = new HashMap<>();
+            for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+            final Map<String, Object> raw = byKey.get("x:raw"), binned = byKey.get("x:binned");
+            final boolean expected = leakZ < 10;
+            Assertions.assertEquals(Math.abs((Double) raw.get("z")) > leakZ, raw.get("leakSuspect"), raw.toString());
+            Assertions.assertEquals(expected, raw.get("leakSuspect"), raw.toString());
+            Assertions.assertNull(binned.get("z"));
+            Assertions.assertEquals((Double) binned.get("pValue") < StatMath.chiSquare1UpperTail(leakZ * leakZ), binned.get("leakSuspect"), binned.toString());
+            Assertions.assertEquals(expected, binned.get("leakSuspect"), binned.toString());
+            Assertions.assertEquals(Boolean.FALSE, byKey.get("__noise_0:binned").get("leakSuspect"));
+            Assertions.assertEquals(expected ? 2L : 0L, result.summary().get("nLeakSuspect"));
+        }
+    }
+
+    @Test
+    public void testNullLevelIsAlwaysItsOwnAndExcludeReachesTheCategoricals() {
+        // the dictionary: (null) is named whatever its rank, outside the maxLevels count; the rest fold beyond it
+        final WindowQuantiles q = new WindowQuantiles(0, 1);
+        final String[] levels = {"A", "A", "A", "A", "A", "B", "B", "B", "B", "C", "C", "C", ScreenSpec.LEVEL_NULL};
+        for (final String l : levels) q.updateLevels(new String[]{l});
+        final WindowQuantiles.Levels two = q.levels(0, 2);
+        Assertions.assertEquals(List.of("A", "B", ScreenSpec.LEVEL_NULL, ScreenSpec.LEVEL_OTHER), two.names());
+        Assertions.assertTrue(two.folded());
+        Assertions.assertEquals(2, two.indexOf(ScreenSpec.LEVEL_NULL));
+        Assertions.assertEquals(3, two.indexOf("C"));
+        Assertions.assertEquals(1d / 13, two.frequency()[2], 1e-12);
+        Assertions.assertEquals(List.of("A", "B", "C", ScreenSpec.LEVEL_NULL), q.levels(0, 32).names());
+
+        // candidates.exclude reaches the categoricals: a lineage selector drops the outcome-kind field from both
+        // lists, and the resolution notes an outcome-kind pass-through field left among the candidates
+        final Schema schema = Schema.builder()
+                .withField("y", Schema.FieldType.INT64)
+                .withField("x", Schema.FieldType.FLOAT64)
+                .withField("z", Schema.FieldType.FLOAT64)
+                .withField("cat", Schema.FieldType.STRING)
+                .withField("seg", Schema.FieldType.STRING)
+                .build();
+        final FeatureLineage lineage = new FeatureLineage();
+        lineage.columns.put("x", new FeatureLineage.Entry("input", null, java.util.Set.of("outcome"), null, "outcome"));
+        lineage.columns.put("z", new FeatureLineage.Entry("input", null, java.util.Set.of("market"), null, "market"));
+        lineage.columns.put("cat", new FeatureLineage.Entry("input", null, java.util.Set.of("outcome"), null, "outcome"));
+        lineage.columns.put("seg", new FeatureLineage.Entry("input", null, java.util.Set.of("market"), null, "market"));
+        final ScreenSpec kept = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: ['*'], categorical: ['*']}").getAsJsonObject()).resolve(schema, lineage);
+        Assertions.assertEquals(List.of("x", "z"), kept.candidates);
+        Assertions.assertEquals(List.of("cat", "seg"), kept.categoricals);
+        Assertions.assertTrue(kept.notes.stream().anyMatch(n -> n.startsWith("outcome-kind input candidates [x, cat]")), kept.notes.toString());
+        final ScreenSpec excluded = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: {include: ['*'], exclude: ['kind:outcome']}, categorical: ['*']}").getAsJsonObject()).resolve(schema, lineage);
+        Assertions.assertEquals(List.of("z"), excluded.candidates);
+        Assertions.assertEquals(List.of("seg"), excluded.categoricals);
+        Assertions.assertTrue(excluded.notes.stream().anyMatch(n -> n.startsWith("categorical excluded by lineage: [cat (kind:outcome)]")), excluded.notes.toString());
+        Assertions.assertTrue(excluded.notes.stream().noneMatch(n -> n.startsWith("outcome-kind input candidates")), excluded.notes.toString());
+        // a name glob excludes a categorical too; excluding every categorical is an error that says so
+        Assertions.assertEquals(List.of("seg"), ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: {include: ['*'], exclude: ['c*']}, categorical: ['*']}").getAsJsonObject()).resolve(schema, lineage).categoricals);
+        final IllegalArgumentException none = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: {include: ['*'], exclude: ['cat', 'seg']}, categorical: ['*']}").getAsJsonObject()).resolve(schema, lineage));
+        Assertions.assertTrue(none.getMessage().contains("candidates.exclude applies to the categoricals too"), none.getMessage());
+    }
+
+    @Test
+    public void testOnehotNamesStayUniqueWhenLevelsShareASanitizedName() {
+        // "a b" and "a-b" both become a_b in the indicator name: the later level (by count then name) takes its position
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 5}}");
+        final String[] levels = {"a-b", "a b", "C", "D"};
+        final double[] rate = {0.05, 0.05, 0.9, 0.9};
+        final java.util.Random random = new java.util.Random(29);
+        final List<ScreenRow> rows = new ArrayList<>();
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+        for (int i = 0; i < 400; i++) {
+            final int l = i % 4;
+            final double y = random.nextDouble() < rate[l] ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, Double.NaN, 1, new double[]{random.nextGaussian()}, new String[]{levels[l]});
+            rows.add(r);
+            q.update(r.x);
+            q.updateLevels(r.cat);
+        }
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+        final Map<String, String> fragments = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) if ("onehot".equals(s.get("kind"))) fragments.put((String) s.get("name"), (String) s.get("fragment"));
+        Assertions.assertTrue(fragments.containsKey("a b") && fragments.containsKey("a-b"), fragments.toString());
+        Assertions.assertTrue(fragments.get("a b").startsWith("{name: g_is_a_b, "), fragments.toString());
+        Assertions.assertTrue(fragments.get("a-b").startsWith("{name: g_is_a_b_3, "), fragments.toString());
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S
@@ -1765,7 +1871,7 @@ public class GroupScorerTest {
         Assertions.assertTrue(byKind.get("onehot").stream().anyMatch(s -> "D".equals(s.get("name"))), byKind.get("onehot").toString());
         // the one-hot fragment is the feature transform's row indicator op (its expressions have no string literal)
         Assertions.assertTrue(byKind.get("onehot").stream().filter(s -> "D".equals(s.get("name")))
-                .allMatch(s -> ((String) s.get("fragment")).startsWith("{name: g_is, scope: row, type: indicator, input: g, values: [\"D\"]}")), byKind.get("onehot").toString());
+                .allMatch(s -> ((String) s.get("fragment")).startsWith("{name: g_is_D, scope: row, type: indicator, input: g, values: [\"D\"]}")), byKind.get("onehot").toString());
         Assertions.assertTrue(ScreenReport.describe(spec).contains("categorical=1 [g]"));
         // validation
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], categorical: {maxLevels: 4}}"));
