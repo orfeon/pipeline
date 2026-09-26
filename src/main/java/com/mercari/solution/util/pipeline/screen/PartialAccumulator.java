@@ -55,6 +55,19 @@ public final class PartialAccumulator implements Serializable {
         return this;
     }
 
+    /**
+     * The window vector for in-place sums (a sparse contribution, the binned block's occupied bins, touches only its
+     * entries), allocated at {@code length} on first use.
+     */
+    double[] total(final int length) {
+        if (total.length == 0) {
+            total = new double[length];
+        } else if (total.length != length) {
+            throw new IllegalStateException("partial sums of " + total.length + " and " + length + " values cannot merge");
+        }
+        return total;
+    }
+
     /** Adds one contribution to the total and, when {@code period} is non-null, to that period. */
     public PartialAccumulator add(final String period, final double[] contribution) {
         total = sum(total, contribution);

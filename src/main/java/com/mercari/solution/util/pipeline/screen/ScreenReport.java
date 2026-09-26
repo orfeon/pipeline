@@ -111,11 +111,16 @@ public final class ScreenReport {
      * every column x transform (a multi-right-hand-side solve); {@code partial} then applies one column's γ.
      */
     static Map<Integer, double[]> gammas(final Map<Integer, PartialAccumulator> partials, final FitState fit, final double l2) {
+        return gammas(partials, fit, l2, Integer.MAX_VALUE);
+    }
+
+    /** {@link #gammas} over the keys below {@code keyLimit} (the pair grids' keys after it are not {@code [s, b, a]} columns). */
+    static Map<Integer, double[]> gammas(final Map<Integer, PartialAccumulator> partials, final FitState fit, final double l2, final int keyLimit) {
         final List<Integer> keys = new ArrayList<>();
         for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
             // the sigma / fit sums are not a column; a column whose sums overflowed stays out of the batched solve
             // (no gamma = degenerate, as the per-column solve reported it) instead of failing every column
-            if (e.getKey() >= 0 && solvable(e.getValue().getTotal(), fit.k)) keys.add(e.getKey());
+            if (e.getKey() >= 0 && e.getKey() < keyLimit && solvable(e.getValue().getTotal(), fit.k)) keys.add(e.getKey());
         }
         final Map<Integer, double[]> out = new HashMap<>();
         if (keys.isEmpty()) return out;
@@ -198,7 +203,7 @@ public final class ScreenReport {
     }
 
     /**
-     * The binned block test of one column (DSL doc §12.1): the score test of the one-hot block of B bins with the
+     * The binned block test of one column (DSL doc §6.1): the score test of the one-hot block of B bins with the
      * intercept profiled out — χ²(df) with df = active bins − 1, no sign (z is NaN) — and its per-bin score S_b,
      * information H_bb and weight mass n_b for the report.
      */
@@ -218,8 +223,11 @@ public final class ScreenReport {
         final double[] s = new double[nb];
         final double[] n = new double[nb];
         final double[][] h;
+        final double[] hd = new double[nb];
+        final Stats[] out = new Stats[1];
+        final int df;
         if (spec.isGroupedMultinomial()) {
-            // [S (B), P (B), P P' (B²)]: H = diag(P) − P P'
+            // [S (B), P (B), P P' (B²)]: H = diag(P) − P P', already of rank active − 1 (the shares sum to one per unit)
             if (extra.length < 2 * nb + nb * nb) return Block.degenerate(nObs, nb);
             h = new double[nb][nb];
             for (int b = 0; b < nb; b++) {
@@ -227,6 +235,8 @@ public final class ScreenReport {
                 n[b] = extra[nb + b];
                 for (int c = 0; c < nb; c++) h[b][c] = (b == c ? extra[nb + b] : 0d) - extra[2 * nb + b * nb + c];
             }
+            for (int b = 0; b < nb; b++) hd[b] = h[b][b];
+            df = blockChi2(s, h, hd, nUnits, nObs, out);
         } else {
             // per bin [Σ w, Σ w r, Σ w v] then the totals [Σ w, Σ w r, Σ w r²]
             if (extra.length < 3 * nb + 3) return Block.degenerate(nObs, nb);
@@ -240,17 +250,27 @@ public final class ScreenReport {
                 if (!(sigma2 > 0)) return Block.degenerate(nObs, nb);
             }
             final double priorWeight = prior && !spec.isGaussian() ? spec.fisherWeight(rMean) : 1d;
-            h = new double[nb][nb];
+            double sumS = 0, sumD = 0;
             for (int b = 0; b < nb; b++) {
                 n[b] = extra[3 * b];
                 s[b] = (prior ? extra[3 * b + 1] - rMean * extra[3 * b] : extra[3 * b + 1]) / sigma2;
-                h[b][b] = (spec.isGaussian() ? extra[3 * b] : prior ? priorWeight * extra[3 * b] : extra[3 * b + 2]) / sigma2;
+                hd[b] = (spec.isGaussian() ? extra[3 * b] : prior ? priorWeight * extra[3 * b] : extra[3 * b + 2]) / sigma2;
+                sumS += s[b];
+                sumD += hd[b];
             }
+            // the intercept profiled out: H = D − d d' / Σd and S centred by the d-weighted mean, so the reduced system
+            // (one reference bin dropped) gives χ² = Σ S_b² / H_b − (Σ S_b)² / Σ H_b — the diagonal D alone is full
+            // rank, and dropping a bin from it would lose that bin's term instead of the intercept direction
+            if (!(sumD > 0)) return Block.degenerate(nObs, nb);
+            final double mean = sumS / sumD;
+            final double[] sp = new double[nb];
+            h = new double[nb][nb];
+            for (int b = 0; b < nb; b++) {
+                sp[b] = s[b] - hd[b] * mean;
+                for (int c = 0; c < nb; c++) h[b][c] = (b == c ? hd[b] : 0d) - hd[b] * hd[c] / sumD;
+            }
+            df = blockChi2(sp, h, hd, nUnits, nObs, out);
         }
-        final double[] hd = new double[nb];
-        for (int b = 0; b < nb; b++) hd[b] = h[b][b];
-        final Stats[] out = new Stats[1];
-        final int df = blockChi2(s, h, hd, nUnits, nObs, out);
         return new Block(out[0], df, s, hd, n, h);
     }
 
@@ -300,11 +320,6 @@ public final class ScreenReport {
         return df;
     }
 
-    /**
-     * The block's partial test from {@code [s (B), H (B² grouped / B diagonal), A (B × k)]} at the fitted p̂:
-     * Γ = (G + l2·N·I)⁻¹ A (a multi-right-hand-side solve), S⊥ = s − Γ'g, H⊥ = H − Γ'A' − A Γ + Γ'GΓ, then χ² = S⊥' H⊥⁺ S⊥
-     * over the bins the marginal block found active; r²_F = 1 − tr(H⊥) / tr(H). Gaussian divides by σ².
-     */
     /** The block's partial test with its degrees of freedom. */
     public record BlockPartial(Partial partial, int df) {
         static BlockPartial degenerate(final long nObs, final double r2) {
@@ -312,6 +327,11 @@ public final class ScreenReport {
         }
     }
 
+    /**
+     * The block's partial test from {@code [s (B), H (B² grouped / B diagonal), A (B × k)]} at the fitted p̂:
+     * Γ = (G + l2·N·I)⁻¹ A (a multi-right-hand-side solve), S⊥ = s − Γ'g, H⊥ = H − Γ'A' − A Γ + Γ'GΓ, then χ² = S⊥' H⊥⁺ S⊥
+     * over the bins the marginal block found active; r²_F = 1 − tr(H⊥) / tr(H). Gaussian divides by σ².
+     */
     static BlockPartial blockPartial(final ScreenSpec spec, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
                                      final long nObs, final double sigma2, final double l2) {
         return blockPartial(spec, spec.binCount(), vec, marginal, fit, nUnits, nObs, sigma2, l2);
@@ -333,6 +353,15 @@ public final class ScreenReport {
         } catch (final RuntimeException e) {
             return BlockPartial.degenerate(nObs, Double.NaN);
         }
+        // G Γ (k × B) once: Γ'GΓ is then O(B² k) instead of O(B² k²)
+        final double[][] gGamma = new double[k][nb];
+        for (int j = 0; j < k; j++) {
+            for (int l = 0; l < k; l++) {
+                final double gjl = fit.bestG[j][l];
+                if (gjl == 0d) continue;
+                for (int c = 0; c < nb; c++) gGamma[j][c] += gjl * gamma[l][c];
+            }
+        }
         final double[] s = new double[nb];
         final double[][] h = new double[nb][nb];
         double trH = 0, trHp = 0;
@@ -346,9 +375,7 @@ public final class ScreenReport {
                 for (int j = 0; j < k; j++) {
                     ga += gamma[j][b] * a[j][c];
                     ag += a[j][b] * gamma[j][c];
-                    double gj = 0;
-                    for (int l = 0; l < k; l++) gj += fit.bestG[j][l] * gamma[l][c];
-                    ggg += gamma[j][b] * gj;
+                    ggg += gamma[j][b] * gGamma[j][c];
                 }
                 h[b][c] = (hbc - ga - ag + ggg) / sigma2;
                 if (b == c) {
@@ -396,6 +423,17 @@ public final class ScreenReport {
         return new Het(chi2, df, StatMath.chiSquareUpperTail(chi2, df), nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, usable, false);
     }
 
+    /** One slice's entry of {@code period_z} / {@code partial_period_z} / {@code level_z}: its name, z (null when degenerate), S, H, n. */
+    private static Map<String, Object> sliceRecord(final String nameField, final String name, final Stats ps, final long n) {
+        final Map<String, Object> r = new LinkedHashMap<>();
+        r.put(nameField, name);
+        r.put("z", ps.degenerate ? null : ps.z);
+        r.put("S", ps.s);
+        r.put("H", ps.h);
+        r.put("n", n);
+        return r;
+    }
+
     private static void putHet(final Map<String, Object> r, final String prefix, final Het het) {
         r.put(prefix + "het_chi2", het == null ? null : het.chi2);
         r.put(prefix + "het_df", het == null ? null : (long) het.df);
@@ -405,8 +443,9 @@ public final class ScreenReport {
     }
 
     /**
-     * The bins' geometry the suggestions read: a representative value per value bin and the k − 1 edges (null for
-     * position bins) by column, and the pair grids' edges by x column (a pair member's conditioning column).
+     * The bins' geometry: a representative value per value bin (the suggestions' shapes), and the k − 1 edges (the
+     * suggestions' cuts, the records' {@code bin_edges} and the pass list's block recipes; null for position bins) by
+     * column, and the pair grids' edges by x column (a pair member's conditioning column, the interaction shapes).
      */
     public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges, IntFunction<double[]> gridEdges, IntFunction<Double> minimum,
                        IntFunction<WindowQuantiles.Levels> levels) {
@@ -424,8 +463,15 @@ public final class ScreenReport {
         }
     }
 
-    /** A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none). */
-    private record Shape(String name, double[] phi, double cut) {}
+    /**
+     * A shape over the bins: its name, the contrast φ_b per value bin, the cut it uses (NaN when none), and for a
+     * hinge which side of the cut it rises on ({@code below}: max(0, c − x), else max(0, x − c)).
+     */
+    private record Shape(String name, double[] phi, double cut, boolean below) {
+        Shape(final String name, final double[] phi, final double cut) {
+            this(name, phi, cut, false);
+        }
+    }
 
     /**
      * The one-candidate derivation suggestions (DSL doc §9.4) from the binned sums: the shapes (linear / log /
@@ -468,8 +514,8 @@ public final class ScreenReport {
             final boolean position = ScreenSpec.EDGES_RANK.equals(spec.binsEdges);
             final boolean placebo = spec.isPlacebo(c);
             final String name = names.get(c);
-            // the block over the value bins alone (the missing bin is its own suggestion)
-            final double blockDisc = subBlockChi2(bd, k), blockConf = subBlockChi2(bc, k);
+            // the bound over the value bins alone (the missing bin is its own suggestion)
+            final double blockDisc = contrastBound(bd, k), blockConf = contrastBound(bc, k);
             if (blockDisc > 0 && blockConf > 0) {
                 // shapes: chosen on discovery, reported on confirmation
                 final List<Shape> shapes = shapes(x, edges, k, position);
@@ -495,7 +541,7 @@ public final class ScreenReport {
                 if (bestStep != null) {
                     candidates.add(suggestion(name, placebo, "cut", "step", bestStep.cut, direction(bd, bestStep.phi, k), Double.NaN, Double.NaN,
                             bestStepChi2 / blockDisc, bestStepChi2, bc, bestStep.phi, k, blockConf, nConf,
-                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : "{scope: row, type: bin, input: " + name + ", edges: [" + fmt(bestStep.cut) + "]}", placeboGains));
+                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : rowBinFragment(name, new double[]{bestStep.cut}), placeboGains));
                 }
                 // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction
                 final double[] effects = new double[k], weights = new double[k];
@@ -507,12 +553,16 @@ public final class ScreenReport {
                 final double chiUp = contrastChi2(bd, up, k), chiDown = contrastChi2(bd, down, k);
                 final boolean increasing = chiUp >= chiDown;
                 final double[] phi = increasing ? up : down;
-                int consistent = 0, pairs = 0;
-                for (int b = 1; b < k; b++) {
-                    if (!(weights[b] > 0) || !(weights[b - 1] > 0)) continue;
-                    pairs++;
-                    final double d = effects[b] - effects[b - 1];
-                    if (increasing ? d >= 0 : d <= 0) consistent++;
+                // adjacent among the bins with information: an empty bin (tied edges) does not break the chain
+                int consistent = 0, pairs = 0, previous = -1;
+                for (int b = 0; b < k; b++) {
+                    if (!(weights[b] > 0)) continue;
+                    if (previous >= 0) {
+                        pairs++;
+                        final double d = effects[b] - effects[previous];
+                        if (increasing ? d >= 0 : d <= 0) consistent++;
+                    }
+                    previous = b;
                 }
                 if (pairs > 0) {
                     candidates.add(suggestion(name, placebo, "monotone", increasing ? "increasing" : "decreasing", Double.NaN, increasing ? "+" : "-", Double.NaN,
@@ -524,8 +574,8 @@ public final class ScreenReport {
             if (bd.h[k] > 0 && bc.h[k] > 0) {
                 final double[] phiMiss = new double[nb];
                 phiMiss[k] = 1;
-                final double chiDisc = contrastChi2(bd, phiMiss, nb), chiConf = contrastChi2(bc, phiMiss, nb);
-                final double blockAllDisc = bd.stats.chi2, blockAllConf = bc.stats.chi2;
+                final double chiDisc = contrastChi2(bd, phiMiss, nb);
+                final double blockAllDisc = contrastBound(bd, nb), blockAllConf = contrastBound(bc, nb);
                 final double missEffect = bd.s[k] / bd.h[k];
                 double fill = Double.NaN, gap = Double.POSITIVE_INFINITY;
                 for (int b = 0; b < k; b++) {
@@ -536,12 +586,13 @@ public final class ScreenReport {
                         fill = x[b];
                     }
                 }
-                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, missEffect >= 0 ? "+" : "-", fill, Double.NaN,
+                // the direction of the missing-vs-rest contrast (not the missing bin's raw effect, which an offset
+                // miscalibrated overall would carry)
+                final String fillText = Double.isNaN(fill) ? ""
+                        : position ? ", or place it at rank " + fmt(fill) + " within the unit" : ", or fill with " + fmt(fill);
+                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, direction(bd, phiMiss, nb), fill, Double.NaN,
                         blockAllDisc > 0 ? chiDisc / blockAllDisc : 0d, chiDisc, bc, phiMiss, nb, blockAllConf, nConf,
-                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + (Double.isNaN(fill) ? "" : ", or fill with " + fmt(fill)), placeboGains));
-                // the confirmation statistic used the whole-block share: recompute the share on the confirmation block
-                final Map<String, Object> last = candidates.get(candidates.size() - 1);
-                last.put("confirmation_share", blockAllConf > 0 ? chiConf / blockAllConf : 0d);
+                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains));
             }
         }
         // the cut per kind from the placebo columns' confirmation gains, else the theoretical chi2(1) / 2N of the half
@@ -606,12 +657,41 @@ public final class ScreenReport {
         return v[3 * nb];
     }
 
-    /** The block's χ² over the first {@code over} bins (the value bins, the missing bin left out). */
-    private static double subBlockChi2(final Block block, final int over) {
-        final double[] s = Arrays.copyOf(block.s, over);
-        final double[] diag = Arrays.copyOf(block.h, over);
+    /**
+     * The bound the shares are read against: the maximum of {@link #contrastChi2} over every contrast φ on the first
+     * {@code over} bins. S and H go through the same H-weighted centring P = I − 1w' (w_b = H_bb / Σ H_bb over the
+     * bins with information): S̃ = P'S, H̃ = P'HP, then S̃'H̃⁺S̃ — 1 spans H̃'s null space and S̃ ⊥ 1, so one
+     * reference bin is dropped exactly. The block's own χ² is not that bound: a row family's H is diagonal (the
+     * intercept is not profiled out of it), and the value bins alone leave the missing bin's coupling out, so a
+     * single contrast could exceed it (a share above 1).
+     */
+    private static double contrastBound(final Block block, final int over) {
+        double hsum = 0, ssum = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            hsum += block.h[b];
+            ssum += block.s[b];
+        }
+        if (!(hsum > 0)) return 0d;
+        // w: the centring weights; r = H1 and t = 1'H1 over the bins with information
+        final double[] w = new double[over], r = new double[over];
+        double t = 0;
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            w[b] = block.h[b] / hsum;
+            for (int c = 0; c < over; c++) if (block.h[c] > 0) r[b] += block.hFull[b][c];
+            t += r[b];
+        }
+        final double[] s = new double[over], diag = new double[over];
         final double[][] h = new double[over][over];
-        for (int i = 0; i < over; i++) h[i] = Arrays.copyOf(block.hFull[i], over);
+        for (int b = 0; b < over; b++) {
+            if (!(block.h[b] > 0)) continue;
+            s[b] = block.s[b] - w[b] * ssum;
+            for (int c = 0; c < over; c++) {
+                if (block.h[c] > 0) h[b][c] = block.hFull[b][c] - r[b] * w[c] - w[b] * r[c] + w[b] * w[c] * t;
+            }
+            diag[b] = h[b][b];
+        }
         final Stats[] out = new Stats[1];
         final int df = blockChi2(s, h, diag, 1, 2, out);
         return df < 1 ? 0d : out[0].chi2;
@@ -663,7 +743,8 @@ public final class ScreenReport {
         for (int b = 0; b < k; b++) index[b] = b;
         out.add(new Shape("rank", index, Double.NaN));
         if (x != null) {
-            out.add(new Shape("linear", x.clone(), Double.NaN));
+            // position bins: the representatives are the rank positions, so linear would repeat rank exactly
+            if (!position) out.add(new Shape("linear", x.clone(), Double.NaN));
             boolean positive = true, nonNegative = true;
             for (final double v : x) {
                 if (!(v > 0)) positive = false;
@@ -692,8 +773,8 @@ public final class ScreenReport {
                 down[b] = Math.max(0, cut - x[b]);
                 abs[b] = Math.abs(x[b] - cut);
             }
-            out.add(new Shape("hinge", up, cut));
-            out.add(new Shape("hinge", down, cut));
+            out.add(new Shape("hinge", up, cut, false));
+            out.add(new Shape("hinge", down, cut, true));
             out.add(new Shape("abs", abs, cut));
         }
         return out;
@@ -728,11 +809,14 @@ public final class ScreenReport {
         final String c = fmt(shape.cut);
         return switch (shape.name) {
             case "linear" -> name + " as is";
-            case "log" -> "{scope: row, expr: \"log(" + name + ")\"}";
-            case "sqrt" -> "{scope: row, expr: \"sqrt(" + name + ")\"}";
+            // position bins: the shape is of the within-unit rank, not of the raw value
+            case "log" -> position ? "the log of the rank of " + name + " within the unit" : "{scope: row, expr: \"log(" + name + ")\"}";
+            case "sqrt" -> position ? "the square root of the rank of " + name + " within the unit" : "{scope: row, expr: \"sqrt(" + name + ")\"}";
             case "rank" -> position ? "the rank of " + name + " within the unit" : "the rank of " + name + " over the window (a quantile transform upstream)";
             case "step" -> position ? "the rows above rank " + c + " within the unit" : "{scope: row, expr: \"" + name + " > " + c + " ? 1 : 0\"}";
-            case "hinge" -> position ? "a hinge at rank " + c + " of " + name + " within the unit" : "{scope: row, expr: \"max(0, " + name + " - " + c + ")\"} or max(0, " + c + " - " + name + ")";
+            case "hinge" -> position
+                    ? "a hinge " + (shape.below ? "below" : "above") + " rank " + c + " of " + name + " within the unit"
+                    : "{scope: row, expr: \"" + (shape.below ? "max(0, " + c + " - " + name + ")" : "max(0, " + name + " - " + c + ")") + "\"}";
             case "abs" -> position ? "the distance to rank " + c + " of " + name + " within the unit" : "{scope: row, expr: \"abs(" + name + " - " + c + ")\"}";
             default -> shape.name;
         };
@@ -746,9 +830,10 @@ public final class ScreenReport {
     /**
      * The several-candidate suggestions (DSL doc §9.5) from the candidates' joint sums under {@link ScoreAccumulator#JOINT_KEY}:
      * the score vector S, the m × m Fisher matrix H and the pHd matrix M = Σ w r x̃x̃' over the joint columns (the chosen
-     * candidates, then a few noise placebos for the null scale). Reported: the principal Hessian directions of
-     * H^(−1/2) M H^(−1/2) (residual curvature: quadratic effects and interactions in bulk, the loadings naming the
-     * candidates; a diagnostic, never a pass flag), the redundancy clusters (|correlation| in the Fisher metric at or
+     * candidates, then a few noise placebos for the null scale; row families: r with the intercept profiled out as in S,
+     * gaussian S / H / M over σ² as in {@link #stats}, a degenerate column dropped). Reported: the principal Hessian
+     * directions of H^(−1/2) M H^(−1/2) (residual curvature: quadratic effects and interactions in bulk, the scale-free
+     * loadings v_j √H_jj naming the candidates; a diagnostic, never a pass flag), the redundancy clusters (|correlation| in the Fisher metric at or
      * above {@code joint.redundancy}), a report-time forward selection (the score test of a candidate given the
      * selected set, closed form at β = 0, stopped at the df = 1 cut) and the linear composite of the selected set.
      * In-sample, one-step: hypotheses for a feature spec, not decisions.
@@ -759,9 +844,9 @@ public final class ScreenReport {
         if (!spec.jointOn) return out;
         final ScoreAccumulator acc = accumulators.get(ScoreAccumulator.JOINT_KEY);
         final int m = spec.jointColumnCount();
+        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(m);
         final double[] e = acc == null ? null : acc.getExtra();
-        if (e == null || e.length != GroupScorer.jointLength(m) || !(e[0] > 0)) return out;
-        final int hOff = 1 + m, rOff = 1 + m + m * (m + 1) / 2, sOff = rOff + 1, mOff = sOff + m, r2Off = mOff + m * (m + 1) / 2;
+        if (e == null || e.length != at.length() || !(e[0] > 0)) return out;
         final List<String> names = spec.columnNames();
         final int nCand = spec.jointColumns.size();
         // centred S, H (Fisher), M (pHd)
@@ -769,44 +854,69 @@ public final class ScreenReport {
         final double[][] h = new double[m][m], mm = new double[m][m];
         if (spec.isGroupedMultinomial()) {
             for (int j = 0; j < m; j++) {
-                s[j] = e[sOff + j];
+                s[j] = e[at.s() + j];
                 for (int l = 0; l < m; l++) {
-                    h[j][l] = e[hOff + GroupScorer.packed(m, j, l)];
-                    mm[j][l] = e[mOff + GroupScorer.packed(m, j, l)];
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)];
                 }
             }
         } else {
-            final double n0 = e[0], rsum = e[rOff];
+            final double n0 = e[0], rsum = e[at.r()];
             final double[] mu = new double[m];
             for (int j = 0; j < m; j++) mu[j] = e[1 + j] / n0;
             for (int j = 0; j < m; j++) {
-                s[j] = e[sOff + j] - mu[j] * rsum;
+                s[j] = e[at.s() + j] - mu[j] * rsum;
                 for (int l = 0; l < m; l++) {
-                    h[j][l] = e[hOff + GroupScorer.packed(m, j, l)] - n0 * mu[j] * mu[l];
-                    mm[j][l] = e[mOff + GroupScorer.packed(m, j, l)] - mu[j] * e[sOff + l] - mu[l] * e[sOff + j] + mu[j] * mu[l] * rsum;
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)] - n0 * mu[j] * mu[l];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
                 }
             }
-            if (!spec.hasBaseline()) {
-                // prior mode: r = y; the residual is y − ȳ, the Fisher weight the prior's (the label variance for gaussian)
-                final double rMean = rsum / n0;
-                final double scale = spec.isGaussian() ? 1d / Math.max(e[r2Off] / n0 - rMean * rMean, 1e-300) : spec.fisherWeight(rMean);
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
+            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
+            for (int j = 0; j < m; j++) {
+                if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
+                s[j] = 0d;
+                for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+            }
+            // the intercept is profiled out of M as it is out of S: the residual at its one-step estimate
+            // Σ w r / Σ w v (prior mode: y − ȳ), so a miscalibrated baseline does not add its mean residual times H
+            final double rMean = rsum / n0;
+            for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) mm[j][l] -= rMean * h[j][l];
+            if (spec.isGaussian()) {
+                // identity link: S, H and M over σ², the residual (offset) / label (prior) variance, as in stats()
+                final double sigma2 = e[at.r2()] / n0 - rMean * rMean;
+                if (!(sigma2 > 0)) return out;
                 for (int j = 0; j < m; j++) {
+                    s[j] /= sigma2;
                     for (int l = 0; l < m; l++) {
-                        mm[j][l] -= rMean * h[j][l];
-                        h[j][l] *= scale;
+                        h[j][l] /= sigma2;
+                        mm[j][l] /= sigma2;
                     }
-                    if (spec.isGaussian()) s[j] *= scale;
                 }
+            } else if (!spec.hasBaseline()) {
+                // prior mode: raw moments, the Fisher weight at ȳ (offset mode: already inside the sums)
+                final double weight = spec.fisherWeight(rMean);
+                for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) h[j][l] *= weight;
             }
         }
+        // overflowing sums leave nothing to decompose (a non-finite matrix may not terminate the eigensolver)
+        if (!allFinite(s) || !allFinite(h) || !allFinite(mm)) return out;
         double trace = 0;
-        for (int j = 0; j < m; j++) trace += h[j][j];
+        final double[] hd = new double[m];
+        for (int j = 0; j < m; j++) {
+            hd[j] = h[j][j];
+            trace += hd[j];
+        }
         if (!(trace > 0)) return out;
         final double ridge = 1e-8 * trace / m;
-        for (int j = 0; j < m; j++) h[j][j] += ridge;
-        // pHd: eigenpairs of H^(-1/2) M H^(-1/2), the directions mapped back through H^(-1/2)
+        // pHd: eigenpairs of H^(-1/2) M H^(-1/2) (H ridged to stay definite), the directions mapped back through H^(-1/2)
         try {
-            final SymmetricEigen.Result eh = SymmetricEigen.leading(h, m, false);
+            final double[][] hr = new double[m][];
+            for (int j = 0; j < m; j++) {
+                hr[j] = h[j].clone();
+                hr[j][j] += ridge;
+            }
+            final SymmetricEigen.Result eh = SymmetricEigen.leading(hr, m, false);
             final double[][] hm = new double[m][m];
             for (int i = 0; i < eh.values().length; i++) {
                 if (!(eh.values()[i] > 1e-12 * trace)) continue;
@@ -814,43 +924,47 @@ public final class ScreenReport {
                 final double f = 1 / Math.sqrt(eh.values()[i]);
                 for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) hm[j][l] += f * u[j] * u[l];
             }
-            final double[][] b = new double[m][m];
-            for (int j = 0; j < m; j++) {
-                for (int l = 0; l < m; l++) {
-                    double v = 0;
-                    for (int a = 0; a < m; a++) for (int c = 0; c < m; c++) v += hm[j][a] * mm[a][c] * hm[c][l];
-                    b[j][l] = v;
-                }
-            }
+            // B = hm M hm as two m³ products
+            final double[][] b = multiply(multiply(hm, mm), hm);
             final SymmetricEigen.Result eb = SymmetricEigen.leading(b, m, true);
             double total = 0;
             for (final double v : eb.values()) total += Math.abs(v);
+            final boolean noise = nCand < m;
             for (int k = 0; k < Math.min(spec.jointDirections, eb.values().length); k++) {
                 final double[] q = eb.vectors()[k];
-                final double[] v = new double[m];
-                double norm = 0;
+                // v: the projection's coefficients in the columns' units (the recipe v'x); z: the scale-free loadings
+                // v_j √H_jj, which name the candidates and compare with the noise columns' (the null scale)
+                final double[] v = new double[m], z = new double[m];
+                double norm = 0, zNorm = 0;
                 for (int j = 0; j < m; j++) {
                     for (int l = 0; l < m; l++) v[j] += hm[j][l] * q[l];
+                    z[j] = v[j] * Math.sqrt(Math.max(hd[j], 0d));
                     norm += v[j] * v[j];
+                    zNorm += z[j] * z[j];
                 }
                 norm = Math.sqrt(norm);
-                if (!(norm > 0)) continue;
-                for (int j = 0; j < m; j++) v[j] /= norm;
+                zNorm = Math.sqrt(zNorm);
+                if (!(norm > 0) || !(zNorm > 0)) continue;
+                for (int j = 0; j < m; j++) {
+                    v[j] /= norm;
+                    z[j] /= zNorm;
+                }
                 final Integer[] order = new Integer[nCand];
                 for (int j = 0; j < nCand; j++) order[j] = j;
-                Arrays.sort(order, Comparator.comparingDouble(j -> -Math.abs(v[j])));
-                double noiseLoading = 0;
-                for (int j = nCand; j < m; j++) noiseLoading = Math.max(noiseLoading, Math.abs(v[j]));
+                Arrays.sort(order, Comparator.comparingDouble(j -> -Math.abs(z[j])));
+                double noiseLoading = noise ? 0d : Double.NaN;
+                for (int j = nCand; j < m; j++) noiseLoading = Math.max(noiseLoading, Math.abs(z[j]));
                 final StringBuilder fragment = new StringBuilder();
                 for (int i = 0; i < Math.min(5, nCand); i++) {
                     final int j = order[i];
-                    if (Math.abs(v[j]) < 0.05) break;
+                    if (Math.abs(z[j]) < 0.05) break;
                     fragment.append(fragment.length() == 0 ? (v[j] < 0 ? "-" : "") : (v[j] < 0 ? " - " : " + "))
                             .append(fmt(Math.abs(v[j]))).append("*").append(names.get(spec.jointColumn(j)));
                 }
                 out.add(jointRecord(names.get(spec.jointColumn(order[0])), "phd", "direction" + (k + 1), noiseLoading,
-                        total > 0 ? Math.abs(eb.values()[k]) / total : 0d, eb.values()[k], Double.NaN, null,
-                        "the projection v'x and its square, v = " + fragment + " (max noise loading " + fmt(noiseLoading) + ")"));
+                        total > 0 ? Math.abs(eb.values()[k]) / total : 0d, eb.values()[k], Double.NaN, null, Double.NaN,
+                        "the projection v'x and its square, v = " + fragment
+                                + (noise ? " (max noise loading " + fmt(noiseLoading) + ")" : " (no noise column: no null scale)")));
             }
         } catch (final RuntimeException ex) {
             // a singular metric or a failed decomposition leaves the pHd diagnostic out
@@ -861,7 +975,7 @@ public final class ScreenReport {
         final double[][] corr = new double[nCand][nCand];
         for (int j = 0; j < nCand; j++) {
             for (int l = j + 1; l < nCand; l++) {
-                corr[j][l] = corr[l][j] = h[j][j] > 0 && h[l][l] > 0 ? h[j][l] / Math.sqrt(h[j][j] * h[l][l]) : 0d;
+                corr[j][l] = corr[l][j] = hd[j] > 0 && hd[l] > 0 ? h[j][l] / Math.sqrt(hd[j] * hd[l]) : 0d;
                 if (Math.abs(corr[j][l]) >= spec.jointRedundancy) parent[find(parent, j)] = find(parent, l);
             }
         }
@@ -881,29 +995,36 @@ public final class ScreenReport {
             }
             final List<String> others = new ArrayList<>();
             for (final int j : members) if (j != head) others.add(names.get(spec.jointColumn(j)));
-            out.add(jointRecord(names.get(spec.jointColumn(head)), "redundant", "cluster", Double.NaN, minCorr, best, Double.NaN, null,
+            out.add(jointRecord(names.get(spec.jointColumn(head)), "redundant", "cluster", Double.NaN, minCorr, best, Double.NaN, null, Double.NaN,
                     "near-duplicates of " + names.get(spec.jointColumn(head)) + ": " + others + " (|corr| >= " + fmt(spec.jointRedundancy) + "); keep one, or average / project them"));
         }
         // forward selection at beta = 0: the score test of a candidate given the selected set, closed form
         final List<Integer> selected = new ArrayList<>();
+        final boolean[] taken = new boolean[nCand];
         for (int step = 0; step < spec.jointSelect; step++) {
+            // γ_j = H_AA⁻¹ H_Aj for every candidate at once: one factorisation of the selected block per step
+            final int a = selected.size();
+            final double[] sa = new double[a];
+            final double[][] hac = new double[a][nCand];
+            double[][] gamma = null;
+            if (a > 0) {
+                final double[][] haa = new double[a][a];
+                for (int i = 0; i < a; i++) {
+                    final int si = selected.get(i);
+                    sa[i] = s[si];
+                    for (int l = 0; l < a; l++) haa[i][l] = h[si][selected.get(l)];
+                    for (int j = 0; j < nCand; j++) hac[i][j] = h[si][j];
+                }
+                gamma = MatrixOps.solveGram(haa, hac, ridge);
+            }
             int bestJ = -1;
             double bestChi2 = 0;
             for (int j = 0; j < nCand; j++) {
-                if (selected.contains(j) || !(h[j][j] > 0)) continue;
+                if (taken[j] || !(h[j][j] > 0)) continue;
                 double sPerp = s[j], hPerp = h[j][j];
-                if (!selected.isEmpty()) {
-                    final int a = selected.size();
-                    final double[][] haa = new double[a][a];
-                    final double[] haj = new double[a], sa = new double[a];
-                    for (int i = 0; i < a; i++) {
-                        sa[i] = s[selected.get(i)];
-                        haj[i] = h[selected.get(i)][j];
-                        for (int l = 0; l < a; l++) haa[i][l] = h[selected.get(i)][selected.get(l)];
-                    }
-                    final double[] gamma = MatrixOps.solveGram(haa, haj, ridge);
-                    sPerp -= MatrixOps.dot(gamma, sa);
-                    hPerp -= MatrixOps.dot(gamma, haj);
+                for (int i = 0; i < a; i++) {
+                    sPerp -= gamma[i][j] * sa[i];
+                    hPerp -= gamma[i][j] * hac[i][j];
                 }
                 if (!(hPerp > 1e-10 * h[j][j])) continue;
                 final double chi2 = sPerp * sPerp / hPerp;
@@ -916,9 +1037,10 @@ public final class ScreenReport {
             if (bestJ < 0 || !(gain > df1Cut)) break;
             final List<String> given = new ArrayList<>();
             for (final int j : selected) given.add(names.get(spec.jointColumn(j)));
-            out.add(jointRecord(names.get(spec.jointColumn(bestJ)), "select", "step" + (step + 1), Double.NaN, gain, bestChi2, gain, true,
+            out.add(jointRecord(names.get(spec.jointColumn(bestJ)), "select", "step" + (step + 1), Double.NaN, gain, bestChi2, gain, true, df1Cut,
                     "adds " + fmt(gain) + " given " + given));
             selected.add(bestJ);
+            taken[bestJ] = true;
         }
         if (selected.size() >= 2) {
             final int a = selected.size();
@@ -937,7 +1059,7 @@ public final class ScreenReport {
                             .append(fmt(Math.abs(beta[i]))).append("*").append(names.get(spec.jointColumn(selected.get(i))));
                 }
                 final double gain = nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN;
-                out.add(jointRecord(names.get(spec.jointColumn(selected.get(0))), "composite", "composite", Double.NaN, gain, chi2, gain, null,
+                out.add(jointRecord(names.get(spec.jointColumn(selected.get(0))), "composite", "composite", Double.NaN, gain, chi2, gain, null, Double.NaN,
                         "{scope: row, expr: \"" + expr + "\"}"));
             } catch (final RuntimeException ex) {
                 // a singular selected block leaves the composite out
@@ -973,14 +1095,14 @@ public final class ScreenReport {
             final boolean iPositive = p[4] > 0;
             final String first = iPositive ? a : b, second = iPositive ? b : a;
             final double r = Math.abs(iPositive ? p[5] / p[4] : p[4] / p[5]);
-            final Map<String, Object> diff = jointRecord(first, "difference", first + " - " + second, p[6], p[2], p[3], gain, null,
+            final Map<String, Object> diff = jointRecord(first, "difference", first + " - " + second, p[6], p[2], p[3], gain, null, Double.NaN,
                     "{scope: row, expr: \"" + first + " - " + fmt(r) + "*" + second + "\"} (joint chi2 " + fmt(p[3]) + ", " + fmt(p[2]) + "x the better single)");
             out.add(diff);
             // the ratio reading needs positive columns (the log-scale direction); the sketch minima tell
             final Double minI = bins == null ? Double.NaN : bins.minimum().apply(spec.jointColumn(i));
             final Double minJ = bins == null ? Double.NaN : bins.minimum().apply(spec.jointColumn(j));
             if (minI != null && minJ != null && minI > 0 && minJ > 0) {
-                out.add(jointRecord(first, "ratio", first + " / " + second, p[6], p[2], p[3], gain, null,
+                out.add(jointRecord(first, "ratio", first + " / " + second, p[6], p[2], p[3], gain, null, Double.NaN,
                         "{scope: row, expr: \"" + first + " / " + second + "\"} (both positive; the difference's log-scale reading, approximate)"));
             }
         }
@@ -993,9 +1115,35 @@ public final class ScreenReport {
         return r;
     }
 
+    /** The product of two square matrices (the pHd metric's B = H^(−1/2) M H^(−1/2)), i-k-j order. */
+    private static double[][] multiply(final double[][] x, final double[][] y) {
+        final int n = x.length;
+        final double[][] out = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            for (int k = 0; k < n; k++) {
+                final double xik = x[i][k];
+                if (xik == 0d) continue;
+                final double[] yk = y[k], oi = out[i];
+                for (int j = 0; j < n; j++) oi[j] += xik * yk[j];
+            }
+        }
+        return out;
+    }
+
+    private static boolean allFinite(final double[] v) {
+        for (final double d : v) if (!Double.isFinite(d)) return false;
+        return true;
+    }
+
+    private static boolean allFinite(final double[][] m) {
+        for (final double[] row : m) if (!allFinite(row)) return false;
+        return true;
+    }
+
     /** A joint suggestion record in the suggestions schema (the discovery / confirmation fields carry the in-sample values). */
     private static Map<String, Object> jointRecord(final String candidate, final String kind, final String name, final double consistency,
-                                                   final double share, final double chi2, final double gain, final Boolean passed, final String fragment) {
+                                                   final double share, final double chi2, final double gain, final Boolean passed,
+                                                   final double threshold, final String fragment) {
         final Map<String, Object> s = new LinkedHashMap<>();
         s.put("candidate", candidate);
         s.put("kind", kind);
@@ -1010,7 +1158,7 @@ public final class ScreenReport {
         s.put("confirmation_share", null);
         s.put("confirmation_gain", Double.isNaN(gain) ? null : gain);
         s.put("confirmation_pValue", null);
-        s.put("threshold", null);
+        s.put("threshold", Double.isNaN(threshold) ? null : threshold);
         s.put("passed", passed);
         s.put("placebo", false);
         s.put("fragment", fragment);
@@ -1024,10 +1172,10 @@ public final class ScreenReport {
      * diagonal information) as a share of the grid's block χ² (the bound), and the asymmetry of the two sides'
      * second-level gains: near 0 the other member matters on one side only ("b matters only when a > c"), near 1 it
      * matters on both (no conditional shape). In-sample, a diagnostic; the recipe is the crossed bins or a
-     * conditional expression.
+     * conditional expression. Gaussian divides the sums by the residual variance {@code sigma2} (1 otherwise).
      */
     static List<Map<String, Object>> interactions(final ScreenSpec spec, final Map<Integer, PartialAccumulator> partials, final boolean conditioned,
-                                                  final double nUnits, final Bins bins) {
+                                                  final double nUnits, final double sigma2, final Bins bins) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.hasPairShape() || !conditioned || partials == null || bins == null) return out;
         final int kk = spec.pairShapeBins, cells = kk * kk;
@@ -1042,19 +1190,27 @@ public final class ScreenReport {
             if (ea == null || eb == null) continue;
             final boolean grouped = spec.isGroupedMultinomial();
             final double[] s = new double[cells], diag = new double[cells];
-            final double[][] h = new double[cells][cells];
+            final double[][] h = grouped ? new double[cells][cells] : null;
             for (int c = 0; c < cells; c++) {
-                s[c] = vec[c];
+                s[c] = vec[c] / sigma2;
                 if (grouped) {
-                    for (int d = 0; d < cells; d++) h[c][d] = (c == d ? vec[cells + c] : 0d) - vec[2 * cells + c * cells + d];
+                    for (int d = 0; d < cells; d++) h[c][d] = ((c == d ? vec[cells + c] : 0d) - vec[2 * cells + c * cells + d]) / sigma2;
+                    diag[c] = h[c][c];
                 } else {
-                    h[c][c] = vec[cells + c];
+                    diag[c] = vec[cells + c] / sigma2;
                 }
-                diag[c] = h[c][c];
             }
-            final Stats[] block = new Stats[1];
-            final int df = blockChi2(s, h, diag, nUnits, 2, block);
-            if (df < 1 || !(block[0].chi2 > 0)) continue;
+            // the bound: the grid's block χ². Grouped: the full Fisher block (the shares' sum is the implicit
+            // reference). Row families: the diagonal block with the intercept profiled, Σ S_c² / H_c − (Σ S)² / Σ H —
+            // the tree's gain (the same diagonal information, profiled per node) never exceeds it
+            final double chi2;
+            if (grouped) {
+                final Stats[] block = new Stats[1];
+                chi2 = blockChi2(s, h, diag, nUnits, 2, block) < 1 ? Double.NaN : block[0].chi2;
+            } else {
+                chi2 = profiledDiagonalChi2(s, diag);
+            }
+            if (!(chi2 > 0)) continue;
             // the best depth-2 tree: first split on a (cells with a_bin <= j) or on b, then the best split of the
             // other member within each side
             double best = -1;
@@ -1084,23 +1240,62 @@ public final class ScreenReport {
             final String first = bestVar == 0 ? a : b, other = bestVar == 0 ? b : a;
             final double[] firstEdges = bestVar == 0 ? ea : eb, otherEdges = bestVar == 0 ? eb : ea;
             final double cut = firstEdges[bestCut];
-            final boolean rightSide = bestRight >= bestLeft;
+            final double share = Math.min(1d, best / chi2), gain = nUnits > 0 ? best / (2 * nUnits) : Double.NaN;
             final double sideGain = Math.max(bestLeft, bestRight), otherGain = Math.min(bestLeft, bestRight);
-            final double asymmetry = sideGain > 0 ? otherGain / sideGain : 1d;
+            if (!(sideGain > 0)) {
+                // no split of the other member adds anything on either side: the grid's gain is the first member's
+                // own split, not an interaction — no side, no fill, no consistency (0 / 0)
+                final String reading = "no split of " + other + " adds to " + first + " at " + fmt(cut) + " on either side: no conditional shape";
+                final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), Double.NaN, share, best, gain, null, Double.NaN,
+                        reading + " -> " + rowBinFragment(first, new double[]{cut}));
+                rec.put("cut", cut);
+                out.add(rec);
+                continue;
+            }
+            final boolean rightSide = bestRight >= bestLeft;
+            final double consistency = otherGain / sideGain;
             final int sideCut = rightSide ? bestRightCut : bestLeftCut;
-            final String sideCutText = sideCut >= 0 ? fmt(otherEdges[sideCut]) : "";
-            final String reading = other + " matters " + (asymmetry < 0.5 ? "mainly" : "on both sides, and most") + " when " + first + (rightSide ? " > " : " <= ") + fmt(cut)
-                    + (sideCut >= 0 ? " (its own cut at " + sideCutText + ")" : "") + "; second-level gains " + fmt(bestLeft) + " / " + fmt(bestRight);
-            final String fragment = "cross of bin(" + first + ", edges: [" + fmt(cut) + "]) and bin(" + other + ", edges: [" + sideCutText + "])"
-                    + (asymmetry < 0.5 && sideCut >= 0 ? ", or {scope: row, expr: \"" + first + (rightSide ? " > " : " <= ") + fmt(cut) + " ? " + other + " : 0\"}" : "");
-            final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), asymmetry,
-                    Math.min(1d, best / block[0].chi2), best, nUnits > 0 ? best / (2 * nUnits) : Double.NaN, null, reading + " -> " + fragment);
+            final double fill = otherEdges[sideCut];
+            final String side = first + (rightSide ? " > " : " <= ");
+            final String reading = other + " matters " + (consistency < 0.5 ? "mainly" : "on both sides, and most") + " when " + side + fmt(cut)
+                    + " (its own cut at " + fmt(fill) + "); second-level gains " + fmt(bestLeft) + " / " + fmt(bestRight);
+            // the recipe reproduces the screen's partition exactly: the row bin op at the next double above each edge
+            // (rowBinFragment), the conditional expression at the full-precision cut
+            final String fragment = "cross of " + rowBinFragment(first, new double[]{cut}) + " and " + rowBinFragment(other, new double[]{fill})
+                    + " (a row type: cross of the two bins)"
+                    + (consistency < 0.5 ? ", or {scope: row, expr: \"" + side + plain(cut) + " ? " + other + " : 0\"}" : "");
+            final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), consistency,
+                    share, best, gain, null, Double.NaN, reading + " -> " + fragment);
             rec.put("cut", cut);
             rec.put("direction", rightSide ? ">" : "<=");
-            rec.put("fill", sideCut >= 0 ? otherEdges[sideCut] : null);
+            rec.put("fill", fill);
             out.add(rec);
         }
         return out;
+    }
+
+    /**
+     * The score statistic of a one-hot block with diagonal information and the intercept profiled:
+     * Σ S_c² / H_c − (Σ S_c)² / Σ H_c over the cells with information (NaN below two of them).
+     */
+    private static double profiledDiagonalChi2(final double[] s, final double[] h) {
+        double maxH = 0;
+        for (final double v : h) maxH = Math.max(maxH, v);
+        double chi2 = 0, gs = 0, hs = 0;
+        int active = 0;
+        for (int c = 0; c < s.length; c++) {
+            if (!(h[c] > 1e-12 * maxH) || !(h[c] > 1e-300) || !Double.isFinite(s[c])) continue;
+            chi2 += s[c] * s[c] / h[c];
+            gs += s[c];
+            hs += h[c];
+            active++;
+        }
+        return active < 2 ? Double.NaN : Math.max(0d, chi2 - gs * gs / hs);
+    }
+
+    /** A cut written in full, in plain notation (a rounded cut moves the rows between it and the true one to the other side). */
+    private static String plain(final double v) {
+        return java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
     }
 
     /** The split gain of a node's cells into left / right with the intercept profiled: G_L² / H_L + G_R² / H_R − G² / H. */
@@ -1169,7 +1364,7 @@ public final class ScreenReport {
                 final List<String> low = new ArrayList<>(), high = new ArrayList<>();
                 for (int j = 0; j < order.size(); j++) (j < bestCut ? low : high).add(levels.names().get(order.get(j)));
                 out.add(jointRecord(name, "grouping", "split", Double.NaN, Math.min(1d, bestGain / block.stats.chi2), bestGain,
-                        nUnits > 0 ? bestGain / (2 * nUnits) : Double.NaN, null,
+                        nUnits > 0 ? bestGain / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         "group " + name + " into " + low + " (lower effect) vs " + high + " (higher): a level grouping, or one-hot the few strong levels and a shrunk encoding for the rest"));
             }
             // strong single levels
@@ -1181,7 +1376,7 @@ public final class ScreenReport {
                 if (chi2 < 9) continue;
                 final String level = levels.names().get(l);
                 out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
-                        nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null,
+                        nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         "{scope: row, expr: \"" + name + " == '" + level.replace("'", "\\'") + "' ? 1 : 0\"} (z " + fmt(Math.signum(block.s[l]) * Math.sqrt(chi2)) + ")"));
             }
         }
@@ -1222,7 +1417,8 @@ public final class ScreenReport {
     /**
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
-     * @param bins     the bins' geometry for the suggestions (null = no suggestions)
+     * @param bins     the bins' geometry for the suggestions and the block records' {@code bin_edges} (null = no
+     *                 suggestions, and null edges: a passing value block then has no row bin op in the pass list)
      */
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                final Map<Integer, PartialAccumulator> partials, final FitState fit, final Bins bins) {
@@ -1240,7 +1436,19 @@ public final class ScreenReport {
         }
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
-        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2) : Map.of();
+        // the df = 1 keys' γ in one batched solve; a binned key's sums have the block layout [s (B), H, A], not
+        // [s, b, a], and blockPartial solves its Γ itself
+        final Map<Integer, double[]> gammas;
+        if (conditioned) {
+            final Map<Integer, PartialAccumulator> scalar = new HashMap<>();
+            for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
+                if (e.getKey() >= 0 && ScreenSpec.isBinned(spec.transforms.get(e.getKey() % nTransforms))) continue;
+                scalar.put(e.getKey(), e.getValue());
+            }
+            gammas = gammas(scalar, fit, spec.conditioningL2, spec.pairGridKey(0));
+        } else {
+            gammas = Map.of();
+        }
         // the fitted model's [n, g, G] per period: the partial statistic's decomposition by period
         final PartialAccumulator fitPeriods = conditioned ? partials.get(ConditioningScorer.FIT_PERIOD_KEY) : null;
         final List<String> notes = new ArrayList<>(spec.notes);
@@ -1255,7 +1463,9 @@ public final class ScreenReport {
             notes.add("flags.leakZ.on partial: no partial statistics (see the conditioning note); the leak flag reads the marginal z");
         }
         if (fitPeriods != null && !fitPeriods.isEmpty() && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k) {
-            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period partial information is approximate (the window's Gram scaled by the period's unit mass); the per-period partial score and sign are exact");
+            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period"
+                    + (spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? " / per-level" : "")
+                    + " partial information is approximate (the window's Gram scaled by the slice's unit mass); the partial score and sign per slice are exact");
         }
         // skipped units past the share worth a look: which reason, and the way out of an invalid-baseline skip
         final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
@@ -1318,9 +1528,7 @@ public final class ScreenReport {
                     // the value edges (k − 1), the pass list's material to reproduce a passing block as a row bin op;
                     // null for position bins or without a sketch value
                     final double[] edges = bins == null ? null : bins.edges().apply(c);
-                    final List<Double> edgeList = edges == null ? null : new ArrayList<>();
-                    if (edges != null) for (final double v : edges) edgeList.add(v);
-                    r.put("bin_edges", edgeList);
+                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(edges).boxed().toList()));
                     Stats used = st;
                     if (conditioned) {
                         final PartialAccumulator pacc = partials.get(key);
@@ -1386,24 +1594,12 @@ public final class ScreenReport {
                 for (final Map.Entry<String, double[]> e : acc.getPeriods().entrySet()) {
                     final Stats ps = stats(spec, e.getValue(), nUnits);
                     if (ScoreAccumulator.isLevel(e.getKey())) {
-                        final Map<String, Object> lr = new LinkedHashMap<>();
-                        lr.put("level", ScoreAccumulator.levelName(e.getKey()));
-                        lr.put("z", ps.degenerate ? null : ps.z);
-                        lr.put("S", ps.s);
-                        lr.put("H", ps.h);
-                        lr.put("n", ps.nObs);
-                        levelRecords.add(lr);
+                        levelRecords.add(sliceRecord("level", ScoreAccumulator.levelName(e.getKey()), ps, ps.nObs));
                         levelStats.add(ps);
                         if (!ps.degenerate) scorableLevels.add(e.getKey());
                         continue;
                     }
-                    final Map<String, Object> pr = new LinkedHashMap<>();
-                    pr.put("period", e.getKey());
-                    pr.put("z", ps.degenerate ? null : ps.z);
-                    pr.put("S", ps.s);
-                    pr.put("H", ps.h);
-                    pr.put("n", ps.nObs);
-                    periodRecords.add(pr);
+                    periodRecords.add(sliceRecord("period", e.getKey(), ps, ps.nObs));
                     periodStats.add(ps);
                     if (!ps.degenerate) {
                         scorablePeriods.add(e.getKey());
@@ -1417,7 +1613,7 @@ public final class ScreenReport {
                 r.put("bin_stats", null);
                 r.put("bin_edges", null);
                 // the heterogeneity test across the modifier's levels (marginal; the partial one follows the partial slices)
-                final Het het = !spec.hasHeterogeneity() || st.degenerate ? (spec.hasHeterogeneity() ? Het.degenerate(0) : null)
+                final Het het = !spec.hasHeterogeneity() ? null : st.degenerate ? Het.degenerate(0)
                         : heterogeneity(spec.heterogeneityByPeriods() ? periodStats : levelStats, nUnits);
                 putHet(r, "", het);
                 r.put("level_z", spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? levelRecords : null);
@@ -1468,13 +1664,7 @@ public final class ScreenReport {
                             final Stats ps = scorablePeriods.contains(e.getKey())
                                     ? partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma, windowGGg)
                                     : Stats.degenerate(pObs);
-                            final Map<String, Object> pr = new LinkedHashMap<>();
-                            pr.put("period", e.getKey());
-                            pr.put("z", ps.degenerate ? null : ps.z);
-                            pr.put("S", ps.s);
-                            pr.put("H", ps.h);
-                            pr.put("n", pObs);
-                            partialPeriods.add(pr);
+                            partialPeriods.add(sliceRecord("period", e.getKey(), ps, pObs));
                             partialPeriodStats.add(ps);
                             if (!ps.degenerate) {
                                 pPeriods++;
@@ -1711,10 +1901,14 @@ public final class ScreenReport {
             r.put("leakSuspect", leak);
             final boolean pair = ScreenSpec.TRANSFORM_PRODUCT.equals(r.get("transform"));
             if (passed) {
-                nPassed++;
-                // a passing pair is a recipe (a product to build upstream), never one of the pass list's columns
-                if (pair) passedPairs.add((String) r.get("candidate"));
-                else passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
+                // a passing pair is a recipe (a product to build upstream), never one of the pass list's columns: it
+                // counts in nPairsPassed, not nPassed (nPassed > 0 keeps meaning the pass list has a column)
+                if (pair) {
+                    passedPairs.add((String) r.get("candidate"));
+                } else {
+                    nPassed++;
+                    passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
+                }
             }
             if (leak && !placebo) nLeak++;
             // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
@@ -1768,7 +1962,8 @@ public final class ScreenReport {
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
         summary.put("nPassed", nPassed);
-        summary.put("nPlacebo", placeboGains.values().stream().mapToLong(List::size).sum());
+        // placebo records (not the placebo gains: a df = 1 placebo record feeds both the df1 and the het kind)
+        summary.put("nPlacebo", (long) (records.size() - candidateRecords.size()));
         summary.put("nLeakSuspect", nLeak);
         summary.put("nHetPassed", spec.hasHeterogeneity() ? nHetPassed : null);
         summary.put("hetPassedColumns", spec.hasHeterogeneity() ? hetPassedColumns : null);
@@ -1801,10 +1996,11 @@ public final class ScreenReport {
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
         suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold), bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
-        suggested.addAll(interactions(spec, partials, conditioned, nUnits, bins));
+        suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
         // the categorical candidates' level groupings and strong single levels
         suggested.addAll(groupings(spec, accumulators, nUnits, bins));
-        summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() || spec.hasCategoricals() ? (long) suggested.size() : null);
+        // the candidates' suggestions (placebo records excluded, as nScored)
+        summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() || spec.hasCategoricals() ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
         summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);
         summary.put("nCategoricals", spec.hasCategoricals() ? (long) spec.categoricals.size() : null);
         return new Result(records, summary, suggested);
@@ -1848,13 +2044,17 @@ public final class ScreenReport {
         }
         // the passing pairs (a product to build upstream: {scope: row, expr: "a * b"}), apart from columns
         if (summary.get("passedPairs") != null) {
+            // the members from the spec (not split from the record name: a field name may hold the separator)
+            final Map<String, String[]> members = new HashMap<>();
+            for (int q = 0; q < spec.pairs.size(); q++) members.put(spec.pairName(q), spec.pairFieldNames(q));
             final JsonArray pairs = new JsonArray();
             for (final Object name : (List<?>) summary.get("passedPairs")) {
+                final String[] ab = members.get((String) name);
+                if (ab == null) continue;
                 final JsonObject pair = new JsonObject();
-                final String[] members = ((String) name).split("\\*", 2);
-                pair.addProperty("a", members[0]);
-                pair.addProperty("b", members.length > 1 ? members[1] : null);
-                pair.addProperty("fragment", "{scope: row, expr: \"" + members[0] + " * " + (members.length > 1 ? members[1] : "") + "\"}");
+                pair.addProperty("a", ab[0]);
+                pair.addProperty("b", ab[1]);
+                pair.addProperty("fragment", "{scope: row, expr: \"" + ab[0] + " * " + ab[1] + "\"}");
                 pairs.add(pair);
             }
             o.add("passedPairs", pairs);
@@ -1913,8 +2113,9 @@ public final class ScreenReport {
     /**
      * The recipe of a passing binned block: {@code k}, {@code edges} (value bins: the k − 1 window quantile edges,
      * bin i = (edge_{i−1}, edge_i]) or {@code rankCuts} (position bins: the rank fractions i / k), whether the
-     * missing values had their own bin, and the feature transform's row {@code bin} op with those edges (a
-     * position block has no row op: the within-unit rank is a context op, the fragment says so).
+     * missing values had their own bin, and the feature transform's row {@code bin} op that reproduces those bins
+     * ({@link #rowBinFragment}: the next double above each edge; a position block has no row op: the within-unit
+     * rank is a context op, the fragment says so).
      */
     static JsonObject blockRecipe(final ScreenSpec spec, final String candidate, final Object edges) {
         final JsonObject block = new JsonObject();
@@ -1928,15 +2129,33 @@ public final class ScreenReport {
             block.add("rankCuts", cuts);
             block.add("edges", null);
             block.addProperty("fragment", "the rank of " + candidate + " within the unit, cut at " + cuts + " (a context op upstream, then a row bin)");
-        } else {
-            if (edges instanceof List<?>) for (final Object v : (List<?>) edges) cuts.add((Double) v);
+        } else if (edges instanceof List<?> list) {
+            final double[] values = list.stream().mapToDouble(v -> (Double) v).toArray();
+            for (final double v : values) cuts.add(v);
             block.add("edges", cuts);
             block.add("rankCuts", null);
-            final StringBuilder list = new StringBuilder();
-            for (int i = 0; i < cuts.size(); i++) list.append(i == 0 ? "" : ", ").append(fmt(cuts.get(i).getAsDouble()));
-            block.addProperty("fragment", "{scope: row, type: bin, input: " + candidate + ", edges: [" + list + "]}");
+            block.addProperty("fragment", rowBinFragment(candidate, values));
+        } else {
+            // no value edges (no window sketch value for the column, or a report built without the bins' geometry):
+            // an empty edge list is not a row bin op (the feature transform rejects it), so say so instead
+            block.add("edges", null);
+            block.add("rankCuts", null);
+            block.addProperty("fragment", "no value edges for " + candidate + " (no window sketch value): no row bin op reproduces the block");
         }
         return block;
+    }
+
+    /**
+     * The feature transform's row {@code bin} op over the screen's value edges. The screen's bin i is
+     * (edge_{i−1}, edge_i] (a value equal to an edge falls below it, and a sketch edge is an observed value) while
+     * the row op counts the edges a value reaches (bin i = [edge_{i−1}, edge_i)), so the op takes the next double
+     * above each edge — v ≥ nextUp(e) exactly when v > e, the same partition with ties and repeated edges — written
+     * in full (a rounded edge moves the rows between it and the true one to the neighbouring bin).
+     */
+    static String rowBinFragment(final String input, final double[] edges) {
+        final StringBuilder list = new StringBuilder();
+        for (int i = 0; i < edges.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(edges[i])));
+        return "{scope: row, type: bin, input: " + input + ", edges: [" + list + "]}";
     }
 
     /**
@@ -2105,7 +2324,7 @@ public final class ScreenReport {
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
-        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebo + " placebo each)");
+        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebos.size() + " placebo pairs)" + (spec.hasPairShape() ? " shape=" + spec.pairShapeBins + "x" + spec.pairShapeBins : ""));
         if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect);
         if (spec.hasCategoricals()) parts.add("categorical=" + spec.categoricals.size() + " " + spec.categoricals + " maxLevels=" + spec.categoricalMaxLevels + " placebo=" + spec.categoricalPlacebo);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);

@@ -500,7 +500,7 @@ public class ScreenTransformTest {
             Assertions.assertEquals(1, shapes.size());
             Assertions.assertEquals("f_known*f_extra", shapes.get(0).getAsString("candidate"));
             Assertions.assertTrue(shapes.get(0).getAsDouble("share") <= 1.0 + 1e-9);
-            Assertions.assertTrue(shapes.get(0).getAsString("fragment").contains("cross of bin("));
+            Assertions.assertTrue(shapes.get(0).getAsString("fragment").contains("{scope: row, type: bin, input: "));
             return null;
         });
         PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
