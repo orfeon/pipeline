@@ -8,6 +8,7 @@ import com.mercari.solution.util.pipeline.glm.StatMath;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -984,6 +985,101 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
+        // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
+        // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S
+        final ScreenSpec grouped = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [b, x], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, select: 2}}");
+        Assertions.assertFalse(grouped.needsJointFill());
+        final GroupScorer gs = new GroupScorer(grouped);
+        final Map<Integer, ScoreAccumulator> gacc = new HashMap<>();
+        Assertions.assertEquals(Baselines.Skip.NONE, gs.score(List.of(row("u", 1, 1, Double.NaN, 3, 1), row("u", 1, 0, Double.NaN, Double.NaN, 2), row("u", 1, 0, Double.NaN, 2, 5)), "u", gacc));
+        Assertions.assertEquals(Baselines.Skip.NONE, gs.score(List.of(row("v", 2, 0, Double.NaN, 1, 1), row("v", 2, 1, Double.NaN, 4, 0)), "v", gacc));
+        final GroupScorer.JointLayout gl = GroupScorer.JointLayout.of(2);
+        final double[] ge = gacc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(2d, ge[gl.used()]);
+        Assertions.assertEquals(1d, ge[gl.filled()]);
+        Assertions.assertEquals(0d, ge[gl.dropped()]);
+        Assertions.assertEquals(gacc.get(grouped.key(0, 0)).getTotal()[ScoreAccumulator.S], ge[gl.s()], 1e-12);
+        Assertions.assertEquals(gacc.get(grouped.key(1, 0)).getTotal()[ScoreAccumulator.S], ge[gl.s() + 1], 1e-12);
+        final ScreenReport.Result gr = ScreenReport.build(grouped, gacc);
+        Assertions.assertEquals(2L, gr.summary().get("nJointUnits"));
+        Assertions.assertEquals(1L, gr.summary().get("nJointFilled"));
+        Assertions.assertEquals(0L, gr.summary().get("nJointDropped"));
+        Assertions.assertTrue(((List<?>) gr.summary().get("notes")).stream().anyMatch(n -> ((String) n).startsWith("joint: 1 of 2 units (50%)")), gr.summary().get("notes").toString());
+
+        // independent rows: with the window means (the sketch pre-pass feeds the joint columns) a missing value is the
+        // mean — 0 after the shift — and the row stays; without them the row is left out and counted
+        final ScreenSpec rows = spec("{family: binomial, label: y, candidates: [b, x], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, select: 2}}");
+        Assertions.assertTrue(rows.needsJointFill());
+        Assertions.assertArrayEquals(new int[]{0, 1}, rows.sketchedColumns());
+        final java.util.Random random = new java.util.Random(11);
+        final List<ScreenRow> data = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            final double a = random.nextGaussian(), b = random.nextGaussian();
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-(a + 0.5 * b))) ? 1 : 0;
+            data.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{i % 10 == 0 ? Double.NaN : a, b}));
+        }
+        final WindowQuantiles q = new WindowQuantiles(rows.sketchColumns(), 0);
+        for (final ScreenRow r : data) q.update(r.x, rows.sketchedColumns());
+        Assertions.assertEquals(180L, q.count(0));
+        double sumA = 0;
+        for (final ScreenRow r : data) if (Double.isFinite(r.x[0])) sumA += r.x[0];
+        Assertions.assertEquals(sumA / 180, q.mean(0), 1e-12);
+        final GroupScorer filled = new GroupScorer(rows).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> facc = new HashMap<>();
+        for (final ScreenRow r : data) filled.score(List.of(r), r.getIdentity(), facc);
+        final GroupScorer.JointLayout rl = GroupScorer.JointLayout.of(2);
+        final double[] fe = facc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(200d, fe[rl.used()]);
+        Assertions.assertEquals(20d, fe[rl.filled()]);
+        Assertions.assertEquals(0d, fe[rl.dropped()]);
+        // the shifted Σ w v x of the filled column is (about) 0: the observed values centre on the mean, the fills are 0
+        Assertions.assertEquals(0d, fe[1], 1e-9);
+        final ScreenReport.Result fr = ScreenReport.build(rows, facc);
+        Assertions.assertEquals(200L, fr.summary().get("nJointUnits"));
+        Assertions.assertEquals(20L, fr.summary().get("nJointFilled"));
+        Assertions.assertFalse(((List<?>) fr.summary().get("notes")).stream().anyMatch(n -> ((String) n).startsWith("joint:")), fr.summary().get("notes").toString());
+        Assertions.assertTrue(fr.suggestions().stream().anyMatch(s -> "select".equals(s.get("kind"))), fr.suggestions().toString());
+        final GroupScorer dropping = new GroupScorer(rows);
+        final Map<Integer, ScoreAccumulator> dacc = new HashMap<>();
+        for (final ScreenRow r : data) dropping.score(List.of(r), r.getIdentity(), dacc);
+        final double[] de = dacc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(180d, de[rl.used()]);
+        Assertions.assertEquals(0d, de[rl.filled()]);
+        Assertions.assertEquals(20d, de[rl.dropped()]);
+        final ScreenReport.Result dr = ScreenReport.build(rows, dacc);
+        Assertions.assertEquals(20L, dr.summary().get("nJointDropped"));
+        Assertions.assertTrue(((List<?>) dr.summary().get("notes")).stream().anyMatch(n -> ((String) n).startsWith("joint: 20 rows with a missing joint value were left out")), dr.summary().get("notes").toString());
+        // the coder carries the sketch's running sum
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        WindowQuantiles.CODER.encode(q, bytes);
+        Assertions.assertEquals(q.mean(0), WindowQuantiles.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray())).mean(0), 0d);
+
+        // a column constant over its observed values has that value as its mean exactly (0.1 fed ten times sums to
+        // 0.9999999999999999): its shifted values are 0 like the fills, not a rounding residue times the observed
+        // indicator that the report would score as the missingness
+        final WindowQuantiles constant = new WindowQuantiles(1, 0);
+        for (int i = 0; i < 10; i++) constant.update(new double[]{0.1});
+        Assertions.assertEquals(0.1, constant.mean(0), 0d);
+
+        // a joint column with no value in the window: every row is a fill (the column is degenerate) instead of every
+        // row leaving the joint sums
+        final List<ScreenRow> empty = new ArrayList<>();
+        for (final ScreenRow r : data) empty.add(new ScreenRow(r.group, r.identity, r.time, null, r.label, Double.NaN, 1, new double[]{Double.NaN, r.x[1]}));
+        final WindowQuantiles qe = new WindowQuantiles(rows.sketchColumns(), 0);
+        for (final ScreenRow r : empty) qe.update(r.x, rows.sketchedColumns());
+        final GroupScorer emptyScorer = new GroupScorer(rows).withWindowQuantiles(qe);
+        final Map<Integer, ScoreAccumulator> eacc = new HashMap<>();
+        for (final ScreenRow r : empty) emptyScorer.score(List.of(r), r.getIdentity(), eacc);
+        final double[] ee = eacc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(200d, ee[rl.used()]);
+        Assertions.assertEquals(200d, ee[rl.filled()]);
+        Assertions.assertEquals(0d, ee[rl.dropped()]);
+        final ScreenReport.Result er = ScreenReport.build(rows, eacc);
+        Assertions.assertEquals(0L, er.summary().get("nJointDropped"));
+    }
+
+    @Test
     public void testJointSuggestionsFromTheCandidatesSums() throws Exception {
         // independent binomial rows over three candidates (schema order b, x, x2): x carries the main effect, x2 is a
         // near copy of x (redundant), b an independent effect and an interaction with x. The joint sums give the
@@ -1009,9 +1105,12 @@ public class GroupScorerTest {
         Assertions.assertNotNull(joint);
         Assertions.assertEquals(GroupScorer.jointLength(5), joint.getExtra().length);
         Assertions.assertEquals(400d, joint.getTotal()[ScoreAccumulator.N_OBS]);
-        Assertions.assertEquals(400d, joint.getExtra()[GroupScorer.jointLength(5) - 1]);
+        Assertions.assertEquals(400d, joint.getExtra()[GroupScorer.JointLayout.of(5).used()]);
         final ScreenReport.Result result = ScreenReport.build(spec, acc);
         Assertions.assertEquals(5L, result.summary().get("nJointColumns"));
+        Assertions.assertEquals(400L, result.summary().get("nJointUnits"));
+        Assertions.assertEquals(0L, result.summary().get("nJointFilled"));
+        Assertions.assertEquals(0L, result.summary().get("nJointDropped"));
         final Map<String, List<Map<String, Object>>> byKind = new HashMap<>();
         for (final Map<String, Object> s : result.suggestions()) byKind.computeIfAbsent((String) s.get("kind"), k -> new java.util.ArrayList<>()).add(s);
         Assertions.assertEquals(java.util.Set.of("phd", "redundant", "select", "composite"), byKind.keySet(), byKind.toString());
@@ -1210,7 +1309,10 @@ public class GroupScorerTest {
         // ... and the pre-pass then feeds the candidates, so their sketches are not left empty
         Assertions.assertArrayEquals(new int[]{0, 1}, spec.sketchedColumns());
         Assertions.assertFalse(spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").needsJointMinima());
-        Assertions.assertArrayEquals(new int[0], spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").sketchedColumns());
+        // a row family feeds the joint columns for the missing-value fill (the window means) even without the minima;
+        // the grouped family fills within the unit and feeds nothing
+        Assertions.assertArrayEquals(new int[]{0, 1}, spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").sketchedColumns());
+        Assertions.assertArrayEquals(new int[0], spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [b, x], joint: {pairs: 0}}").sketchedColumns());
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {excess: 0.5}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 1.5}}"));
     }

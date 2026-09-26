@@ -50,6 +50,7 @@ public final class GroupScorer implements Serializable {
             edgesCache = null;
             gridEdgesCache = null;
             levelsCache = null;
+            jointMeansCache = null;
         }
         this.quantiles = quantiles;
         return this;
@@ -281,19 +282,12 @@ public final class GroupScorer implements Serializable {
     static void groupedContribution(final double[] v, final double[] y, final double[] p, final double weight, final double[] out) {
         final int n = v.length;
         final double pivot = pivot(v);
-        double pm = 0, psum = 0;
+        final double mean = pWeightedMean(v, p, pivot);
+        double s = 0, h = 0, px = 0;
         int nObs = 0;
         for (int i = 0; i < n; i++) {
-            if (StatMath.isFinite(v[i])) {
-                pm += p[i] * (v[i] - pivot);
-                psum += p[i];
-                nObs++;
-            }
-        }
-        final double mean = psum > 0 ? pm / psum : 0d;
-        double s = 0, h = 0, px = 0;
-        for (int i = 0; i < n; i++) {
             if (!StatMath.isFinite(v[i])) continue;
+            nObs++;
             final double xt = v[i] - pivot - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
@@ -315,6 +309,20 @@ public final class GroupScorer implements Serializable {
     static double pivot(final double[] v) {
         for (final double x : v) if (StatMath.isFinite(x)) return x;
         return 0d;
+    }
+
+    /**
+     * The p-weighted mean of {@code v − pivot} over the unit's observed (finite) rows, 0 when they carry no p mass:
+     * the grouped centre, shared by the marginal test and the joint sums so a missing value centres to 0 in both.
+     */
+    static double pWeightedMean(final double[] v, final double[] p, final double pivot) {
+        double pm = 0, psum = 0;
+        for (int i = 0; i < v.length; i++) {
+            if (!StatMath.isFinite(v[i])) continue;
+            pm += p[i] * (v[i] - pivot);
+            psum += p[i];
+        }
+        return psum > 0 ? pm / psum : 0d;
     }
 
     /**
@@ -439,22 +447,32 @@ public final class GroupScorer implements Serializable {
     /**
      * The offsets of the joint sums vector for m joint columns (DSL doc §9.5), one definition for the scorer and the
      * report: {@code [Σ w v, Σ w v x (m), Σ w v x x' (packed at h), Σ w r (at r), Σ w r x (m, at s), Σ w r x x' (packed
-     * at mm), Σ w r² (at r2), used]}, {@code length = 4 + 2m + m(m + 1)}.
+     * at mm), Σ w r² (at r2), used, filled, dropped]}, {@code length = 6 + 2m + m(m + 1)}.
      */
     record JointLayout(int m, int h, int r, int s, int mm, int r2, int length) {
         static JointLayout of(final int m) {
             final int packed = m * (m + 1) / 2;
             final int h = 1 + m, r = h + packed, s = r + 1, mm = s + m, r2 = mm + packed;
-            return new JointLayout(m, h, r, s, mm, r2, r2 + 2);
+            return new JointLayout(m, h, r, s, mm, r2, r2 + 4);
         }
 
         /** The slot counting the rows (grouped: units) added. */
         int used() {
             return r2 + 1;
         }
+
+        /** The slot counting the rows (grouped: units) added with a missing joint value filled (DSL doc §9.5). */
+        int filled() {
+            return r2 + 2;
+        }
+
+        /** The slot counting the rows left out for a missing joint value with no fill (a row family without the window means). */
+        int dropped() {
+            return r2 + 3;
+        }
     }
 
-    /** The length of the joint sums vector for m joint columns (DSL doc §9.5): {@code 4 + 2m + m(m + 1)}. */
+    /** The length of the joint sums vector for m joint columns (DSL doc §9.5): {@code 6 + 2m + m(m + 1)}. */
     static int jointLength(final int m) {
         return JointLayout.of(m).length();
     }
@@ -462,11 +480,14 @@ public final class GroupScorer implements Serializable {
     /**
      * Adds the unit's contribution to the candidates' joint sums over the joint columns (the chosen candidates, then
      * the noise placebos) into {@code out} (laid out by {@link JointLayout}). Row families accumulate raw moments (v the
-     * Fisher weight in offset mode, 1 in prior mode; r = y − μ or y) and the report centres them; a row with a missing
-     * joint value is left out (the sums must share one row set to stay positive definite). The grouped family centres
-     * by p̂ within the unit and adds the unit's S, Fisher block diag(p) − pp' and pHd block Σ (ỹ − p) x̃x̃' in the same
-     * slots (the "Σ w v x" / "Σ w r" slots stay 0), leaving out a unit with a missing joint value. Returns the rows
-     * (grouped: units) added, 0 when nothing was.
+     * Fisher weight in offset mode, 1 in prior mode; r = y − μ or y) shifted by the joint columns' window means
+     * ({@link #jointMeans}) and the report centres them; a missing joint value is the window mean — 0 after the shift,
+     * no information, the rule the marginal test follows — so the sums keep one row set and stay positive definite;
+     * without the means (no sketch: a merging window) a row missing a joint value is left out and counted as dropped.
+     * The grouped family centres by p̂ over the unit's observed rows, as {@link #groupedContribution} does — a missing
+     * value is 0 after centring, the unit's p-weighted mean — and adds the unit's S, Fisher block diag(p) − pp' and pHd
+     * block Σ (ỹ − p) x̃x̃' in the same slots (the "Σ w v x" / "Σ w r" slots stay 0). Returns the rows (grouped: units)
+     * added, 0 when nothing was.
      */
     int addJoint(final Unit unit, final double[][] cols, final boolean prior, final double[] out) {
         final int m = spec.jointColumnCount();
@@ -476,16 +497,16 @@ public final class GroupScorer implements Serializable {
         final double[] x = new double[m];
         if (spec.isGroupedMultinomial()) {
             // shifted by the unit's pivot first, as the marginal test is: a column constant within the unit centres to
-            // exactly 0 instead of the rounding residue of its magnitude
+            // exactly 0 instead of the rounding residue of its magnitude; a missing value centres to 0
             final double[][] xt = new double[n][m];
-            final double[] mean = new double[m];
+            boolean filled = false;
             for (int j = 0; j < m; j++) {
                 final double[] col = cols[spec.jointColumn(j)];
-                for (final double v : col) if (!StatMath.isFinite(v)) return 0;
                 final double pivot = pivot(col);
+                final double mean = pWeightedMean(col, unit.p, pivot);
                 for (int i = 0; i < n; i++) {
-                    xt[i][j] = col[i] - pivot;
-                    mean[j] += unit.p[i] * xt[i][j];
+                    if (StatMath.isFinite(col[i])) xt[i][j] = col[i] - pivot - mean;
+                    else filled = true;
                 }
             }
             final double w = unit.unitWeight;
@@ -493,22 +514,36 @@ public final class GroupScorer implements Serializable {
             for (int i = 0; i < n; i++) {
                 final double r = unit.y[i] - unit.p[i];
                 for (int j = 0; j < m; j++) {
-                    x[j] = xt[i][j] - mean[j];
+                    x[j] = xt[i][j];
                     out[at.s() + j] += w * r * x[j];
                 }
                 addOuter(out, at, x, w * unit.p[i], w * r);
             }
             out[at.used()] += 1;
+            if (filled) out[at.filled()] += 1;
             return 1;
         }
-        int used = 0;
+        final double[] means = jointMeans();
+        int used = 0, filled = 0, dropped = 0;
         for (int i = 0; i < n; i++) {
-            boolean finite = true;
+            boolean finite = true, fill = false;
             for (int j = 0; j < m && finite; j++) {
-                x[j] = cols[spec.jointColumn(j)][i];
-                finite = StatMath.isFinite(x[j]);
+                final double v = cols[spec.jointColumn(j)][i];
+                final boolean shift = means != null && Double.isFinite(means[j]);
+                if (StatMath.isFinite(v)) {
+                    x[j] = shift ? v - means[j] : v;
+                } else if (shift) {
+                    x[j] = 0d;
+                    fill = true;
+                } else {
+                    finite = false;
+                }
             }
-            if (!finite) continue;
+            if (!finite) {
+                dropped++;
+                continue;
+            }
+            if (fill) filled++;
             final double w = unit.w[i];
             final double v = prior ? 1d : spec.fisherWeight(unit.p[i]);
             final double r = prior ? unit.y[i] : unit.y[i] - unit.p[i];
@@ -523,7 +558,32 @@ public final class GroupScorer implements Serializable {
             used++;
         }
         out[at.used()] += used;
+        out[at.filled()] += filled;
+        out[at.dropped()] += dropped;
         return used;
+    }
+
+    /** the joint columns' window means (the row families' shift and fill), read once per sketch view */
+    private transient double[] jointMeansCache;
+
+    /**
+     * The window mean of every joint column from the sketches (DSL doc §9.5): 0 for a candidate with no value in the
+     * window (every row is then a fill — a window-constant column the report drops as degenerate — instead of every
+     * row leaving the joint sums), NaN where the column has no sketch (a noise column, which is never missing), null
+     * without a sketch view.
+     */
+    double[] jointMeans() {
+        if (quantiles == null) return null;
+        if (jointMeansCache == null) {
+            final int m = spec.jointColumnCount();
+            final double[] means = new double[m];
+            for (int j = 0; j < m; j++) {
+                final int c = spec.jointColumn(j);
+                means[j] = c < nCandidates && c < quantiles.columns() ? (quantiles.count(c) == 0 ? 0d : quantiles.mean(c)) : Double.NaN;
+            }
+            jointMeansCache = means;
+        }
+        return jointMeansCache;
     }
 
     /** Adds {@code a·xx'} to the packed Fisher block and {@code b·xx'} to the packed pHd block (upper triangles, row-major). */

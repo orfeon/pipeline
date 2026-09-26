@@ -142,13 +142,15 @@ public final class ScreenSpec implements Serializable {
     /**
      * The x columns the window sketch pre-pass feeds, ascending: the candidates and the shuffle reference when their
      * sketches are read ({@link #needsCandidateSketches}: rank / absdev of independent rows, value bins), the
-     * candidates when the joint reads their minima ({@link #needsJointMinima}), plus the members of the real pairs
-     * when their 2-D grids need value edges — not every candidate for a pair shape alone.
+     * candidates when the joint reads their minima ({@link #needsJointMinima}), the joint columns when a row family's
+     * joint sums fill a missing value with the window mean ({@link #needsJointFill}), plus the members of the real
+     * pairs when their 2-D grids need value edges — not every candidate for a pair shape alone.
      */
     public int[] sketchedColumns() {
         final java.util.TreeSet<Integer> fed = new java.util.TreeSet<>();
         if (needsCandidateSketches()) for (int c = 0; c < conditioningOffset(); c++) fed.add(c);
         if (needsJointMinima()) for (int c = 0; c < candidates.size(); c++) fed.add(c);
+        if (needsJointFill()) fed.addAll(jointColumns);
         if (hasPairShape()) for (final int[] pair : pairs) for (final int member : pair) fed.add(conditioningColumn(member));
         return fed.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -461,6 +463,15 @@ public final class ScreenSpec implements Serializable {
      */
     public boolean needsJointMinima() {
         return jointOn && jointPairs > 0;
+    }
+
+    /**
+     * Whether a row family's joint sums read the joint columns' window means from the sketches (DSL doc §9.5): a
+     * missing joint value is then the mean — nothing after centring — instead of dropping the row. The grouped
+     * family fills within the unit and needs no sketch.
+     */
+    public boolean needsJointFill() {
+        return jointOn && !isGroupedMultinomial();
     }
 
     public boolean hasBinned() {

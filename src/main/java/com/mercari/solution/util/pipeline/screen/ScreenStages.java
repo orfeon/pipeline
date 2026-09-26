@@ -114,18 +114,22 @@ public final class ScreenStages {
         // independent rows with rank / absdev, value bins, a pair's 2-D grid: one pre-pass sketches the columns they
         // read over the window (per window under a windowing strategy; the singleton view carries the Combine's
         // default on an empty window). The joint's ratio suggestions read the candidates' minima in the finalize
-        // step alone, so the scoring passes get the view only when their transforms / bins need it; merging
-        // (session) windows cannot carry the view, and the ratio is then not suggested (the difference still is)
+        // step alone, so the scoring passes get the view only when their transforms / bins need it — or when a row
+        // family's joint sums fill a missing joint value with the window mean; merging (session) windows cannot
+        // carry the view, and the ratio is then not suggested (the difference still is) and a row missing a joint
+        // value is left out of the joint sums (counted as nJointDropped)
         PCollectionView<WindowQuantiles> quantilesView = null;
         final List<PCollectionView<?>> scoreSideInputs = new ArrayList<>();
-        final boolean jointMinima = spec.needsJointMinima() && input.getWindowingStrategy().getWindowFn().isNonMerging();
-        if (spec.needsWindowQuantiles() || jointMinima) {
+        final boolean nonMerging = input.getWindowingStrategy().getWindowFn().isNonMerging();
+        final boolean jointMinima = spec.needsJointMinima() && nonMerging;
+        final boolean jointFill = spec.needsJointFill() && nonMerging;
+        if (spec.needsWindowQuantiles() || jointMinima || jointFill) {
             quantilesView = rows
                     .apply("WindowQuantiles", ParDo.of(new QuantilesDoFn(spec)))
                     .setCoder(WindowQuantiles.CODER)
                     .apply("WindowQuantiles_Combine", Combine.globally(new WindowQuantiles.Fn()).asSingletonView());
         }
-        final PCollectionView<WindowQuantiles> scoreQuantilesView = spec.needsWindowQuantiles() ? quantilesView : null;
+        final PCollectionView<WindowQuantiles> scoreQuantilesView = spec.needsWindowQuantiles() || jointFill ? quantilesView : null;
         if (scoreQuantilesView != null) scoreSideInputs.add(scoreQuantilesView);
 
         final PCollection<KV<Integer, ScoreAccumulator>> scored = units
@@ -172,10 +176,13 @@ public final class ScreenStages {
                         .apply("ConditioningFit" + it + "_View", View.asSingleton());
             }
             fitView = state;
+            // the partial pass reads the sketches for its transforms / bins / grids only: the joint's window means are the
+            // score pass's alone
+            final PCollectionView<WindowQuantiles> partialQuantilesView = spec.needsWindowQuantiles() ? quantilesView : null;
             final List<PCollectionView<?>> partialSideInputs = new ArrayList<>(List.of(momentsView, fitView));
-            partialSideInputs.addAll(scoreSideInputs);
+            if (partialQuantilesView != null) partialSideInputs.add(partialQuantilesView);
             partialView = units
-                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView, scoreQuantilesView)).withSideInputs(partialSideInputs))
+                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView, partialQuantilesView)).withSideInputs(partialSideInputs))
                     .setCoder(KvCoder.of(VarIntCoder.of(), PartialAccumulator.CODER))
                     .apply("ConditioningPartial_Combine", Combine.perKey(new PartialAccumulator.Fn()))
                     .apply("ConditioningPartial_View", View.asMap());

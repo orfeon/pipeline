@@ -54,9 +54,11 @@ input ─ Prepare ─┬─ rows KV<unitKey, ScreenRow> ─ Group (GBK) or Units
   same `KV<String, Iterable<ScreenRow>>` type for every pass.
 - **WindowQuantiles** (independent rows with `rank` / `absdev`, value bins of the binned test, a pair's
   2-D grid; the joint's ratio suggestions, whose candidate minima only the finalize step reads — the scoring
-  passes then get no sketch, and a merging-window run skips it): one pre-pass over the rows — `QuantilesDoFn`
+  passes then get no sketch, and a merging-window run skips it; a row family's joint sums, which shift the joint
+  columns by their window means so a missing joint value is 0 — under a merging window such a row is left out
+  instead): one pre-pass over the rows — `QuantilesDoFn`
   feeds the `sketchedColumns()` of x (the candidates and the shuffle reference when their sketches are read, the
-  candidates when the joint reads their minima, the pair members' conditioning columns when a pair shape is asked
+  candidates when the joint reads their minima or fills, the pair members' conditioning columns when a pair shape is asked
   for; a sketch index is the x column, the others stay empty) of the rows
   that will be scored (a row whose baseline is invalid for its form is skipped) into per-bundle sketches, flushed at `@FinishBundle` per window, then
   `Combine.globally(...).asSingletonView()` (a default-carrying singleton per window, so a fixed-window run
@@ -191,7 +193,7 @@ transform) key periods × 9 doubles; per Newton pass `2 + k + k²` doubles (k �
 k = 100 (`(1 + k) × (1 + periods)` beyond); a binned key adds `3B + 3` (row families) or `2B + B²` (grouped)
 doubles to its marginal accumulator and `B (1 + B + k)` / `B (2 + k)` to its partial one, B = bins + 1; a
 pair costs `2 + k` doubles per partial key, times `1 + pairs.placebo` keys per declared pair, under
-`pairs.maxPairs`; the joint sums are one key of `4 + 2m + m(m + 1)` doubles (m = joint columns + noise, under
+`pairs.maxPairs`; the joint sums are one key of `6 + 2m + m(m + 1)` doubles (m = joint columns + noise, under
 `joint.maxColumns` = 200: ≈ 40k doubles) with O(m²) work per row — the one opt-in whose per-row cost grows
 with the candidate count; the window quantile view is m sketches of a few KB each
 (k = 400: about 3 KB per column, so 500 candidates ≈ 1.5 MB, materialised once per worker). Nothing is
