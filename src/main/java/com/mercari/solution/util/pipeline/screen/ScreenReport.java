@@ -1625,7 +1625,7 @@ public final class ScreenReport {
                 if (chi2 < 9) continue;
                 final String indicator = ScreenSpec.LEVEL_NULL.equals(level)
                         ? "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}"
-                        : "{name: " + name + "_is, scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
+                        : "{name: " + name + "_is_" + level.replaceAll("[^A-Za-z0-9_]", "_") + ", scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
                 out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
                         nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         indicator + " (z " + fmt(contrastSign(block, phi, nb) * Math.sqrt(chi2)) + ")"));
@@ -2159,11 +2159,20 @@ public final class ScreenReport {
             r.put("partial_excess_gain", partialGain == null ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
             final boolean passed = !placebo && !st.degenerate && spec.passesGain(st.estGain, effectiveDf, nUnits, kindThreshold)
                     && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
-            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned);
-            // a block test has no z, so the leak flag does not read it
+            // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned).
+            // A df = 1 test is flagged on |z| > leakZ; a block (no z) on the same tail — its p-value below
+            // P(|Z| > leakZ), so a χ²(df) as unlikely under the null as a z of leakZ flags the block too
             final Double marginalZ = (Double) r.get("z");
-            final double flagZ = marginalZ == null ? Double.NaN : leakOnPartial ? st.z() : marginalZ;
-            final boolean leak = spec.leakZ != null && Math.abs(flagZ) > spec.leakZ;
+            final Double marginalP = (Double) r.get("pValue");
+            final boolean leak;
+            if (spec.leakZ == null) {
+                leak = false;
+            } else if (marginalZ != null) {
+                leak = Math.abs(leakOnPartial ? st.z() : marginalZ) > spec.leakZ;
+            } else {
+                final double flagP = leakOnPartial ? (st.degenerate ? Double.NaN : st.pValue) : marginalP == null ? Double.NaN : marginalP;
+                leak = flagP < StatMath.chiSquare1UpperTail(spec.leakZ * spec.leakZ);
+            }
             r.put("threshold", kindThreshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);

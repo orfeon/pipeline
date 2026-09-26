@@ -148,8 +148,9 @@ public final class WindowQuantiles implements Serializable {
 
     /**
      * A categorical column's level dictionary (DSL doc §6.2): the {@code maxLevels} most frequent levels named, by
-     * count then name, at indices 0..n − 1; every other level folds into the last index ({@link ScreenSpec#LEVEL_OTHER},
-     * present only when a level was folded). {@code index} maps a level to its slot, {@code frequency} gives each
+     * count then name, at indices 0..n − 1 — plus {@link ScreenSpec#LEVEL_NULL} whenever a value was missing, outside
+     * that count (a missing value is information, as the binned test's missing bin is; it never folds); every other
+     * level folds into the last index ({@link ScreenSpec#LEVEL_OTHER}, present only when a level was folded). {@code index} maps a level to its slot, {@code frequency} gives each
      * slot's share of the rows (the placebo columns' redraw distribution) and {@code cumulative} its running sum.
      */
     public record Levels(List<String> names, Map<String, Integer> index, double[] frequency, double[] cumulative, boolean folded) {
@@ -184,11 +185,14 @@ public final class WindowQuantiles implements Serializable {
         double total = 0;
         for (final Map.Entry<String, Long> e : entries) total += e.getValue();
         double other = 0;
+        int named = 0;
         for (final Map.Entry<String, Long> e : entries) {
-            if (names.size() < maxLevels) {
+            final boolean missing = ScreenSpec.LEVEL_NULL.equals(e.getKey());
+            if (missing || named < maxLevels) {
                 index.put(e.getKey(), names.size());
                 names.add(e.getKey());
                 freq.add(total > 0 ? e.getValue() / total : 0d);
+                if (!missing) named++;
             } else {
                 other += e.getValue();
             }

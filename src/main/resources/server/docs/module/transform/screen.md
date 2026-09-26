@@ -198,8 +198,12 @@ which carries no sketch view).
 `categorical: {include: [category, condition_grade]}` tests string fields natively — a level → (score,
 information) block instead of a one-hot or target encoding upstream. The sketch pre-pass counts every level
 exactly (a column past 20,000 distinct levels fails the step: not a categorical candidate), keeps the
-`maxLevels` (default 32) most frequent as named levels and folds the rest into `(other)` (a null value is
-its own level `(null)`); a screen of categorical candidates alone needs no numeric candidate. The column's
+`maxLevels` (default 32) most frequent as named levels and folds the rest into `(other)`; a null value is
+always its own level `(null)`, outside the `maxLevels` count — a missing value is information, as the binned
+test's missing bin is. `candidates.exclude` applies to the categoricals too (a `kind:outcome` selector drops a
+pass-through outcome field from both lists), and a note names any pass-through input field the sources tag as
+an outcome that is left among the candidates. A screen of categorical candidates alone needs no numeric
+candidate. The column's
 record (`transform: levels`) is the same block test as the
 [binned block](#binned-block-test): `chi2`, `df` (active levels − 1), `pValue`, `est_gain`, no sign, the
 partial block under conditioning, and `level_z` with each level's contrast against the rest (its signed z,
@@ -209,8 +213,9 @@ distribution kept, the alignment with the label broken). A passing column goes i
 (the feature transform encodes it); for a passing column only, the `suggestions` output adds its `grouping`
 (the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
 fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
-transform's row op in the fragment (`{type: indicator, input, values: [level]}`; `== null` for the `(null)`
-level; none for the folded `(other)`).
+transform's row op in the fragment (`{name: <column>_is_<level>, type: indicator, input, values: [level]}`, the
+level's non-alphanumeric characters as `_` in the name; `== null` for the `(null)` level; none for the folded
+`(other)`).
 
 ### Periods, time window and leak flags
 
@@ -242,7 +247,9 @@ level; none for the folded `(other)`).
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
-  a factor of several over the healthy top). **It is a flag only, never a rejection.** A bare number reads the
+  a factor of several over the healthy top); a block test (`binned`, `levels`, no z) is flagged on the same tail —
+  its p-value below P(|Z| > leakZ), so a χ²(df) as unlikely under the null as a z of `leakZ` flags it too.
+  **It is a flag only, never a rejection.** A bare number reads the
   marginal z; `{z, on: partial}` reads the partial z under [conditioning](#conditioning-partial-test) — a leak
   is not explained by the conditioning set, so its partial z stays outsized, while a legitimate but strong
   candidate that overlaps F (a rating that summarises the same history the model already uses) has a large
@@ -382,10 +389,10 @@ is an assembly error.
 | suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
 | pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`), `shape` (value bins per member of the pair's 2-D grid for the interaction shape, default 4; `false` / 0 = off). Needs `conditioning` holding both members of every pair. |
 | joint | optional | Boolean or Object | The candidates' joint sums for the several-candidate suggestions (see [Several candidates](#several-candidates-joint)): `true`, or `{include: [globs / selectors] (default every candidate), maxColumns (default 200), noise (noise columns carried for the null scale, default 10), directions (pHd directions, default 3), redundancy (|correlation| of a cluster, default 0.95), select (forward-selection steps, default 10), pairs (difference / ratio suggestions at most, default 10), excess (a pair's joint statistic over the better single one, default 1.5)}`. O(m²) per row: opt-in, bounded. |
-| categorical | optional | Object or Array | String fields tested natively as candidates (see [Categorical candidates](#categorical-candidates)): `{include: [globs / selectors], maxLevels (named levels kept, default 32), placebo (placebo columns per candidate, default 5)}` or a list of include globs. Role fields are never candidates. |
+| categorical | optional | Object or Array | String fields tested natively as candidates (see [Categorical candidates](#categorical-candidates)): `{include: [globs / selectors], maxLevels (named levels kept, default 32), placebo (placebo columns per candidate, default 5)}` or a list of include globs, minus `candidates.exclude` (its globs and lineage selectors apply to the categoricals too). Role fields are never candidates. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
-| flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
+| flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`); a block test (no z) is flagged when its p-value is below P(\|Z\| > leakZ). Default: no flag. |
 | pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. `minGain`: a positive floor on the effective test's excess gain (`excess_gain` / `partial_excess_gain` = the gain less df / 2N, the average log-likelihood improvement per unit beyond a null test's): `passed` needs the gain above the threshold and the excess above the floor. Default: the placebo threshold alone. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol, missing}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit; `missing` (`mean` (default) \| `groupMean`) how a missing conditioning value enters the fit — the window mean, or the unit's baseline-weighted mean of its observed values (`groupedMultinomial` only). Needs the global window. |
 | output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
@@ -425,7 +432,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
 | passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), `excess_gain > minGain` under `pass.minGain` (`partial_excess_gain` with conditioning), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
-| leakSuspect | BOOL | \|z\| > `flags.leakZ` (\|partial_z\| under `flags.leakZ.on: partial`) |
+| leakSuspect | BOOL | \|z\| > `flags.leakZ` (\|partial_z\| under `flags.leakZ.on: partial`); a block test: its (partial) p-value below P(\|Z\| > leakZ) |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
 
