@@ -249,8 +249,8 @@ public final class ScreenSpec implements Serializable {
      * lifted to {@code pass.minGain} when that is declared and higher. NaN stays NaN (no scorable unit).
      */
     public double gainCut(final double threshold) {
-        if (minGain == null || Double.isNaN(threshold)) return threshold;
-        return Math.max(threshold, minGain);
+        // Math.max propagates a NaN threshold
+        return minGain == null ? threshold : Math.max(threshold, minGain);
     }
 
 
@@ -462,9 +462,13 @@ public final class ScreenSpec implements Serializable {
                     else if (s.minPeriodsAgree > 1 && s.minPeriodsAgree != Math.rint(s.minPeriodsAgree)) errors.add("pass.minPeriodsAgree above 1 is a count of periods and must be an integer");
                     if (s.periodsBucket == null) errors.add("pass.minPeriodsAgree needs periods (the sign agreement is read per period bucket)");
                 }
-                s.minGain = number(o, "minGain");
-                if (s.minGain != null && !(s.minGain > 0 && Double.isFinite(s.minGain))) {
-                    errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                // a declared but malformed floor (a list, an object, a non-numeric string) is an error, never silently no floor
+                final JsonElement minGain = o.get("minGain");
+                if (minGain != null && !minGain.isJsonNull()) {
+                    s.minGain = numeric(minGain);
+                    if (s.minGain == null || !(s.minGain > 0 && Double.isFinite(s.minGain))) {
+                        errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                    }
                 }
             } else {
                 errors.add("pass must be an object {minPeriodsAgree, minGain}");
