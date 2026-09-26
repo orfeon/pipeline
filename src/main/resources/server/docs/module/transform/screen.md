@@ -105,6 +105,13 @@ block's information F explains).
   and does not bar the block.
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; keep `binned` for the shapes `raw` and `rank` miss, and keep `k` small (10 is plenty).
+- **Closing the loop.** The record carries `bin_edges` (value bins), and a passing block goes into the pass
+  list as a recipe: `passedBlocks` (written with the `binned` transform only; and the `bins` member of its
+  `passed` entry) with `k`, `edges` / `rankCuts`, `missingBin` and the fragment
+  `{scope: row, type: bin, input: x, edges: [...]}` — the row `bin` op the next feature run adds; `columns`
+  keeps the raw column's name. The row op's bins are `[edge_{i−1}, edge_i)` where the screen's are
+  `(edge_{i−1}, edge_i]`, so the fragment's edges are the next doubles above `edges` (`10.000000000000002` for
+  `10`), written in full: copy them as they are, since a rounded edge moves the rows at it to the other bin.
 
 ### Heterogeneity across a modifier
 
@@ -347,6 +354,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
 | bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
+| bin_edges | ARRAY<FLOAT64\> | the binned block test with `edges: value`: the k − 1 window quantile edges (bin i = `(edge_{i−1}, edge_i]`); null for position bins, a column without a sketch value and the other transforms |
 | het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
 | level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
 | het_passed | BOOL | the effective heterogeneity gain above `max(thresholds.het, minGain)`; candidate records only, never part of `passed` |
