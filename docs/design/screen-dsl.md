@@ -533,9 +533,18 @@ quantile / 2N of the half without placebos), and `passed` compares the confirmat
 
 **Hypotheses, not decisions.** The score test is local to β = 0 and a shape with a large effect is
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
-transform, never applied automatically. The suggestions read the marginal binned sums (what the baseline
-misses), not the partial block: a shape's redundancy with F is read off the block's `r2_F`. The summary
-counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nScored`).
+transform, never applied automatically. The summary counts the candidates' ones (`nSuggestions`, placebo
+records excluded as in `nScored`).
+
+**Basis.** Without conditioning the suggestions read the marginal binned sums (what the baseline misses).
+Under conditioning they read the *partial* block: the partial pass keeps the binned key's `[s, H, A]` twice
+as well (the window's, then the discovery half's, the same seeded split) together with the fit's own
+`[n, g, G]` over the discovery half, and the report orthogonalises each half against F with the window's Γ
+and the half's own gradient and Gram (the confirmation half's being the window's less the discovery's; without
+the Gram, k above the period-Gram bound, the window's scaled by the half's unit mass as the period slices do) —
+so every choice and every confirmation says what F does not already carry. Each record names its basis (`basis`: `marginal` / `partial`) and, on the partial basis, the
+window block's `r2_F` (the share of the block's information F carries); a column whose partial block is
+degenerate falls back to the marginal basis.
 
 ### 9.5 Several candidates: the joint sums
 
@@ -553,6 +562,23 @@ information — so the sums keep one row set (positive definite) and a unit with
 only a row family under a merging window, which carries no sketch view, leaves such a row out. The summary
 carries the row set as `nJointUnits` / `nJointFilled` / `nJointDropped`, with a note when the filled share
 exceeds 10%. O(m²) state and per-row work, hence the explicit opt-in and the bound.
+
+**Partial basis.** Under conditioning the partial pass keeps the joint sums at the fitted p̂ as well — S, H,
+M, their cross terms with the standardised F̃: A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃', and the
+fit's own g = Σ w r f̃ and G = Σ w v f̃f̃' over the same rows (`3 + m + m(m + 1) + 2mk + k + k(k + 1)` doubles
+under one key; grouped: x̃ and f̃ centred by p̂ within the unit, a missing value 0 as above; row families: x
+shifted by the window mean, the intercept in F̃ doing the centring, a row left out for a missing value without
+the window means left out of g and G too) — and the report orthogonalises them against F in closed form:
+Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ (gaussian over
+σ²; row families: the intercept's one-step residual r̄ = g₀ / G₀₀ profiled out of M⊥ as M⊥ − r̄ H⊥, as the
+marginal sums profile it). The pHd directions, the forward selection, the composite and the differences /
+ratios then read S⊥ / H⊥ / M⊥ — what F does not already carry — while the redundancy clusters keep H at p̂
+un-orthogonalised against F (row families: centred by the intercept only, H − a₀a₀' / G₀₀ — near-duplicates are
+near-duplicates whatever F carries); r²_F = 1 − H⊥_jj / H_jj on that H, a column whose centred spread the raw
+moments cannot hold is degenerate as on the marginal basis, and a column F explains fully (H⊥_jj ≤ 1e-10 H_jj,
+r²_F = 1) leaves the metric. Every record
+carries `basis` (`partial`; `marginal` without conditioning or when the partial sums are unusable) and, for
+`select` / `difference` / `ratio`, the named candidate's own `r2_F`.
 The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:
 
 | kind | read from | record |
@@ -771,7 +797,8 @@ linear composite, the curvature directions (§9.5 over the joint sums: `redundan
 `phd`), the ratios and differences (§9.5, `difference` / `ratio` — the raw-scale Newton direction of a pair
 with the sketch minima standing in for the log-scale reading, an approximation of the original position),
 the segment / time dependence (the heterogeneity test of §7.1) and the interaction shape (§8.7, a depth-2
-tree over a declared pair's grid).
+tree over a declared pair's grid). Under conditioning both tables read the partial sums (§9.4 / §9.5,
+`basis: partial`): a recipe says what the conditioning set does not already carry, not a re-encoding of it.
 
 **Parameter families.** When the feature transform emits a family (a window of 7 / 30 / 90 days), gain
 against the parameter gives the best value and the point where the gain saturates. The lineage today

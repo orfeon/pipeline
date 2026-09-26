@@ -393,6 +393,8 @@ public class ScreenTransformTest {
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
                       flags: {leakZ: {z: 5, on: partial}}
+                      suggestions: true
+                      joint: {noise: 3, pairs: 0}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
@@ -452,6 +454,33 @@ public class ScreenTransformTest {
             final List<?> passed = (List<?>) summary.getPrimitiveValue("passedColumns");
             Assertions.assertTrue(passed.contains("f_extra"), "passedColumns: " + passed);
             Assertions.assertFalse(passed.contains("f_known"), "passedColumns: " + passed);
+            return null;
+        });
+        PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
+            // under conditioning the suggestions read the partial sums: every record names the basis, the joint kinds
+            // and the candidates' recipes are partial, and the forward selection starts with f_extra — f_known, the
+            // conditioning column itself, is not a step
+            String firstStep = null;
+            boolean knownShape = false, extraShape = false;
+            for (final MElement e : rows) {
+                Assertions.assertNotNull(e.getAsString("basis"), e.toString());
+                final String kind = e.getAsString("kind");
+                if (java.util.Set.of("phd", "redundant", "select", "composite").contains(kind)) {
+                    Assertions.assertEquals("partial", e.getAsString("basis"), e.toString());
+                    if ("select".equals(kind) && "step1".equals(e.getAsString("name"))) firstStep = e.getAsString("candidate");
+                    if ("select".equals(kind)) Assertions.assertNotEquals("f_known", e.getAsString("candidate"), e.toString());
+                } else if ("shape".equals(kind) && "f_known".equals(e.getAsString("candidate"))) {
+                    Assertions.assertEquals("partial", e.getAsString("basis"), e.toString());
+                    Assertions.assertTrue(e.getAsDouble("r2_F") > 0.2, e.toString());
+                    knownShape = true;
+                } else if ("shape".equals(kind) && "f_extra".equals(e.getAsString("candidate"))) {
+                    Assertions.assertEquals("partial", e.getAsString("basis"), e.toString());
+                    Assertions.assertTrue(e.getAsDouble("r2_F") < 0.5, e.toString());
+                    extraShape = true;
+                }
+            }
+            Assertions.assertEquals("f_extra", firstStep);
+            Assertions.assertTrue(knownShape && extraShape);
             return null;
         });
         pipeline.run();
