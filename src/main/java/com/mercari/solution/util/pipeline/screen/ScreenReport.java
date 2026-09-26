@@ -800,11 +800,6 @@ public final class ScreenReport {
         return df < 1 ? 0d : out[0].chi2;
     }
 
-    /**
-     * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
-     * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information carry
-     * nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
-     */
     /** the share of a block's information below which a bin carries none for a contrast (DSL doc §9.4) */
     static final double CONTRAST_H_FLOOR = 1e-9;
 
@@ -822,6 +817,11 @@ public final class ScreenReport {
         return use;
     }
 
+    /**
+     * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
+     * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information
+     * ({@link #informative}) carry nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
+     */
     static double contrastChi2(final Block block, final double[] phi, final int over) {
         final boolean[] use = informative(block, over);
         double hsum = 0, hphi = 0;
@@ -1592,9 +1592,11 @@ public final class ScreenReport {
             final Block block = binnedStats(spec, nb, acc.getExtra(), nUnits, (long) acc.getTotal()[ScoreAccumulator.N_OBS]);
             if (block.stats.degenerate || !(block.stats.chi2 > 0)) continue;
             final String name = spec.categoricals.get(c);
-            // levels by effect, the best single cut along that order
+            // levels by effect, the best single cut along that order — over the levels with information: a lone row
+            // at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would sort to an end with an effect of 10¹² and split off with a gain of 1 / H
+            final boolean[] use = informative(block, nb);
             final List<Integer> order = new ArrayList<>();
-            for (int l = 0; l < nb; l++) if (block.h[l] > 0) order.add(l);
+            for (int l = 0; l < nb; l++) if (use[l]) order.add(l);
             order.sort(Comparator.comparingDouble(l -> block.s[l] / block.h[l]));
             double bestGain = 0;
             int bestCut = -1;
@@ -1614,7 +1616,7 @@ public final class ScreenReport {
             }
             // strong single levels
             for (int l = 0; l < nb; l++) {
-                if (!(block.h[l] > 0)) continue;
+                if (!use[l]) continue;
                 final String level = levels.names().get(l);
                 // the fold of the levels beyond maxLevels is no value a row indicator can name
                 if (levels.folded() && l == nb - 1) continue;
@@ -2048,13 +2050,15 @@ public final class ScreenReport {
                 // each level against the rest: the df = 1 contrast's signed z, its score and information
                 final List<Map<String, Object>> levelRecords = new ArrayList<>();
                 if (!placebo) {
+                    // a level without information (the contrasts' rule) has no z, rather than a z of 0
+                    final boolean[] use = informative(block, nb);
                     for (int l = 0; l < nb; l++) {
                         final double[] phi = new double[nb];
                         phi[l] = 1;
                         final double chi2 = st.degenerate ? 0d : contrastChi2(block, phi, nb);
                         final Map<String, Object> lr = new LinkedHashMap<>();
                         lr.put("level", levels.names().get(l));
-                        lr.put("z", st.degenerate || !(block.h[l] > 0) ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
+                        lr.put("z", st.degenerate || !use[l] ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
                         lr.put("S", block.s[l]);
                         lr.put("H", block.h[l]);
                         lr.put("n", Math.round(block.n[l]));

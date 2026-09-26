@@ -146,6 +146,11 @@ public final class WindowQuantiles implements Serializable {
         return sketches[c].edges(bins);
     }
 
+    /** The median of the values of column {@code c} within each bin cut by {@code edges} ({@link SketchAccumulator#binMedians}). */
+    public double[] binMedians(final int c, final double[] edges) {
+        return sketches[c].binMedians(edges);
+    }
+
     /**
      * A categorical column's level dictionary (DSL doc §6.2): the {@code maxLevels} most frequent levels named, by
      * count then name, at indices 0..n − 1; every other level folds into the last index ({@link ScreenSpec#LEVEL_OTHER},
