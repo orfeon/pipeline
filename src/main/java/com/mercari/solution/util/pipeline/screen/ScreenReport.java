@@ -342,24 +342,54 @@ public final class ScreenReport {
     /** {@link #blockPartial(ScreenSpec, double[], Block, FitState, double, long, double, double)} over a block of {@code nb} cells. */
     static BlockPartial blockPartial(final ScreenSpec spec, final int nb, final double[] vec, final Block marginal, final FitState fit, final double nUnits,
                                      final long nObs, final double sigma2, final double l2) {
+        if (marginal.df < 1) return BlockPartial.degenerate(nObs, Double.NaN);
+        final double[][] gamma = blockGamma(spec, nb, vec, fit, l2);
+        if (gamma == null) return BlockPartial.degenerate(nObs, Double.NaN);
+        final Orthogonal o = orthogonalBlock(spec, nb, vec, gamma, fit.bestGrad, fit.bestG, sigma2);
+        final Block block = partialBlock(spec, nb, vec, o, marginal, sigma2, nUnits, nObs);
+        final double r2 = o.trH > 0 ? Math.min(1d, Math.max(0d, 1d - o.trHp / o.trH)) : Double.NaN;
+        if (block.df < 1) return BlockPartial.degenerate(nObs, o.trH > 0 && o.trHp <= 1e-10 * o.trH ? 1d : r2);
+        return new BlockPartial(new Partial(block.stats, r2), block.df);
+    }
+
+    /** A block's sums after orthogonalisation against the fitted F: S⊥, the full H⊥, and the traces of H / H⊥ (r²_F). */
+    record Orthogonal(double[] s, double[][] h, double trH, double trHp) {
+    }
+
+    /**
+     * Γ (k × B) of a block's partial sums {@code [s (B), H, A (B × k)]} against the fitted F: (G + l2·N·I)⁻¹ A' (a
+     * multi-right-hand-side solve); null when the sums are missing, not finite, or the solve fails.
+     */
+    static double[][] blockGamma(final ScreenSpec spec, final int nb, final double[] vec, final FitState fit, final double l2) {
         final int k = fit.k;
-        final boolean grouped = spec.isGroupedMultinomial();
-        final int hLen = grouped ? nb * nb : nb;
-        if (vec == null || vec.length < nb + hLen + nb * k || marginal.df < 1) return BlockPartial.degenerate(nObs, Double.NaN);
+        final int hLen = spec.isGroupedMultinomial() ? nb * nb : nb;
+        if (vec == null || vec.length < nb + hLen + nb * k) return null;
         final double[][] a = new double[k][nb];   // A' : k × B, the right-hand sides
         for (int b = 0; b < nb; b++) for (int j = 0; j < k; j++) a[j][b] = vec[nb + hLen + b * k + j];
-        for (final double[] row : a) for (final double v : row) if (!Double.isFinite(v)) return BlockPartial.degenerate(nObs, Double.NaN);
-        final double[][] gamma;
+        for (final double[] row : a) for (final double v : row) if (!Double.isFinite(v)) return null;
         try {
-            gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);   // k × B
+            return MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);   // k × B
         } catch (final RuntimeException e) {
-            return BlockPartial.degenerate(nObs, Double.NaN);
+            return null;
         }
+    }
+
+    /**
+     * S⊥ = s − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ over σ² for a block's sums with the given Γ (k × B) and the fit's gradient
+     * g and Gram G over the same rows: the window's sums with the window's (g, G); a half's (the suggestions' discovery /
+     * confirmation, DSL doc §9.4) with the window's Γ and the half's own (g, G) — the discovery slice of the fit sums,
+     * the confirmation being the window's less it.
+     */
+    static Orthogonal orthogonalBlock(final ScreenSpec spec, final int nb, final double[] vec, final double[][] gamma, final double[] grad,
+                                      final double[][] gram, final double sigma2) {
+        final int k = grad.length;
+        final boolean grouped = spec.isGroupedMultinomial();
+        final int hLen = grouped ? nb * nb : nb;
         // G Γ (k × B) once: Γ'GΓ is then O(B² k) instead of O(B² k²)
         final double[][] gGamma = new double[k][nb];
         for (int j = 0; j < k; j++) {
             for (int l = 0; l < k; l++) {
-                final double gjl = fit.bestG[j][l];
+                final double gjl = gram[j][l];
                 if (gjl == 0d) continue;
                 for (int c = 0; c < nb; c++) gGamma[j][c] += gjl * gamma[l][c];
             }
@@ -369,14 +399,14 @@ public final class ScreenReport {
         double trH = 0, trHp = 0;
         for (int b = 0; b < nb; b++) {
             double gg = 0;
-            for (int j = 0; j < k; j++) gg += gamma[j][b] * fit.bestGrad[j];
+            for (int j = 0; j < k; j++) gg += gamma[j][b] * grad[j];
             s[b] = (vec[b] - gg) / sigma2;
             for (int c = 0; c < nb; c++) {
                 final double hbc = grouped ? vec[nb + b * nb + c] : (b == c ? vec[nb + b] : 0d);
                 double ga = 0, ag = 0, ggg = 0;
                 for (int j = 0; j < k; j++) {
-                    ga += gamma[j][b] * a[j][c];
-                    ag += a[j][b] * gamma[j][c];
+                    ga += gamma[j][b] * vec[nb + hLen + c * k + j];
+                    ag += vec[nb + hLen + b * k + j] * gamma[j][c];
                     ggg += gamma[j][b] * gGamma[j][c];
                 }
                 h[b][c] = (hbc - ga - ag + ggg) / sigma2;
@@ -386,14 +416,22 @@ public final class ScreenReport {
                 }
             }
         }
-        // the bins the marginal test kept; a bin F explains fully (no information left) drops out
+        return new Orthogonal(s, h, trH, trHp);
+    }
+
+    /**
+     * The block test over the orthogonalised sums as a {@link Block}: the bins the marginal block found active keep
+     * their information (a bin F explains fully drops out), the block χ²(df) by {@link #blockChi2}, the per-bin masses
+     * from the marginal block.
+     */
+    static Block partialBlock(final ScreenSpec spec, final int nb, final double[] vec, final Orthogonal o, final Block marginal,
+                              final double sigma2, final double nUnits, final long nObs) {
+        final boolean grouped = spec.isGroupedMultinomial();
         final double[] diag = new double[nb];
-        for (int b = 0; b < nb; b++) diag[b] = marginal.h[b] > 0 && h[b][b] > 1e-10 * (vec[nb + (grouped ? b * nb + b : b)] / sigma2) ? h[b][b] : 0d;
+        for (int b = 0; b < nb; b++) diag[b] = marginal.h[b] > 0 && o.h[b][b] > 1e-10 * (vec[nb + (grouped ? b * nb + b : b)] / sigma2) ? o.h[b][b] : 0d;
         final Stats[] out = new Stats[1];
-        final int df = blockChi2(s, h, diag, nUnits, nObs, out);
-        final double r2 = trH > 0 ? Math.min(1d, Math.max(0d, 1d - trHp / trH)) : Double.NaN;
-        if (df < 1) return BlockPartial.degenerate(nObs, trH > 0 && trHp <= 1e-10 * trH ? 1d : r2);
-        return new BlockPartial(new Partial(out[0], r2), df);
+        final int df = blockChi2(o.s, o.h, diag, nUnits, nObs, out);
+        return new Block(out[0], df, o.s, diag, marginal.n, o.h);
     }
 
     /**
@@ -485,7 +523,8 @@ public final class ScreenReport {
      * go through the same search and give each kind its cut.
      */
     static List<Map<String, Object>> suggestions(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
-                                                 final double nUnits, final Bins bins) {
+                                                 final Map<Integer, PartialAccumulator> partials, final FitState fit, final boolean conditioned,
+                                                 final double sigma2, final double nUnits, final Bins bins) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.suggestionsOn || bins == null) return out;
         final int t = spec.transforms.indexOf(ScreenSpec.TRANSFORM_BINNED);
@@ -495,6 +534,31 @@ public final class ScreenReport {
         final int k = spec.binsK;
         final Map<String, List<Double>> placeboGains = new LinkedHashMap<>();
         final List<Map<String, Object>> candidates = new ArrayList<>();
+        // under conditioning: the fit's gradient and Gram over each half (the discovery slice of the fit sums; the
+        // confirmation half is the window's less it; without the Gram — k above PERIOD_GRAM_MAX_K — the window's Gram
+        // scaled by the half's unit mass, as the period slices do)
+        double[] gDisc = null, gConf = null;
+        double[][] gramDisc = null, gramConf = null;
+        if (conditioned) {
+            final int kf = fit.k;
+            final PartialAccumulator fitAcc = partials.get(ConditioningScorer.FIT_PERIOD_KEY);
+            final double[] slice = fitAcc == null ? null : fitAcc.getPeriods().get(ConditioningScorer.DISCOVERY_SLICE);
+            if (slice != null && slice.length >= 1 + kf) {
+                gDisc = Arrays.copyOfRange(slice, 1, 1 + kf);
+                gConf = new double[kf];
+                for (int j = 0; j < kf; j++) gConf[j] = fit.bestGrad[j] - gDisc[j];
+                gramDisc = new double[kf][kf];
+                gramConf = new double[kf][kf];
+                final boolean gram = slice.length >= 1 + kf + kf * kf;
+                final double share = fit.nUnits > 0 ? slice[0] / fit.nUnits : 0.5;
+                for (int i = 0; i < kf; i++) {
+                    for (int j = 0; j < kf; j++) {
+                        gramDisc[i][j] = gram ? slice[1 + kf + i * kf + j] : share * fit.bestG[i][j];
+                        gramConf[i][j] = fit.bestG[i][j] - gramDisc[i][j];
+                    }
+                }
+            }
+        }
         for (int c = 0; c < names.size(); c++) {
             final ScoreAccumulator acc = accumulators.get(spec.key(c, t));
             final double[] extra = acc == null ? null : acc.getExtra();
@@ -509,9 +573,34 @@ public final class ScreenReport {
             if (!(massFull > 0)) continue;
             final double nDisc = nUnits * massDisc / massFull, nConf = nUnits - nDisc;
             final long nObs = (long) acc.getTotal()[ScoreAccumulator.N_OBS];
-            final Block bd = binnedStats(spec, disc, nDisc, nObs);
-            final Block bc = binnedStats(spec, conf, nConf, nObs);
+            Block bd = binnedStats(spec, disc, nDisc, nObs);
+            Block bc = binnedStats(spec, conf, nConf, nObs);
             if (bd.stats.degenerate || bc.stats.degenerate) continue;
+            // under conditioning the halves are orthogonalised against F with the window's Γ (DSL doc §9.4): the
+            // recipes then say what F does not already carry; r²_F is the window block's
+            String basis = "marginal";
+            double r2 = Double.NaN;
+            if (conditioned && gDisc != null) {
+                final PartialAccumulator pacc = partials.get(spec.key(c, t));
+                final double[] pv = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
+                final int plen = pv == null ? 0 : pv.length / 2;
+                final double[][] gamma = pv != null && pv.length % 2 == 0 && plen > 0 ? blockGamma(spec, nb, Arrays.copyOfRange(pv, 0, plen), fit, spec.conditioningL2) : null;
+                final Block window = gamma == null ? null : binnedStats(spec, full, nUnits, nObs);
+                if (gamma != null && !window.stats.degenerate) {
+                    final double[] pfull = Arrays.copyOfRange(pv, 0, plen), pdisc = Arrays.copyOfRange(pv, plen, 2 * plen), pconf = new double[plen];
+                    for (int i = 0; i < plen; i++) pconf[i] = pfull[i] - pdisc[i];
+                    final Orthogonal ow = orthogonalBlock(spec, nb, pfull, gamma, fit.bestGrad, fit.bestG, sigma2);
+                    final Block pd = partialBlock(spec, nb, pdisc, orthogonalBlock(spec, nb, pdisc, gamma, gDisc, gramDisc, sigma2), bd, sigma2, nDisc, nObs);
+                    final Block pc = partialBlock(spec, nb, pconf, orthogonalBlock(spec, nb, pconf, gamma, gConf, gramConf, sigma2), bc, sigma2, nConf, nObs);
+                    if (!pd.stats.degenerate && !pc.stats.degenerate) {
+                        bd = pd;
+                        bc = pc;
+                        basis = "partial";
+                        r2 = ow.trH > 0 ? Math.min(1d, Math.max(0d, 1d - ow.trHp / ow.trH)) : Double.NaN;
+                    }
+                }
+            }
+            final int before = candidates.size();
             final double[] x = bins.representatives.apply(c);
             final double[] edges = bins.edges.apply(c);
             final boolean position = ScreenSpec.EDGES_RANK.equals(spec.binsEdges);
@@ -597,6 +686,10 @@ public final class ScreenReport {
                         blockAllDisc > 0 ? chiDisc / blockAllDisc : 0d, chiDisc, bc, phiMiss, nb, blockAllConf, nConf,
                         "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains));
             }
+            for (int i = before; i < candidates.size(); i++) {
+                candidates.get(i).put("basis", basis);
+                candidates.get(i).put("r2_F", Double.isNaN(r2) ? null : r2);
+            }
         }
         // the cut per kind from the placebo columns' confirmation gains, else the theoretical chi2(1) / 2N of the half
         final Map<String, Double> thresholds = new LinkedHashMap<>();
@@ -644,6 +737,8 @@ public final class ScreenReport {
         s.put("passed", null);
         s.put("placebo", placebo);
         s.put("fragment", fragment);
+        s.put("basis", null);
+        s.put("r2_F", null);
         s.put("_nConf", nConf);
         if (placebo) placeboGains.computeIfAbsent(kind, key -> new ArrayList<>()).add(Double.isNaN(gainConf) ? 0d : gainConf);
         return s;
@@ -850,69 +945,24 @@ public final class ScreenReport {
      * differences / ratios: every candidate pair's 2 × 2 Newton direction, equal and opposite on the standardised
      * scale, whose joint χ² exceeds the better single one by {@code joint.excess} with the increment clearing the
      * df = 1 cut (a ratio too when both columns' window minima from {@code bins} are positive).
-     * In-sample, one-step: hypotheses for a feature spec, not decisions.
+     * In-sample, one-step: hypotheses for a feature spec, not decisions. Under conditioning the sums are the partial
+     * pass's, orthogonalised against F ({@link #partialJoint}); every record says which ({@code basis}).
      */
-    static List<Map<String, Object>> joint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final double df1Cut,
-                                           final Bins bins) {
+    static List<Map<String, Object>> joint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
+                                           final Map<Integer, PartialAccumulator> partials, final FitState fit, final boolean conditioned,
+                                           final double sigma2, final double nUnits, final double df1Cut, final Bins bins) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.jointOn) return out;
-        final ScoreAccumulator acc = accumulators.get(ScoreAccumulator.JOINT_KEY);
         final int m = spec.jointColumnCount();
-        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(m);
-        final double[] e = acc == null ? null : acc.getExtra();
-        if (e == null || e.length != at.length() || !(e[0] > 0)) return out;
         final List<String> names = spec.columnNames();
         final int nCand = spec.jointColumns.size();
-        // centred S, H (Fisher), M (pHd)
-        final double[] s = new double[m];
-        final double[][] h = new double[m][m], mm = new double[m][m];
-        if (spec.isGroupedMultinomial()) {
-            for (int j = 0; j < m; j++) {
-                s[j] = e[at.s() + j];
-                for (int l = 0; l < m; l++) {
-                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)];
-                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)];
-                }
-            }
-        } else {
-            final double n0 = e[0], rsum = e[at.r()];
-            final double[] mu = new double[m];
-            for (int j = 0; j < m; j++) mu[j] = e[1 + j] / n0;
-            for (int j = 0; j < m; j++) {
-                s[j] = e[at.s() + j] - mu[j] * rsum;
-                for (int l = 0; l < m; l++) {
-                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)] - n0 * mu[j] * mu[l];
-                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
-                }
-            }
-            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
-            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
-            for (int j = 0; j < m; j++) {
-                if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
-                s[j] = 0d;
-                for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
-            }
-            // the intercept is profiled out of M as it is out of S: the residual at its one-step estimate
-            // Σ w r / Σ w v (prior mode: y − ȳ), so a miscalibrated baseline does not add its mean residual times H
-            final double rMean = rsum / n0;
-            for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) mm[j][l] -= rMean * h[j][l];
-            if (spec.isGaussian()) {
-                // identity link: S, H and M over σ², the residual (offset) / label (prior) variance, as in stats()
-                final double sigma2 = e[at.r2()] / n0 - rMean * rMean;
-                if (!(sigma2 > 0)) return out;
-                for (int j = 0; j < m; j++) {
-                    s[j] /= sigma2;
-                    for (int l = 0; l < m; l++) {
-                        h[j][l] /= sigma2;
-                        mm[j][l] /= sigma2;
-                    }
-                }
-            } else if (!spec.hasBaseline()) {
-                // prior mode: raw moments, the Fisher weight at ȳ (offset mode: already inside the sums)
-                final double weight = spec.fisherWeight(rMean);
-                for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) h[j][l] *= weight;
-            }
-        }
+        // the sums the suggestions read: under conditioning the partial pass's, orthogonalised against F (what F does
+        // not already carry); else the marginal ones (what the baseline misses)
+        JointSums js = conditioned ? partialJoint(spec, partials, fit, sigma2) : null;
+        if (js == null) js = marginalJoint(spec, accumulators);
+        if (js == null) return out;
+        final double[] s = js.s;
+        final double[][] h = js.h, mm = js.mm, hRaw = js.hRaw;
         // overflowing sums leave nothing to decompose (a non-finite matrix may not terminate the eigensolver)
         if (!allFinite(s) || !allFinite(h) || !allFinite(mm)) return out;
         double trace = 0;
@@ -989,7 +1039,7 @@ public final class ScreenReport {
         final double[][] corr = new double[nCand][nCand];
         for (int j = 0; j < nCand; j++) {
             for (int l = j + 1; l < nCand; l++) {
-                corr[j][l] = corr[l][j] = hd[j] > 0 && hd[l] > 0 ? h[j][l] / Math.sqrt(hd[j] * hd[l]) : 0d;
+                corr[j][l] = corr[l][j] = hRaw[j][j] > 0 && hRaw[l][l] > 0 ? hRaw[j][l] / Math.sqrt(hRaw[j][j] * hRaw[l][l]) : 0d;
                 if (Math.abs(corr[j][l]) >= spec.jointRedundancy) parent[find(parent, j)] = find(parent, l);
             }
         }
@@ -1120,7 +1170,152 @@ public final class ScreenReport {
                         "{scope: row, expr: \"" + first + " / " + second + "\"} (both positive; the difference's log-scale reading, approximate)"));
             }
         }
+        // the basis every record was read on, and the candidate's own r²_F under conditioning (the share of its
+        // information F carries) for the recipes that name one candidate's contribution
+        final Map<String, Integer> index = new HashMap<>();
+        for (int j = 0; j < nCand; j++) index.put(names.get(spec.jointColumn(j)), j);
+        for (final Map<String, Object> rec : out) {
+            rec.put("basis", js.basis);
+            final String kind = (String) rec.get("kind");
+            final Integer j = "select".equals(kind) || "difference".equals(kind) || "ratio".equals(kind) ? index.get((String) rec.get("candidate")) : null;
+            rec.put("r2_F", j != null && js.r2 != null && !Double.isNaN(js.r2[j]) ? js.r2[j] : null);
+        }
         return out;
+    }
+
+    /**
+     * The joint sums the several-candidate suggestions read: the centred score vector S, the Fisher block H, the pHd
+     * block M, the un-orthogonalised H the redundancy clusters read ({@code hRaw}: the same as H on the marginal basis),
+     * each candidate's r²_F (null on the marginal basis) and the basis ({@code marginal} / {@code partial}).
+     */
+    record JointSums(double[] s, double[][] h, double[][] mm, double[][] hRaw, double[] r2, String basis) {
+    }
+
+    /** The marginal joint sums of DSL doc §9.5 centred at report time; null without usable sums. */
+    static JointSums marginalJoint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
+        final ScoreAccumulator acc = accumulators.get(ScoreAccumulator.JOINT_KEY);
+        final int m = spec.jointColumnCount();
+        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(m);
+        final double[] e = acc == null ? null : acc.getExtra();
+        if (e == null || e.length != at.length() || !(e[0] > 0)) return null;
+        // centred S, H (Fisher), M (pHd)
+        final double[] s = new double[m];
+        final double[][] h = new double[m][m], mm = new double[m][m];
+        if (spec.isGroupedMultinomial()) {
+            for (int j = 0; j < m; j++) {
+                s[j] = e[at.s() + j];
+                for (int l = 0; l < m; l++) {
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)];
+                }
+            }
+        } else {
+            final double n0 = e[0], rsum = e[at.r()];
+            final double[] mu = new double[m];
+            for (int j = 0; j < m; j++) mu[j] = e[1 + j] / n0;
+            for (int j = 0; j < m; j++) {
+                s[j] = e[at.s() + j] - mu[j] * rsum;
+                for (int l = 0; l < m; l++) {
+                    h[j][l] = e[at.h() + GroupScorer.packed(m, j, l)] - n0 * mu[j] * mu[l];
+                    mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
+                }
+            }
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
+            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
+            for (int j = 0; j < m; j++) {
+                if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
+                s[j] = 0d;
+                for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+            }
+            // the intercept is profiled out of M as it is out of S: the residual at its one-step estimate
+            // Σ w r / Σ w v (prior mode: y − ȳ), so a miscalibrated baseline does not add its mean residual times H
+            final double rMean = rsum / n0;
+            for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) mm[j][l] -= rMean * h[j][l];
+            if (spec.isGaussian()) {
+                // identity link: S, H and M over σ², the residual (offset) / label (prior) variance, as in stats()
+                final double sigma2 = e[at.r2()] / n0 - rMean * rMean;
+                if (!(sigma2 > 0)) return null;
+                for (int j = 0; j < m; j++) {
+                    s[j] /= sigma2;
+                    for (int l = 0; l < m; l++) {
+                        h[j][l] /= sigma2;
+                        mm[j][l] /= sigma2;
+                    }
+                }
+            } else if (!spec.hasBaseline()) {
+                // prior mode: raw moments, the Fisher weight at ȳ (offset mode: already inside the sums)
+                final double weight = spec.fisherWeight(rMean);
+                for (int j = 0; j < m; j++) for (int l = 0; l < m; l++) h[j][l] *= weight;
+            }
+        }
+        return new JointSums(s, h, mm, h, null, "marginal");
+    }
+
+    /**
+     * The joint sums at the fitted p̂ orthogonalised against F (DSL doc §9.5, {@link ConditioningScorer#JOINT_PARTIAL_KEY}):
+     * Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ, over σ²; a column
+     * F explains fully (H⊥_jj ≤ 1e-10 H_jj, r²_F = 1) leaves the metric. Null without the sums or when the solve fails.
+     */
+    static JointSums partialJoint(final ScreenSpec spec, final Map<Integer, PartialAccumulator> partials, final FitState fit, final double sigma2) {
+        if (partials == null || fit == null || !fit.hasBest) return null;
+        final PartialAccumulator acc = partials.get(ConditioningScorer.JOINT_PARTIAL_KEY);
+        final int m = spec.jointColumnCount(), k = fit.k;
+        final ConditioningScorer.JointPartialLayout at = ConditioningScorer.JointPartialLayout.of(m, k);
+        final double[] e = acc == null || acc.isEmpty() ? null : acc.getTotal();
+        if (e == null || e.length != at.length() || !(e[at.used()] > 0) || !allFinite(e)) return null;
+        final double[][] aT = new double[k][m];   // A' : k × m, the right-hand sides
+        for (int j = 0; j < m; j++) for (int c = 0; c < k; c++) aT[c][j] = e[at.a() + j * k + c];
+        final double[][] gamma;
+        try {
+            gamma = MatrixOps.solveGram(fit.bestG, aT, spec.conditioningL2 * fit.nUnits);   // k × m
+        } catch (final RuntimeException ex) {
+            return null;
+        }
+        // G Γ and Mff Γ (k × m) once
+        final double[][] gG = new double[k][m], fG = new double[k][m];
+        for (int c = 0; c < k; c++) {
+            for (int d = 0; d < k; d++) {
+                final double g = fit.bestG[c][d], f = e[at.mff() + GroupScorer.packed(k, c, d)];
+                for (int j = 0; j < m; j++) {
+                    gG[c][j] += g * gamma[d][j];
+                    fG[c][j] += f * gamma[d][j];
+                }
+            }
+        }
+        final double[] s = new double[m];
+        final double[][] h = new double[m][m], mm = new double[m][m], hr = new double[m][m];
+        for (int j = 0; j < m; j++) {
+            double gg = 0;
+            for (int c = 0; c < k; c++) gg += gamma[c][j] * fit.bestGrad[c];
+            s[j] = (e[j] - gg) / sigma2;
+            for (int l = 0; l < m; l++) {
+                final int q = GroupScorer.packed(m, j, l);
+                double ga = 0, ag = 0, ggg = 0, gx = 0, xg = 0, gfg = 0;
+                for (int c = 0; c < k; c++) {
+                    ga += gamma[c][j] * e[at.a() + l * k + c];
+                    ag += e[at.a() + j * k + c] * gamma[c][l];
+                    ggg += gamma[c][j] * gG[c][l];
+                    gx += gamma[c][j] * e[at.mxf() + l * k + c];
+                    xg += e[at.mxf() + j * k + c] * gamma[c][l];
+                    gfg += gamma[c][j] * fG[c][l];
+                }
+                hr[j][l] = e[at.h() + q] / sigma2;
+                h[j][l] = (e[at.h() + q] - ga - ag + ggg) / sigma2;
+                mm[j][l] = (e[at.mm() + q] - gx - xg + gfg) / sigma2;
+            }
+        }
+        final int nCand = spec.jointColumns.size();
+        final double[] r2 = new double[nCand];
+        for (int j = 0; j < m; j++) {
+            final double rj = hr[j][j] > 0 ? Math.min(1d, Math.max(0d, 1d - h[j][j] / hr[j][j])) : Double.NaN;
+            if (j < nCand) r2[j] = rj;
+            if (h[j][j] > 1e-10 * hr[j][j]) continue;
+            // nothing left of the column beyond F: it leaves the metric rather than enter it as rounding residue
+            if (j < nCand) r2[j] = 1d;
+            s[j] = 0d;
+            for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+        }
+        return new JointSums(s, h, mm, hr, r2, "partial");
     }
 
     /** A pair's two-dimensional Newton direction kept for a difference / ratio suggestion (joint column indices). */
@@ -1180,6 +1375,8 @@ public final class ScreenReport {
         s.put("passed", passed);
         s.put("placebo", false);
         s.put("fragment", fragment);
+        s.put("basis", null);
+        s.put("r2_F", null);
         return s;
     }
 
@@ -1267,6 +1464,7 @@ public final class ScreenReport {
                 final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), Double.NaN, share, best, gain, null, Double.NaN,
                         reading + " -> " + rowBinFragment(first, new double[]{cut}));
                 rec.put("cut", cut);
+            rec.put("basis", "partial");
                 out.add(rec);
                 continue;
             }
@@ -1285,6 +1483,7 @@ public final class ScreenReport {
             final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), consistency,
                     share, best, gain, null, Double.NaN, reading + " -> " + fragment);
             rec.put("cut", cut);
+            rec.put("basis", "partial");
             rec.put("direction", rightSide ? ">" : "<=");
             rec.put("fill", fill);
             out.add(rec);
@@ -1429,6 +1628,8 @@ public final class ScreenReport {
                 .withField("passed", Schema.FieldType.BOOLEAN)
                 .withField("placebo", Schema.FieldType.BOOLEAN)
                 .withField("fragment", Schema.FieldType.STRING)
+                .withField("basis", Schema.FieldType.STRING)
+                .withField("r2_F", Schema.FieldType.FLOAT64)
                 .build();
     }
 
@@ -2044,13 +2245,15 @@ public final class ScreenReport {
         summary.put("nJointFilled", nJointFilled);
         summary.put("nJointDropped", nJointDropped);
         summary.put("notes", notes);
-        final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, nUnits, bins));
+        final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, bins));
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
-        suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold), bins));
+        suggested.addAll(joint(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, spec.gainCut(threshold), bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
         suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
         // the passing categorical candidates' level groupings and strong single levels
         suggested.addAll(groupings(spec, accumulators, nUnits, bins, passedBest.keySet()));
+        // every suggestion says the basis it was read on (the marginal sums unless a kind reads the partial ones)
+        for (final Map<String, Object> sg : suggested) if (sg.get("basis") == null) sg.put("basis", "marginal");
         // the candidates' suggestions (placebo records excluded, as nScored)
         summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() || spec.hasCategoricals() ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
         summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);

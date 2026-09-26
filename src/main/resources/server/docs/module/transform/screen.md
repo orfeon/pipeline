@@ -152,9 +152,13 @@ scorable candidate, recipes in the feature transform's vocabulary to the `<name>
   half — the numbers to trust.
 - **Calibrated.** Placebo columns go through the same search; each kind's `threshold` is the placebo quantile
   of their confirmation gains (lifted to `pass.minGain`), and `passed` compares the confirmation gain with it.
+- **Basis.** Without `conditioning` the recipes are read on the marginal binned sums (what the baseline
+  misses). With it they are read on the partial block — both halves orthogonalised against the conditioning
+  set — so a recipe says what the conditioning set does not already carry, not a re-encoding of it; `basis`
+  names which (`marginal` / `partial`) and, on the partial basis, `r2_F` is the share of the block's
+  information the conditioning set carries.
 - **Hypotheses.** A suggestion goes into a feature spec and is checked by the next screen or the `evaluation`
-  transform; nothing is applied automatically. A shape's redundancy with the conditioning set is read off the
-  block record's `r2_F`.
+  transform; nothing is applied automatically.
 
 ### Several candidates (joint)
 
@@ -172,7 +176,11 @@ scale) — and writes, to the same `suggestions` output, what a univariate ranki
 | `ratio` | the same pair when both columns are positive over the window: the difference's log-scale reading (approximate) | `fragment` `{scope: row, expr: "a / b"}` |
 
 These are one-step, in-sample estimates at the null point — hypotheses for a feature spec, checked by the
-next screen. The joint sums cost O(m²) per row and `m(m + 1)` doubles of state: keep `joint.include` to the
+next screen. With `conditioning` the joint sums are taken at the fitted model and orthogonalised against the
+conditioning set (`basis: partial`): the pHd directions, the selection, the composite and the differences /
+ratios say what the conditioning set does not already carry, and `select` / `difference` / `ratio` records
+carry the named candidate's `r2_F`; the redundancy clusters keep the plain correlation (near-duplicates are
+near-duplicates whatever the conditioning set carries). The joint sums cost O(m²) per row and `m(m + 1)` doubles of state: keep `joint.include` to the
 candidates worth combining (at most `maxColumns`, default 200). A missing joint value follows the marginal
 test's rule — no information: the grouped family centres each column by the unit's p-weighted mean over its
 observed rows (a missing value is 0 after centring), a row family shifts each column by its window mean from
@@ -433,8 +441,11 @@ One record per candidate × kind (`shape` / `cut` / `missing` / `monotone`, see 
 `fill`, `consistency`, `share` and `chi2` (discovery half), `confirmation_chi2`, `confirmation_share`,
 `confirmation_gain`, `confirmation_pValue` (confirmation half), `threshold` (the kind's placebo cut),
 `passed`, `placebo`, `fragment` (the recipe in the feature transform's row vocabulary, or a description when it
-has no row op — a monotone constraint, a within-unit rank). Placebo columns get records too (`placebo: true`,
-never `passed`); the summary counts the candidates' records (`nSuggestions`, placebo records excluded).
+has no row op — a monotone constraint, a within-unit rank), `basis` (`marginal` / `partial`: the sums the
+record was read on, see [Suggestions](#suggestions) and [Several candidates](#several-candidates-joint)),
+`r2_F` (on the partial basis: the share of the candidate's — or the block's — information the conditioning set
+carries; null otherwise). Placebo columns get records too (`placebo: true`, never `passed`); the summary counts
+the candidates' records (`nSuggestions`, placebo records excluded).
 
 ## Examples
 
