@@ -213,7 +213,8 @@ public final class GroupScorer implements Serializable {
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.categoricalKey(c, r), k -> new ScoreAccumulator());
                 Arrays.fill(contribution, 0d);
                 contribution[ScoreAccumulator.N_OBS] = n;
-                acc.add(unitPeriod, contribution);
+                // the block's record reads no period slice: the total alone
+                acc.add(null, contribution);
                 if (spec.isGroupedMultinomial()) binnedGroupedContribution(nb, idx, unit.y, unit.p, unit.unitWeight, acc.extra(binnedGroupedLength(nb)));
                 else binnedRowContribution(nb, idx, unit.y, unit.p, unit.w, prior, acc.extra(binnedRowLength(nb)));
             }
@@ -571,18 +572,7 @@ public final class GroupScorer implements Serializable {
         final SplittableRandom rng = FeatureValues.seededRandom(spec.seed, unit.key + SEP + "cat" + c + SEP + r);
         final int n = unit.size();
         final int[] out = new int[n];
-        for (int i = 0; i < n; i++) {
-            double u = rng.nextDouble();
-            int slot = levels.size() - 1;
-            for (int j = 0; j < levels.frequency().length; j++) {
-                u -= levels.frequency()[j];
-                if (u < 0) {
-                    slot = j;
-                    break;
-                }
-            }
-            out[i] = slot;
-        }
+        for (int i = 0; i < n; i++) out[i] = levels.slot(rng.nextDouble());
         return out;
     }
 

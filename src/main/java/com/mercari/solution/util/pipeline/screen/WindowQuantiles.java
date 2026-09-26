@@ -145,9 +145,9 @@ public final class WindowQuantiles implements Serializable {
      * A categorical column's level dictionary (DSL doc §6.2): the {@code maxLevels} most frequent levels named, by
      * count then name, at indices 0..n − 1; every other level folds into the last index ({@link ScreenSpec#LEVEL_OTHER},
      * present only when a level was folded). {@code index} maps a level to its slot, {@code frequency} gives each
-     * slot's share of the rows (the placebo columns' redraw distribution).
+     * slot's share of the rows (the placebo columns' redraw distribution) and {@code cumulative} its running sum.
      */
-    public record Levels(List<String> names, Map<String, Integer> index, double[] frequency, boolean folded) {
+    public record Levels(List<String> names, Map<String, Integer> index, double[] frequency, double[] cumulative, boolean folded) {
         public int size() {
             return names.size();
         }
@@ -155,6 +155,17 @@ public final class WindowQuantiles implements Serializable {
         public int indexOf(final String level) {
             final Integer i = index.get(level);
             return i != null ? i : folded ? names.size() - 1 : -1;
+        }
+
+        /** The slot a uniform draw {@code u} in [0, 1) falls in under the frequencies (the last one past a rounding shortfall). */
+        public int slot(final double u) {
+            int lo = 0, hi = cumulative.length - 1;
+            while (lo < hi) {
+                final int mid = (lo + hi) >>> 1;
+                if (u < cumulative[mid]) hi = mid;
+                else lo = mid + 1;
+            }
+            return lo;
         }
     }
 
@@ -183,8 +194,14 @@ public final class WindowQuantiles implements Serializable {
             freq.add(total > 0 ? other / total : 0d);
         }
         final double[] frequency = new double[freq.size()];
-        for (int i = 0; i < frequency.length; i++) frequency[i] = freq.get(i);
-        return new Levels(names, index, frequency, folded);
+        final double[] cumulative = new double[freq.size()];
+        double running = 0;
+        for (int i = 0; i < frequency.length; i++) {
+            frequency[i] = freq.get(i);
+            running += frequency[i];
+            cumulative[i] = running;
+        }
+        return new Levels(names, index, frequency, cumulative, folded);
     }
 
     /**

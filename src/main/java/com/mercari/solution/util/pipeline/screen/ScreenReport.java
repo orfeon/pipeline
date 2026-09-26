@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.MatrixOps;
 import com.mercari.solution.util.pipeline.glm.Baselines;
@@ -738,6 +739,14 @@ public final class ScreenReport {
         return s >= 0 ? "+" : "-";
     }
 
+    /**
+     * The sign of the centred contrast's score ({@link #direction}) as ±1: a level's effect against the rest, not the
+     * sign of its raw S_l (which carries the window's total residual in offset mode).
+     */
+    private static double contrastSign(final Block block, final double[] phi, final int over) {
+        return "+".equals(direction(block, phi, over)) ? 1d : -1d;
+    }
+
     /** The shapes tried on the value bins: the smooth ones on the representatives, the cut ones at every edge. */
     private static List<Shape> shapes(final double[] x, final double[] edges, final int k, final boolean position) {
         final List<Shape> out = new ArrayList<>();
@@ -1342,12 +1351,16 @@ public final class ScreenReport {
      * The categorical grouping suggestions (DSL doc §6.2): a column's named levels sorted by effect S_l / H_l and cut
      * once at the best split gain (the boosted-tree categorical split) — kind {@code grouping}, the two groups in
      * the fragment, the split's share of the block χ² — and every level whose own contrast against the rest is
-     * strong (|z| ≥ 3) as a one-hot indicator — kind {@code onehot}. In-sample, hypotheses.
+     * strong (|z| ≥ 3) as a one-hot indicator — kind {@code onehot} (the feature transform's row {@code indicator} op;
+     * the folded {@code (other)} level has no single value to flag and gets none). In-sample, hypotheses, for the
+     * passing columns only ({@code passed}: the column names that passed their test).
      */
-    static List<Map<String, Object>> groupings(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final Bins bins) {
+    static List<Map<String, Object>> groupings(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final Bins bins,
+                                               final Set<String> passed) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.hasCategoricals() || bins == null) return out;
         for (int c = 0; c < spec.categoricals.size(); c++) {
+            if (!passed.contains(spec.categoricals.get(c))) continue;
             final WindowQuantiles.Levels levels = bins.levels().apply(c);
             if (levels == null || levels.size() < 2) continue;
             final int nb = levels.size();
@@ -1379,14 +1392,19 @@ public final class ScreenReport {
             // strong single levels
             for (int l = 0; l < nb; l++) {
                 if (!(block.h[l] > 0)) continue;
+                final String level = levels.names().get(l);
+                // the fold of the levels beyond maxLevels is no value a row indicator can name
+                if (levels.folded() && l == nb - 1) continue;
                 final double[] phi = new double[nb];
                 phi[l] = 1;
                 final double chi2 = contrastChi2(block, phi, nb);
                 if (chi2 < 9) continue;
-                final String level = levels.names().get(l);
+                final String indicator = ScreenSpec.LEVEL_NULL.equals(level)
+                        ? "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}"
+                        : "{name: " + name + "_is, scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
                 out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
                         nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
-                        "{scope: row, expr: \"" + name + " == '" + level.replace("'", "\\'") + "' ? 1 : 0\"} (z " + fmt(Math.signum(block.s[l]) * Math.sqrt(chi2)) + ")"));
+                        indicator + " (z " + fmt(contrastSign(block, phi, nb) * Math.sqrt(chi2)) + ")"));
             }
         }
         return out;
@@ -1811,7 +1829,7 @@ public final class ScreenReport {
                         final double chi2 = st.degenerate ? 0d : contrastChi2(block, phi, nb);
                         final Map<String, Object> lr = new LinkedHashMap<>();
                         lr.put("level", levels.names().get(l));
-                        lr.put("z", st.degenerate || !(block.h[l] > 0) ? null : Math.signum(block.s[l]) * Math.sqrt(chi2));
+                        lr.put("z", st.degenerate || !(block.h[l] > 0) ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
                         lr.put("S", block.s[l]);
                         lr.put("H", block.h[l]);
                         lr.put("n", Math.round(block.n[l]));
@@ -2007,8 +2025,8 @@ public final class ScreenReport {
         suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold), bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
         suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
-        // the categorical candidates' level groupings and strong single levels
-        suggested.addAll(groupings(spec, accumulators, nUnits, bins));
+        // the passing categorical candidates' level groupings and strong single levels
+        suggested.addAll(groupings(spec, accumulators, nUnits, bins, passedBest.keySet()));
         // the candidates' suggestions (placebo records excluded, as nScored)
         summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() || spec.hasCategoricals() ? suggested.stream().filter(s -> !(Boolean) s.get("placebo")).count() : null);
         summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);

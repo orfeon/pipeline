@@ -200,7 +200,7 @@ public final class ScreenSpec implements Serializable {
     /** the categorical block test's record transform and placebo kind */
     public static final String TRANSFORM_LEVELS = "levels";
     public static final String KIND_LEVELS = "levels";
-    /** the level a null categorical value takes, and the fold of the levels beyond maxLevels */
+    /** the fold of the categorical levels beyond maxLevels (a null value takes {@link #LEVEL_NULL}) */
     public static final String LEVEL_OTHER = "(other)";
     /** the marginal / partial keys of the categorical blocks start here (real columns, then their placebos) */
     public static final int CATEGORICAL_KEY_BASE = 1_000_000;
@@ -1072,7 +1072,6 @@ public final class ScreenSpec implements Serializable {
             errors.add("candidates use lineage selectors (derivedFrom: / scope: / block: / evidence: / kind:) but no lineage is available: "
                     + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
         }
-        if (candidates.isEmpty()) errors.add("no candidate column: candidates.include " + candidateInclude + " matched no numeric input field (after exclusions)");
 
         // conditioning columns: numeric fields matching the patterns, never the label / group / time / weight roles
         conditioningFields = new ArrayList<>();
@@ -1180,6 +1179,15 @@ public final class ScreenSpec implements Serializable {
             }
             if (categoricals.isEmpty()) errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates)");
             if (categoricalPlacebo > 0 && noise == 0) notes.add("categorical placebos redraw the levels from the window frequencies; they need no noise column");
+            // the marginal / partial keys of the numeric columns and the pairs must stay below the categorical blocks'
+            if (pairGridKey(pairs.size()) > CATEGORICAL_KEY_BASE) {
+                errors.add("categorical: " + pairGridKey(pairs.size()) + " column / pair keys reach the categorical key range (" + CATEGORICAL_KEY_BASE + "); narrow candidates.include or transforms");
+            }
+        }
+        // a screen of categorical candidates alone needs no numeric one
+        if (candidates.isEmpty() && categoricals.isEmpty()) {
+            errors.add("no candidate column: candidates.include " + candidateInclude + " matched no numeric input field (after exclusions)"
+                    + (categoricalInclude.isEmpty() ? "" : " and categorical.include " + categoricalInclude + " no string one"));
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;

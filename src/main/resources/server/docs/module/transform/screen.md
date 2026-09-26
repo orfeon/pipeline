@@ -182,15 +182,18 @@ in any joint column is left out of the joint sums.
 information) block instead of a one-hot or target encoding upstream. The sketch pre-pass counts every level
 exactly (a column past 20,000 distinct levels fails the step: not a categorical candidate), keeps the
 `maxLevels` (default 32) most frequent as named levels and folds the rest into `(other)` (a null value is
-its own level `(null)`). The column's record (`transform: levels`) is the same block test as the
+its own level `(null)`); a screen of categorical candidates alone needs no numeric candidate. The column's
+record (`transform: levels`) is the same block test as the
 [binned block](#binned-block-test): `chi2`, `df` (active levels − 1), `pValue`, `est_gain`, no sign, the
 partial block under conditioning, and `level_z` with each level's contrast against the rest (its signed z,
 S, H, n — which levels carry the effect). It has its own placebo kind (`thresholds.levels`): `placebo`
 (default 5) columns per candidate whose levels are redrawn from the window frequencies (the marginal
 distribution kept, the alignment with the label broken). A passing column goes into the pass list by name
-(the feature transform encodes it); the `suggestions` output adds its `grouping` (the levels sorted by
-effect and cut once at the best split — a level grouping, the two groups in the fragment) and an `onehot`
-record for every level whose own contrast is strong (|z| ≥ 3), with the indicator expression.
+(the feature transform encodes it); for a passing column only, the `suggestions` output adds its `grouping`
+(the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
+fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
+transform's row op in the fragment (`{type: indicator, input, values: [level]}`; `== null` for the `(null)`
+level; none for the folded `(other)`).
 
 ### Periods, time window and leak flags
 
