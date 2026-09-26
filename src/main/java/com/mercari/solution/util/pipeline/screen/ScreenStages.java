@@ -182,14 +182,16 @@ public final class ScreenStages {
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final TupleTag<MElement> suggestionTag = new TupleTag<>() {};
-        // the suggestions read the bins' value edges from the window sketches (nothing else in the finalize step does)
-        if (spec.suggestionsOn && quantilesView != null) finalizeSideInputs.add(quantilesView);
+        // the finalize step reads the window sketches for the suggestions' bin representatives and the pair grids'
+        // edges (the interaction shapes); nothing else there does
+        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape()) && quantilesView != null;
+        if (finalizeReadsSketches) finalizeSideInputs.add(quantilesView);
         // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
         final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
                 Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER)));
         final PCollectionTuple finalized = combined
                 .apply("Gather", combined.getWindowingStrategy().getWindowFn() instanceof GlobalWindows ? gather : gather.withoutDefaults())
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, suggestionTag, fitView, partialView, spec.suggestionsOn ? quantilesView : null))
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, suggestionTag, fitView, partialView, finalizeReadsSketches ? quantilesView : null))
                         .withSideInputs(finalizeSideInputs)
                         .withOutputTags(recordTag, TupleTagList.of(summaryTag).and(suggestionTag)));
         return new Outputs(finalized.get(recordTag), finalized.get(summaryTag), finalized.get(suggestionTag), prepared.get(failureTag));
