@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
+import java.util.function.IntToDoubleFunction;
 
 /**
  * Turns the combined accumulators into the scoring records and the run summary. Pure: the statistics,
@@ -436,11 +437,16 @@ public final class ScreenReport {
     /**
      * The bins' geometry: a representative value per value bin (the suggestions' shapes), and the k − 1 edges (the
      * suggestions' cuts, the records' {@code bin_edges} and the pass list's block recipes; null for position bins) by
-     * column, and the pair grids' edges by x column (a pair member's conditioning column, the interaction shapes).
+     * column, the pair grids' edges by x column (a pair member's conditioning column, the interaction shapes), and a
+     * candidate column's smallest finite value in the window (NaN when unknown: the joint's ratio reading).
      */
-    public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges, IntFunction<double[]> gridEdges) {
+    public record Bins(IntFunction<double[]> representatives, IntFunction<double[]> edges, IntFunction<double[]> gridEdges, IntToDoubleFunction minimum) {
         public Bins(final IntFunction<double[]> representatives, final IntFunction<double[]> edges) {
-            this(representatives, edges, i -> null);
+            this(representatives, edges, i -> null, i -> Double.NaN);
+        }
+
+        public Bins(final IntFunction<double[]> representatives, final IntFunction<double[]> edges, final IntFunction<double[]> gridEdges) {
+            this(representatives, edges, gridEdges, i -> Double.NaN);
         }
     }
 
@@ -816,10 +822,14 @@ public final class ScreenReport {
      * directions of H^(−1/2) M H^(−1/2) (residual curvature: quadratic effects and interactions in bulk, the scale-free
      * loadings v_j √H_jj naming the candidates; a diagnostic, never a pass flag), the redundancy clusters (|correlation| in the Fisher metric at or
      * above {@code joint.redundancy}), a report-time forward selection (the score test of a candidate given the
-     * selected set, closed form at β = 0, stopped at the df = 1 cut) and the linear composite of the selected set.
+     * selected set, closed form at β = 0, stopped at the df = 1 cut), the linear composite of the selected set, and the
+     * differences / ratios: every candidate pair's 2 × 2 Newton direction, equal and opposite on the standardised
+     * scale, whose joint χ² exceeds the better single one by {@code joint.excess} with the increment clearing the
+     * df = 1 cut (a ratio too when both columns' window minima from {@code bins} are positive).
      * In-sample, one-step: hypotheses for a feature spec, not decisions.
      */
-    static List<Map<String, Object>> joint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final double df1Cut) {
+    static List<Map<String, Object>> joint(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators, final double nUnits, final double df1Cut,
+                                           final Bins bins) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.jointOn) return out;
         final ScoreAccumulator acc = accumulators.get(ScoreAccumulator.JOINT_KEY);
@@ -1045,7 +1055,52 @@ public final class ScreenReport {
                 // a singular selected block leaves the composite out
             }
         }
+        // ratios and differences: a pair whose two-dimensional Newton direction is equal and opposite on the
+        // standardised scale, and whose joint chi2 clearly exceeds the better single one — by the excess factor, and
+        // the other member's gain given the better one (the increment, a df = 1 score test) clearing the df = 1 cut
+        // (DSL doc §9.5)
+        final List<PairDirection> pairsFound = new ArrayList<>();
+        for (int i = 0; i < nCand && spec.jointPairs > 0 && nUnits > 0; i++) {
+            for (int j = i + 1; j < nCand; j++) {
+                if (!(h[i][i] > 0) || !(h[j][j] > 0)) continue;
+                final double det = h[i][i] * h[j][j] - h[i][j] * h[i][j];
+                if (!(det > 1e-12 * h[i][i] * h[j][j])) continue;
+                final double bi = (h[j][j] * s[i] - h[i][j] * s[j]) / det, bj = (h[i][i] * s[j] - h[i][j] * s[i]) / det;
+                final double chi2 = bi * s[i] + bj * s[j];
+                final double single = Math.max(s[i] * s[i] / h[i][i], s[j] * s[j] / h[j][j]);
+                if (!(single > 0) || !(chi2 > spec.jointExcess * single) || !((chi2 - single) / (2 * nUnits) > df1Cut)) continue;
+                // standardised coefficients: opposite signs, comparable magnitudes
+                final double si = bi * Math.sqrt(h[i][i]), sj = bj * Math.sqrt(h[j][j]);
+                if (si * sj >= 0) continue;
+                final double consistency = Math.min(Math.abs(si), Math.abs(sj)) / Math.max(Math.abs(si), Math.abs(sj));
+                if (consistency < 0.5) continue;
+                pairsFound.add(new PairDirection(i, j, chi2 / single, chi2, bi, bj, consistency));
+            }
+        }
+        pairsFound.sort(Comparator.comparingDouble((PairDirection p) -> -p.excess()));
+        for (int n = 0; n < Math.min(spec.jointPairs, pairsFound.size()); n++) {
+            final PairDirection p = pairsFound.get(n);
+            final String a = names.get(spec.jointColumn(p.i())), b = names.get(spec.jointColumn(p.j()));
+            final double gain = p.chi2() / (2 * nUnits);
+            // x_i − r x_j with r the raw-scale coefficient ratio; the sign of beta_i decides which is subtracted
+            final boolean iPositive = p.bi() > 0;
+            final String first = iPositive ? a : b, second = iPositive ? b : a;
+            final double r = Math.abs(iPositive ? p.bj() / p.bi() : p.bi() / p.bj());
+            out.add(jointRecord(first, "difference", first + " - " + second, p.consistency(), p.excess(), p.chi2(), gain, null, Double.NaN,
+                    "{scope: row, expr: \"" + first + " - " + fmt(r) + "*" + second + "\"} (joint chi2 " + fmt(p.chi2()) + ", " + fmt(p.excess()) + "x the better single)"));
+            // the ratio reading needs positive columns (the log-scale direction); the sketch minima tell (NaN = unknown)
+            final double minI = bins == null ? Double.NaN : bins.minimum().applyAsDouble(spec.jointColumn(p.i()));
+            final double minJ = bins == null ? Double.NaN : bins.minimum().applyAsDouble(spec.jointColumn(p.j()));
+            if (minI > 0 && minJ > 0) {
+                out.add(jointRecord(first, "ratio", first + " / " + second, p.consistency(), p.excess(), p.chi2(), gain, null, Double.NaN,
+                        "{scope: row, expr: \"" + first + " / " + second + "\"} (both positive; the difference's log-scale reading, approximate)"));
+            }
+        }
         return out;
+    }
+
+    /** A pair's two-dimensional Newton direction kept for a difference / ratio suggestion (joint column indices). */
+    private record PairDirection(int i, int j, double excess, double chi2, double bi, double bj, double consistency) {
     }
 
     private static int find(final int[] parent, final int j) {
@@ -1303,7 +1358,8 @@ public final class ScreenReport {
      * @param partials the partial-test sums per key (null without conditioning)
      * @param fit      the final fit state (null without conditioning)
      * @param bins     the bins' geometry for the suggestions and the block records' {@code bin_edges} (null = no
-     *                 suggestions, and null edges: a passing value block then has no row bin op in the pass list)
+     *                 one-candidate or interaction suggestions, no ratio, and null edges: a passing value block then
+     *                 has no row bin op in the pass list)
      */
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                final Map<Integer, PartialAccumulator> partials, final FitState fit, final Bins bins) {
@@ -1790,7 +1846,7 @@ public final class ScreenReport {
         summary.put("notes", notes);
         final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, nUnits, bins));
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
-        suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold)));
+        suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold), bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
         suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
         // the candidates' suggestions (placebo records excluded, as nScored)
@@ -2117,7 +2173,7 @@ public final class ScreenReport {
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
         if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebos.size() + " placebo pairs)" + (spec.hasPairShape() ? " shape=" + spec.pairShapeBins + "x" + spec.pairShapeBins : ""));
-        if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect);
+        if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect + " pairs=" + spec.jointPairs + " excess=" + spec.jointExcess);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

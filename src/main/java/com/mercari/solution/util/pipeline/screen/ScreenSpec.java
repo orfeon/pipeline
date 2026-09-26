@@ -141,12 +141,14 @@ public final class ScreenSpec implements Serializable {
 
     /**
      * The x columns the window sketch pre-pass feeds, ascending: the candidates and the shuffle reference when their
-     * sketches are read ({@link #needsCandidateSketches}: rank / absdev of independent rows, value bins), plus the
-     * members of the real pairs when their 2-D grids need value edges — not every candidate for a pair shape alone.
+     * sketches are read ({@link #needsCandidateSketches}: rank / absdev of independent rows, value bins), the
+     * candidates when the joint reads their minima ({@link #needsJointMinima}), plus the members of the real pairs
+     * when their 2-D grids need value edges — not every candidate for a pair shape alone.
      */
     public int[] sketchedColumns() {
         final java.util.TreeSet<Integer> fed = new java.util.TreeSet<>();
         if (needsCandidateSketches()) for (int c = 0; c < conditioningOffset(); c++) fed.add(c);
+        if (needsJointMinima()) for (int c = 0; c < candidates.size(); c++) fed.add(c);
         if (hasPairShape()) for (final int[] pair : pairs) for (final int member : pair) fed.add(conditioningColumn(member));
         return fed.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -174,6 +176,10 @@ public final class ScreenSpec implements Serializable {
     public double jointRedundancy = 0.95;
     /** joint.select: the forward selection's maximum number of steps */
     public int jointSelect = 10;
+    /** joint.pairs: at most this many difference / ratio suggestions (the pairs with the largest joint excess) */
+    public int jointPairs = 10;
+    /** joint.excess: a pair's joint χ² must exceed the better single one by this factor for a difference / ratio suggestion */
+    public double jointExcess = 1.5;
     /** the resolved joint columns as candidate indices */
     public List<Integer> jointColumns = new ArrayList<>();
 
@@ -414,6 +420,14 @@ public final class ScreenSpec implements Serializable {
      */
     public boolean windowTransforms() {
         return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
+    }
+
+    /**
+     * Whether the report reads the candidates' window minima (the joint's ratio suggestions, DSL doc §9.5): the
+     * sketch pre-pass then runs for the finalize step alone when the scoring passes do not need it.
+     */
+    public boolean needsJointMinima() {
+        return jointOn && jointPairs > 0;
     }
 
     public boolean hasBinned() {
@@ -726,8 +740,18 @@ public final class ScreenSpec implements Serializable {
                     if (select < 0 || select != Math.rint(select)) errors.add("joint.select must be a non-negative integer");
                     else s.jointSelect = select.intValue();
                 }
+                final Double jp = number(o, "pairs");
+                if (jp != null) {
+                    if (jp < 0 || jp != Math.rint(jp)) errors.add("joint.pairs must be a non-negative integer");
+                    else s.jointPairs = jp.intValue();
+                }
+                final Double excess = number(o, "excess");
+                if (excess != null) {
+                    if (!(excess >= 1)) errors.add("joint.excess must be at least 1");
+                    else s.jointExcess = excess;
+                }
             } else {
-                errors.add("joint must be a boolean or an object {include, maxColumns, noise, directions, redundancy, select}");
+                errors.add("joint must be a boolean or an object {include, maxColumns, noise, directions, redundancy, select, pairs, excess}");
             }
         }
         s.transformsExplicit = !s.transforms.isEmpty();

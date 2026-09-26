@@ -401,6 +401,12 @@ public final class GroupScorer implements Serializable {
         return b;
     }
 
+    /** The smallest finite value of a candidate column in the window (its sketch; NaN for a placebo column or without a sketch). */
+    public double columnMin(final int column) {
+        if (quantiles == null || column >= nCandidates || column >= quantiles.columns() || quantiles.count(column) == 0) return Double.NaN;
+        return quantiles.min(column);
+    }
+
     /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
     public double[] binEdges(final int column) {
         return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);

@@ -1141,6 +1141,81 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testJointDifferenceAndRatio() throws Exception {
+        // independent binomial rows over two positive candidates (schema order b, x) whose label follows the
+        // difference b − x: each alone carries part of the effect, the pair's joint chi2 clearly exceeds the better
+        // single one and the two-dimensional Newton direction is equal and opposite — a difference, and, both
+        // columns being positive, a ratio
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [b, x], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, select: 0, directions: 1}}");
+        Assertions.assertEquals(2, spec.jointColumnCount());
+        final java.util.Random random = new java.util.Random(9);
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        final WindowQuantiles q = new WindowQuantiles(2);
+        for (int i = 0; i < 600; i++) {
+            final double b = 2 + random.nextGaussian(), x = 2 + random.nextGaussian();
+            final double logit = 1.5 * (b - x);
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-logit)) ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{Math.max(b, 0.1), Math.max(x, 0.1)});
+            q.update(r.x);
+            scorer.score(List.of(r), r.getIdentity(), acc);
+        }
+        final GroupScorer withSketch = new GroupScorer(spec).withWindowQuantiles(q);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(withSketch::binRepresentatives, withSketch::binEdges, withSketch::gridEdges, withSketch::columnMin));
+        final Map<String, List<Map<String, Object>>> byKind = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) byKind.computeIfAbsent((String) s.get("kind"), k -> new java.util.ArrayList<>()).add(s);
+        Assertions.assertTrue(byKind.containsKey("difference"), byKind.keySet().toString());
+        final Map<String, Object> diff = byKind.get("difference").get(0);
+        Assertions.assertEquals("b", diff.get("candidate"));
+        Assertions.assertEquals("b - x", diff.get("name"));
+        Assertions.assertTrue((Double) diff.get("share") > 1.5, "excess " + diff.get("share"));   // share = the joint chi2 over the better single
+        Assertions.assertTrue((Double) diff.get("consistency") > 0.5, "magnitude ratio " + diff.get("consistency"));
+        Assertions.assertTrue(((String) diff.get("fragment")).startsWith("{scope: row, expr: \"b - "), diff.toString());
+        // the ratio: both columns positive in the window (the sketch minima)
+        Assertions.assertTrue(byKind.containsKey("ratio"), byKind.keySet().toString());
+        Assertions.assertEquals("{scope: row, expr: \"b / x\"} (both positive; the difference's log-scale reading, approximate)", byKind.get("ratio").get(0).get("fragment"));
+        // without the sketch minima no ratio is read (the sign of the columns is unknown)
+        final ScreenReport.Result noSketch = ScreenReport.build(spec, acc);
+        Assertions.assertTrue(noSketch.suggestions().stream().anyMatch(s -> "difference".equals(s.get("kind"))));
+        Assertions.assertTrue(noSketch.suggestions().stream().noneMatch(s -> "ratio".equals(s.get("kind"))));
+        // a pair whose members pull the same way (a sum, not a difference) is not suggested
+        final Map<Integer, ScoreAccumulator> sumAcc = new HashMap<>();
+        for (int i = 0; i < 600; i++) {
+            final double b = random.nextGaussian(), x = random.nextGaussian();
+            final double y = random.nextDouble() < 1 / (1 + Math.exp(-(b + x))) ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{b, x});
+            scorer.score(List.of(r), r.getIdentity(), sumAcc);
+        }
+        Assertions.assertTrue(ScreenReport.build(spec, sumAcc).suggestions().stream().noneMatch(s -> "difference".equals(s.get("kind"))));
+        // pure noise: the excess and sign rules alone let a noise pair through about one run in five (equal |z| of
+        // opposite signs: the joint chi2 up to twice the better single); the increment's df = 1 cut keeps it out
+        boolean looseSeen = false;
+        for (int seed = 0; seed < 100 && !looseSeen; seed++) {
+            final java.util.Random rnd = new java.util.Random(seed);
+            final Map<Integer, ScoreAccumulator> noiseAcc = new HashMap<>();
+            for (int i = 0; i < 600; i++) {
+                final double b = rnd.nextGaussian(), x = rnd.nextGaussian();
+                final double y = rnd.nextBoolean() ? 1 : 0;
+                final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{b, x});
+                scorer.score(List.of(r), r.getIdentity(), noiseAcc);
+            }
+            if (ScreenReport.joint(spec, noiseAcc, 600, Double.NEGATIVE_INFINITY, null).stream().noneMatch(s -> "difference".equals(s.get("kind")))) continue;
+            looseSeen = true;
+            Assertions.assertTrue(ScreenReport.build(spec, noiseAcc).suggestions().stream().noneMatch(s -> "difference".equals(s.get("kind"))), "seed " + seed);
+        }
+        Assertions.assertTrue(looseSeen);
+        // the ratio's positivity needs the window sketches even without a rank / absdev / binned / pair-shape reader
+        Assertions.assertFalse(spec.needsWindowQuantiles());
+        Assertions.assertTrue(spec.needsJointMinima());
+        // ... and the pre-pass then feeds the candidates, so their sketches are not left empty
+        Assertions.assertArrayEquals(new int[]{0, 1}, spec.sketchedColumns());
+        Assertions.assertFalse(spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").needsJointMinima());
+        Assertions.assertArrayEquals(new int[0], spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").sketchedColumns());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {excess: 0.5}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 1.5}}"));
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.

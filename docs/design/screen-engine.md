@@ -26,7 +26,7 @@ feature transform does (engine doc §1.2):
 | `PartialAccumulator` | one variable-length vector for the window plus the same per period and per heterogeneity level (`addSlice` under `LEVEL_PREFIX`, as the score accumulator) — the partial pass's shape; custom coder; `Fn` | coder + CombineFn |
 | `glm.FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
 | `glm.VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
-| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `heterogeneity` (the level slices' Σ S_l² / H_l − (Σ S_l)² / Σ H_l, marginal from the score slices and partial from the partial slices), `suggestions` (the one-candidate recipes from the binned sums: `contrastChi2` along a bin-constant contrast, `shapes`, `isotonic`, the discovery / confirmation halves of the doubled `extra` vector, per-kind placebo cuts; `Bins` = the representatives / edges callbacks the finalize step builds from the sketches), `joint` (the several-candidate suggestions from the joint sums: the centred S / H / M, the pHd eigenpairs through `SymmetricEigen`, the redundancy clusters, the forward selection and the composite), `interactions` (a real pair's shape from its 2-D grid: the best depth-2 tree of split gains, its share of the grid's block χ², the sides' asymmetry, DSL §8.7), `build` (records + summary + suggestions, the placebo cut per statistic kind — df1 / binned / het / pair; the pair records from the pair keys' partial sums through the same `gammas` / `partial`), `selection` (the pass list, `passedPairs` apart from `columns`), the output schemas, `describe` | no |
+| `ScreenReport` | `stats` per slot array, `binnedStats` / `blockChi2` (the block test: active bins, one reference dropped, Cholesky on the reduced system, χ²(df)), `gammas` + `partial` (the orthogonalisation) and `blockPartial` (the block's Γ, S⊥, H⊥, r²_F = 1 − tr H⊥ / tr H), `heterogeneity` (the level slices' Σ S_l² / H_l − (Σ S_l)² / Σ H_l, marginal from the score slices and partial from the partial slices), `suggestions` (the one-candidate recipes from the binned sums: `contrastChi2` along a bin-constant contrast, `shapes`, `isotonic`, the discovery / confirmation halves of the doubled `extra` vector, per-kind placebo cuts; `Bins` = the representatives / edges callbacks the finalize step builds from the sketches), `joint` (the several-candidate suggestions from the joint sums: the centred S / H / M, the pHd eigenpairs through `SymmetricEigen`, the redundancy clusters, the forward selection, the composite, and the differences / ratios from every pair's 2 × 2 Newton direction with the sketch minima for positivity), `interactions` (a real pair's shape from its 2-D grid: the best depth-2 tree of split gains, its share of the grid's block χ², the sides' asymmetry, DSL §8.7), `build` (records + summary + suggestions, the placebo cut per statistic kind — df1 / binned / het / pair; the pair records from the pair keys' partial sums through the same `gammas` / `partial`), `selection` (the pass list, `passedPairs` apart from `columns`), the output schemas, `describe` | no |
 | `ScreenStages` | the graph (§2–§4) and its DoFns | yes |
 | `ScreenTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, three outputs (records, `summary`, `suggestions`) | module |
 
@@ -53,9 +53,11 @@ input ─ Prepare ─┬─ rows KV<unitKey, ScreenRow> ─ Group (GBK) or Units
 - **Units** are the GroupByKey output for a grouped run, or one row each otherwise (`SingletonUnitDoFn`), the
   same `KV<String, Iterable<ScreenRow>>` type for every pass.
 - **WindowQuantiles** (independent rows with `rank` / `absdev`, value bins of the binned test, a pair's
-  2-D grid): one pre-pass over the rows — `QuantilesDoFn` feeds the `sketchedColumns()` of x (the candidates
-  and the shuffle reference when their sketches are read, the pair members' conditioning columns when a pair
-  shape is asked for; a sketch index is the x column, the others stay empty) of the rows
+  2-D grid; the joint's ratio suggestions, whose candidate minima only the finalize step reads — the scoring
+  passes then get no sketch, and a merging-window run skips it): one pre-pass over the rows — `QuantilesDoFn`
+  feeds the `sketchedColumns()` of x (the candidates and the shuffle reference when their sketches are read, the
+  candidates when the joint reads their minima, the pair members' conditioning columns when a pair shape is asked
+  for; a sketch index is the x column, the others stay empty) of the rows
   that will be scored (a row whose baseline is invalid for its form is skipped) into per-bundle sketches, flushed at `@FinishBundle` per window, then
   `Combine.globally(...).asSingletonView()` (a default-carrying singleton per window, so a fixed-window run
   gets one reference per window). `ScoreUnits` and, under conditioning, `ConditioningPartial` read the view
@@ -228,10 +230,10 @@ in-screen expansion (categorical score tests, a built-in baseline-bin modifier f
 the test itself is built over the period buckets and a declared field — a pre-selection of pairs beyond a
 declared set (the declared pairs on the conditioning fit's p̂ are built, and the pHd directions over the
 joint sums name the members to declare)), pruning between passes against the `pass.minGain` floor (the floor itself is
-built: `ScreenSpec.gainCut`, one comparison in the report), the ratio / difference and two-dimensional
-interaction-shape suggestions (the one-candidate ones — shape / cut / missing / monotone with the discovery /
-confirmation split — and the several-candidate ones — pHd, redundancy clusters, forward selection, composite
-over the joint sums — are built as the `suggestions` output) — in the step order of DSL §12.4. Engine-side
+built: `ScreenSpec.gainCut`, one comparison in the report) — in the step order of DSL §12.4. The suggestions
+are built as the `suggestions` output: the one-candidate ones — shape / cut / missing / monotone with the
+discovery / confirmation split — the several-candidate ones over the joint sums — pHd, redundancy clusters,
+forward selection, composite, differences / ratios — and a declared pair's two-dimensional interaction shape. Engine-side
 refactors judged larger than their value so far: a `Family` enum in place of the string switches, σ² carried
 in `FitState` instead of the partial map, a typed summary record instead of the map the selection reads.
 Outside the repository: the numerical acceptance against the proposer's reference implementation and the
