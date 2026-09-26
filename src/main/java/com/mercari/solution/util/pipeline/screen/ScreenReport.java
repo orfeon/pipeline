@@ -1725,6 +1725,14 @@ public final class ScreenReport {
         final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
         final long skippedBaseline = (long) b[ScoreAccumulator.UNITS_SKIPPED_BASELINE];
         final long dropped = (long) b[ScoreAccumulator.ROWS_DROPPED];
+        // a field modifier on the grouped family: the units whose rows carry more than one level (read as the most
+        // frequent), a unit-level field being what the test expects
+        final boolean unitModifier = spec.isGroupedMultinomial() && ScreenSpec.HET_FIELD.equals(spec.heterogeneityBy);
+        final Long hetMixed = unitModifier ? (long) b[ScoreAccumulator.UNITS_HET_MIXED] : null;
+        if (hetMixed != null && hetMixed > 0 && nUnits > 0) {
+            notes.add("heterogeneity by " + spec.heterogeneityField + ": " + hetMixed + " of " + (long) nUnits + " units (" + fmt(100d * hetMixed / nUnits)
+                    + "%) carry more than one level; each such unit takes its rows' most frequent level (ties to the smallest) — a unit-level modifier is expected");
+        }
         if (Baselines.skipShareNoted(skipped, nUnits)) {
             notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + Baselines.percent(skipped, nUnits + skipped)
                     + ": invalid baseline " + skippedBaseline + ", no positive label " + (skipped - skippedBaseline) + ")"
@@ -2217,6 +2225,7 @@ public final class ScreenReport {
         summary.put("nUnitsSkipped", skipped);
         summary.put("nUnitsSkippedInvalidBaseline", skippedBaseline);
         summary.put("nRowsDropped", dropped);
+        summary.put("nHetMixedUnits", hetMixed);
         summary.put("nCandidates", (long) spec.candidates.size());
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
@@ -2566,6 +2575,7 @@ public final class ScreenReport {
                 .withField("nUnitsSkipped", Schema.FieldType.INT64)
                 .withField("nUnitsSkippedInvalidBaseline", Schema.FieldType.INT64)
                 .withField("nRowsDropped", Schema.FieldType.INT64)
+                .withField("nHetMixedUnits", Schema.FieldType.INT64)
                 .withField("nCandidates", Schema.FieldType.INT64)
                 .withField("nTransforms", Schema.FieldType.INT64)
                 .withField("nScored", Schema.FieldType.INT64)

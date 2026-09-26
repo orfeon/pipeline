@@ -314,7 +314,7 @@ seeded-hash dilution.
 
 `heterogeneity: periods` or `heterogeneity: {field: <name>}` asks, per df = 1 record, whether the candidate's
 effect *differs* across the levels of a modifier — the period buckets, or a declared field's values (read
-per row for the row families; per unit, its first row's value, for the grouped family, whose likelihood has
+per row for the row families; per unit — its rows' most frequent value, ties to the smallest, and the summary counts the units whose rows disagree as `nHetMixedUnits` — for the grouped family, whose likelihood has
 one term per unit; a null value is its own level `(null)`; the field is reserved, never a candidate). From
 the levels' own score tests (each centred within its level, the same S_l / H_l the period slices already
 carry, so the periods modifier costs nothing) the total Σ S_l² / H_l (df L) splits into the common effect
