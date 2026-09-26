@@ -35,6 +35,17 @@ The following command will generate a container for FlexTemplate from the source
 mvn clean package -DskipTests -Dimage={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
 ```
 
+Every image built this way carries the commit it was built from as the OCI label
+`org.opencontainers.image.revision` (and the project version as `org.opencontainers.image.version`), and the
+launcher opens its log with the same revision (`Build: <abbrev> (branch <name>, committed <time>)`), so a job's
+image can be matched to a commit:
+
+```sh
+gcloud artifacts docker images describe {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest   --format 'value(image_summary.digest)' --show-all-metadata | grep opencontainers
+```
+
+A build outside a git checkout leaves the label empty and logs `Build: unknown (no git.properties)`.
+
 ### Upload template file.
 
 The next step is to generate a template file to start a job from the container image and upload it to GCS.

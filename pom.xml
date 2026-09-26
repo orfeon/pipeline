@@ -119,7 +119,8 @@
       </plugin>
 
       <!-- Stamps git.properties on the classpath: used to label launched Dataflow jobs with the
-           build version and to let the agent detect version skew between server and job. -->
+           build version, to let the agent detect version skew between server and job, to open the
+           pipeline launcher's log (MPipeline.main) and to label the Jib images (below). -->
       <plugin>
         <groupId>io.github.git-commit-id</groupId>
         <artifactId>git-commit-id-maven-plugin</artifactId>
@@ -139,6 +140,7 @@
           <failOnNoGitDirectory>false</failOnNoGitDirectory>
           <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
           <includeOnlyProperties>
+            <includeOnlyProperty>^git.commit.id$</includeOnlyProperty>
             <includeOnlyProperty>^git.commit.id.abbrev$</includeOnlyProperty>
             <includeOnlyProperty>^git.branch$</includeOnlyProperty>
             <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
@@ -283,6 +285,12 @@
               <APP_VERSION>${project.version}</APP_VERSION>
               <DATAFLOW_JAVA_COMMAND_SPEC>/template/MPipeline/resources/command-spec.json</DATAFLOW_JAVA_COMMAND_SPEC>
             </environment>
+            <!-- the commit the image was built from (git-commit-id-maven-plugin, initialize phase; empty without a
+                 git checkout): docker inspect / Artifact Registry show it, MPipeline.main logs the same revision -->
+            <labels>
+              <org.opencontainers.image.revision>${git.commit.id}</org.opencontainers.image.revision>
+              <org.opencontainers.image.version>${project.version}</org.opencontainers.image.version>
+            </labels>
           </container>
         </configuration>
       </plugin>

@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.config.*;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.BuildInfo;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import org.apache.beam.sdk.Pipeline;
@@ -78,6 +79,9 @@ public class MPipeline {
     }
 
     public static void main(final String[] args) throws IOException {
+
+        // the build this launcher runs (the image's org.opencontainers.image.revision label carries the same commit)
+        LOG.info("Build: {}", BuildInfo.describe());
 
         final MPipelineOptions pipelineOptions = PipelineOptionsFactory
                 .fromArgs(OptionUtil.filterPipelineArgs(args))
