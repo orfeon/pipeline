@@ -7,6 +7,7 @@ import com.mercari.solution.util.pipeline.feature.FeatureLineage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
+import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 
 import java.io.Serializable;
@@ -216,6 +217,14 @@ public final class ScreenSpec implements Serializable {
 
     public boolean isPlacebo(final int column) {
         return column >= candidates.size();
+    }
+
+    /**
+     * Whether the run needs the window quantile sketches (engine doc §2): independent rows (no group) with a
+     * {@code rank} or {@code absdev} transform, whose "within the unit" would be a single row.
+     */
+    public boolean needsWindowQuantiles() {
+        return group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV));
     }
 
     /** Accumulator key of (column, transform). */
@@ -536,8 +545,8 @@ public final class ScreenSpec implements Serializable {
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
         if (group == null) {
-            for (final String t : transforms) {
-                if (!TRANSFORM_RAW.equals(t)) errors.add("transform '" + t + "' needs group (within-group " + t + "); independent rows support raw only in this version");
+            if (needsWindowQuantiles()) {
+                notes.add("rank / absdev of independent rows are taken against the window's quantile sketch (KLL k=" + SketchAccumulator.K + ", rank error about 0.8%, randomised compaction: beyond k values a re-run can shift them within that error; noise placebos use the exact normal cdf)");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
             if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");

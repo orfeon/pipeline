@@ -290,6 +290,108 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testWindowQuantilesTransformsForIndependentRows() throws Exception {
+        // 40 independent rows: x = 1..40 (with one missing), the label the top half. Within a single-row unit
+        // rank / absdev carry nothing; against the window sketch (exact below k values) they are the mid-rank
+        // fraction and the distance to the window median.
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, rank, absdev], placebo: {noise: 2, seed: 3}}");
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 40; i++) {
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, i > 20 ? 1 : 0, Double.NaN, 1, new double[]{i == 7 ? Double.NaN : i}));
+        }
+        WindowQuantiles q = new WindowQuantiles(1);
+        WindowQuantiles other = new WindowQuantiles(1);
+        for (int i = 0; i < rows.size(); i++) (i % 2 == 0 ? q : other).update(rows.get(i).x);
+        // the coder round-trips and the merge is column-wise
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        WindowQuantiles.CODER.encode(other, bytes);
+        q = new WindowQuantiles.Fn().mergeAccumulators(List.of(new WindowQuantiles(0), q, WindowQuantiles.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray()))));
+        Assertions.assertEquals(39L, q.count(0));
+        Assertions.assertEquals(21d, q.median(0), 1e-12);   // 39 values: the inclusive median is the 20th, value 21 (7 is missing)
+        final double[] rank = GroupScorer.transform(spec, q, 0, "rank", new double[]{1, 40, 21, Double.NaN});
+        Assertions.assertEquals(0.5 / 39, rank[0], 1e-12);    // nothing below, half of itself
+        Assertions.assertEquals(38.5 / 39, rank[1], 1e-12);
+        Assertions.assertEquals(19.5 / 39, rank[2], 1e-12);   // 19 values below 21 (7 missing), half of itself
+        Assertions.assertTrue(Double.isNaN(rank[3]));
+        final double[] absdev = GroupScorer.transform(spec, q, 0, "absdev", new double[]{1, 40, Double.NaN});
+        Assertions.assertEquals(Math.abs(1 - q.median(0)), absdev[0], 1e-12);
+        Assertions.assertEquals(Math.abs(40 - q.median(0)), absdev[1], 1e-12);
+        Assertions.assertTrue(Double.isNaN(absdev[2]));
+        // a noise placebo (column index beyond the candidates) takes the exact normal cdf and |x|
+        final double[] noiseRank = GroupScorer.transform(spec, q, 1, "rank", new double[]{0, 1.96, -1.96});
+        Assertions.assertEquals(0.5, noiseRank[0], 1e-12);
+        Assertions.assertEquals(0.975, noiseRank[1], 1e-4);
+        Assertions.assertEquals(0.025, noiseRank[2], 1e-4);
+        Assertions.assertArrayEquals(new double[]{0, 1.96, 1.96}, GroupScorer.transform(spec, q, 1, "absdev", new double[]{0, 1.96, -1.96}), 1e-12);
+        // raw is untouched, and without sketches the within-unit transform applies
+        Assertions.assertArrayEquals(new double[]{3, 1}, GroupScorer.transform(spec, q, 0, "raw", new double[]{3, 1}), 0d);
+        Assertions.assertArrayEquals(new double[]{1, 0}, GroupScorer.transform(spec, null, 0, "rank", new double[]{3, 1}), 0d);
+
+        // scored as independent units: rank carries the monotone effect (x itself is monotone in the label, so
+        // rank and raw agree in sign and the rank z is close to the raw one), absdev sees the symmetric "extremeness"
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        final Map<String, Map<String, Object>> byKey = new HashMap<>();
+        for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+        final double zRaw = (Double) byKey.get("x:raw").get("z");
+        final double zRank = (Double) byKey.get("x:rank").get("z");
+        Assertions.assertTrue(zRaw > 3 && zRank > 3, "raw " + zRaw + " rank " + zRank);
+        Assertions.assertEquals(zRaw, zRank, 0.25 * zRaw);
+        Assertions.assertTrue(Math.abs((Double) byKey.get("x:absdev").get("z")) < 1.5, "absdev z " + byKey.get("x:absdev").get("z"));
+        Assertions.assertEquals(39L, byKey.get("x:rank").get("n_obs"));
+        Assertions.assertTrue(byKey.containsKey("__noise_0:rank") && byKey.containsKey("__noise_1:absdev"));
+        Assertions.assertFalse((Boolean) byKey.get("x:rank").get("degenerate"));
+
+        // an even count: the type-7 median (the mean of the two middle values), like the within-unit absdev
+        final WindowQuantiles even = new WindowQuantiles(1);
+        for (int i = 1; i <= 40; i++) even.update(new double[]{i});
+        Assertions.assertEquals(20.5, even.median(0), 1e-12);
+        Assertions.assertEquals(StatMath.medianFinite(new double[]{1, 2, 3, 4}), windowOf(1, 2, 3, 4).median(0), 1e-12);
+        // the Combine's column-less default reads as no reference (NaN), not an index error
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).rank(0, 1d)));
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).median(0)));
+
+        // addInput never aliases (then mutates) a Combine input: an empty accumulator adopts a copy
+        final WindowQuantiles.Fn fn = new WindowQuantiles.Fn();
+        final WindowQuantiles in1 = windowOf(1, 2);
+        final WindowQuantiles acc1 = fn.addInput(fn.createAccumulator(), in1);
+        Assertions.assertNotSame(in1, acc1);
+        fn.addInput(acc1, windowOf(3, 4, 5));
+        Assertions.assertEquals(2L, in1.count(0));
+        Assertions.assertEquals(5L, acc1.count(0));
+
+        // independent rows with rank / absdev: a scorer without the window reference fails instead of scoring
+        // single-row units (rank 0.5, absdev 0) as silently degenerate records
+        Assertions.assertThrows(IllegalStateException.class, () -> new GroupScorer(spec).score(List.of(rows.get(0)), "r1", new HashMap<>()));
+    }
+
+    private static WindowQuantiles windowOf(final double... values) {
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final double v : values) q.update(new double[]{v});
+        return q;
+    }
+
+    @Test
+    public void testWindowQuantilesRejectMergingWindows() {
+        // the window reference is a side input: a session window cannot map to it (Beam throws at assembly)
+        final ScreenSpec rank = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, rank]}");
+        final ScreenSpec raw = spec("{family: binomial, label: y, candidates: [x]}");
+        final org.apache.beam.sdk.Pipeline p = org.apache.beam.sdk.Pipeline.create();
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> input = p
+                .apply(org.apache.beam.sdk.transforms.Create.empty(org.apache.beam.sdk.coders.SerializableCoder.of(com.mercari.solution.module.MElement.class)));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> sessions = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.Sessions.withGapDuration(org.joda.time.Duration.standardMinutes(10))));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> fixed = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.FixedWindows.of(org.joda.time.Duration.standardDays(1))));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, rank).stream().anyMatch(m -> m.contains("merging (session) windows")));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, raw).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(fixed, rank).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(input, rank).isEmpty());
+    }
+
+    @Test
     public void testPassRuleMinGain() {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.
@@ -392,7 +494,13 @@ public class GroupScorerTest {
     @Test
     public void testSpecValidation() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: gamma, label: y, candidates: [x]}"));
-        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, transforms: [rank], candidates: [x]}"));
+        // rank / absdev of independent rows read the window quantile sketch; shuffle still needs a group
+        final ScreenSpec windowRank = spec("{family: binomial, label: y, transforms: [rank], candidates: [x]}");
+        Assertions.assertTrue(windowRank.needsWindowQuantiles());
+        Assertions.assertTrue(windowRank.notes.stream().anyMatch(n -> n.contains("window's quantile sketch")), windowRank.notes.toString());
+        Assertions.assertFalse(spec("{family: binomial, label: y, candidates: [x]}").needsWindowQuantiles());
+        Assertions.assertFalse(spec("{family: groupedMultinomial, group: g, label: y, candidates: [x]}").needsWindowQuantiles());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], placebo: {shuffle: {field: x}}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, label: y, candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [nothing_matches]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: {exclude: ['derivedFrom:market']}}"));

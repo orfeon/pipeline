@@ -199,6 +199,15 @@ public final class ConditioningScorer implements Serializable {
         return 2 + k;
     }
 
+    /** the window's quantile sketches (independent rows with rank / absdev), set per bundle from the side input; null = within-unit transforms */
+    private transient WindowQuantiles quantiles;
+
+    /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
+    public ConditioningScorer withWindowQuantiles(final WindowQuantiles quantiles) {
+        this.quantiles = quantiles;
+        return this;
+    }
+
     /**
      * Adds, for every column x transform, the sums at the fitted p̂: s = x̃'(ỹ − p̂), b = x̃'W x̃, a = F̃'W x̃ with the
      * Fisher metric W (grouped: block diagonal diag(p̂) − p̂p̂' with x̃ centred by p̂ within the unit; binomial:
@@ -209,6 +218,7 @@ public final class ConditioningScorer implements Serializable {
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
                         final Map<Integer, PartialAccumulator> into) {
+        GroupScorer.requireWindowQuantiles(spec, quantiles);
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
         final int n = unit.size();
@@ -230,7 +240,7 @@ public final class ConditioningScorer implements Serializable {
             if (periods) into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).add(period, fitPeriodSums(unit, p, f, null));
             for (int c = 0; c < cols.length; c++) {
                 for (int t = 0; t < nTransforms; t++) {
-                    final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
+                    final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                     // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
                     final double pivot = GroupScorer.pivot(v);
                     double pm = 0, psum = 0;
@@ -271,8 +281,9 @@ public final class ConditioningScorer implements Serializable {
         }
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
-                final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
+                // the transform is taken once over the whole unit (rank / absdev within the unit, or against the
+                // window's sketches for independent rows), then summed per bucket
+                final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
                 for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
                     final double[] acc = new double[partialLength()];

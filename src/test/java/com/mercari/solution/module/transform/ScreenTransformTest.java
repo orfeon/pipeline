@@ -231,23 +231,32 @@ public class ScreenTransformTest {
                       label: {expr: "sold > 0 ? 1 : 0"}
                       time: {field: session_time, to: "2024-06-30T23:59:59Z"}
                       candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids", "s_supp"]}
+                      transforms: [raw, rank, absdev]
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = byKey(rows);
-            // raw only for independent rows; sold / session_time are roles, p_model / start_price excluded by name
-            Assertions.assertEquals(3 + 10, records.size());
+            // independent rows: rank / absdev read the window quantile sketch (one pre-pass); sold / session_time
+            // are roles, p_model / start_price excluded by name
+            Assertions.assertEquals((3 + 10) * 3, records.size());
             Assertions.assertTrue(records.containsKey("f_extra:raw"));
             Assertions.assertFalse(records.containsKey("p_model:raw"));
-            Assertions.assertFalse(records.containsKey("f_extra:rank"));
             final MElement signal = records.get("f_extra:raw");
             // 120 sessions two days apart from 2024-01-01: 91 sessions fall before the end of June (Q1 + Q2)
             Assertions.assertEquals(91L * 3, signal.getAsLong("n_groups"));
             Assertions.assertEquals(2L, signal.getAsLong("n_periods"));
             Assertions.assertTrue(signal.getAsDouble("z") > 2, "z of f_extra: " + signal.getAsDouble("z"));
             Assertions.assertEquals("binomial", signal.getAsString("family"));
+            // the window rank of a monotone effect keeps its sign and most of its size
+            final MElement rank = records.get("f_extra:rank");
+            Assertions.assertEquals(91L * 3, rank.getAsLong("n_groups"));
+            Assertions.assertEquals(Boolean.FALSE, rank.getPrimitiveValue("degenerate"));
+            Assertions.assertTrue(rank.getAsDouble("z") > 2, "rank z of f_extra: " + rank.getAsDouble("z"));
+            Assertions.assertEquals(signal.getAsDouble("z"), rank.getAsDouble("z"), 0.5 * signal.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("f_extra:absdev").getPrimitiveValue("degenerate"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("__noise_0:rank").getPrimitiveValue("degenerate"));
             return null;
         });
         PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
@@ -257,7 +266,8 @@ public class ScreenTransformTest {
             Assertions.assertEquals(273L, summary.getAsLong("nUnits"));
             Assertions.assertNull(summary.getAsString("baseline"));
             Assertions.assertEquals("2024-06-30T23:59:59Z", summary.getAsString("timeTo"));
-            Assertions.assertEquals(List.of("raw"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertEquals(List.of("raw", "rank", "absdev"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertTrue(String.valueOf(summary.getPrimitiveValue("notes")).contains("quantile sketch"), String.valueOf(summary.getPrimitiveValue("notes")));
             return null;
         });
         pipeline.run();

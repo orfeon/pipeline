@@ -81,6 +81,9 @@ public final class ScreenStages {
         if (spec.selectionUri != null && !(strategy.getWindowFn() instanceof GlobalWindows)) {
             errors.add("output.selection needs the global window (one pass list per run; a windowed run would overwrite it per window)");
         }
+        if (spec.needsWindowQuantiles() && !strategy.getWindowFn().isNonMerging()) {
+            errors.add("rank / absdev of independent rows read the window's quantile sketch as a side input, which merging (session) windows cannot provide; use a global / fixed / sliding / calendar window, a group, or transforms: [raw]");
+        }
         if (!(strategy.getTrigger() instanceof DefaultTrigger)) {
             errors.add("screen needs the default trigger (a triggered input fires the Combines once per pane: several partial summaries, and the conditioning singleton views break); remove strategy.trigger");
         }
@@ -108,8 +111,20 @@ public final class ScreenStages {
             units = rows.apply("Units", ParDo.of(new SingletonUnitDoFn())).setCoder(unitCoder);
         }
 
+        // independent rows with rank / absdev: one pre-pass sketches every candidate over the window (per window
+        // under a windowing strategy; the singleton view carries the Combine's default on an empty window)
+        PCollectionView<WindowQuantiles> quantilesView = null;
+        final List<PCollectionView<?>> scoreSideInputs = new ArrayList<>();
+        if (spec.needsWindowQuantiles()) {
+            quantilesView = rows
+                    .apply("WindowQuantiles", ParDo.of(new QuantilesDoFn(spec)))
+                    .setCoder(WindowQuantiles.CODER)
+                    .apply("WindowQuantiles_Combine", Combine.globally(new WindowQuantiles.Fn()).asSingletonView());
+            scoreSideInputs.add(quantilesView);
+        }
+
         final PCollection<KV<Integer, ScoreAccumulator>> scored = units
-                .apply("ScoreUnits", ParDo.of(new ScoreUnitsDoFn(spec)))
+                .apply("ScoreUnits", ParDo.of(new ScoreUnitsDoFn(spec, quantilesView)).withSideInputs(scoreSideInputs))
                 .setCoder(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER));
         final PCollection<KV<Integer, ScoreAccumulator>> combined = PCollectionList
                 .of(scored)
@@ -152,8 +167,10 @@ public final class ScreenStages {
                         .apply("ConditioningFit" + it + "_View", View.asSingleton());
             }
             fitView = state;
+            final List<PCollectionView<?>> partialSideInputs = new ArrayList<>(List.of(momentsView, fitView));
+            partialSideInputs.addAll(scoreSideInputs);
             partialView = units
-                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView)).withSideInputs(momentsView, fitView))
+                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView, quantilesView)).withSideInputs(partialSideInputs))
                     .setCoder(KvCoder.of(VarIntCoder.of(), PartialAccumulator.CODER))
                     .apply("ConditioningPartial_Combine", Combine.perKey(new PartialAccumulator.Fn()))
                     .apply("ConditioningPartial_View", View.asMap());
@@ -327,6 +344,41 @@ public final class ScreenStages {
         }
     }
 
+    /**
+     * The window quantile pre-pass (independent rows with rank / absdev): every candidate value of the rows
+     * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
+     * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
+     * and window (combined globally).
+     */
+    static class QuantilesDoFn extends DoFn<KV<String, ScreenRow>, WindowQuantiles> {
+        private final ScreenSpec spec;
+        private transient Map<BoundedWindow, WindowQuantiles> partials;
+
+        QuantilesDoFn(final ScreenSpec spec) {
+            this.spec = spec;
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partials = new HashMap<>();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
+            final ScreenRow row = c.element().getValue();
+            if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.candidates.size())).update(row.x);
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            for (final Map.Entry<BoundedWindow, WindowQuantiles> w : partials.entrySet()) {
+                c.output(w.getValue(), w.getKey().maxTimestamp(), w.getKey());
+            }
+            partials = new HashMap<>();
+        }
+    }
+
     /** Independent rows: every row is its own unit. */
     static class SingletonUnitDoFn extends DoFn<KV<String, ScreenRow>, KV<String, Iterable<ScreenRow>>> {
         @ProcessElement
@@ -341,11 +393,14 @@ public final class ScreenStages {
      */
     static class ScoreUnitsDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, ScoreAccumulator>> {
         private final ScreenSpec spec;
+        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer scorer;
         private transient Map<BoundedWindow, Map<Integer, ScoreAccumulator>> partials;
 
-        ScoreUnitsDoFn(final ScreenSpec spec) {
+        ScoreUnitsDoFn(final ScreenSpec spec, final PCollectionView<WindowQuantiles> quantilesView) {
             this.spec = spec;
+            this.quantilesView = quantilesView;
         }
 
         @Setup
@@ -363,6 +418,7 @@ public final class ScreenStages {
             final List<ScreenRow> rows = new ArrayList<>();
             for (final ScreenRow r : c.element().getValue()) rows.add(r);
             if (rows.isEmpty()) return;
+            if (quantilesView != null) scorer.withWindowQuantiles(c.sideInput(quantilesView));
             scorer.score(rows, c.element().getKey(), partials.computeIfAbsent(window, w -> new HashMap<>()));
         }
 
@@ -516,14 +572,18 @@ public final class ScreenStages {
         private final ScreenSpec spec;
         private final PCollectionView<VectorAccumulator> momentsView;
         private final PCollectionView<FitState> stateView;
+        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer groups;
         private transient ConditioningScorer scorer;
         private transient Map<Integer, PartialAccumulator> partial;
 
-        PartialPassDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView, final PCollectionView<FitState> stateView) {
+        PartialPassDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView, final PCollectionView<FitState> stateView,
+                        final PCollectionView<WindowQuantiles> quantilesView) {
             this.spec = spec;
             this.momentsView = momentsView;
             this.stateView = stateView;
+            this.quantilesView = quantilesView;
         }
 
         @Setup
@@ -547,6 +607,7 @@ public final class ScreenStages {
             if (rows.isEmpty()) return;
             final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
             if (unit.skip != Baselines.Skip.NONE) return;
+            if (quantilesView != null) scorer.withWindowQuantiles(c.sideInput(quantilesView));
             scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partial);
         }
 

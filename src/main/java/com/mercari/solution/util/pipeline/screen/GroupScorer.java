@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.mercari.solution.util.domain.math.NormalDistribution;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Baselines.Skip;
@@ -30,6 +31,8 @@ public final class GroupScorer implements Serializable {
     private final int shuffleRef;
     /** {@code baseline.invalid: dropRow}: the invalid rows leave their unit before it is prepared */
     private final boolean dropsRows;
+    /** the window's quantile sketches (independent rows with rank / absdev): the transforms' reference, set per bundle from the side input */
+    private transient WindowQuantiles quantiles;
 
     public GroupScorer(final ScreenSpec spec) {
         this.spec = spec;
@@ -37,6 +40,12 @@ public final class GroupScorer implements Serializable {
         this.nColumns = spec.columnCount();
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
         this.dropsRows = spec.baselineDropsRows();
+    }
+
+    /** Sets the window's quantile sketches (the rank / absdev reference of independent rows); null = within-unit transforms. */
+    public GroupScorer withWindowQuantiles(final WindowQuantiles quantiles) {
+        this.quantiles = quantiles;
+        return this;
     }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
@@ -120,6 +129,7 @@ public final class GroupScorer implements Serializable {
      * {@link Skip#NONE} when it was scored.
      */
     public Skip score(final List<ScreenRow> input, final String unitKey, final Map<Integer, ScoreAccumulator> into) {
+        requireWindowQuantiles(spec, quantiles);
         final Unit unit = prepare(input, unitKey);
         final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
         final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
@@ -140,7 +150,7 @@ public final class GroupScorer implements Serializable {
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
         for (int c = 0; c < nColumns; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                final double[] v = transform(spec.transforms.get(t), cols[c]);
+                final double[] v = transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
                 if (spec.isGroupedMultinomial()) {
                     groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
@@ -271,6 +281,41 @@ public final class GroupScorer implements Serializable {
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
+    }
+
+    /**
+     * Fails a scoring call of independent rows with rank / absdev that was not handed the window's sketches: the
+     * within-unit fallback would read a single row (rank 0.5, absdev 0) and report degenerate records silently.
+     */
+    static void requireWindowQuantiles(final ScreenSpec spec, final WindowQuantiles quantiles) {
+        if (quantiles == null && spec.needsWindowQuantiles()) {
+            throw new IllegalStateException("rank / absdev of independent rows need the window quantile sketches (withWindowQuantiles)");
+        }
+    }
+
+    /**
+     * Applies a transform variant to column {@code column} of a unit: within the unit when {@code quantiles} is
+     * null (a grouped run), else against the window's sketches (independent rows, DSL doc §6) — a candidate's
+     * rank is its mid-rank among the window's finite values and its absdev the distance to the window median;
+     * a noise placebo, standard normal by construction, takes the exact normal cdf and |x| (its median is 0).
+     */
+    static double[] transform(final ScreenSpec spec, final WindowQuantiles quantiles, final int column, final String transform, final double[] v) {
+        if (quantiles == null || ScreenSpec.TRANSFORM_RAW.equals(transform)) return transform(transform, v);
+        final boolean candidate = !spec.isPlacebo(column);
+        final double[] out = new double[v.length];
+        switch (transform) {
+            case ScreenSpec.TRANSFORM_RANK -> {
+                for (int i = 0; i < v.length; i++) {
+                    out[i] = !StatMath.isFinite(v[i]) ? Double.NaN : candidate ? quantiles.rank(column, v[i]) : NormalDistribution.cdf(v[i]);
+                }
+            }
+            case ScreenSpec.TRANSFORM_ABSDEV -> {
+                final double median = candidate ? quantiles.median(column) : 0d;
+                for (int i = 0; i < v.length; i++) out[i] = StatMath.isFinite(v[i]) && StatMath.isFinite(median) ? Math.abs(v[i] - median) : Double.NaN;
+            }
+            default -> throw new IllegalArgumentException("unknown transform " + transform);
+        }
+        return out;
     }
 
     /** Applies a transform variant within the unit; NaN inputs stay NaN. */
