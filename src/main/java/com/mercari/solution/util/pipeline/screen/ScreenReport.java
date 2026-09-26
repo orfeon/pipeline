@@ -1222,8 +1222,10 @@ public final class ScreenReport {
                     mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
                 }
             }
-            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
-            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of the
+            // moments' magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding
+            // residue. Under a sketch view the moments are shifted by the window mean, so the magnitude is the spread's own
+            // and a large-valued column the marginal record flags degenerate can stay here
             for (int j = 0; j < m; j++) {
                 if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
                 s[j] = 0d;

@@ -1103,6 +1103,29 @@ public class GroupScorerTest {
         final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         WindowQuantiles.CODER.encode(q, bytes);
         Assertions.assertEquals(q.mean(0), WindowQuantiles.CODER.decode(new java.io.ByteArrayInputStream(bytes.toByteArray())).mean(0), 0d);
+
+        // a column constant over its observed values has that value as its mean exactly (0.1 fed ten times sums to
+        // 0.9999999999999999): its shifted values are 0 like the fills, not a rounding residue times the observed
+        // indicator that the report would score as the missingness
+        final WindowQuantiles constant = new WindowQuantiles(1, 0);
+        for (int i = 0; i < 10; i++) constant.update(new double[]{0.1});
+        Assertions.assertEquals(0.1, constant.mean(0), 0d);
+
+        // a joint column with no value in the window: every row is a fill (the column is degenerate) instead of every
+        // row leaving the joint sums
+        final List<ScreenRow> empty = new ArrayList<>();
+        for (final ScreenRow r : data) empty.add(new ScreenRow(r.group, r.identity, r.time, null, r.label, Double.NaN, 1, new double[]{Double.NaN, r.x[1]}));
+        final WindowQuantiles qe = new WindowQuantiles(rows.sketchColumns(), 0);
+        for (final ScreenRow r : empty) qe.update(r.x, rows.sketchedColumns());
+        final GroupScorer emptyScorer = new GroupScorer(rows).withWindowQuantiles(qe);
+        final Map<Integer, ScoreAccumulator> eacc = new HashMap<>();
+        for (final ScreenRow r : empty) emptyScorer.score(List.of(r), r.getIdentity(), eacc);
+        final double[] ee = eacc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        Assertions.assertEquals(200d, ee[rl.used()]);
+        Assertions.assertEquals(200d, ee[rl.filled()]);
+        Assertions.assertEquals(0d, ee[rl.dropped()]);
+        final ScreenReport.Result er = ScreenReport.build(rows, eacc);
+        Assertions.assertEquals(0L, er.summary().get("nJointDropped"));
     }
 
     @Test
