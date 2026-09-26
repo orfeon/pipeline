@@ -186,9 +186,9 @@ public final class ScreenStages {
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final TupleTag<MElement> suggestionTag = new TupleTag<>() {};
-        // the finalize step reads the window sketches for the suggestions' bin representatives and the pair grids'
-        // edges (the interaction shapes); nothing else there does
-        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape()) && quantilesView != null;
+        // the finalize step reads the window sketches for the suggestions' bin representatives, the pair grids'
+        // edges (the interaction shapes) and the joint's candidate minima (the ratio suggestions); nothing else there does
+        final boolean finalizeReadsSketches = (spec.suggestionsOn || spec.hasPairShape() || spec.needsJointMinima()) && quantilesView != null;
         if (finalizeReadsSketches) finalizeSideInputs.add(quantilesView);
         // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
         final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
