@@ -434,6 +434,11 @@ public final class ConditioningScorer implements Serializable {
         for (int q = 0; q < spec.pairCount(); q++) {
             final double[] z = pairColumn(q, unit, f, cols);
             final PartialAccumulator target = into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator());
+            if (!periods) {
+                // no period to slice by (the modifier's level cells would only split the one total)
+                target.add(null, rowPartialSums(unit, p, f, z, null));
+                continue;
+            }
             for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
                 target.add(cell.getKey().period(), rowPartialSums(unit, p, f, z, cells.size() == 1 ? null : cell.getValue()));
             }

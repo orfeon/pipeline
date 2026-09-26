@@ -1169,11 +1169,14 @@ public class GroupScorerTest {
         Assertions.assertTrue(none.getMessage().contains("candidates.exclude applies to the categoricals too"), none.getMessage());
     }
 
-    @Test
-    public void testPairsCarryThePartialPeriodSlices() throws Exception {
-        // the pair test of testPairsAtTheFittedMeans over two periods: the pair record decomposes its partial statistic
-        // by period like any column, so pass.minPeriodsAgree holds it — both periods carry the interaction here
-        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, periods: year, candidates: [x], transforms: [raw], placebo: {noise: 2, seed: 7}, "
+    /**
+     * The pair test of testPairsAtTheFittedMeans over two periods (even units 2024, odd 2025), every row weighing
+     * {@code weight}; with {@code x2MissingIn2025} the pair's second member is missing throughout 2025. The report's
+     * records by {@code candidate:transform}.
+     */
+    private static Map<String, Map<String, Object>> pairPeriodRecords(final String transforms, final double weight, final boolean x2MissingIn2025,
+                                                                      final Map<String, Object> summary) throws Exception {
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, periods: year, candidates: [x], transforms: " + transforms + ", placebo: {noise: 2, seed: 7}, "
                 + "conditioning: {fields: [x, x2], l2: 1.0e-4, maxIter: 8}, pairs: {fields: [[x, x2]], placebo: 2, shape: false}, pass: {minPeriodsAgree: 1.0}}");
         final java.util.Random random = new java.util.Random(11);
         final List<List<ScreenRow>> units = new ArrayList<>();
@@ -1187,12 +1190,19 @@ public class GroupScorerTest {
                 if (score[i] > score[best]) best = i;
             }
             final String period = g % 2 == 0 ? "2024" : "2025";
+            final boolean missing = x2MissingIn2025 && g % 2 == 1;
             final List<ScreenRow> rows = new ArrayList<>();
-            for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, period, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
+            for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, period, i == best ? 1 : 0, Double.NaN, weight, new double[]{x1[i], x1[i], missing ? Double.NaN : x2[i]}));
             units.add(rows);
         }
-        final GroupScorer groups = new GroupScorer(spec);
-        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        GroupScorer groups = new GroupScorer(spec);
+        ConditioningScorer scorer = new ConditioningScorer(spec);
+        if (spec.needsWindowQuantiles()) {
+            final WindowQuantiles quantiles = new WindowQuantiles(spec.sketchColumns());
+            for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) quantiles.update(r.x);
+            groups = groups.withWindowQuantiles(quantiles);
+            scorer = scorer.withWindowQuantiles(quantiles);
+        }
         final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
         for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
         com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
@@ -1213,8 +1223,18 @@ public class GroupScorerTest {
         Assertions.assertEquals(java.util.Set.of("2024", "2025"), partials.get(spec.pairKey(0)).getPeriods().keySet());
         Assertions.assertEquals(java.util.Set.of("2024", "2025"), partials.get(spec.key(0, 0)).getPeriods().keySet());
         final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state);
+        if (summary != null) summary.putAll(result.summary());
         final Map<String, Map<String, Object>> byKey = new HashMap<>();
         for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+        return byKey;
+    }
+
+    @Test
+    public void testPairsCarryThePartialPeriodSlices() throws Exception {
+        // the pair record decomposes its partial statistic by period like any column, so pass.minPeriodsAgree holds
+        // it — both periods carry the interaction here
+        final Map<String, Object> summary = new HashMap<>();
+        final Map<String, Map<String, Object>> byKey = pairPeriodRecords("[raw]", 1d, false, summary);
         final Map<String, Object> pair = byKey.get("x*x2:product");
         Assertions.assertTrue((Double) pair.get("partial_z") > 3, "partial z of the pair: " + pair.get("partial_z"));
         Assertions.assertEquals(2L, pair.get("partial_n_periods"), pair.toString());
@@ -1226,11 +1246,55 @@ public class GroupScorerTest {
             Assertions.assertTrue((Long) slice.get("n") > 0, slice.toString());
         }
         Assertions.assertEquals(Boolean.TRUE, pair.get("passed"));
-        Assertions.assertTrue(((String) result.summary().get("passRule")).contains("partial_periods_agree >= 1.0 * partial_n_periods"));
+        Assertions.assertTrue(((String) summary.get("passRule")).contains("partial_periods_agree >= 1.0 * partial_n_periods"));
         // the marginal period fields of a pair stay null (no marginal pair test); a placebo pair has the slices too
         Assertions.assertNull(pair.get("periods_agree"));
         Assertions.assertNotNull(byKey.get("x*__noise_0:product").get("partial_n_periods"));
-        Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
+        Assertions.assertEquals(List.of("x*x2"), summary.get("passedPairs"));
+    }
+
+    @Test
+    public void testPairPeriodSlicesReadTheWeightsAsAShareOfTheUnits() throws Exception {
+        // rows weighing 0.01: a period's fit mass is 0.8, yet its slice counts its 80 units (the share of the unit
+        // count), so the slices stay scorable and the agreement rule still sees both periods
+        final Map<String, Map<String, Object>> byKey = pairPeriodRecords("[raw]", 0.01, false, null);
+        final Map<String, Object> pair = byKey.get("x*x2:product");
+        Assertions.assertEquals(2L, pair.get("partial_n_periods"), pair.toString());
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> slices = (List<Map<String, Object>>) pair.get("partial_period_z");
+        for (final Map<String, Object> slice : slices) Assertions.assertEquals(80L, slice.get("n"), slice.toString());
+    }
+
+    @Test
+    public void testPairPeriodWithoutThePairHasNoSlice() throws Exception {
+        // x2 missing throughout 2025: the pair carries nothing there, so its 2025 slice is degenerate (not the
+        // conditioning fit's own period misfit) and only 2024 counts towards the agreement
+        final Map<String, Map<String, Object>> byKey = pairPeriodRecords("[raw]", 1d, true, null);
+        final Map<String, Object> pair = byKey.get("x*x2:product");
+        Assertions.assertEquals(1L, pair.get("partial_n_periods"), pair.toString());
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> slices = (List<Map<String, Object>>) pair.get("partial_period_z");
+        final Map<String, Object> y2025 = slices.stream().filter(s -> "2025".equals(s.get("period"))).findFirst().orElseThrow();
+        Assertions.assertNull(y2025.get("z"), y2025.toString());
+    }
+
+    @Test
+    public void testPairKeysAreNotReadAsBinnedKeys() throws Exception {
+        // transforms [raw, binned]: the pair keys follow the column × transform keys, and a pair key whose index
+        // modulo the transforms lands on binned (the first placebo pair here) is still a df = 1 column of the γ solve
+        final Map<String, Map<String, Object>> byKey = pairPeriodRecords("[raw, binned]", 1d, false, null);
+        for (final String name : List.of("x*x2", "x*__noise_0", "x*__noise_1")) {
+            final Map<String, Object> pair = byKey.get(name + ":product");
+            Assertions.assertEquals(Boolean.FALSE, pair.get("degenerate"), pair.toString());
+            Assertions.assertNotNull(pair.get("r2_F"), pair.toString());
+        }
+    }
+
+    @Test
+    public void testDistinctEdges() {
+        // tied quantile edges collapse to one (−0.0 and 0.0 too: they bin alike and nextUp maps both to one double)
+        Assertions.assertArrayEquals(new double[]{-2, 2}, ScreenReport.distinctEdges(new double[]{-2, -2, 2, 2}));
+        Assertions.assertEquals(1, ScreenReport.distinctEdges(new double[]{-0.0, 0.0}).length);
+        Assertions.assertEquals("{scope: row, type: bin, input: x, edges: [-1.9999999999999998, 2.0000000000000004]}",
+                ScreenReport.rowBinFragment("x", new double[]{-2, -2, 2, 2}));
     }
 
     @Test

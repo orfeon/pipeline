@@ -436,7 +436,9 @@ both, orthogonalised against the whole of F by the same γ solve as any column (
 A pair record (`candidate: a*b`, `transform: product`) carries the partial statistics only (`partial_z`,
 `partial_gain`, `r2_F`, …; the marginal fields are null), the period slices of any column (§8.2:
 `partial_period_z`, `partial_periods_agree` / `partial_n_periods`, so `pass.minPeriodsAgree` holds a pair as it
-holds a column; no modifier level slice), and its own placebo kind
+holds a column; no modifier level slice; a period without the pair's information — a member missing throughout it —
+has a degenerate slice, as a period the marginal test cannot score does for a column, and a slice's `n` is the period's
+share of the fit's unit mass on the unit count's scale), and its own placebo kind
 (`pair`): each pair brings `pairs.placebo` (default 5) placebo pairs — its first member times a noise
 placebo column, a standard normal draw independent of everything, which keeps the member's marginal; pairs
 sharing a member take different noise columns, so no placebo column repeats —
