@@ -10,6 +10,7 @@ import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.GatherFn;
+import com.mercari.solution.util.pipeline.glm.SketchAccumulator;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import org.apache.beam.sdk.coders.Coder;

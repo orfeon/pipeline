@@ -37,6 +37,8 @@ public final class ScoreAccumulator implements Serializable {
 
     /** key of the bookkeeping accumulator (never a column index) */
     public static final int BOOKKEEPING_KEY = -1;
+    /** the candidates' joint sums (DSL doc §9.5) travel under this key, in the {@code extra} vector */
+    public static final int JOINT_KEY = -2;
     public static final int ROWS_IN = 0, ROWS_TIME_FILTERED = 1, ROWS_INVALID = 2, UNITS_SCORED = 3, UNITS_SKIPPED = 4, ROWS_SCORED = 5;
     /** bookkeeping: units skipped for an invalid baseline (the rest of UNITS_SKIPPED had no positive label); rows {@code baseline.invalid: dropRow} removed */
     public static final int UNITS_SKIPPED_BASELINE = 6, ROWS_DROPPED = 7;
@@ -45,11 +47,43 @@ public final class ScoreAccumulator implements Serializable {
     final TreeMap<String, double[]> periods = new TreeMap<>();
     long maxTime = Long.MIN_VALUE;
     long minTime = Long.MAX_VALUE;
+    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §6.1); null until fed */
+    double[] extra;
 
     public ScoreAccumulator() {}
 
     public double[] getTotal() {
         return total;
+    }
+
+    /** The window's variable-length sums (null when the key carries none). */
+    public double[] getExtra() {
+        return extra;
+    }
+
+    /**
+     * The window's variable-length sums for in-place adds (a sparse contribution touches only its entries),
+     * allocated at {@code length} on first use.
+     */
+    double[] extra(final int length) {
+        if (extra == null) {
+            extra = new double[length];
+        } else if (extra.length != length) {
+            throw new IllegalStateException("extra sums of " + extra.length + " and " + length + " values cannot merge");
+        }
+        return extra;
+    }
+
+    /** Adds a variable-length contribution element-wise (the first one sets the length). */
+    public ScoreAccumulator addExtra(final double[] contribution) {
+        if (contribution == null) return this;
+        if (extra == null) {
+            extra = contribution.clone();
+        } else {
+            if (extra.length != contribution.length) throw new IllegalStateException("extra sums of " + extra.length + " and " + contribution.length + " values cannot merge");
+            for (int i = 0; i < extra.length; i++) extra[i] += contribution[i];
+        }
+        return this;
     }
 
     public Map<String, double[]> getPeriods() {
@@ -64,13 +98,31 @@ public final class ScoreAccumulator implements Serializable {
         return minTime;
     }
 
+    /**
+     * Key prefix of the heterogeneity modifier's level slices, kept in the period map (same shape, same merge and
+     * coder) and told apart by this prefix (a period bucket never starts with it).
+     */
+    public static final String LEVEL_PREFIX = "\u0001level:";
+
+    public static boolean isLevel(final String key) {
+        return key.startsWith(LEVEL_PREFIX);
+    }
+
+    public static String levelName(final String key) {
+        return key.substring(LEVEL_PREFIX.length());
+    }
+
+    /** Adds one contribution to a slice only: a period ({@link #add}) or a modifier level (the total already holds the row). */
+    public ScoreAccumulator addSlice(final String key, final double[] contribution) {
+        final double[] slot = periods.computeIfAbsent(key, k -> new double[SLOTS]);
+        for (int i = 0; i < SLOTS; i++) slot[i] += contribution[i];
+        return this;
+    }
+
     /** Adds one contribution to the total and, when {@code period} is non-null, to that period. */
     public ScoreAccumulator add(final String period, final double[] contribution) {
         for (int i = 0; i < SLOTS; i++) total[i] += contribution[i];
-        if (period != null) {
-            final double[] slot = periods.computeIfAbsent(period, k -> new double[SLOTS]);
-            for (int i = 0; i < SLOTS; i++) slot[i] += contribution[i];
-        }
+        if (period != null) addSlice(period, contribution);
         return this;
     }
 
@@ -88,6 +140,7 @@ public final class ScoreAccumulator implements Serializable {
         }
         if (other.maxTime > maxTime) maxTime = other.maxTime;
         if (other.minTime < minTime) minTime = other.minTime;
+        addExtra(other.extra);
         return this;
     }
 
@@ -109,6 +162,8 @@ public final class ScoreAccumulator implements Serializable {
             }
             LONG.encode(value.maxTime, out);
             LONG.encode(value.minTime, out);
+            INT.encode(value.extra == null ? 0 : value.extra.length, out);
+            if (value.extra != null) for (final double d : value.extra) DOUBLE.encode(d, out);
         }
 
         @Override
@@ -124,6 +179,11 @@ public final class ScoreAccumulator implements Serializable {
             }
             acc.maxTime = LONG.decode(in);
             acc.minTime = LONG.decode(in);
+            final int extra = INT.decode(in);
+            if (extra > 0) {
+                acc.extra = new double[extra];
+                for (int i = 0; i < extra; i++) acc.extra[i] = DOUBLE.decode(in);
+            }
             return acc;
         }
     }

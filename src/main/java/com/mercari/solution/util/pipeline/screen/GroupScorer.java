@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.mercari.solution.util.domain.math.NormalDistribution;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Baselines.Skip;
@@ -30,6 +31,10 @@ public final class GroupScorer implements Serializable {
     private final int shuffleRef;
     /** {@code baseline.invalid: dropRow}: the invalid rows leave their unit before it is prepared */
     private final boolean dropsRows;
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges), set per bundle from the side input */
+    private transient WindowQuantiles quantiles;
+    /** the binned test's value edges per column, derived once from the sketches (reset with them) */
+    private transient double[][] edgesCache;
 
     public GroupScorer(final ScreenSpec spec) {
         this.spec = spec;
@@ -37,6 +42,17 @@ public final class GroupScorer implements Serializable {
         this.nColumns = spec.columnCount();
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
         this.dropsRows = spec.baselineDropsRows();
+    }
+
+    /** Sets the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges). */
+    public GroupScorer withWindowQuantiles(final WindowQuantiles quantiles) {
+        if (this.quantiles != quantiles) {
+            edgesCache = null;
+            gridEdgesCache = null;
+            levelsCache = null;
+        }
+        this.quantiles = quantiles;
+        return this;
     }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
@@ -70,6 +86,11 @@ public final class GroupScorer implements Serializable {
 
         public String period() {
             return rows.get(0).period;
+        }
+
+        /** The heterogeneity modifier's level of a grouped unit: its first row's (the modifier is a unit-level field). */
+        public String level() {
+            return rows.get(0).level;
         }
     }
 
@@ -120,6 +141,7 @@ public final class GroupScorer implements Serializable {
      * {@link Skip#NONE} when it was scored.
      */
     public Skip score(final List<ScreenRow> input, final String unitKey, final Map<Integer, ScoreAccumulator> into) {
+        requireWindowQuantiles(spec, quantiles);
         final Unit unit = prepare(input, unitKey);
         final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
         final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
@@ -136,18 +158,76 @@ public final class GroupScorer implements Serializable {
         final boolean prior = !spec.hasBaseline();
         final double[][] cols = columns(unit);
         final String unitPeriod = unit.period();
+        final String unitLevel = spec.isGroupedMultinomial() ? unit.level() : null;
         final int nTransforms = spec.transforms.size();
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
+        // the suggestions' half of this unit: one seeded hash per unit, not per column
+        final boolean inDiscovery = spec.suggestionsOn && discovery(unit.key);
         for (int c = 0; c < nColumns; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                final double[] v = transform(spec.transforms.get(t), cols[c]);
                 final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
+                if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                    // the binned block test: per-bin sums in the accumulator's variable-length vector, added in
+                    // place over the occupied bins only; no period slices (the block has no sign to agree on)
+                    final int[] bins = bins(c, cols[c]);
+                    Arrays.fill(contribution, 0d);
+                    contribution[ScoreAccumulator.N_OBS] = observed(cols[c]);
+                    acc.add(null, contribution);
+                    final int len = spec.isGroupedMultinomial() ? binnedGroupedLength() : binnedRowLength();
+                    if (spec.suggestionsOn) {
+                        // the suggestions' honest gain: the window's sums, then the discovery half's (a seeded hash of
+                        // the unit); the confirmation half is the difference
+                        final double[] sums = new double[len];
+                        if (spec.isGroupedMultinomial()) binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight, sums);
+                        else binnedRowContribution(bins, unit.y, unit.p, unit.w, prior, sums);
+                        final double[] both = acc.extra(2 * len);
+                        for (int i = 0; i < len; i++) {
+                            both[i] += sums[i];
+                            if (inDiscovery) both[len + i] += sums[i];
+                        }
+                    } else if (spec.isGroupedMultinomial()) {
+                        binnedGroupedContribution(bins, unit.y, unit.p, unit.unitWeight, acc.extra(binnedGroupedLength()));
+                    } else {
+                        binnedRowContribution(bins, unit.y, unit.p, unit.w, prior, acc.extra(binnedRowLength()));
+                    }
+                    continue;
+                }
+                final double[] v = transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 if (spec.isGroupedMultinomial()) {
                     groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
                     acc.add(unitPeriod, contribution);
+                    if (unitLevel != null) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + unitLevel, contribution);
                 } else {
                     rowContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
                 }
+            }
+        }
+        // the categorical candidates (DSL doc §6.2): the block of a column's levels, and its placebos (the levels
+        // redrawn from the window frequencies, the alignment with the label broken)
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            final WindowQuantiles.Levels levels = categoricalLevels(c);
+            if (levels == null || levels.size() < 2) continue;
+            final int nb = levels.size();
+            for (int r = -1; r < spec.categoricalPlacebo; r++) {
+                final int[] idx = r < 0 ? levelIndices(unit, c, levels) : placeboLevels(unit, c, r, levels);
+                final ScoreAccumulator acc = into.computeIfAbsent(spec.categoricalKey(c, r), k -> new ScoreAccumulator());
+                Arrays.fill(contribution, 0d);
+                contribution[ScoreAccumulator.N_OBS] = n;
+                // the block's record reads no period slice: the total alone
+                acc.add(null, contribution);
+                if (spec.isGroupedMultinomial()) binnedGroupedContribution(nb, idx, unit.y, unit.p, unit.unitWeight, acc.extra(binnedGroupedLength(nb)));
+                else binnedRowContribution(nb, idx, unit.y, unit.p, unit.w, prior, acc.extra(binnedRowLength(nb)));
+            }
+        }
+        if (spec.jointOn) {
+            // the candidates' joint sums (S, the Fisher block, the pHd block) under one key, added in place: at
+            // m(m + 1) doubles a unit's contribution is not worth a vector of its own
+            final ScoreAccumulator acc = into.computeIfAbsent(ScoreAccumulator.JOINT_KEY, k -> new ScoreAccumulator());
+            final int used = addJoint(unit, cols, prior, acc.extra(jointLength(spec.jointColumnCount())));
+            if (used > 0) {
+                Arrays.fill(contribution, 0d);
+                contribution[ScoreAccumulator.N_OBS] = used;
+                acc.add(null, contribution);
             }
         }
         bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
@@ -247,30 +327,417 @@ public final class GroupScorer implements Serializable {
     private void rowContributions(final List<ScreenRow> rows, final double[] v, final double[] y, final double[] mu,
                                   final double[] w, final boolean prior, final ScoreAccumulator acc) {
         final Map<String, double[]> byPeriod = new HashMap<>();
+        // the heterogeneity modifier's levels: the same sums per level, added as slices (the total holds the row once)
+        final Map<String, double[]> byLevel = new HashMap<>();
+        final double[] d = new double[ScoreAccumulator.SLOTS];
         for (int i = 0; i < v.length; i++) {
             if (!StatMath.isFinite(v[i])) continue;
-            final double[] c = byPeriod.computeIfAbsent(rows.get(i).period, k -> new double[ScoreAccumulator.SLOTS]);
             final double x = v[i];
-            c[ScoreAccumulator.N_OBS] += 1;
+            d[ScoreAccumulator.N_OBS] = 1;
             if (prior) {
-                c[ScoreAccumulator.C1] += w[i] * x * y[i];
-                c[ScoreAccumulator.C2] += w[i] * y[i];
-                c[ScoreAccumulator.C3] += w[i] * x * x;
-                c[ScoreAccumulator.C4] += w[i] * x;
-                c[ScoreAccumulator.C5] += w[i];
-                c[ScoreAccumulator.C6] += w[i] * y[i] * y[i];
+                d[ScoreAccumulator.C1] = w[i] * x * y[i];
+                d[ScoreAccumulator.C2] = w[i] * y[i];
+                d[ScoreAccumulator.C3] = w[i] * x * x;
+                d[ScoreAccumulator.C4] = w[i] * x;
+                d[ScoreAccumulator.C5] = w[i];
+                d[ScoreAccumulator.C6] = w[i] * y[i] * y[i];
             } else {
                 final double r = y[i] - mu[i];
                 final double vv = spec.fisherWeight(mu[i]);
-                c[ScoreAccumulator.C1] += w[i] * x * r;
-                c[ScoreAccumulator.C2] += w[i] * r;
-                c[ScoreAccumulator.C3] += w[i] * vv * x * x;
-                c[ScoreAccumulator.C4] += w[i] * vv * x;
-                c[ScoreAccumulator.C5] += w[i] * vv;
-                c[ScoreAccumulator.C6] += w[i] * r * r;
+                d[ScoreAccumulator.C1] = w[i] * x * r;
+                d[ScoreAccumulator.C2] = w[i] * r;
+                d[ScoreAccumulator.C3] = w[i] * vv * x * x;
+                d[ScoreAccumulator.C4] = w[i] * vv * x;
+                d[ScoreAccumulator.C5] = w[i] * vv;
+                d[ScoreAccumulator.C6] = w[i] * r * r;
+            }
+            final double[] c = byPeriod.computeIfAbsent(rows.get(i).period, k -> new double[ScoreAccumulator.SLOTS]);
+            for (int s = 0; s < ScoreAccumulator.SLOTS; s++) c[s] += d[s];
+            final String level = rows.get(i).level;
+            if (level != null) {
+                final double[] cl = byLevel.computeIfAbsent(level, k -> new double[ScoreAccumulator.SLOTS]);
+                for (int s = 0; s < ScoreAccumulator.SLOTS; s++) cl[s] += d[s];
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
+        for (final Map.Entry<String, double[]> e : byLevel.entrySet()) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + e.getKey(), e.getValue());
+    }
+
+    /** Whether a unit belongs to the suggestions' discovery half: a seeded hash of the unit key (the placebo derivation). */
+    boolean discovery(final String unitKey) {
+        return FeatureValues.seededRandom(spec.seed, unitKey + SEP + "split").nextBoolean();
+    }
+
+    /**
+     * A representative value per bin of column {@code column} (the binned test's k value bins, the missing bin
+     * excluded), for the suggestions' shapes: the midpoint of (edge_{i−1}, edge_i], the outer bins reaching to the
+     * sketch's min / max (a noise placebo: the normal quantile mids); position bins take the position's centre
+     * (b + 0.5) / k. Null without an edge (no sketch value for the column).
+     */
+    double[] binRepresentatives(final int column) {
+        final int k = spec.binsK;
+        final double[] out = new double[k];
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            for (int b = 0; b < k; b++) out[b] = (b + 0.5) / k;
+            return out;
+        }
+        final double[] edges = edges(column);
+        if (edges == null) return null;
+        final boolean candidate = column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise);
+        final int sketch = column < nCandidates ? column : shuffleRef;
+        final double lo = candidate ? quantiles.min(sketch) : StatMath.inverseNormal(0.5 / k);
+        final double hi = candidate ? quantiles.max(sketch) : StatMath.inverseNormal(1 - 0.5 / k);
+        for (int b = 0; b < k; b++) {
+            final double left = b == 0 ? lo : edges[b - 1];
+            final double right = b == k - 1 ? hi : edges[b];
+            out[b] = 0.5 * (left + right);
+        }
+        return out;
+    }
+
+    /** the pair grids' value edges per x column (the members' sketches), cached while the sketches are set */
+    private transient Map<Integer, double[]> gridEdgesCache;
+
+    /**
+     * The {@code pairs.shape − 1} value edges of x column {@code xIndex} (a pair member's conditioning column) from the
+     * window sketches (DSL doc §8.7); null without a sketch value.
+     */
+    double[] gridEdges(final int xIndex) {
+        if (quantiles == null || xIndex >= quantiles.columns() || quantiles.count(xIndex) == 0 || spec.pairShapeBins < 2) return null;
+        if (gridEdgesCache == null) gridEdgesCache = new HashMap<>();
+        return gridEdgesCache.computeIfAbsent(xIndex, i -> quantiles.edges(i, spec.pairShapeBins));
+    }
+
+    /**
+     * The value bin of {@code v} among {@code edges} (bin i = (edge_{i−1}, edge_i]: a value equal to an edge falls
+     * below it) — the binned test's and the pair grids' rule; −1 for a non-finite value.
+     */
+    static int gridBin(final double[] edges, final double v) {
+        if (!StatMath.isFinite(v)) return -1;
+        int b = 0;
+        while (b < edges.length && edges[b] < v) b++;
+        return b;
+    }
+
+    /** The smallest finite value of a candidate column in the window (its sketch; NaN for a placebo column or without a sketch). */
+    public double columnMin(final int column) {
+        if (quantiles == null || column >= nCandidates || column >= quantiles.columns() || quantiles.count(column) == 0) return Double.NaN;
+        return quantiles.min(column);
+    }
+
+    /** The k − 1 value edges of a column (null for position bins or without a sketch value). */
+    public double[] binEdges(final int column) {
+        return ScreenSpec.EDGES_RANK.equals(spec.binsEdges) ? null : edges(column);
+    }
+
+    /** The packed (upper triangle, row-major) index of (i, j), i ≤ j, of an m × m symmetric matrix. */
+    static int packed(final int m, final int i, final int j) {
+        final int a = Math.min(i, j), b = Math.max(i, j);
+        return a * m - a * (a - 1) / 2 + (b - a);
+    }
+
+    /**
+     * The offsets of the joint sums vector for m joint columns (DSL doc §9.5), one definition for the scorer and the
+     * report: {@code [Σ w v, Σ w v x (m), Σ w v x x' (packed at h), Σ w r (at r), Σ w r x (m, at s), Σ w r x x' (packed
+     * at mm), Σ w r² (at r2), used]}, {@code length = 4 + 2m + m(m + 1)}.
+     */
+    record JointLayout(int m, int h, int r, int s, int mm, int r2, int length) {
+        static JointLayout of(final int m) {
+            final int packed = m * (m + 1) / 2;
+            final int h = 1 + m, r = h + packed, s = r + 1, mm = s + m, r2 = mm + packed;
+            return new JointLayout(m, h, r, s, mm, r2, r2 + 2);
+        }
+
+        /** The slot counting the rows (grouped: units) added. */
+        int used() {
+            return r2 + 1;
+        }
+    }
+
+    /** The length of the joint sums vector for m joint columns (DSL doc §9.5): {@code 4 + 2m + m(m + 1)}. */
+    static int jointLength(final int m) {
+        return JointLayout.of(m).length();
+    }
+
+    /**
+     * Adds the unit's contribution to the candidates' joint sums over the joint columns (the chosen candidates, then
+     * the noise placebos) into {@code out} (laid out by {@link JointLayout}). Row families accumulate raw moments (v the
+     * Fisher weight in offset mode, 1 in prior mode; r = y − μ or y) and the report centres them; a row with a missing
+     * joint value is left out (the sums must share one row set to stay positive definite). The grouped family centres
+     * by p̂ within the unit and adds the unit's S, Fisher block diag(p) − pp' and pHd block Σ (ỹ − p) x̃x̃' in the same
+     * slots (the "Σ w v x" / "Σ w r" slots stay 0), leaving out a unit with a missing joint value. Returns the rows
+     * (grouped: units) added, 0 when nothing was.
+     */
+    int addJoint(final Unit unit, final double[][] cols, final boolean prior, final double[] out) {
+        final int m = spec.jointColumnCount();
+        if (m < 2) return 0;
+        final JointLayout at = JointLayout.of(m);
+        final int n = unit.size();
+        final double[] x = new double[m];
+        if (spec.isGroupedMultinomial()) {
+            // shifted by the unit's pivot first, as the marginal test is: a column constant within the unit centres to
+            // exactly 0 instead of the rounding residue of its magnitude
+            final double[][] xt = new double[n][m];
+            final double[] mean = new double[m];
+            for (int j = 0; j < m; j++) {
+                final double[] col = cols[spec.jointColumn(j)];
+                for (final double v : col) if (!StatMath.isFinite(v)) return 0;
+                final double pivot = pivot(col);
+                for (int i = 0; i < n; i++) {
+                    xt[i][j] = col[i] - pivot;
+                    mean[j] += unit.p[i] * xt[i][j];
+                }
+            }
+            final double w = unit.unitWeight;
+            out[0] += w;
+            for (int i = 0; i < n; i++) {
+                final double r = unit.y[i] - unit.p[i];
+                for (int j = 0; j < m; j++) {
+                    x[j] = xt[i][j] - mean[j];
+                    out[at.s() + j] += w * r * x[j];
+                }
+                addOuter(out, at, x, w * unit.p[i], w * r);
+            }
+            out[at.used()] += 1;
+            return 1;
+        }
+        int used = 0;
+        for (int i = 0; i < n; i++) {
+            boolean finite = true;
+            for (int j = 0; j < m && finite; j++) {
+                x[j] = cols[spec.jointColumn(j)][i];
+                finite = StatMath.isFinite(x[j]);
+            }
+            if (!finite) continue;
+            final double w = unit.w[i];
+            final double v = prior ? 1d : spec.fisherWeight(unit.p[i]);
+            final double r = prior ? unit.y[i] : unit.y[i] - unit.p[i];
+            out[0] += w * v;
+            out[at.r()] += w * r;
+            out[at.r2()] += w * r * r;
+            for (int j = 0; j < m; j++) {
+                out[1 + j] += w * v * x[j];
+                out[at.s() + j] += w * r * x[j];
+            }
+            addOuter(out, at, x, w * v, w * r);
+            used++;
+        }
+        out[at.used()] += used;
+        return used;
+    }
+
+    /** Adds {@code a·xx'} to the packed Fisher block and {@code b·xx'} to the packed pHd block (upper triangles, row-major). */
+    private static void addOuter(final double[] out, final JointLayout at, final double[] x, final double a, final double b) {
+        final int m = x.length;
+        int k = 0;
+        for (int j = 0; j < m; j++) {
+            final double aj = a * x[j], bj = b * x[j];
+            for (int l = j; l < m; l++, k++) {
+                out[at.h() + k] += aj * x[l];
+                out[at.mm() + k] += bj * x[l];
+            }
+        }
+    }
+
+    /** the categorical columns' level dictionaries, from the window sketches' counts (reset with them) */
+    private transient WindowQuantiles.Levels[] levelsCache;
+
+    /** Categorical column {@code c}'s level dictionary (null without the pre-pass counts). */
+    WindowQuantiles.Levels categoricalLevels(final int c) {
+        if (quantiles == null || c >= quantiles.categoricals()) return null;
+        if (levelsCache == null) levelsCache = new WindowQuantiles.Levels[spec.categoricals.size()];
+        if (levelsCache[c] == null) levelsCache[c] = quantiles.levels(c, spec.categoricalMaxLevels);
+        return levelsCache[c];
+    }
+
+    /** The unit's rows' level slots of categorical column {@code c} (the folded slot for a level beyond the named ones). */
+    static int[] levelIndices(final Unit unit, final int c, final WindowQuantiles.Levels levels) {
+        final int n = unit.size();
+        final int[] out = new int[n];
+        for (int i = 0; i < n; i++) {
+            final String[] cat = unit.rows.get(i).cat;
+            final int idx = cat == null || c >= cat.length ? -1 : levels.indexOf(cat[c]);
+            // a level the dictionary never saw (impossible after the counting pass) folds into the last slot
+            out[i] = idx >= 0 ? idx : levels.size() - 1;
+        }
+        return out;
+    }
+
+    /**
+     * A placebo column of categorical {@code c}: every row's level redrawn from the window frequencies (the marginal
+     * distribution kept, the alignment with the label broken), from {@code seededRandom(seed, unitKey + "cat" + c + r)}
+     * in row order — reproducible, as the noise placebos.
+     */
+    int[] placeboLevels(final Unit unit, final int c, final int r, final WindowQuantiles.Levels levels) {
+        final SplittableRandom rng = FeatureValues.seededRandom(spec.seed, unit.key + SEP + "cat" + c + SEP + r);
+        final int n = unit.size();
+        final int[] out = new int[n];
+        for (int i = 0; i < n; i++) out[i] = levels.slot(rng.nextDouble());
+        return out;
+    }
+
+    /** Finite values of a column (the binned test's n_obs). */
+    static int observed(final double[] v) {
+        int n = 0;
+        for (final double x : v) if (StatMath.isFinite(x)) n++;
+        return n;
+    }
+
+    /**
+     * The bin of every value of column {@code column} (DSL doc §6.1): value bins from the window's quantile
+     * edges (a candidate or the shuffle reference's sketch; a noise placebo takes the exact normal quantiles),
+     * or position bins from the within-unit rank ({@code bins.edges: rank}); a missing value goes to the missing
+     * bin (the last index). Bin i holds the values in (edge_{i−1}, edge_i]: a value equal to an edge falls below it.
+     */
+    int[] bins(final int column, final double[] v) {
+        final int k = spec.binsK;
+        final int[] out = new int[v.length];
+        if (ScreenSpec.EDGES_RANK.equals(spec.binsEdges)) {
+            final double[] rank = percentileRank(v);
+            for (int i = 0; i < v.length; i++) out[i] = StatMath.isFinite(rank[i]) ? Math.min(k - 1, (int) Math.floor(rank[i] * k)) : spec.missingBin();
+            return out;
+        }
+        final double[] edges = edges(column);
+        for (int i = 0; i < v.length; i++) {
+            final int b = edges == null ? -1 : gridBin(edges, v[i]);
+            out[i] = b < 0 ? spec.missingBin() : b;
+        }
+        return out;
+    }
+
+    /** The k − 1 interior value edges of a column, cached per column while the sketches are set; null without a sketch value. */
+    private double[] edges(final int column) {
+        if (edgesCache == null) edgesCache = new double[nColumns][];
+        double[] edges = edgesCache[column];
+        if (edges != null) return edges;
+        final int k = spec.binsK;
+        if (column < nCandidates || (shuffleRef >= 0 && column >= nCandidates + spec.noise)) {
+            final int sketch = column < nCandidates ? column : shuffleRef;
+            if (quantiles == null || sketch >= quantiles.columns() || quantiles.count(sketch) == 0) return null;
+            edges = quantiles.edges(sketch, k);
+        } else {
+            edges = new double[k - 1];
+            for (int i = 1; i < k; i++) edges[i - 1] = StatMath.inverseNormal((double) i / k);
+        }
+        edgesCache[column] = edges;
+        return edges;
+    }
+
+    /** Length of the grouped binned sums {@code [S_b (B), P_b (B), (P P')_bb' (B²)]}. */
+    int binnedGroupedLength() {
+        return binnedGroupedLength(spec.binCount());
+    }
+
+    /** {@link #binnedGroupedLength()} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    static int binnedGroupedLength(final int nb) {
+        return 2 * nb + nb * nb;
+    }
+
+    /** Length of the row-family binned sums: {@code [Σ w, Σ w r, Σ w v]} per bin, then the three window totals. */
+    int binnedRowLength() {
+        return binnedRowLength(spec.binCount());
+    }
+
+    /** {@link #binnedRowLength()} over a block of {@code nb} cells. */
+    static int binnedRowLength(final int nb) {
+        return 3 * nb + 3;
+    }
+
+    /**
+     * Adds the grouped (conditional logit) binned sums into {@code into}, scaled by the unit weight:
+     * {@code [S_b (B), P_b (B), (P P')_bb' (B²)]} with S_b = Σ_{i in b} (ỹ_i − p_i) and P_b = Σ_{i in b} p_i — the score
+     * of the one-hot block and the pieces of its Fisher block diag(P) − P P' (DSL doc §6.1). Only the bins the unit
+     * occupies are touched: O(n + occupied²) instead of O(B²) per unit.
+     */
+    void binnedGroupedContribution(final int[] bins, final double[] y, final double[] p, final double weight, final double[] into) {
+        binnedGroupedContribution(spec.binCount(), bins, y, p, weight, into);
+    }
+
+    /** {@link #binnedGroupedContribution(int[], double[], double[], double, double[])} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    void binnedGroupedContribution(final int nb, final int[] bins, final double[] y, final double[] p, final double weight, final double[] into) {
+        final double[] s = new double[nb];
+        final double[] pb = new double[nb];
+        final boolean[] seen = new boolean[nb];
+        final int[] occupied = new int[Math.min(nb, bins.length)];
+        int m = 0;
+        for (int i = 0; i < bins.length; i++) {
+            final int b = bins[i];
+            if (!seen[b]) {
+                seen[b] = true;
+                occupied[m++] = b;
+            }
+            s[b] += y[i] - p[i];
+            pb[b] += p[i];
+        }
+        for (int x = 0; x < m; x++) {
+            final int b = occupied[x];
+            into[b] += weight * s[b];
+            into[nb + b] += weight * pb[b];
+            for (int z = 0; z < m; z++) {
+                final int c = occupied[z];
+                into[2 * nb + b * nb + c] += weight * pb[b] * pb[c];
+            }
+        }
+    }
+
+    /**
+     * Fails a scoring call of independent rows with rank / absdev that was not handed the window's sketches: the
+     * within-unit fallback would read a single row (rank 0.5, absdev 0) and report degenerate records silently.
+     */
+    static void requireWindowQuantiles(final ScreenSpec spec, final WindowQuantiles quantiles) {
+        if (quantiles == null && spec.needsWindowQuantiles()) {
+            throw new IllegalStateException("rank / absdev of independent rows need the window quantile sketches (withWindowQuantiles)");
+        }
+    }
+
+    /**
+     * Adds the row-family binned sums into {@code into}: per bin {@code [Σ w, Σ w r, Σ w v]} (r = y − μ and v the
+     * Fisher weight in offset mode; r = y and v unused in prior mode, where the report supplies the prior weight) and
+     * the window totals {@code [Σ w, Σ w r, Σ w r²]} after the bins (the prior mean and the gaussian variance).
+     */
+    void binnedRowContribution(final int[] bins, final double[] y, final double[] mu, final double[] w, final boolean prior, final double[] into) {
+        binnedRowContribution(spec.binCount(), bins, y, mu, w, prior, into);
+    }
+
+    /** {@link #binnedRowContribution(int[], double[], double[], double[], boolean, double[])} over a block of {@code nb} cells. */
+    void binnedRowContribution(final int nb, final int[] bins, final double[] y, final double[] mu, final double[] w, final boolean prior, final double[] into) {
+        for (int i = 0; i < bins.length; i++) {
+            final double r = prior ? y[i] : y[i] - mu[i];
+            final double v = prior ? 0d : spec.fisherWeight(mu[i]);
+            final int o = 3 * bins[i];
+            into[o] += w[i];
+            into[o + 1] += w[i] * r;
+            into[o + 2] += w[i] * v;
+            into[3 * nb] += w[i];
+            into[3 * nb + 1] += w[i] * r;
+            into[3 * nb + 2] += w[i] * r * r;
+        }
+    }
+
+    /**
+     * Applies a transform variant to column {@code column} of a unit: within the unit for a grouped run (the
+     * sketches a grouped run may carry are the value bins' and the pair grids' edges, never its rank reference) or
+     * without sketches, else against the window's sketches (independent rows, DSL doc §6) — a candidate's rank is
+     * its mid-rank among the window's finite values and its absdev the distance to the window median; a noise
+     * placebo, standard normal by construction, takes the exact normal cdf and |x| (its median is 0).
+     */
+    static double[] transform(final ScreenSpec spec, final WindowQuantiles quantiles, final int column, final String transform, final double[] v) {
+        if (quantiles == null || spec.isGrouped() || ScreenSpec.TRANSFORM_RAW.equals(transform)) return transform(transform, v);
+        final boolean candidate = !spec.isPlacebo(column);
+        final double[] out = new double[v.length];
+        switch (transform) {
+            case ScreenSpec.TRANSFORM_RANK -> {
+                for (int i = 0; i < v.length; i++) {
+                    out[i] = !StatMath.isFinite(v[i]) ? Double.NaN : candidate ? quantiles.rank(column, v[i]) : NormalDistribution.cdf(v[i]);
+                }
+            }
+            case ScreenSpec.TRANSFORM_ABSDEV -> {
+                final double median = candidate ? quantiles.median(column) : 0d;
+                for (int i = 0; i < v.length; i++) out[i] = StatMath.isFinite(v[i]) && StatMath.isFinite(median) ? Math.abs(v[i] - median) : Double.NaN;
+            }
+            default -> throw new IllegalArgumentException("unknown transform " + transform);
+        }
+        return out;
     }
 
     /** Applies a transform variant within the unit; NaN inputs stay NaN. */

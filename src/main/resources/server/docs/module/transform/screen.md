@@ -53,10 +53,11 @@ nothing to a tree model (false positive). See [Limits](#limits).
 threshold applies**. The transform adds placebo columns to the same pipeline — `placebo.noise` standard-normal
 columns (`__noise_<i>`) and `placebo.shuffle.n` within-group permutations of a reference column
 (`__shuffle_<i>`, marginal distribution kept, alignment broken) — and takes the `placebo.quantile` quantile
-of their `est_gain` (over every transform variant) as the pass threshold. The default q99 (not q95) accounts for
-the candidate × transform multiplicity. Without placebo columns (`noise: 0`, no shuffle) the theoretical χ²(1)
-quantile / 2N is used; it is always reported as `thresholdTheoretical` in the summary — the two agree when the
-statistic is well calibrated.
+of their `est_gain` (pooled over the transform variants of the same statistic kind: `raw` / `rank` / `absdev`
+share one cut, the [binned block test](#binned-block-test) has its own) as the pass threshold. The default q99
+(not q95) accounts for the candidate × transform multiplicity. Without placebo columns (`noise: 0`, no shuffle)
+the theoretical χ²(df) quantile / 2N is used; it is always reported as `thresholdTheoretical` in the summary —
+the two agree when the statistic is well calibrated.
 
 The placebo random numbers are derived from `placebo.seed` and the unit key (the group key, or the row identity
 for independent rows), so a re-run reproduces the same columns.
@@ -69,8 +70,130 @@ for independent rows), so a re-run reproduces the same columns.
 | `rank` | percentile rank within the group over the observed (finite) values: `(number of smaller values + half the number of other values tied with it) / (observed count − 1)`, in [0, 1] (an untied minimum reads 0, an untied maximum 1); 0.5 when only one value is observed. With `r` the average 1-based rank and `m` the observed count it is `(r − 1) / (m − 1)` — in pandas `(s.rank() − 1) / (s.count() − 1)`, not `s.rank(pct=True)` (`r / m`: the numerator and the denominator both differ) | monotone non-linear effects, outlier robustness |
 | `absdev` | \|x − median of the group\| | symmetric "extremeness" effects |
 
-Records are keyed by (`candidate`, `transform`). `rank` and `absdev` need `group` (the within-group
-statistics); independent rows support `raw` only in this version.
+Records are keyed by (`candidate`, `transform`). `rank` and `absdev` are within-group statistics; with
+independent rows (no `group`) the reference is the whole window instead: one extra pass sketches every
+candidate (a KLL quantile sketch per column, rank error about 0.8 %), `rank` is the value's mid-rank among
+the window's observed values as a fraction of their count — `(values below + half the values equal, itself
+included) / n`, in (0, 1) — and `absdev` is `|x − window median|`. Noise placebos are standard normal by
+construction and take the exact normal cdf / `|x|`; the summary's `notes` says the sketch was used. The
+sketch's compaction is randomised, so beyond 400 values per candidate a re-run can move a candidate's
+`rank` / `absdev` z slightly (within the rank error; the placebo columns and every grouped transform stay
+exactly reproducible). Session windows cannot carry the window reference (use the global, fixed, sliding or
+calendar window). The default without `group` stays `raw` (the pre-pass reads the input once more): list the
+transforms to get `rank` / `absdev`.
+
+### Binned block test
+
+`transforms: [raw, binned]` with `bins: {k: 10, edges: value}` tests a candidate as a one-hot block of `k`
+bins plus a missing bin (a missing value is a bin of its own, so informative missingness scores), which
+catches any univariate shape at bin resolution — a band, a threshold, a U — where the linear probe of `raw`
+sees nothing. The record is one χ²(df) statistic without a sign: `chi2`, `df` (active bins − 1), `pValue`,
+`est_gain = chi2 / (2N)` on the same scale as the other transforms, and `bin_stats` (per bin: score `S`,
+information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z`, the
+period fields and the leak flag do not apply (null / false). Under conditioning the block gets its own
+partial test (`partial_chi2`, `partial_df`, `partial_gain`, `partial_pValue`, `r2_F` = the share of the
+block's information F explains).
+
+- `edges: value` bins by the window's value quantiles (the same sketch pre-pass as the independent-row
+  `rank`, run for grouped input too when the block test asks for it); bin i holds `(edge_{i−1}, edge_i]`.
+  `edges: rank` (needs `group`) bins by the row's rank within its group — a *position* bin ("does the
+  standing within the group matter"), a different question from the value bins ("does the level matter").
+- **Its own threshold.** A df = k − 1 gain is not comparable with a df = 1 gain, so the placebo cut is taken
+  per statistic kind: `raw` / `rank` / `absdev` share one, `binned` has its own; each record's `threshold` is
+  its kind's cut and the summary / pass list carry the `thresholds` map (`df1`, `binned`), the scalar
+  `threshold` staying the df = 1 cut. `pass.minGain` applies to both; `pass.minPeriodsAgree` is a df = 1 rule
+  and does not bar the block.
+- **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
+  `raw` first; keep `binned` for the shapes `raw` and `rank` miss, and keep `k` small (10 is plenty).
+- **Closing the loop.** The record carries `bin_edges` (value bins), and a passing block goes into the pass
+  list as a recipe: `passedBlocks` (written with the `binned` transform only; and the `bins` member of its
+  `passed` entry) with `k`, `edges` / `rankCuts`, `missingBin` and the fragment
+  `{scope: row, type: bin, input: x, edges: [...]}` — the row `bin` op the next feature run adds; `columns`
+  keeps the raw column's name. The row op's bins are `[edge_{i−1}, edge_i)` where the screen's are
+  `(edge_{i−1}, edge_i]`, so the fragment's edges are the next doubles above `edges` (`10.000000000000002` for
+  `10`), written in full: copy them as they are, since a rounded edge moves the rows at it to the other bin.
+
+### Heterogeneity across a modifier
+
+`heterogeneity: periods` or `heterogeneity: {field: segment}` asks, per `raw` / `rank` / `absdev` record,
+whether the candidate's effect *differs* across the levels of a modifier — the period buckets, or a
+declared field's values. From the levels' own score tests the total splits into the common effect and the
+heterogeneity `Σ S_l² / H_l − (Σ S_l)² / Σ H_l` (χ² with levels − 1 degrees of freedom), which catches an
+effect that flips sign across segments or periods — invisible to the window statistic, whose sum cancels.
+
+- Record: `het_chi2`, `het_df`, `het_pValue`, `het_gain` (on the `est_gain` scale), `het_levels`, and for a
+  field modifier `level_z` (per level: z, S, H, n; for `periods` read `period_z`). With conditioning the same
+  decomposition runs on the partial slices (`partial_het_*`) and decides, as for the main statistic.
+- **Its own flag.** `het_passed` compares the effective heterogeneity gain with its own placebo cut
+  (`thresholds.het`, lifted to `pass.minGain`). It is **never folded into `passed`** — a candidate passes on
+  its main effect; the summary and the pass list list the flagged columns apart (`nHetPassed`,
+  `hetPassedColumns`). The reading is "cross this candidate with the modifier upstream" (a `cross` op in the
+  feature transform), not "select it as is".
+- `periods` costs nothing (the period slices are already there); a field modifier keeps one more slice per
+  level in every accumulator. For the grouped family a field modifier is a group-level attribute (the
+  value of the group's first row). "Does the effect depend on the predicted level" is the same test on a
+  field that bins the baseline upstream.
+
+### Suggestions
+
+`suggestions: true` (with `binned` in `transforms`) reads the binned sums as estimates and writes, per
+scorable candidate, recipes in the feature transform's vocabulary to the `<name>.suggestions` output:
+
+| kind | what it says | fields |
+|---|---|---|
+| `shape` | which univariate shape captures the effect: `linear`, `log`, `sqrt`, `rank`, `step` / `hinge` / `abs` at a cut — scored by the share of the block's χ² the shape's contrast captures (in [0, 1]) | `name`, `cut`, `direction`, `share`, `fragment` (e.g. `{scope: row, expr: "abs(x - 20)"}`) |
+| `cut` | the best single split (a boosting round's first split) | `cut`, `direction`, `fragment` (a row `bin` with that edge) |
+| `missing` | the missing values' own effect against the rest, and the fill value whose bin behaves like them (only when values are missing) | `direction`, `fill`, `fragment` (an `x == null` indicator, or the fill) |
+| `monotone` | whether the effect is monotone (the isotonic fit's share) and in which direction, with the sign consistency of the bin effects | `name` (increasing / decreasing), `consistency`, `share` |
+
+- **Honest gain.** Every choice is made on a discovery half of the units (a seeded hash, as the placebo
+  columns) and reported on the other half: `share` / `chi2` are the discovery values, `confirmation_chi2` /
+  `confirmation_share` / `confirmation_gain` / `confirmation_pValue` the chosen recipe's on the confirmation
+  half — the numbers to trust.
+- **Calibrated.** Placebo columns go through the same search; each kind's `threshold` is the placebo quantile
+  of their confirmation gains (lifted to `pass.minGain`), and `passed` compares the confirmation gain with it.
+- **Hypotheses.** A suggestion goes into a feature spec and is checked by the next screen or the `evaluation`
+  transform; nothing is applied automatically. A shape's redundancy with the conditioning set is read off the
+  block record's `r2_F`.
+
+### Several candidates (joint)
+
+`joint: true` accumulates the candidates' joint sums — the score vector, the m × m Fisher matrix and the pHd
+matrix over the joint columns (every candidate, or `joint.include`; plus a few noise columns for the null
+scale) — and writes, to the same `suggestions` output, what a univariate ranking cannot say:
+
+| kind | what it says | fields |
+|---|---|---|
+| `phd` | the principal Hessian directions: the directions of residual curvature (quadratic effects and interactions in bulk), their loadings naming the candidates involved — a diagnostic, never a pass flag; a real direction loads on candidates, not on the noise columns | `name` direction i, `candidate` the top loading (loadings are scale-free: a column's units do not decide its rank), `chi2` the eigenvalue, `share`, `consistency` the largest noise loading (null without a noise column), `fragment` the top candidates' coefficients in their own units — the recipe is the projection and its square; and the members to declare as `pairs` |
+| `redundant` | near-duplicate candidates (\|correlation\| ≥ `joint.redundancy` in the Fisher metric): keep one, or average / project them | `candidate` the strongest member, `fragment` the others, `share` the cluster's smallest \|correlation\| |
+| `select` | a forward selection: the candidate that adds most given the already selected set, step by step, while it clears the df = 1 cut — a set that works together | `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = the gain given the set (in-sample), `threshold` the cut it cleared, `fragment` "given [...]" |
+| `composite` | the best linear combination of the selected set to add to the baseline | `fragment` the row expression, `chi2` / `share` the joint statistic and gain |
+| `difference` | a pair whose joint statistic clearly exceeds the better single one (`joint.excess`, default 1.5×, and the other member's gain given the better one clears the df = 1 cut) with equal and opposite standardised coefficients — the label follows `a − b`; at most `joint.pairs` (default 10) pairs | `name` `a - b`, `fragment` `{scope: row, expr: "a - r*b"}`, `chi2` the joint statistic, `share` the excess factor, `consistency` how equal the magnitudes are |
+| `ratio` | the same pair when both columns are positive over the window: the difference's log-scale reading (approximate) | `fragment` `{scope: row, expr: "a / b"}` |
+
+These are one-step, in-sample estimates at the null point — hypotheses for a feature spec, checked by the
+next screen. The joint sums cost O(m²) per row and `m(m + 1)` doubles of state: keep `joint.include` to the
+candidates worth combining (at most `maxColumns`, default 200). A row (grouped: a unit) with a missing value
+in any joint column is left out of the joint sums.
+
+### Categorical candidates
+
+`categorical: {include: [category, condition_grade]}` tests string fields natively — a level → (score,
+information) block instead of a one-hot or target encoding upstream. The sketch pre-pass counts every level
+exactly (a column past 20,000 distinct levels fails the step: not a categorical candidate), keeps the
+`maxLevels` (default 32) most frequent as named levels and folds the rest into `(other)` (a null value is
+its own level `(null)`); a screen of categorical candidates alone needs no numeric candidate. The column's
+record (`transform: levels`) is the same block test as the
+[binned block](#binned-block-test): `chi2`, `df` (active levels − 1), `pValue`, `est_gain`, no sign, the
+partial block under conditioning, and `level_z` with each level's contrast against the rest (its signed z,
+S, H, n — which levels carry the effect). It has its own placebo kind (`thresholds.levels`): `placebo`
+(default 5) columns per candidate whose levels are redrawn from the window frequencies (the marginal
+distribution kept, the alignment with the label broken). A passing column goes into the pass list by name
+(the feature transform encodes it); for a passing column only, the `suggestions` output adds its `grouping`
+(the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
+fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
+transform's row op in the fragment (`{type: indicator, input, values: [level]}`; `== null` for the `(null)`
+level; none for the folded `(other)`).
 
 ### Periods, time window and leak flags
 
@@ -145,6 +268,39 @@ residual variance is 0 (an exact fit) cannot scale the partial statistics: they 
 marginal test and `notes` says so.
 Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
 
+### Pairs
+
+`pairs: {fields: [[f_price, f_recent_bids]]}` (or `among: [f_*]` for every pair of a set) tests the product of
+two conditioning columns — an interaction — beyond what the model of those columns explains. Both members
+must be in `conditioning.fields`: a product is meaningful only at the fitted means of a model that holds
+its main effects (at the baseline alone, an unmodelled main effect leaves curvature the product would pick
+up as a spurious interaction). The pair record (`candidate: a*b`, `transform: product`) carries the partial
+statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null), has its own placebo
+kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column (pairs sharing a
+member take different noise columns, so no placebo repeats), whose gains give
+`thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A row
+missing either member is missing for the product (as the fragment `a * b` would be null there), not the
+product of the conditioning fill. A
+passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
+apart (counted in `nPairsPassed`, not `nPassed`), each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
+doubles per partial key (times `1 + placebo`), and with `shape` each real pair's grid `2 K` more (`2 K + K²`
+for `groupedMultinomial`, K = `shape`²); `maxPairs` bounds a run. The members of a pure interaction
+have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect (the
+pHd directions of [`joint`](#several-candidates-joint) name the members).
+
+**The interaction shape.** The pair test says whether the product adds information; `pairs.shape` (default
+4 bins per member, at least 2; `false` / 0 = off) says what shape it has. Each declared pair also keeps a
+2-D grid of its members' value bins at the fitted means (their value quantiles come from the sketch pre-pass:
+one more read of the input, over the pair members' columns only), and the `suggestions` output gets one
+`interaction` record per pair: the best
+depth-2 tree over the grid (a first cut on one member, then the other member's best cut on each side) with
+`share` (the tree's gain over the grid's block χ²), `cut` / `direction` (the first member's cut and the side
+where the other member matters), `fill` (the other member's cut on that side), `consistency` (the two sides'
+second-level gains, smaller over larger: near 0 the other member matters on one side only — "b matters only
+when a > c" — near 1 on both; null, with no `direction` / `fill`, when no cut of the other member adds
+anything on either side) and `fragment` (the two row `bin` ops crossed, or the conditional expression
+`a > c ? b : 0` when the shape is one-sided). In-sample, a diagnostic: read it for the pairs that passed.
+
 ## Input contract
 
 | role | description |
@@ -199,7 +355,13 @@ is an assembly error.
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
 | rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
-| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without. |
+| transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`, `binned`. Default: the first three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). `binned` (the block test, see [Binned block test](#binned-block-test)) is never in the default list. |
+| bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
+| heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
+| suggestions | optional | Boolean | `true` emits the one-candidate derivation suggestions (see [Suggestions](#suggestions)) to the `<name>.suggestions` output; needs `binned` in `transforms`. Default false. |
+| pairs | optional | Object | Products of two conditioning columns tested at the fitted means (see [Pairs](#pairs)): `fields: [[a, b], ...]` and / or `among: [names / globs]` (every pair of the matched conditioning fields), `maxPairs` (default 200), `placebo` (placebo pairs per pair: the first member × a noise column, default 5; at most `placebo.noise`), `shape` (value bins per member of the pair's 2-D grid for the interaction shape, default 4; `false` / 0 = off). Needs `conditioning` holding both members of every pair. |
+| joint | optional | Boolean or Object | The candidates' joint sums for the several-candidate suggestions (see [Several candidates](#several-candidates-joint)): `true`, or `{include: [globs / selectors] (default every candidate), maxColumns (default 200), noise (noise columns carried for the null scale, default 10), directions (pHd directions, default 3), redundancy (|correlation| of a cluster, default 0.95), select (forward-selection steps, default 10), pairs (difference / ratio suggestions at most, default 10), excess (a pair's joint statistic over the better single one, default 1.5)}`. O(m²) per row: opt-in, bounded. |
+| categorical | optional | Object or Array | String fields tested natively as candidates (see [Categorical candidates](#categorical-candidates)): `{include: [globs / selectors], maxLevels (named levels kept, default 32), placebo (placebo columns per candidate, default 5)}` or a list of include globs. Role fields are never candidates. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -210,7 +372,8 @@ is an assembly error.
 ## Outputs
 
 The default output (`<name>`) holds one scoring record per column × transform, placebo columns included.
-`<name>.summary` holds one record per run (per window under a windowing strategy).
+`<name>.summary` holds one record per run (per window under a windowing strategy). `<name>.suggestions` holds
+the derivation suggestions under `suggestions: true` (see [Suggestions record](#suggestions-record-namesuggestions-with-suggestions-true)).
 
 ### Scoring record
 
@@ -221,14 +384,20 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | method | STRING | `scoreTest` |
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
-| df | INT64 | degrees of freedom (1) |
-| pValue, qValue | FLOAT64 | χ²(1) upper tail; Benjamini–Hochberg q-value over the candidate records (null for placebo) |
+| df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
+| pValue, qValue | FLOAT64 | χ²(df) upper tail (χ²(1), or the binned block's df); Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
 | n_obs | INT64 | rows whose transformed value is finite |
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
+| bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
+| bin_edges | ARRAY<FLOAT64\> | the binned block test with `edges: value`: the k − 1 window quantile edges (bin i = `(edge_{i−1}, edge_i]`); null for position bins, a column without a sketch value and the other transforms |
+| het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
+| level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
+| het_passed | BOOL | the effective heterogeneity gain above `max(thresholds.het, minGain)`; candidate records only, never part of `passed` |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
@@ -240,7 +409,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical`,
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions` / `joint` / `pairs` / `categorical`), `nJointColumns` (null without `joint`), `nCategoricals` (null without `categorical`),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -250,6 +419,16 @@ names with a passing transform, best gain first — the list to feed back into t
 `output.include`), `conditioningFields`, `conditioningK`, `conditioningIterations`, `conditioningRejectedSteps`,
 `conditioningConverged`, `conditioningGain`, `conditioningL2` (null without conditioning), `notes` (role defaults
 applied, columns excluded by lineage, a skipped share of units above 1% with its reasons, dropped rows).
+
+### Suggestions record (`<name>.suggestions`, with `suggestions: true`)
+
+One record per candidate × kind (`shape` / `cut` / `missing` / `monotone`, see [Suggestions](#suggestions)):
+`candidate`, `kind`, `name`, `cut`, `direction` (`+` / `-`, the sign of the label's response along the recipe),
+`fill`, `consistency`, `share` and `chi2` (discovery half), `confirmation_chi2`, `confirmation_share`,
+`confirmation_gain`, `confirmation_pValue` (confirmation half), `threshold` (the kind's placebo cut),
+`passed`, `placebo`, `fragment` (the recipe in the feature transform's row vocabulary, or a description when it
+has no row op — a monotone constraint, a within-unit rank). Placebo columns get records too (`placebo: true`,
+never `passed`); the summary counts the candidates' records (`nSuggestions`, placebo records excluded).
 
 ## Examples
 
@@ -398,7 +577,8 @@ transforms:
   "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66, "minGain": null,
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
-  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
+  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null,
+  "heterogeneity": null, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
   "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
@@ -539,7 +719,8 @@ transforms:
   neither controls the family-wise error of a large candidate set.
 - Blind to time dynamics: the statistic is a window average; read `period_z` for decay.
 - Batch only (every statistic is a global Combine); under a windowing strategy the records are per window.
-- Independent rows (`group` omitted) support `raw` only; `rank` / `absdev` over the whole window need a
-  quantile sketch (planned).
+- Independent rows (`group` omitted) take `rank` / `absdev` against a window quantile sketch: one extra pass,
+  approximate (rank error about 0.8 %) and not bit-reproducible beyond 400 values per candidate; not under
+  session windows.
 - Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
   hundred columns (the Newton Gram matrix is k × k).

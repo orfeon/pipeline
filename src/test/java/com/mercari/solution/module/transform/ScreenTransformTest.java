@@ -231,23 +231,83 @@ public class ScreenTransformTest {
                       label: {expr: "sold > 0 ? 1 : 0"}
                       time: {field: session_time, to: "2024-06-30T23:59:59Z"}
                       candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids", "s_supp"]}
+                      transforms: [raw, rank, absdev, binned]
+                      bins: 5
+                      suggestions: true
+                      joint: {noise: 3, directions: 2}
+                      categorical: {include: [session_id], maxLevels: 8, placebo: 2}
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            // the categorical candidate (session_id, a string field that is no role here): 120 sessions fold into 8 named
+            // levels + (other), a block of df <= 8, and two placebo columns with the levels redrawn
             final Map<String, MElement> records = byKey(rows);
-            // raw only for independent rows; sold / session_time are roles, p_model / start_price excluded by name
-            Assertions.assertEquals(3 + 10, records.size());
+            final MElement levels = records.get("session_id:levels");
+            Assertions.assertNotNull(levels, records.keySet().toString());
+            Assertions.assertTrue(levels.getAsLong("df") >= 1 && levels.getAsLong("df") <= 8, "df " + levels.getAsLong("df"));
+            Assertions.assertNull(levels.getAsDouble("z"));
+            Assertions.assertEquals(9, ((List<?>) levels.getPrimitiveValue("level_z")).size());
+            Assertions.assertEquals(Boolean.TRUE, records.get("session_id*__noise_1:levels").getPrimitiveValue("placebo"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
+            // one-candidate suggestions from the binned sums: every scorable candidate and placebo gets its shape,
+            // cut and monotone records (no missing values in the data, so no missing record); the joint sums add the
+            // pHd directions and the forward selection over the three candidates
+            final Map<String, Map<String, MElement>> byCandidate = new java.util.HashMap<>();
+            final java.util.Set<String> jointKinds = new java.util.HashSet<>();
+            for (final MElement e : rows) {
+                if (java.util.Set.of("phd", "redundant", "select", "composite", "difference", "ratio").contains(e.getAsString("kind"))) {
+                    jointKinds.add(e.getAsString("kind"));
+                    continue;
+                }
+                byCandidate.computeIfAbsent(e.getAsString("candidate"), k -> new java.util.HashMap<>()).put(e.getAsString("kind"), e);
+            }
+            Assertions.assertTrue(jointKinds.contains("phd") && jointKinds.contains("select"), jointKinds.toString());
+            Assertions.assertTrue(byCandidate.containsKey("f_extra"), byCandidate.keySet().toString());
+            final Map<String, MElement> extra = byCandidate.get("f_extra");
+            Assertions.assertEquals(java.util.Set.of("shape", "cut", "monotone"), extra.keySet());
+            Assertions.assertNotNull(extra.get("shape").getAsDouble("confirmation_gain"));
+            Assertions.assertNotNull(extra.get("cut").getAsDouble("cut"));
+            Assertions.assertTrue(extra.get("shape").getAsString("fragment").contains("f_extra"));
+            for (final Map<String, MElement> kinds : byCandidate.values()) {
+                for (final MElement s : kinds.values()) Assertions.assertNotNull(s.getAsDouble("threshold"));
+            }
+            Assertions.assertTrue(byCandidate.containsKey("__noise_0"));
+            Assertions.assertEquals(Boolean.FALSE, byCandidate.get("__noise_0").get("shape").getPrimitiveValue("passed"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            // independent rows: rank / absdev and the value bins read the window quantile sketch (one pre-pass);
+            // sold / session_time are roles, p_model / start_price excluded by name
+            Assertions.assertEquals((3 + 10) * 4 + 1 + 2, records.size());   // + the categorical block and its two placebos
+            final MElement binned = records.get("f_extra:binned");
+            Assertions.assertEquals(4L, binned.getAsLong("df"));   // 5 value bins, the missing bin empty
+            Assertions.assertTrue(binned.getAsDouble("chi2") > 4, "binned chi2 of f_extra: " + binned.getAsDouble("chi2"));
+            Assertions.assertNull(binned.getAsDouble("z"));
+            Assertions.assertNull(binned.getPrimitiveValue("period_z"));
+            Assertions.assertEquals(6, ((List<?>) binned.getPrimitiveValue("bin_stats")).size());
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), binned.getAsDouble("threshold"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("__noise_0:binned").getPrimitiveValue("degenerate"));
             Assertions.assertTrue(records.containsKey("f_extra:raw"));
             Assertions.assertFalse(records.containsKey("p_model:raw"));
-            Assertions.assertFalse(records.containsKey("f_extra:rank"));
             final MElement signal = records.get("f_extra:raw");
             // 120 sessions two days apart from 2024-01-01: 91 sessions fall before the end of June (Q1 + Q2)
             Assertions.assertEquals(91L * 3, signal.getAsLong("n_groups"));
             Assertions.assertEquals(2L, signal.getAsLong("n_periods"));
             Assertions.assertTrue(signal.getAsDouble("z") > 2, "z of f_extra: " + signal.getAsDouble("z"));
             Assertions.assertEquals("binomial", signal.getAsString("family"));
+            // the window rank of a monotone effect keeps its sign and most of its size
+            final MElement rank = records.get("f_extra:rank");
+            Assertions.assertEquals(91L * 3, rank.getAsLong("n_groups"));
+            Assertions.assertEquals(Boolean.FALSE, rank.getPrimitiveValue("degenerate"));
+            Assertions.assertTrue(rank.getAsDouble("z") > 2, "rank z of f_extra: " + rank.getAsDouble("z"));
+            Assertions.assertEquals(signal.getAsDouble("z"), rank.getAsDouble("z"), 0.5 * signal.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("f_extra:absdev").getPrimitiveValue("degenerate"));
+            Assertions.assertEquals(Boolean.FALSE, records.get("__noise_0:rank").getPrimitiveValue("degenerate"));
             return null;
         });
         PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
@@ -257,7 +317,11 @@ public class ScreenTransformTest {
             Assertions.assertEquals(273L, summary.getAsLong("nUnits"));
             Assertions.assertNull(summary.getAsString("baseline"));
             Assertions.assertEquals("2024-06-30T23:59:59Z", summary.getAsString("timeTo"));
-            Assertions.assertEquals(List.of("raw"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertEquals(List.of("raw", "rank", "absdev", "binned"), summary.getPrimitiveValue("transforms"));
+            Assertions.assertEquals("value/5", summary.getAsString("bins"));
+            Assertions.assertEquals(3, ((Map<?, ?>) summary.getPrimitiveValue("thresholds")).size());   // df1, binned, levels
+            Assertions.assertEquals(1L, summary.getAsLong("nCategoricals"));
+            Assertions.assertTrue(String.valueOf(summary.getPrimitiveValue("notes")).contains("quantile sketch"), String.valueOf(summary.getPrimitiveValue("notes")));
             return null;
         });
         pipeline.run();
@@ -324,7 +388,8 @@ public class ScreenTransformTest {
                       label: sold
                       time: {field: session_time}
                       candidates: {include: ["f_*"]}
-                      transforms: [raw, rank]
+                      transforms: [raw, rank, binned]
+                      bins: {k: 4, edges: rank}
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
                       flags: {leakZ: {z: 5, on: partial}}
@@ -332,7 +397,24 @@ public class ScreenTransformTest {
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = byKey(rows);
-            Assertions.assertEquals((3 + 30) * 2, records.size());
+            Assertions.assertEquals((3 + 30) * 3, records.size());
+            // the binned block (position bins within the session): df = 3, no sign, its own threshold kind; the
+            // conditioning explains f_known's block (r2_F ≈ 1) and leaves f_extra's partial block significant
+            final MElement knownBinned = records.get("f_known:binned");
+            Assertions.assertEquals(3L, knownBinned.getAsLong("df"));
+            Assertions.assertNull(knownBinned.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.FALSE, knownBinned.getPrimitiveValue("leakSuspect"));
+            // F = f_known explains the block's linear direction only (one of its three): part of the trace and
+            // most of the statistic go, the curvature directions stay
+            Assertions.assertTrue(knownBinned.getAsDouble("r2_F") > 0.2, "r2_F of f_known binned: " + knownBinned.getAsDouble("r2_F"));
+            Assertions.assertTrue(knownBinned.getAsDouble("partial_chi2") < knownBinned.getAsDouble("chi2") / 2,
+                    "binned chi2 of f_known: " + knownBinned.getAsDouble("chi2") + " partial " + knownBinned.getAsDouble("partial_chi2"));
+            final MElement extraBinned = records.get("f_extra:binned");
+            Assertions.assertTrue(extraBinned.getAsDouble("chi2") > 20, "binned chi2 of f_extra: " + extraBinned.getAsDouble("chi2"));
+            Assertions.assertTrue(extraBinned.getAsDouble("partial_pValue") < 0.01, "binned partial p of f_extra: " + extraBinned.getAsDouble("partial_pValue"));
+            Assertions.assertTrue(extraBinned.getAsLong("partial_df") >= 1);
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), extraBinned.getAsDouble("threshold"));
+            Assertions.assertEquals(5, ((List<?>) extraBinned.getPrimitiveValue("bin_stats")).size());
             final MElement known = records.get("f_known:raw");
             final MElement extra = records.get("f_extra:raw");
             final MElement noise = records.get("f_noise:raw");
@@ -376,6 +458,63 @@ public class ScreenTransformTest {
     }
 
     @Test
+    public void testPairsAtTheFittedMeans() throws Exception {
+        // the winner follows softmax(1.5 f_known + f_extra) with no interaction: conditioned on both members, the
+        // declared pair carries nothing beyond the main effects, and its placebo pairs (f_known × noise) calibrate it
+        final String config = sessionsConfig(80, 8, 42) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      time: {field: session_time}
+                      candidates: {include: ["f_*"]}
+                      transforms: [raw]
+                      placebo: {noise: 20, seed: 3}
+                      conditioning: {fields: [f_known, f_extra], l2: 1.0e-4, maxIter: 6}
+                      pairs: {fields: [[f_known, f_extra]], placebo: 4}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            Assertions.assertEquals(3 + 20 + 1 + 4, records.size(), records.keySet().toString());
+            final MElement pair = records.get("f_known*f_extra:product");
+            Assertions.assertNull(pair.getAsDouble("z"));
+            Assertions.assertNotNull(pair.getAsDouble("partial_z"));
+            Assertions.assertTrue(Math.abs(pair.getAsDouble("partial_z")) < 3, "partial z of the pair: " + pair.getAsDouble("partial_z"));
+            Assertions.assertEquals(Boolean.FALSE, pair.getPrimitiveValue("passed"));
+            Assertions.assertEquals(Boolean.FALSE, pair.getPrimitiveValue("placebo"));
+            final MElement placebo = records.get("f_known*__noise_0:product");
+            Assertions.assertEquals(Boolean.TRUE, placebo.getPrimitiveValue("placebo"));
+            Assertions.assertNotNull(placebo.getAsDouble("partial_gain"));
+            Assertions.assertNotEquals(records.get("f_extra:raw").getAsDouble("threshold"), pair.getAsDouble("threshold"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.suggestions").getCollection()).satisfies(rows -> {
+            // the pair's interaction shape from its 2-D grid (pairs.shape defaults to 4 bins per member)
+            final List<MElement> shapes = new java.util.ArrayList<>();
+            for (final MElement e : rows) if ("interaction".equals(e.getAsString("kind"))) shapes.add(e);
+            Assertions.assertEquals(1, shapes.size());
+            Assertions.assertEquals("f_known*f_extra", shapes.get(0).getAsString("candidate"));
+            Assertions.assertTrue(shapes.get(0).getAsDouble("share") <= 1.0 + 1e-9);
+            Assertions.assertTrue(shapes.get(0).getAsString("fragment").contains("{scope: row, type: bin, input: "));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals(1L, summary.getAsLong("nPairs"));
+            Assertions.assertEquals(0L, summary.getAsLong("nPairsPassed"));
+            Assertions.assertEquals(List.of(), summary.getPrimitiveValue("passedPairs"));
+            Assertions.assertTrue(((Map<?, ?>) summary.getPrimitiveValue("thresholds")).containsKey("pair"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testPartialPeriodsAndMinPeriodsAgree() throws Exception {
         // a suppressor column: marginally ~0 (its period signs are noise), given f_known a strong positive effect in
         // every month. The period agreement of the effective (partial) test is the one pass.minPeriodsAgree reads
@@ -392,6 +531,7 @@ public class ScreenTransformTest {
                       candidates: {include: [s_supp, f_noise]}
                       transforms: [raw]
                       periods: month
+                      heterogeneity: periods
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
                       pass: {minPeriodsAgree: 1.0}
@@ -402,6 +542,15 @@ public class ScreenTransformTest {
             Assertions.assertEquals(2 + 30, records.size());
             final MElement supp = records.get("s_supp:raw");
             final MElement noise = records.get("f_noise:raw");
+            // the heterogeneity test across the months, marginal and partial (from the same period slices): a stable
+            // effect leaves nothing to the heterogeneity test — its own kind's cut, never part of passed
+            Assertions.assertEquals(6L, supp.getAsLong("het_df"));
+            Assertions.assertEquals(7L, supp.getAsLong("partial_het_levels"));
+            Assertions.assertTrue(supp.getAsDouble("partial_het_chi2") >= 0);
+            Assertions.assertTrue(supp.getAsDouble("partial_het_pValue") > 0.01, "partial het p of s_supp: " + supp.getAsDouble("partial_het_pValue"));
+            Assertions.assertNull(supp.getPrimitiveValue("level_z"));
+            Assertions.assertNotNull(noise.getAsDouble("het_gain"));
+            Assertions.assertEquals(Boolean.FALSE, noise.getPrimitiveValue("het_passed"));
             // marginal: nothing to see; partial: the extra signal
             Assertions.assertTrue(Math.abs(supp.getAsDouble("z")) < 2.5, "marginal z of s_supp: " + supp.getAsDouble("z"));
             Assertions.assertTrue(supp.getAsDouble("partial_z") > 5, "partial z of s_supp: " + supp.getAsDouble("partial_z"));

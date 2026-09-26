@@ -199,16 +199,100 @@ public final class ConditioningScorer implements Serializable {
         return 2 + k;
     }
 
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges), set per bundle from the side input */
+    private transient WindowQuantiles quantiles;
+
+    /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
+    public ConditioningScorer withWindowQuantiles(final WindowQuantiles quantiles) {
+        this.quantiles = quantiles;
+        if (binner != null) binner.withWindowQuantiles(quantiles);
+        return this;
+    }
+
+    /** the binned test's bin assignment and the pair grids' edges (the marginal scorer's rules and edge caches) */
+    private transient GroupScorer binner;
+
+    private GroupScorer binner() {
+        if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        return binner;
+    }
+
+    private int[] bins(final int column, final double[] v) {
+        return binner().bins(column, v);
+    }
+
+    /**
+     * Adds the binned block's partial sums at the fitted p̂ into {@code into} (DSL doc §6.1, the generalisation of
+     * {@code [s, b, a]} to a one-hot block of B bins): {@code [s (B), H (B² grouped / B diagonal for the row families),
+     * A (B × k)]}. Grouped: s_b = w Σ_{i in b} (ỹ_i − p̂_i), H = w (diag(P̂) − P̂ P̂'), A_bj = w (Σ_{i in b} p̂_i f_ij −
+     * P̂_b Σ_i p̂_i f_ij); row families: s_b = Σ_{i in b} w_i (y_i − p̂_i), H_bb = Σ_{i in b} w_i v̂_i,
+     * A_bj = Σ_{i in b} w_i v̂_i f_ij. Only the bins the unit occupies are touched (an empty bin's sums are zero).
+     */
+    private void binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
+        binnedPartial(spec.binCount(), unit, bins, f, p, into);
+    }
+
+    /** {@link #binnedPartial(GroupScorer.Unit, int[], double[][], double[], PartialAccumulator)} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    private void binnedPartial(final int nb, final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
+        final int n = unit.size();
+        if (spec.isGroupedMultinomial()) {
+            final double[] out = into.total(nb + nb * nb + nb * k);
+            final int aOffset = nb + nb * nb;
+            final double[] sb = new double[nb];
+            final double[] pb = new double[nb];
+            // Σ_{i in b} p̂_i f_i, allocated for the occupied bins only
+            final double[][] pbf = new double[nb][];
+            final double[] pf = new double[k];
+            final int[] occupied = new int[Math.min(nb, n)];
+            int m = 0;
+            for (int i = 0; i < n; i++) {
+                final int b = bins[i];
+                if (pbf[b] == null) {
+                    pbf[b] = new double[k];
+                    occupied[m++] = b;
+                }
+                sb[b] += unit.y[i] - p[i];
+                pb[b] += p[i];
+                for (int j = 0; j < k; j++) {
+                    final double pfij = p[i] * f[i][j];
+                    pf[j] += pfij;
+                    pbf[b][j] += pfij;
+                }
+            }
+            final double w = unit.unitWeight;
+            for (int x = 0; x < m; x++) {
+                final int b = occupied[x];
+                out[b] += w * sb[b];
+                for (int z = 0; z < m; z++) {
+                    final int c = occupied[z];
+                    out[nb + b * nb + c] += w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
+                }
+                for (int j = 0; j < k; j++) out[aOffset + b * k + j] += w * (pbf[b][j] - pb[b] * pf[j]);
+            }
+            return;
+        }
+        final double[] out = into.total(nb + nb + nb * k);
+        for (int i = 0; i < n; i++) {
+            final double w = unit.w[i];
+            final double vv = spec.fisherWeight(p[i]);
+            out[bins[i]] += w * (unit.y[i] - p[i]);
+            out[nb + bins[i]] += w * vv;
+            for (int j = 0; j < k; j++) out[2 * nb + bins[i] * k + j] += w * vv * f[i][j];
+        }
+    }
+
     /**
      * Adds, for every column x transform, the sums at the fitted p̂: s = x̃'(ỹ − p̂), b = x̃'W x̃, a = F̃'W x̃ with the
      * Fisher metric W (grouped: block diagonal diag(p̂) − p̂p̂' with x̃ centred by p̂ within the unit; binomial:
      * diag(p̂(1 − p̂)), the intercept column of F̃ doing the centring). With {@code periods} the same sums go to the
      * unit's period (grouped) or each row's period (row families), and the fitted model's own sums at θ̂ —
      * {@code [n, g, G]} — go per period under {@link #FIT_PERIOD_KEY}, so the report can decompose the partial
-     * statistic by period with the window's orthogonalisation coefficients.
+     * statistic by period with the window's orthogonalisation coefficients. A heterogeneity modifier's level gets the
+     * same sums as a slice under {@link ScoreAccumulator#LEVEL_PREFIX} (DSL doc §7.1).
      */
     public void partial(final GroupScorer.Unit unit, final double[][] cols, final double[] theta, final double[] moments,
                         final Map<Integer, PartialAccumulator> into) {
+        GroupScorer.requireWindowQuantiles(spec, quantiles);
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
         final int n = unit.size();
@@ -224,70 +308,224 @@ public final class ConditioningScorer implements Serializable {
             into.computeIfAbsent(SIGMA_KEY, key -> new PartialAccumulator()).add(null, sig);
         }
         if (spec.isGroupedMultinomial()) {
-            final String period = unit.period();
             final double[] pf = new double[k];
             for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
-            if (periods) into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).add(period, fitPeriodSums(unit, p, f, null));
+            // the unit's own (period, level) cell: the modifier is a unit-level field for the grouped family
+            final Cell cell = new Cell(periods ? unit.period() : null, unit.level());
+            if (periods || cell.level() != null) {
+                cell.addTo(into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()), fitPeriodSums(unit, p, f, null));
+            }
             for (int c = 0; c < cols.length; c++) {
                 for (int t = 0; t < nTransforms; t++) {
-                    final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
-                    // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
-                    final double pivot = GroupScorer.pivot(v);
-                    double pm = 0, psum = 0;
-                    for (int i = 0; i < n; i++) {
-                        if (StatMath.isFinite(v[i])) {
-                            pm += p[i] * (v[i] - pivot);
-                            psum += p[i];
-                        }
+                    if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                        // the block's sums carry no period slices (the binned test has no sign to agree on)
+                        binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
+                        continue;
                     }
-                    final double mean = psum > 0 ? pm / psum : 0d;
-                    double s = 0, b = 0, px = 0;
-                    final double[] a = new double[k];
-                    for (int i = 0; i < n; i++) {
-                        final double xt = StatMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
-                        s += xt * (unit.y[i] - p[i]);
-                        b += p[i] * xt * xt;
-                        px += p[i] * xt;
-                        for (int j = 0; j < k; j++) a[j] += p[i] * xt * f[i][j];
-                    }
-                    final double w = unit.unitWeight;
-                    final double[] acc = new double[partialLength()];
-                    acc[0] = w * s;
-                    acc[1] = w * (b - px * px);
-                    for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
-                    into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()).add(period, acc);
+                    final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
+                    final double[] acc = groupedPartialSums(unit, p, f, pf, v);
+                    cell.addTo(into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()), acc);
                 }
             }
+            // the declared pairs: the product of two standardised conditioning columns (a placebo pair: a member
+            // times a noise column) as one more column of the partial pass, no period slices (DSL doc §8.6)
+            for (int q = 0; q < spec.pairCount(); q++) {
+                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, unit, f, cols)));
+            }
+            // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
+            for (int q = 0; q < spec.pairs.size(); q++) {
+                final double[] grid = pairGrid(unit, q, p);
+                if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
+            }
+            categoricalBlocks(unit, f, p, into);
             return;
         }
-        // row families: every row is its own period; the rows are bucketed once (one bucket without periods)
-        final Map<String, List<Integer>> buckets = new LinkedHashMap<>();
-        for (int i = 0; i < n; i++) buckets.computeIfAbsent(periods ? unit.rows.get(i).period : null, key -> new ArrayList<>()).add(i);
-        if (periods) {
+        // row families: every row is its own period and modifier level; the rows are bucketed once into (period, level)
+        // cells (one cell without periods or a modifier) and each cell's sums, computed once, go to the total, its
+        // period and — as a slice — its level (the total holds the rows once)
+        final Map<Cell, List<Integer>> cells = new LinkedHashMap<>();
+        boolean levels = false;
+        for (int i = 0; i < n; i++) {
+            final ScreenRow row = unit.rows.get(i);
+            levels |= row.level != null;
+            cells.computeIfAbsent(new Cell(periods ? row.period : null, row.level), key -> new ArrayList<>()).add(i);
+        }
+        if (periods || levels) {
             final PartialAccumulator fit = into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator());
-            for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
-                fit.add(bucket.getKey(), fitPeriodSums(unit, p, f, buckets.size() == 1 ? null : bucket.getValue()));
+            for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
+                cell.getKey().addTo(fit, fitPeriodSums(unit, p, f, cells.size() == 1 ? null : cell.getValue()));
             }
         }
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
-                // the transform is taken once over the whole unit (rank / absdev are within-unit), then summed per bucket
-                final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
+                if (ScreenSpec.isBinned(spec.transforms.get(t))) {
+                    binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
+                    continue;
+                }
+                // the transform is taken once over the whole unit (rank / absdev within the unit, or against the
+                // window's sketches for independent rows), then summed per cell
+                final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
                 final PartialAccumulator target = into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator());
-                for (final Map.Entry<String, List<Integer>> bucket : buckets.entrySet()) {
-                    final double[] acc = new double[partialLength()];
-                    for (final int i : bucket.getValue()) {
-                        if (!StatMath.isFinite(v[i])) continue;
-                        final double w = unit.w[i];
-                        final double vv = spec.fisherWeight(p[i]);
-                        acc[0] += w * v[i] * (unit.y[i] - p[i]);
-                        acc[1] += w * vv * v[i] * v[i];
-                        for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
-                    }
-                    target.add(bucket.getKey(), acc);
+                for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
+                    cell.getKey().addTo(target, rowPartialSums(unit, p, f, v, cell.getValue()));
                 }
             }
         }
+        // the declared pairs (DSL doc §8.6): one more column each over every row, no period slices
+        for (int q = 0; q < spec.pairCount(); q++) {
+            into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, unit, f, cols), null));
+        }
+        // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
+        for (int q = 0; q < spec.pairs.size(); q++) {
+            final double[] grid = pairGrid(unit, q, p);
+            if (grid != null) into.computeIfAbsent(spec.pairGridKey(q), key -> new PartialAccumulator()).add(null, grid);
+        }
+        categoricalBlocks(unit, f, p, into);
+    }
+
+    /**
+     * The categorical candidates' blocks at the fitted p̂ (DSL doc §6.2): a column's levels (and its placebos'
+     * redrawn levels) as a one-hot block of {@code [s, H, A]} sums under the marginal keys, no period slices.
+     */
+    private void categoricalBlocks(final GroupScorer.Unit unit, final double[][] f, final double[] p, final Map<Integer, PartialAccumulator> into) {
+        if (!spec.hasCategoricals()) return;
+        if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            final WindowQuantiles.Levels levels = binner.categoricalLevels(c);
+            if (levels == null || levels.size() < 2) continue;
+            for (int r = -1; r < spec.categoricalPlacebo; r++) {
+                final int[] idx = r < 0 ? GroupScorer.levelIndices(unit, c, levels) : binner.placeboLevels(unit, c, r, levels);
+                binnedPartial(levels.size(), unit, idx, f, p, into.computeIfAbsent(spec.categoricalKey(c, r), key -> new PartialAccumulator()));
+            }
+        }
+    }
+
+    /**
+     * A real pair's 2-D grid at the fitted means (DSL doc §8.7): the members' raw values binned by their window
+     * quantile edges (k = pairs.shape per member, cell = a_bin × k + b_bin; a row with a missing member left out),
+     * as the one-hot block of K = k² cells — row families {@code [Σ w (y − p̂) per cell, Σ w v̂ per cell]}, grouped
+     * {@code [S_cell, P_cell, (P P')]} scaled by the unit weight. Null without both members' edges or any cell hit.
+     */
+    private double[] pairGrid(final GroupScorer.Unit unit, final int pair, final double[] p) {
+        if (!spec.hasPairShape()) return null;
+        final int[] members = spec.pairMembers(pair);
+        // the edges by sketch (the full row's x column), the values at this scorer's offset
+        final double[] ea = binner().gridEdges(spec.conditioningColumn(members[0]));
+        final double[] eb = binner().gridEdges(spec.conditioningColumn(members[1]));
+        if (ea == null || eb == null) return null;
+        final int kk = spec.pairShapeBins, cells = kk * kk, n = unit.size();
+        final int[] cell = new int[n];
+        boolean any = false;
+        for (int i = 0; i < n; i++) {
+            final double[] x = unit.rows.get(i).x;
+            final int a = GroupScorer.gridBin(ea, x[offset + members[0]]);
+            final int b = GroupScorer.gridBin(eb, x[offset + members[1]]);
+            cell[i] = a < 0 || b < 0 ? -1 : a * kk + b;
+            any |= cell[i] >= 0;
+        }
+        if (!any) return null;
+        if (spec.isGroupedMultinomial()) {
+            final double[] s = new double[cells], pc = new double[cells];
+            for (int i = 0; i < n; i++) {
+                if (cell[i] < 0) continue;
+                s[cell[i]] += unit.y[i] - p[i];
+                pc[cell[i]] += p[i];
+            }
+            final double w = unit.unitWeight;
+            final double[] out = new double[2 * cells + cells * cells];
+            for (int c = 0; c < cells; c++) {
+                out[c] = w * s[c];
+                out[cells + c] = w * pc[c];
+                for (int d = 0; d < cells; d++) out[2 * cells + c * cells + d] = w * pc[c] * pc[d];
+            }
+            return out;
+        }
+        final double[] out = new double[2 * cells];
+        for (int i = 0; i < n; i++) {
+            if (cell[i] < 0) continue;
+            out[cell[i]] += unit.w[i] * (unit.y[i] - p[i]);
+            out[cells + cell[i]] += unit.w[i] * spec.fisherWeight(p[i]);
+        }
+        return out;
+    }
+
+    /**
+     * A pair's column: the product of its members' standardised conditioning columns, or for a placebo pair the
+     * first member times a noise placebo column (a standard normal draw independent of everything, the
+     * calibration of the pair kind). A row missing a member is missing (NaN: it contributes nothing, as a missing
+     * candidate value does), not the product of the design's fill — the recipe {@code a * b} is null there, and a
+     * filled product would carry the members' missingness (0 where the observed products average their
+     * correlation) as a spurious interaction the member × noise placebos do not calibrate.
+     */
+    double[] pairColumn(final int pair, final GroupScorer.Unit unit, final double[][] f, final double[][] cols) {
+        final int[] members = spec.pairMembers(pair);
+        final int n = f.length;
+        final double[] z = new double[n];
+        final double[] noise = members[1] >= 0 ? null : cols[spec.candidates.size() + (-1 - members[1])];
+        for (int i = 0; i < n; i++) {
+            final double[] x = unit.rows.get(i).x;
+            final boolean missing = !StatMath.isFinite(x[offset + members[0]]) || (noise == null && !StatMath.isFinite(x[offset + members[1]]));
+            z[i] = missing ? Double.NaN : f[i][members[0]] * (noise == null ? f[i][members[1]] : noise[i]);
+        }
+        return z;
+    }
+
+    /**
+     * The grouped family's {@code [s, b, a]} of one column at the fitted p̂, scaled by the unit weight: the column
+     * shifted by its pivot and centred by p̂ over its finite values (a within-unit constant gives b = 0 exactly),
+     * s = x̃'(ỹ − p̂), b = x̃'Wx̃, a = F̃'Wx̃ with W = diag(p̂) − p̂p̂' and {@code pf} = Σ p̂ F̃ over the unit.
+     */
+    private double[] groupedPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] pf, final double[] v) {
+        final int n = unit.size();
+        final double pivot = GroupScorer.pivot(v);
+        double pm = 0, psum = 0;
+        for (int i = 0; i < n; i++) {
+            if (StatMath.isFinite(v[i])) {
+                pm += p[i] * (v[i] - pivot);
+                psum += p[i];
+            }
+        }
+        final double mean = psum > 0 ? pm / psum : 0d;
+        double s = 0, b = 0, px = 0;
+        final double[] a = new double[k];
+        for (int i = 0; i < n; i++) {
+            final double xt = StatMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
+            s += xt * (unit.y[i] - p[i]);
+            b += p[i] * xt * xt;
+            px += p[i] * xt;
+            for (int j = 0; j < k; j++) a[j] += p[i] * xt * f[i][j];
+        }
+        final double w = unit.unitWeight;
+        final double[] acc = new double[partialLength()];
+        acc[0] = w * s;
+        acc[1] = w * (b - px * px);
+        for (int j = 0; j < k; j++) acc[2 + j] = w * (a[j] - px * pf[j]);
+        return acc;
+    }
+
+    /** A bucket of the partial pass (a grouped unit, or rows of a row-family unit): a period (null without periods) and a modifier level (null without one). */
+    private record Cell(String period, String level) {
+        /** Adds the cell's sums to the total and its period, and to its level as a slice (the accumulator copies them). */
+        void addTo(final PartialAccumulator into, final double[] sums) {
+            into.add(period, sums);
+            if (level != null) into.addSlice(ScoreAccumulator.LEVEL_PREFIX + level, sums);
+        }
+    }
+
+    /** A row family's {@code [s, b, a]} over {@code rows} of the unit at the fitted p̂ (one (period, level) cell). */
+    private double[] rowPartialSums(final GroupScorer.Unit unit, final double[] p, final double[][] f, final double[] v, final List<Integer> rows) {
+        final double[] acc = new double[partialLength()];
+        final int m = rows == null ? unit.size() : rows.size();
+        for (int r = 0; r < m; r++) {
+            final int i = rows == null ? r : rows.get(r);
+            if (!StatMath.isFinite(v[i])) continue;
+            final double w = unit.w[i];
+            final double vv = spec.fisherWeight(p[i]);
+            acc[0] += w * v[i] * (unit.y[i] - p[i]);
+            acc[1] += w * vv * v[i] * v[i];
+            for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
+        }
+        return acc;
     }
 
     /**
