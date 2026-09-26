@@ -53,13 +53,15 @@ input ─ Prepare ─┬─ rows KV<unitKey, ScreenRow> ─ Group (GBK) or Units
 - **Units** are the GroupByKey output for a grouped run, or one row each otherwise (`SingletonUnitDoFn`), the
   same `KV<String, Iterable<ScreenRow>>` type for every pass.
 - **WindowQuantiles** (independent rows with `rank` / `absdev`, value bins of the binned test, a pair's
-  2-D grid): one pre-pass over the rows — `QuantilesDoFn` feeds the leading `sketchColumns()` of x (the
-  candidates, the shuffle reference, and the conditioning columns when a pair shape is asked for) of the rows
+  2-D grid): one pre-pass over the rows — `QuantilesDoFn` feeds the `sketchedColumns()` of x (the candidates
+  and the shuffle reference when their sketches are read, the pair members' conditioning columns when a pair
+  shape is asked for; a sketch index is the x column, the others stay empty) of the rows
   that will be scored (a row whose baseline is invalid for its form is skipped) into per-bundle sketches, flushed at `@FinishBundle` per window, then
   `Combine.globally(...).asSingletonView()` (a default-carrying singleton per window, so a fixed-window run
   gets one reference per window). `ScoreUnits` and, under conditioning, `ConditioningPartial` read the view
   and hand it to the scorers (`withWindowQuantiles`); the transform dispatch is `GroupScorer.transform(spec,
-  quantiles, column, transform, values)` — within the unit when the sketches are null, else the sketch rank /
+  quantiles, column, transform, values)` — within the unit when the sketches are null or the run is grouped
+  (a grouped run carries them for the value bins / pair grids only), else the sketch rank /
   window median for a candidate and the exact normal cdf / |x| for a noise placebo. One more read of the
   input; nothing else in the graph changes.
 - **ScoreUnits** calls `GroupScorer.score` per unit into a bundle-local `Map<Integer, ScoreAccumulator>` per

@@ -253,19 +253,23 @@ kind — each pair brings `pairs.placebo` placebo pairs, its first member times 
 `thresholds.pair` — and `passed` compares its partial gain with that cut (lifted to `pass.minGain`). A
 passing pair is a recipe, never a column of the pass list: the summary and the pass list carry `passedPairs`
 apart, each with the fragment `{scope: row, expr: "a * b"}` to build upstream. Each pair costs `2 + k`
-doubles per partial key (times `1 + placebo`); `maxPairs` bounds a run. The members of a pure interaction
+doubles per partial key (times `1 + placebo`), and with `shape` each real pair's grid `2 K` more (`2 K + K²`
+for `groupedMultinomial`, K = `shape`²); `maxPairs` bounds a run. The members of a pure interaction
 have no marginal effect, so do not pre-select pairs by the marginal ranking: declare the set you suspect (the
 pHd directions of [`joint`](#several-candidates-joint) name the members).
 
 **The interaction shape.** The pair test says whether the product adds information; `pairs.shape` (default
-4 bins per member) says what shape it has. Each declared pair also keeps a 2-D grid of its members' value
-bins at the fitted means, and the `suggestions` output gets one `interaction` record per pair: the best
+4 bins per member, at least 2; `false` / 0 = off) says what shape it has. Each declared pair also keeps a
+2-D grid of its members' value bins at the fitted means (their value quantiles come from the sketch pre-pass:
+one more read of the input, over the pair members' columns only), and the `suggestions` output gets one
+`interaction` record per pair: the best
 depth-2 tree over the grid (a first cut on one member, then the other member's best cut on each side) with
 `share` (the tree's gain over the grid's block χ²), `cut` / `direction` (the first member's cut and the side
 where the other member matters), `fill` (the other member's cut on that side), `consistency` (the two sides'
 second-level gains, smaller over larger: near 0 the other member matters on one side only — "b matters only
-when a > c" — near 1 on both) and `fragment` (the crossed bins, or the conditional expression `a > c ? b : 0`
-when the shape is one-sided). In-sample, a diagnostic: read it for the pairs that passed.
+when a > c" — near 1 on both; null, with no `direction` / `fill`, when no cut of the other member adds
+anything on either side) and `fragment` (the two row `bin` ops crossed, or the conditional expression
+`a > c ? b : 0` when the shape is one-sided). In-sample, a diagnostic: read it for the pairs that passed.
 
 ## Input contract
 

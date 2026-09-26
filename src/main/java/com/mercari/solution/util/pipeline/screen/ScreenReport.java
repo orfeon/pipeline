@@ -111,11 +111,16 @@ public final class ScreenReport {
      * every column x transform (a multi-right-hand-side solve); {@code partial} then applies one column's γ.
      */
     static Map<Integer, double[]> gammas(final Map<Integer, PartialAccumulator> partials, final FitState fit, final double l2) {
+        return gammas(partials, fit, l2, Integer.MAX_VALUE);
+    }
+
+    /** {@link #gammas} over the keys below {@code keyLimit} (the pair grids' keys after it are not {@code [s, b, a]} columns). */
+    static Map<Integer, double[]> gammas(final Map<Integer, PartialAccumulator> partials, final FitState fit, final double l2, final int keyLimit) {
         final List<Integer> keys = new ArrayList<>();
         for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
             // the sigma / fit sums are not a column; a column whose sums overflowed stays out of the batched solve
             // (no gamma = degenerate, as the per-column solve reported it) instead of failing every column
-            if (e.getKey() >= 0 && solvable(e.getValue().getTotal(), fit.k)) keys.add(e.getKey());
+            if (e.getKey() >= 0 && e.getKey() < keyLimit && solvable(e.getValue().getTotal(), fit.k)) keys.add(e.getKey());
         }
         final Map<Integer, double[]> out = new HashMap<>();
         if (keys.isEmpty()) return out;
@@ -964,10 +969,10 @@ public final class ScreenReport {
      * diagonal information) as a share of the grid's block χ² (the bound), and the asymmetry of the two sides'
      * second-level gains: near 0 the other member matters on one side only ("b matters only when a > c"), near 1 it
      * matters on both (no conditional shape). In-sample, a diagnostic; the recipe is the crossed bins or a
-     * conditional expression.
+     * conditional expression. Gaussian divides the sums by the residual variance {@code sigma2} (1 otherwise).
      */
     static List<Map<String, Object>> interactions(final ScreenSpec spec, final Map<Integer, PartialAccumulator> partials, final boolean conditioned,
-                                                  final double nUnits, final Bins bins) {
+                                                  final double nUnits, final double sigma2, final Bins bins) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.hasPairShape() || !conditioned || partials == null || bins == null) return out;
         final int kk = spec.pairShapeBins, cells = kk * kk;
@@ -982,19 +987,27 @@ public final class ScreenReport {
             if (ea == null || eb == null) continue;
             final boolean grouped = spec.isGroupedMultinomial();
             final double[] s = new double[cells], diag = new double[cells];
-            final double[][] h = new double[cells][cells];
+            final double[][] h = grouped ? new double[cells][cells] : null;
             for (int c = 0; c < cells; c++) {
-                s[c] = vec[c];
+                s[c] = vec[c] / sigma2;
                 if (grouped) {
-                    for (int d = 0; d < cells; d++) h[c][d] = (c == d ? vec[cells + c] : 0d) - vec[2 * cells + c * cells + d];
+                    for (int d = 0; d < cells; d++) h[c][d] = ((c == d ? vec[cells + c] : 0d) - vec[2 * cells + c * cells + d]) / sigma2;
+                    diag[c] = h[c][c];
                 } else {
-                    h[c][c] = vec[cells + c];
+                    diag[c] = vec[cells + c] / sigma2;
                 }
-                diag[c] = h[c][c];
             }
-            final Stats[] block = new Stats[1];
-            final int df = blockChi2(s, h, diag, nUnits, 2, block);
-            if (df < 1 || !(block[0].chi2 > 0)) continue;
+            // the bound: the grid's block χ². Grouped: the full Fisher block (the shares' sum is the implicit
+            // reference). Row families: the diagonal block with the intercept profiled, Σ S_c² / H_c − (Σ S)² / Σ H —
+            // the tree's gain (the same diagonal information, profiled per node) never exceeds it
+            final double chi2;
+            if (grouped) {
+                final Stats[] block = new Stats[1];
+                chi2 = blockChi2(s, h, diag, nUnits, 2, block) < 1 ? Double.NaN : block[0].chi2;
+            } else {
+                chi2 = profiledDiagonalChi2(s, diag);
+            }
+            if (!(chi2 > 0)) continue;
             // the best depth-2 tree: first split on a (cells with a_bin <= j) or on b, then the best split of the
             // other member within each side
             double best = -1;
@@ -1024,23 +1037,62 @@ public final class ScreenReport {
             final String first = bestVar == 0 ? a : b, other = bestVar == 0 ? b : a;
             final double[] firstEdges = bestVar == 0 ? ea : eb, otherEdges = bestVar == 0 ? eb : ea;
             final double cut = firstEdges[bestCut];
-            final boolean rightSide = bestRight >= bestLeft;
+            final double share = Math.min(1d, best / chi2), gain = nUnits > 0 ? best / (2 * nUnits) : Double.NaN;
             final double sideGain = Math.max(bestLeft, bestRight), otherGain = Math.min(bestLeft, bestRight);
-            final double asymmetry = sideGain > 0 ? otherGain / sideGain : 1d;
+            if (!(sideGain > 0)) {
+                // no split of the other member adds anything on either side: the grid's gain is the first member's
+                // own split, not an interaction — no side, no fill, no consistency (0 / 0)
+                final String reading = "no split of " + other + " adds to " + first + " at " + fmt(cut) + " on either side: no conditional shape";
+                final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), Double.NaN, share, best, gain, null,
+                        reading + " -> " + rowBinFragment(first, new double[]{cut}));
+                rec.put("cut", cut);
+                out.add(rec);
+                continue;
+            }
+            final boolean rightSide = bestRight >= bestLeft;
+            final double consistency = otherGain / sideGain;
             final int sideCut = rightSide ? bestRightCut : bestLeftCut;
-            final String sideCutText = sideCut >= 0 ? fmt(otherEdges[sideCut]) : "";
-            final String reading = other + " matters " + (asymmetry < 0.5 ? "mainly" : "on both sides, and most") + " when " + first + (rightSide ? " > " : " <= ") + fmt(cut)
-                    + (sideCut >= 0 ? " (its own cut at " + sideCutText + ")" : "") + "; second-level gains " + fmt(bestLeft) + " / " + fmt(bestRight);
-            final String fragment = "cross of bin(" + first + ", edges: [" + fmt(cut) + "]) and bin(" + other + ", edges: [" + sideCutText + "])"
-                    + (asymmetry < 0.5 && sideCut >= 0 ? ", or {scope: row, expr: \"" + first + (rightSide ? " > " : " <= ") + fmt(cut) + " ? " + other + " : 0\"}" : "");
-            final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), asymmetry,
-                    Math.min(1d, best / block[0].chi2), best, nUnits > 0 ? best / (2 * nUnits) : Double.NaN, null, reading + " -> " + fragment);
+            final double fill = otherEdges[sideCut];
+            final String side = first + (rightSide ? " > " : " <= ");
+            final String reading = other + " matters " + (consistency < 0.5 ? "mainly" : "on both sides, and most") + " when " + side + fmt(cut)
+                    + " (its own cut at " + fmt(fill) + "); second-level gains " + fmt(bestLeft) + " / " + fmt(bestRight);
+            // the recipe reproduces the screen's partition exactly: the row bin op at the next double above each edge
+            // (rowBinFragment), the conditional expression at the full-precision cut
+            final String fragment = "cross of " + rowBinFragment(first, new double[]{cut}) + " and " + rowBinFragment(other, new double[]{fill})
+                    + " (a row type: cross of the two bins)"
+                    + (consistency < 0.5 ? ", or {scope: row, expr: \"" + side + plain(cut) + " ? " + other + " : 0\"}" : "");
+            final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), consistency,
+                    share, best, gain, null, reading + " -> " + fragment);
             rec.put("cut", cut);
             rec.put("direction", rightSide ? ">" : "<=");
-            rec.put("fill", sideCut >= 0 ? otherEdges[sideCut] : null);
+            rec.put("fill", fill);
             out.add(rec);
         }
         return out;
+    }
+
+    /**
+     * The score statistic of a one-hot block with diagonal information and the intercept profiled:
+     * Σ S_c² / H_c − (Σ S_c)² / Σ H_c over the cells with information (NaN below two of them).
+     */
+    private static double profiledDiagonalChi2(final double[] s, final double[] h) {
+        double maxH = 0;
+        for (final double v : h) maxH = Math.max(maxH, v);
+        double chi2 = 0, gs = 0, hs = 0;
+        int active = 0;
+        for (int c = 0; c < s.length; c++) {
+            if (!(h[c] > 1e-12 * maxH) || !(h[c] > 1e-300) || !Double.isFinite(s[c])) continue;
+            chi2 += s[c] * s[c] / h[c];
+            gs += s[c];
+            hs += h[c];
+            active++;
+        }
+        return active < 2 ? Double.NaN : Math.max(0d, chi2 - gs * gs / hs);
+    }
+
+    /** A cut written in full, in plain notation (a rounded cut moves the rows between it and the true one to the other side). */
+    private static String plain(final double v) {
+        return java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
     }
 
     /** The split gain of a node's cells into left / right with the intercept profiled: G_L² / H_L + G_R² / H_R − G² / H. */
@@ -1127,7 +1179,7 @@ public final class ScreenReport {
         }
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
-        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2) : Map.of();
+        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2, spec.pairGridKey(0)) : Map.of();
         // the fitted model's [n, g, G] per period: the partial statistic's decomposition by period
         final PartialAccumulator fitPeriods = conditioned ? partials.get(ConditioningScorer.FIT_PERIOD_KEY) : null;
         final List<String> notes = new ArrayList<>(spec.notes);
@@ -1597,7 +1649,7 @@ public final class ScreenReport {
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
         suggested.addAll(joint(spec, accumulators, nUnits, spec.gainCut(threshold)));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
-        suggested.addAll(interactions(spec, partials, conditioned, nUnits, bins));
+        suggested.addAll(interactions(spec, partials, conditioned, nUnits, sigma2, bins));
         summary.put("nSuggestions", spec.suggestionsOn || spec.jointOn || spec.hasPairShape() ? (long) suggested.size() : null);
         summary.put("nJointColumns", spec.jointOn ? (long) spec.jointColumnCount() : null);
         return new Result(records, summary, suggested);
@@ -1916,7 +1968,7 @@ public final class ScreenReport {
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
         if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
-        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebo + " placebo each)");
+        if (spec.hasPairs()) parts.add("pairs=" + spec.pairs.size() + " (+" + spec.pairPlacebo + " placebo each)" + (spec.hasPairShape() ? " shape=" + spec.pairShapeBins + "x" + spec.pairShapeBins : ""));
         if (spec.jointOn) parts.add("joint=" + spec.jointColumns.size() + "+" + spec.jointNoiseCount() + " columns directions=" + spec.jointDirections + " redundancy=" + spec.jointRedundancy + " select=" + spec.jointSelect);
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);

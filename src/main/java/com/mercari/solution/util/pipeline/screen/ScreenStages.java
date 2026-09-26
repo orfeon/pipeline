@@ -108,8 +108,9 @@ public final class ScreenStages {
             units = rows.apply("Units", ParDo.of(new SingletonUnitDoFn())).setCoder(unitCoder);
         }
 
-        // independent rows with rank / absdev: one pre-pass sketches every candidate over the window (per window
-        // under a windowing strategy; the singleton view carries the Combine's default on an empty window)
+        // independent rows with rank / absdev, value bins, a pair's 2-D grid: one pre-pass sketches the columns they
+        // read over the window (per window under a windowing strategy; the singleton view carries the Combine's
+        // default on an empty window)
         PCollectionView<WindowQuantiles> quantilesView = null;
         final List<PCollectionView<?>> scoreSideInputs = new ArrayList<>();
         if (spec.needsWindowQuantiles()) {
@@ -352,17 +353,23 @@ public final class ScreenStages {
 
     /** Independent rows: every row is its own unit. */
     /**
-     * The window quantile pre-pass (independent rows with rank / absdev): every candidate value of the rows
-     * that will be scored — a row whose baseline is invalid for its form is skipped whole or dropped
-     * ({@code baseline.invalid}), so it enters no sketch — into per-bundle sketches, one output per bundle
-     * and window (combined globally).
+     * The window quantile pre-pass (independent rows with rank / absdev, value bins, a pair's 2-D grid): the
+     * sketched columns ({@link ScreenSpec#sketchedColumns}) of the rows that will be scored — a row whose baseline
+     * is invalid for its form is skipped whole or dropped ({@code baseline.invalid}), so it enters no sketch — into
+     * per-bundle sketches, one output per bundle and window (combined globally).
      */
     static class QuantilesDoFn extends DoFn<KV<String, ScreenRow>, WindowQuantiles> {
         private final ScreenSpec spec;
+        private transient int[] sketched;
         private transient Map<BoundedWindow, WindowQuantiles> partials;
 
         QuantilesDoFn(final ScreenSpec spec) {
             this.spec = spec;
+        }
+
+        @Setup
+        public void setup() {
+            sketched = spec.sketchedColumns();
         }
 
         @StartBundle
@@ -374,9 +381,9 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final ScreenRow row = c.element().getValue();
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
-            // the candidates, the shuffle reference (the binned test's shuffle placebos) and, for a pair's 2-D grid,
-            // the conditioning columns — the leading columns of x in that order
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x);
+            // the candidates and the shuffle reference when their sketches are read (rank / absdev of independent rows,
+            // the value bins) and, for a pair's 2-D grid, its members' conditioning columns — a sketch index is the x column
+            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x, sketched);
         }
 
         @FinishBundle
@@ -401,7 +408,7 @@ public final class ScreenStages {
      */
     static class ScoreUnitsDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, ScoreAccumulator>> {
         private final ScreenSpec spec;
-        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        /** the window quantile sketches (null without the pre-pass, see {@link ScreenSpec#needsWindowQuantiles}) */
         private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer scorer;
         private transient Map<BoundedWindow, Map<Integer, ScoreAccumulator>> partials;
@@ -580,7 +587,7 @@ public final class ScreenStages {
         private final ScreenSpec spec;
         private final PCollectionView<VectorAccumulator> momentsView;
         private final PCollectionView<FitState> stateView;
-        /** the window quantile sketches (null unless independent rows use rank / absdev) */
+        /** the window quantile sketches (null without the pre-pass, see {@link ScreenSpec#needsWindowQuantiles}) */
         private final PCollectionView<WindowQuantiles> quantilesView;
         private transient GroupScorer groups;
         private transient ConditioningScorer scorer;

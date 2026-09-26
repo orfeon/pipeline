@@ -406,13 +406,14 @@ exactly them: declare the set, or read the pHd loadings of §9.5).
 
 A pair's test says *whether* the product adds information; `pairs.shape` (default 4, `false` / 0 = off) says
 *what shape* the interaction has. For every real pair the partial pass keeps a 2-D grid at the fitted means:
-the members' raw values binned by their window quantile edges (the sketch pre-pass covers the conditioning
-columns when a shape is asked for, k = `shape` bins per member, K = k² cells, a row with a missing member
+the members' raw values binned by their window quantile edges (the sketch pre-pass covers the pair members'
+columns when a shape is asked for, k = `shape` ≥ 2 bins per member, K = k² cells, a row with a missing member
 left out), as the one-hot block of the cells — row families `[Σ w (y − p̂), Σ w v̂]` per cell, grouped the
-`[S, P, PP']` block scaled by the unit weight. The report reads the grid as a depth-2 tree: a first split on
-one member at an edge, then in each side the best split on the other member; every split gain is
-`G_L² / H_L + G_R² / H_R − G² / H` with the node's intercept profiled and diagonal information (a boosting
-round's reading), the tree's gain is bounded by the grid's block χ² (its `share`), and the *asymmetry* of the
+`[S, P, PP']` block scaled by the unit weight (gaussian divides by σ² at the fit). The report reads the grid as
+a depth-2 tree: a first split on one member at an edge, then in each side the best split on the other member;
+every split gain is `G_L² / H_L + G_R² / H_R − G² / H` with the node's intercept profiled and diagonal
+information (a boosting round's reading), the tree's gain is bounded by the grid's block χ² (its `share`; for
+the row families the diagonal block with the intercept profiled, `Σ S_c² / H_c − (Σ S)² / Σ H`), and the *asymmetry* of the
 two sides' second-level gains (`consistency`: their smaller over their larger) reads the shape — near 0 the
 other member matters on one side only ("b matters only when a > c"), near 1 on both (no conditional shape,
 the product's own reading stands). The `interaction` suggestion record carries the first member and its cut

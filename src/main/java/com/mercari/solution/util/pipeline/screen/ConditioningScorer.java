@@ -199,7 +199,7 @@ public final class ConditioningScorer implements Serializable {
         return 2 + k;
     }
 
-    /** the window's quantile sketches (independent rows with rank / absdev), set per bundle from the side input; null = within-unit transforms */
+    /** the window's quantile sketches (the rank / absdev reference of independent rows, the value bins' and the pair grids' edges), set per bundle from the side input */
     private transient WindowQuantiles quantiles;
 
     /** Sets the rank / absdev reference of independent rows (the same sketches the marginal pass used). */
@@ -209,12 +209,16 @@ public final class ConditioningScorer implements Serializable {
         return this;
     }
 
-    /** the binned test's bin assignment (the marginal scorer's rule and edge cache) */
+    /** the binned test's bin assignment and the pair grids' edges (the marginal scorer's rules and edge caches) */
     private transient GroupScorer binner;
 
-    private int[] bins(final int column, final double[] v) {
+    private GroupScorer binner() {
         if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
-        return binner.bins(column, v);
+        return binner;
+    }
+
+    private int[] bins(final int column, final double[] v) {
+        return binner().bins(column, v);
     }
 
     /**
@@ -374,18 +378,18 @@ public final class ConditioningScorer implements Serializable {
      */
     private double[] pairGrid(final GroupScorer.Unit unit, final int pair, final double[] p) {
         if (!spec.hasPairShape()) return null;
-        if (binner == null) binner = new GroupScorer(spec).withWindowQuantiles(quantiles);
         final int[] members = spec.pairMembers(pair);
-        final double[] ea = binner.gridEdges(spec.conditioningColumn(members[0]));
-        final double[] eb = binner.gridEdges(spec.conditioningColumn(members[1]));
+        // the edges by sketch (the full row's x column), the values at this scorer's offset
+        final double[] ea = binner().gridEdges(spec.conditioningColumn(members[0]));
+        final double[] eb = binner().gridEdges(spec.conditioningColumn(members[1]));
         if (ea == null || eb == null) return null;
         final int kk = spec.pairShapeBins, cells = kk * kk, n = unit.size();
         final int[] cell = new int[n];
         boolean any = false;
         for (int i = 0; i < n; i++) {
             final double[] x = unit.rows.get(i).x;
-            final int a = GroupScorer.gridBin(ea, x[spec.conditioningColumn(members[0])]);
-            final int b = GroupScorer.gridBin(eb, x[spec.conditioningColumn(members[1])]);
+            final int a = GroupScorer.gridBin(ea, x[offset + members[0]]);
+            final int b = GroupScorer.gridBin(eb, x[offset + members[1]]);
             cell[i] = a < 0 || b < 0 ? -1 : a * kk + b;
             any |= cell[i] >= 0;
         }
