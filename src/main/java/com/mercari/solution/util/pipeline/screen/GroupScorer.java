@@ -95,29 +95,43 @@ public final class GroupScorer implements Serializable {
          * {@link #mixedLevels} says when it is not. Null without a modifier.
          */
         public String level() {
-            String best = null;
-            int bestCount = 0;
-            for (final ScreenRow r : rows) {
-                if (r.level == null) continue;
-                int count = 0;
-                for (final ScreenRow o : rows) if (r.level.equals(o.level)) count++;
-                if (count > bestCount || (count == bestCount && r.level.compareTo(best) < 0)) {
-                    best = r.level;
-                    bestCount = count;
-                }
-            }
-            return best;
+            readLevel();
+            return level;
         }
 
         /** Whether the unit's rows carry more than one modifier level (the modifier is not constant within the unit). */
         public boolean mixedLevels() {
-            String first = null;
+            readLevel();
+            return mixedLevels;
+        }
+
+        /** the unit's modifier level and whether its rows disagree, read once: O(n), no map for a constant unit */
+        private String level;
+        private boolean mixedLevels;
+        private boolean levelRead;
+
+        private void readLevel() {
+            if (levelRead) return;
+            levelRead = true;
             for (final ScreenRow r : rows) {
                 if (r.level == null) continue;
-                if (first == null) first = r.level;
-                else if (!first.equals(r.level)) return true;
+                if (level == null) level = r.level;
+                else if (!level.equals(r.level)) {
+                    mixedLevels = true;
+                    break;
+                }
             }
-            return false;
+            if (!mixedLevels) return;
+            final Map<String, Integer> counts = new HashMap<>();
+            for (final ScreenRow r : rows) if (r.level != null) counts.merge(r.level, 1, Integer::sum);
+            int bestCount = 0;
+            for (final Map.Entry<String, Integer> e : counts.entrySet()) {
+                final int count = e.getValue();
+                if (count > bestCount || (count == bestCount && e.getKey().compareTo(level) < 0)) {
+                    level = e.getKey();
+                    bestCount = count;
+                }
+            }
         }
     }
 

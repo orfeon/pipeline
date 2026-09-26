@@ -1065,10 +1065,11 @@ public class GroupScorerTest {
         Assertions.assertEquals("C", scorer.prepare(constant, "u3").level());
         Assertions.assertTrue(scorer.prepare(mixed1, "u1").mixedLevels());
         Assertions.assertFalse(scorer.prepare(constant, "u3").mixedLevels());
-        // the rows' order does not decide: the reversed unit reads the same level
-        final List<ScreenRow> reversed = new ArrayList<>(mixed1);
-        java.util.Collections.reverse(reversed);
-        Assertions.assertEquals("A", scorer.prepare(reversed, "u1").level());
+        // the rows' order does not decide: prepare sorts by (time, identity), so the levels are laid on the
+        // identities in the other order (the sorted first row now carries A, then B) and the level is the same
+        Assertions.assertEquals("A", scorer.prepare(unit.apply("u1", new String[]{"A", "A", "B"}), "u1").level());
+        Assertions.assertEquals("A", scorer.prepare(unit.apply("u2", new String[]{"A", "B"}), "u2").level());
+        Assertions.assertEquals("B", scorer.prepare(unit.apply("u4", new String[]{"A", "B", "B"}), "u4").level());
         scorer.score(mixed1, "u1", acc);
         scorer.score(mixed2, "u2", acc);
         scorer.score(constant, "u3", acc);

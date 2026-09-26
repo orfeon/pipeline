@@ -483,6 +483,7 @@ One record per run (per window under a windowing strategy): the spec's roles, `t
 `minPeriodsAgree` / `minGain`, the thresholds and the quantile (`threshold` / `thresholdTheoretical` = the
 df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test;
 `heterogeneity` = the modifier, `nHetPassed` / `hetPassedColumns` = the heterogeneity flag's count and columns;
+`nHetMixedUnits` = the grouped units whose rows carry more than one modifier level, §7.1;
 `nPairs` / `nPairsPassed` / `passedPairs` = the declared pairs and the passing ones, §8.6; `nSuggestions`), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing

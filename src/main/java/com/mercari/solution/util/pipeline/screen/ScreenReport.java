@@ -1730,8 +1730,8 @@ public final class ScreenReport {
         final boolean unitModifier = spec.isGroupedMultinomial() && ScreenSpec.HET_FIELD.equals(spec.heterogeneityBy);
         final Long hetMixed = unitModifier ? (long) b[ScoreAccumulator.UNITS_HET_MIXED] : null;
         if (hetMixed != null && hetMixed > 0 && nUnits > 0) {
-            notes.add("heterogeneity by " + spec.heterogeneityField + ": " + hetMixed + " of " + (long) nUnits + " units (" + fmt(100d * hetMixed / nUnits)
-                    + "%) carry more than one level; each such unit takes its rows' most frequent level (ties to the smallest) — a unit-level modifier is expected");
+            notes.add("heterogeneity by " + spec.heterogeneityField + ": " + hetMixed + " of " + (long) nUnits + " units (" + Baselines.percent(hetMixed, nUnits)
+                    + ") carry more than one level; each such unit takes its rows' most frequent level (ties to the smallest) — a unit-level modifier is expected");
         }
         if (Baselines.skipShareNoted(skipped, nUnits)) {
             notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + Baselines.percent(skipped, nUnits + skipped)
