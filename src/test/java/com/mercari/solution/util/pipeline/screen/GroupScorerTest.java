@@ -1103,6 +1103,63 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testGroupedModifierLevelIsTheUnitsMostFrequentValue() {
+        // a grouped unit's modifier level is its rows' most frequent value (ties to the smallest), whatever the rows'
+        // order; the summary counts the units whose rows disagree
+        final Schema schema = Schema.builder()
+                .withField("g", Schema.FieldType.STRING)
+                .withField("seg", Schema.FieldType.STRING)
+                .withField("y", Schema.FieldType.INT64)
+                .withField("t", Schema.FieldType.TIMESTAMP)
+                .withField("x", Schema.FieldType.FLOAT64)
+                .build();
+        final ScreenSpec spec = ScreenSpec.parse(JsonParser.parseString("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, heterogeneity: {field: seg}}").getAsJsonObject()).resolve(schema, null);
+        Assertions.assertTrue(spec.notes.stream().anyMatch(n -> n.contains("most frequent")), spec.notes.toString());
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        final java.util.function.BiFunction<String, String[], List<ScreenRow>> unit = (g, levels) -> {
+            final List<ScreenRow> rows = new ArrayList<>();
+            for (int i = 0; i < levels.length; i++) rows.add(new ScreenRow(g, g + ":" + i, 1, null, levels[i], i == 0 ? 1 : 0, Double.NaN, 1, new double[]{i}));
+            return rows;
+        };
+        // B, A, A -> A (majority, not the first row); B, A -> A (a tie, the smallest); C, C -> C (constant)
+        final List<ScreenRow> mixed1 = unit.apply("u1", new String[]{"B", "A", "A"});
+        final List<ScreenRow> mixed2 = unit.apply("u2", new String[]{"B", "A"});
+        final List<ScreenRow> constant = unit.apply("u3", new String[]{"C", "C"});
+        Assertions.assertEquals("A", scorer.prepare(mixed1, "u1").level());
+        Assertions.assertEquals("A", scorer.prepare(mixed2, "u2").level());
+        Assertions.assertEquals("C", scorer.prepare(constant, "u3").level());
+        Assertions.assertTrue(scorer.prepare(mixed1, "u1").mixedLevels());
+        Assertions.assertFalse(scorer.prepare(constant, "u3").mixedLevels());
+        // the rows' order does not decide: prepare sorts by (time, identity), so the levels are laid on the
+        // identities in the other order (the sorted first row now carries A, then B) and the level is the same
+        Assertions.assertEquals("A", scorer.prepare(unit.apply("u1", new String[]{"A", "A", "B"}), "u1").level());
+        Assertions.assertEquals("A", scorer.prepare(unit.apply("u2", new String[]{"A", "B"}), "u2").level());
+        Assertions.assertEquals("B", scorer.prepare(unit.apply("u4", new String[]{"A", "B", "B"}), "u4").level());
+        scorer.score(mixed1, "u1", acc);
+        scorer.score(mixed2, "u2", acc);
+        scorer.score(constant, "u3", acc);
+        final double[] book = acc.get(ScoreAccumulator.BOOKKEEPING_KEY).getTotal();
+        Assertions.assertEquals(3, book[ScoreAccumulator.UNITS_SCORED]);
+        Assertions.assertEquals(2, book[ScoreAccumulator.UNITS_HET_MIXED]);
+        // the level slices: u1 and u2 under A, u3 under C
+        final ScoreAccumulator x = acc.get(spec.key(0, 0));
+        Assertions.assertEquals(java.util.Set.of(ScoreAccumulator.LEVEL_PREFIX + "A", ScoreAccumulator.LEVEL_PREFIX + "C"), x.getPeriods().keySet());
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        Assertions.assertEquals(2L, result.summary().get("nHetMixedUnits"));
+        Assertions.assertTrue(((List<?>) result.summary().get("notes")).stream().anyMatch(n -> ((String) n).startsWith("heterogeneity by seg: 2 of 3 units")), result.summary().get("notes").toString());
+        // a row family reads the modifier per row: the count is null
+        final ScreenSpec rows = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], heterogeneity: {field: g}, placebo: {noise: 0}}");
+        final Map<Integer, ScoreAccumulator> racc = new HashMap<>();
+        final GroupScorer rs = new GroupScorer(rows);
+        for (int i = 0; i < 4; i++) {
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, i % 2 == 0 ? "A" : "B", i % 2, Double.NaN, 1, new double[]{i});
+            rs.score(List.of(r), r.getIdentity(), racc);
+        }
+        Assertions.assertNull(ScreenReport.build(rows, racc).summary().get("nHetMixedUnits"));
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S

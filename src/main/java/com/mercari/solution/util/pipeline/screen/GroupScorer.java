@@ -89,9 +89,49 @@ public final class GroupScorer implements Serializable {
             return rows.get(0).period;
         }
 
-        /** The heterogeneity modifier's level of a grouped unit: its first row's (the modifier is a unit-level field). */
+        /**
+         * The heterogeneity modifier's level of a grouped unit: the most frequent among its rows' (ties to the smallest),
+         * a rule that does not depend on the rows' order — the modifier is meant as a unit-level field, and
+         * {@link #mixedLevels} says when it is not. Null without a modifier.
+         */
         public String level() {
-            return rows.get(0).level;
+            readLevel();
+            return level;
+        }
+
+        /** Whether the unit's rows carry more than one modifier level (the modifier is not constant within the unit). */
+        public boolean mixedLevels() {
+            readLevel();
+            return mixedLevels;
+        }
+
+        /** the unit's modifier level and whether its rows disagree, read once: O(n), no map for a constant unit */
+        private String level;
+        private boolean mixedLevels;
+        private boolean levelRead;
+
+        private void readLevel() {
+            if (levelRead) return;
+            levelRead = true;
+            for (final ScreenRow r : rows) {
+                if (r.level == null) continue;
+                if (level == null) level = r.level;
+                else if (!level.equals(r.level)) {
+                    mixedLevels = true;
+                    break;
+                }
+            }
+            if (!mixedLevels) return;
+            final Map<String, Integer> counts = new HashMap<>();
+            for (final ScreenRow r : rows) if (r.level != null) counts.merge(r.level, 1, Integer::sum);
+            int bestCount = 0;
+            for (final Map.Entry<String, Integer> e : counts.entrySet()) {
+                final int count = e.getValue();
+                if (count > bestCount || (count == bestCount && e.getKey().compareTo(level) < 0)) {
+                    level = e.getKey();
+                    bestCount = count;
+                }
+            }
         }
     }
 
@@ -233,6 +273,7 @@ public final class GroupScorer implements Serializable {
         }
         bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
         bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
+        if (unitLevel != null && unit.mixedLevels()) bookSlots[ScoreAccumulator.UNITS_HET_MIXED] = 1;
         book.add(null, bookSlots);
         for (final ScreenRow r : unit.rows) if (r.time != ScreenRow.NO_TIME) book.time(r.time);
         return Skip.NONE;

@@ -42,6 +42,8 @@ public final class ScoreAccumulator implements Serializable {
     public static final int ROWS_IN = 0, ROWS_TIME_FILTERED = 1, ROWS_INVALID = 2, UNITS_SCORED = 3, UNITS_SKIPPED = 4, ROWS_SCORED = 5;
     /** bookkeeping: units skipped for an invalid baseline (the rest of UNITS_SKIPPED had no positive label); rows {@code baseline.invalid: dropRow} removed */
     public static final int UNITS_SKIPPED_BASELINE = 6, ROWS_DROPPED = 7;
+    /** bookkeeping: scored grouped units whose rows carry more than one heterogeneity modifier level (DSL doc §7.1) */
+    public static final int UNITS_HET_MIXED = 8;
 
     final double[] total = new double[SLOTS];
     final TreeMap<String, double[]> periods = new TreeMap<>();

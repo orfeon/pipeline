@@ -97,7 +97,7 @@ public final class ScreenSpec implements Serializable {
     public String binsEdges = EDGES_VALUE;
     /** heterogeneity.by: {@link #HET_PERIODS} / {@link #HET_FIELD} (null = no heterogeneity test) */
     public String heterogeneityBy;
-    /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its first row) for the grouped family */
+    /** heterogeneity.field: the modifier field (by = field); read per row, per unit (its rows' most frequent value) for the grouped family */
     public String heterogeneityField;
 
     /** suggestions: the one-candidate derivation suggestions from the binned sums (DSL doc §9.4; needs the binned transform) */
@@ -1038,7 +1038,7 @@ public final class ScreenSpec implements Serializable {
             errors.add("heterogeneity needs a raw / rank / absdev transform (the binned block test has no direction to differ across the levels)");
         }
         if (HET_FIELD.equals(heterogeneityBy) && heterogeneityField != null && isGroupedMultinomial()) {
-            notes.add("heterogeneity by " + heterogeneityField + ": the grouped family reads the modifier per unit (the value of the unit's first row)");
+            notes.add("heterogeneity by " + heterogeneityField + ": the grouped family reads the modifier per unit (its rows' most frequent value, ties to the smallest; nHetMixedUnits counts the units whose rows disagree)");
         }
 
         final Map<String, Schema.Field> fields = new HashMap<>();
