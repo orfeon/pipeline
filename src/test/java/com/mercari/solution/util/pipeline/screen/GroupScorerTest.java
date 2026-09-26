@@ -376,7 +376,18 @@ public class GroupScorerTest {
         Assertions.assertEquals("x", block.get("candidate").getAsString());
         Assertions.assertEquals(4, block.get("k").getAsInt());
         Assertions.assertEquals(3, block.getAsJsonArray("edges").size());
-        Assertions.assertEquals("{scope: row, type: bin, input: x, edges: [10, 20, 30]}", block.get("fragment").getAsString());
+        final String fragment = block.get("fragment").getAsString();
+        Assertions.assertEquals("{scope: row, type: bin, input: x, edges: [10.000000000000002, 20.000000000000004, 30.000000000000004]}", fragment);
+        // the fragment reproduces the block's bins under the row bin op's rule (the count of edges a value reaches),
+        // the values at an edge included
+        final String[] opEdges = fragment.substring(fragment.indexOf("edges: [") + 8, fragment.lastIndexOf(']')).split(", ");
+        final double[] probe = {1, 10, 11, 20, 30, 40};
+        final int[] screenBins = scorer.bins(0, probe);
+        for (int i = 0; i < probe.length; i++) {
+            int op = 0;
+            for (final String e : opEdges) if (probe[i] >= Double.parseDouble(e)) op++;
+            Assertions.assertEquals(screenBins[i], op, "value " + probe[i]);
+        }
         Assertions.assertEquals("x", selection.getAsJsonArray("passed").get(0).getAsJsonObject().getAsJsonObject("bins").get("candidate").getAsString());
         Assertions.assertTrue(Math.abs((Double) raw.get("z")) < 2, "raw z " + raw.get("z"));
         Assertions.assertEquals(3L, binned.get("df"));
@@ -426,6 +437,18 @@ public class GroupScorerTest {
         Assertions.assertTrue((Double) xb.get("chi2") > 20, "grouped binned chi2 " + xb.get("chi2"));
         Assertions.assertEquals(Boolean.TRUE, cb.get("degenerate"));
         Assertions.assertEquals(0L, cb.get("df"));
+        // a passing position block: no value edges, the rank cut points i / k
+        Assertions.assertNull(xb.get("bin_edges"));
+        Assertions.assertEquals(Boolean.TRUE, xb.get("passed"));
+        final com.google.gson.JsonObject rankBlock = ScreenReport.selection(grouped, gr).getAsJsonArray("passedBlocks").get(0).getAsJsonObject();
+        Assertions.assertEquals("rank", rankBlock.get("edgesKind").getAsString());
+        Assertions.assertTrue(rankBlock.get("edges").isJsonNull());
+        Assertions.assertEquals(2, rankBlock.getAsJsonArray("rankCuts").size());
+        Assertions.assertEquals(1d / 3, rankBlock.getAsJsonArray("rankCuts").get(0).getAsDouble(), 1e-15);
+        // a value block without its edges (a report built without the bins' geometry) writes no empty row op
+        final com.google.gson.JsonObject noEdges = ScreenReport.blockRecipe(spec, "x", null);
+        Assertions.assertTrue(noEdges.get("edges").isJsonNull());
+        Assertions.assertFalse(noEdges.get("fragment").getAsString().contains("type: bin"));
 
         // validation
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], bins: {k: 4}}"));
