@@ -47,7 +47,7 @@ public final class ScoreAccumulator implements Serializable {
     final TreeMap<String, double[]> periods = new TreeMap<>();
     long maxTime = Long.MIN_VALUE;
     long minTime = Long.MAX_VALUE;
-    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §12.1); null until fed */
+    /** a variable-length vector for the window (the binned test's per-bin sums, DSL doc §6.1); null until fed */
     double[] extra;
 
     public ScoreAccumulator() {}
@@ -58,6 +58,19 @@ public final class ScoreAccumulator implements Serializable {
 
     /** The window's variable-length sums (null when the key carries none). */
     public double[] getExtra() {
+        return extra;
+    }
+
+    /**
+     * The window's variable-length sums for in-place adds (a sparse contribution touches only its entries),
+     * allocated at {@code length} on first use.
+     */
+    double[] extra(final int length) {
+        if (extra == null) {
+            extra = new double[length];
+        } else if (extra.length != length) {
+            throw new IllegalStateException("extra sums of " + extra.length + " and " + length + " values cannot merge");
+        }
         return extra;
     }
 
@@ -99,7 +112,7 @@ public final class ScoreAccumulator implements Serializable {
         return key.substring(LEVEL_PREFIX.length());
     }
 
-    /** Adds one contribution to a slice only (a modifier level: the total already holds the row). */
+    /** Adds one contribution to a slice only: a period ({@link #add}) or a modifier level (the total already holds the row). */
     public ScoreAccumulator addSlice(final String key, final double[] contribution) {
         final double[] slot = periods.computeIfAbsent(key, k -> new double[SLOTS]);
         for (int i = 0; i < SLOTS; i++) slot[i] += contribution[i];
@@ -109,10 +122,7 @@ public final class ScoreAccumulator implements Serializable {
     /** Adds one contribution to the total and, when {@code period} is non-null, to that period. */
     public ScoreAccumulator add(final String period, final double[] contribution) {
         for (int i = 0; i < SLOTS; i++) total[i] += contribution[i];
-        if (period != null) {
-            final double[] slot = periods.computeIfAbsent(period, k -> new double[SLOTS]);
-            for (int i = 0; i < SLOTS; i++) slot[i] += contribution[i];
-        }
+        if (period != null) addSlice(period, contribution);
         return this;
     }
 

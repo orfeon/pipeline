@@ -343,6 +343,52 @@ public class GroupScorerTest {
         Assertions.assertEquals(39L, byKey.get("x:rank").get("n_obs"));
         Assertions.assertTrue(byKey.containsKey("__noise_0:rank") && byKey.containsKey("__noise_1:absdev"));
         Assertions.assertFalse((Boolean) byKey.get("x:rank").get("degenerate"));
+
+        // an even count: the type-7 median (the mean of the two middle values), like the within-unit absdev
+        final WindowQuantiles even = new WindowQuantiles(1);
+        for (int i = 1; i <= 40; i++) even.update(new double[]{i});
+        Assertions.assertEquals(20.5, even.median(0), 1e-12);
+        Assertions.assertEquals(StatMath.medianFinite(new double[]{1, 2, 3, 4}), windowOf(1, 2, 3, 4).median(0), 1e-12);
+        // the Combine's column-less default reads as no reference (NaN), not an index error
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).rank(0, 1d)));
+        Assertions.assertTrue(Double.isNaN(new WindowQuantiles(0).median(0)));
+
+        // addInput never aliases (then mutates) a Combine input: an empty accumulator adopts a copy
+        final WindowQuantiles.Fn fn = new WindowQuantiles.Fn();
+        final WindowQuantiles in1 = windowOf(1, 2);
+        final WindowQuantiles acc1 = fn.addInput(fn.createAccumulator(), in1);
+        Assertions.assertNotSame(in1, acc1);
+        fn.addInput(acc1, windowOf(3, 4, 5));
+        Assertions.assertEquals(2L, in1.count(0));
+        Assertions.assertEquals(5L, acc1.count(0));
+
+        // independent rows with rank / absdev: a scorer without the window reference fails instead of scoring
+        // single-row units (rank 0.5, absdev 0) as silently degenerate records
+        Assertions.assertThrows(IllegalStateException.class, () -> new GroupScorer(spec).score(List.of(rows.get(0)), "r1", new HashMap<>()));
+    }
+
+    private static WindowQuantiles windowOf(final double... values) {
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final double v : values) q.update(new double[]{v});
+        return q;
+    }
+
+    @Test
+    public void testWindowQuantilesRejectMergingWindows() {
+        // the window reference is a side input: a session window cannot map to it (Beam throws at assembly)
+        final ScreenSpec rank = spec("{family: binomial, label: y, candidates: [x], transforms: [raw, rank]}");
+        final ScreenSpec raw = spec("{family: binomial, label: y, candidates: [x]}");
+        final org.apache.beam.sdk.Pipeline p = org.apache.beam.sdk.Pipeline.create();
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> input = p
+                .apply(org.apache.beam.sdk.transforms.Create.empty(org.apache.beam.sdk.coders.SerializableCoder.of(com.mercari.solution.module.MElement.class)));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> sessions = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.Sessions.withGapDuration(org.joda.time.Duration.standardMinutes(10))));
+        final org.apache.beam.sdk.values.PCollection<com.mercari.solution.module.MElement> fixed = input
+                .apply(org.apache.beam.sdk.transforms.windowing.Window.into(org.apache.beam.sdk.transforms.windowing.FixedWindows.of(org.joda.time.Duration.standardDays(1))));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, rank).stream().anyMatch(m -> m.contains("merging (session) windows")));
+        Assertions.assertTrue(ScreenStages.engineConstraints(sessions, raw).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(fixed, rank).isEmpty());
+        Assertions.assertTrue(ScreenStages.engineConstraints(input, rank).isEmpty());
     }
 
     @Test
@@ -412,6 +458,10 @@ public class GroupScorerTest {
         Assertions.assertEquals(40d, n, 1e-12);
         Assertions.assertEquals(0d, s, 1e-9);   // prior mode: the bin scores sum to zero (the intercept profiled out)
         Assertions.assertEquals(0d, (Double) binStats.get(4).get("n"));   // the missing bin is empty
+        // the intercept profiled out, every active bin counted (none dropped as a reference): S = [-2.75, 3.25,
+        // 2.25, -2.75] against H = 10 * 0.275 * 0.725 per bin
+        Assertions.assertEquals(30.75 / 1.99375, (Double) binned.get("chi2"), 1e-9);
+        Assertions.assertEquals(profiledChi2(binStats), (Double) binned.get("chi2"), 1e-9);
         @SuppressWarnings("unchecked") final Map<String, Double> thresholds = (Map<String, Double>) result.summary().get("thresholds");
         Assertions.assertEquals(2, thresholds.size());
         Assertions.assertEquals("value/4", result.summary().get("bins"));
@@ -450,12 +500,52 @@ public class GroupScorerTest {
         Assertions.assertTrue(noEdges.get("edges").isJsonNull());
         Assertions.assertFalse(noEdges.get("fragment").getAsString().contains("type: bin"));
 
+        // offset mode: a baseline miscalibrated overall (0.1 against a rate of 0.275) is the intercept's misfit,
+        // which the block must profile out rather than score: χ² = Σ S_b² / H_b − (Σ S_b)² / Σ H_b on the raw S_b
+        final ScreenSpec offset = spec("{family: binomial, label: y, baseline: {field: b, form: prob}, candidates: [x], transforms: [binned], bins: {k: 4}, placebo: {noise: 0}}");
+        final GroupScorer os = new GroupScorer(offset).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> oacc = new HashMap<>();
+        for (int i = 1; i <= 40; i++) {
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, i >= 15 && i <= 25 ? 1 : 0, 0.1, 1, new double[]{i});
+            os.score(List.of(r), r.getIdentity(), oacc);
+        }
+        final Map<String, Object> ob = ScreenReport.build(offset, oacc).records().get(0);
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> obStats = (List<Map<String, Object>>) ob.get("bin_stats");
+        Assertions.assertEquals(3L, ob.get("df"));
+        // S = [-1, 5, 4, -1], H = 0.9 per bin: 43 / 0.9 − 49 / 3.6
+        Assertions.assertEquals(43 / 0.9 - 49 / 3.6, (Double) ob.get("chi2"), 1e-9);
+        Assertions.assertEquals(profiledChi2(obStats), (Double) ob.get("chi2"), 1e-9);
+
+        // grouped with value bins: the run holds the window sketches for the edges, but rank / absdev stay within the
+        // unit (a shuffle placebo is not standard normal, a candidate's window rank is not its within-unit rank)
+        final ScreenSpec groupedValue = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [rank, absdev, binned], placebo: {noise: 0}}");
+        Assertions.assertTrue(groupedValue.needsWindowQuantiles());
+        final double[] unitValues = {5, 30, 12};
+        for (final String t : List.of(ScreenSpec.TRANSFORM_RANK, ScreenSpec.TRANSFORM_ABSDEV)) {
+            Assertions.assertArrayEquals(GroupScorer.transform(t, unitValues), GroupScorer.transform(groupedValue, q, 0, t, unitValues), 1e-12, t);
+        }
+        Assertions.assertTrue(groupedValue.notes.stream().noneMatch(note -> note.contains("rank / absdev of independent rows")));
+
         // validation
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], bins: {k: 4}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 1}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {edges: rank}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {edges: median}}"));
         Assertions.assertEquals(10, spec("{family: binomial, label: y, candidates: [x], transforms: [binned]}").binsK);
+    }
+
+    /** The row families' block statistic from its bin_stats: Σ S_b² / H_b − (Σ S_b)² / Σ H_b over the bins with information. */
+    private static double profiledChi2(final List<Map<String, Object>> binStats) {
+        double q = 0, sumS = 0, sumH = 0;
+        for (final Map<String, Object> b : binStats) {
+            final double s = (Double) b.get("S");
+            final double h = (Double) b.get("H");
+            if (!(h > 0)) continue;
+            q += s * s / h;
+            sumS += s;
+            sumH += h;
+        }
+        return q - sumS * sumS / sumH;
     }
 
     @Test
@@ -533,6 +623,21 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: segment}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {field: nope}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], heterogeneity: {by: field}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, time: t, candidates: [x], periods: year, heterogeneity: {by: periods, field: g}}"));
+        // the block test has no direction: a modifier with binned alone would test nothing
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], heterogeneity: {field: g}}"));
+
+        // with noise placebos a df = 1 placebo record feeds two placebo kinds (df1 and het) but counts once
+        final ScreenSpec withNoise = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], heterogeneity: {field: g}, placebo: {noise: 3}}");
+        final GroupScorer ns = new GroupScorer(withNoise);
+        final Map<Integer, ScoreAccumulator> nacc = new HashMap<>();
+        for (int i = 1; i <= 40; i++) {
+            final ScreenRow a = new ScreenRow("a" + i, "a" + i, i, null, "A", i > 20 ? 1 : 0, Double.NaN, 1, new double[]{i});
+            ns.score(List.of(a), a.getIdentity(), nacc);
+        }
+        final ScreenReport.Result nr = ScreenReport.build(withNoise, nacc);
+        Assertions.assertEquals(3L, nr.summary().get("nPlacebo"));
+        Assertions.assertEquals(4, nr.records().size());
     }
 
     @Test
@@ -600,6 +705,39 @@ public class GroupScorerTest {
         // without the discovery split (suggestions off) the block reads the plain sums, and no suggestion is produced
         Assertions.assertTrue(ScreenReport.build(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], placebo: {noise: 0}}"), new HashMap<>()).suggestions().isEmpty());
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], suggestions: true}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {enabled: {}}}"));
+        Assertions.assertTrue(spec("{family: binomial, label: y, candidates: [x], transforms: [binned], suggestions: {}}").suggestionsOn);
+    }
+
+    @Test
+    public void testSuggestionShareBoundedByContrasts() throws Exception {
+        // a pure step at the median (binomial, no baseline): the step contrast carries the whole effect. The share is
+        // read against the maximum over the centred contrasts, so it stays in [0, 1] — against the block χ² with a
+        // reference bin dropped from a diagonal H it would exceed 1 (about 1.25 here)
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 4}, suggestions: true, placebo: {noise: 0}}");
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 400; i++) {
+            final double y = i > 200 ? (i % 5 == 0 ? 0 : 1) : (i % 5 == 0 ? 1 : 0);
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{i}));
+        }
+        final WindowQuantiles q = new WindowQuantiles(1);
+        for (final ScreenRow r : rows) q.update(r.x);
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
+        Assertions.assertFalse(result.suggestions().isEmpty());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("share") >= 0 && (Double) s.get("share") <= 1 + 1e-9, s.toString());
+            Assertions.assertTrue((Double) s.get("confirmation_share") >= 0 && (Double) s.get("confirmation_share") <= 1 + 1e-9, s.toString());
+            // a hinge names its side: one expression, not both
+            if ("hinge".equals(s.get("name"))) Assertions.assertFalse(((String) s.get("fragment")).contains(" or "), s.toString());
+        }
+        for (final Map<String, Object> s : result.suggestions()) {
+            if (!"cut".equals(s.get("kind"))) continue;
+            Assertions.assertEquals(200d, (Double) s.get("cut"), 1e-9);
+            Assertions.assertTrue((Double) s.get("share") > 0.95, s.toString());
+        }
     }
 
     @Test
@@ -697,6 +835,7 @@ public class GroupScorerTest {
         Assertions.assertEquals(1L, result.summary().get("nPairsPassed"));
         Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
         Assertions.assertEquals(List.of(), result.summary().get("passedColumns"));   // a pair is never a column
+        Assertions.assertEquals(0L, result.summary().get("nPassed"));                // nor counted in nPassed
         final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
         Assertions.assertEquals(0, selection.getAsJsonArray("columns").size());
         Assertions.assertEquals("x", selection.getAsJsonArray("passedPairs").get(0).getAsJsonObject().get("a").getAsString());
@@ -716,6 +855,11 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], shape: 1}}"));
         final ScreenSpec off = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], shape: false}}");
         Assertions.assertFalse(off.hasPairShape() || off.needsWindowQuantiles());
+        // among resolving to a single field tests nothing: an error, not a silent no-op
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {among: [x2]}}"));
+        // a null / object member is a configuration error (not an escaping UnsupportedOperationException)
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: [[x, null]]}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], conditioning: {fields: [x, x2]}, pairs: {fields: 'x', among: ['x*']}}"));
     }
 
     @Test
@@ -791,6 +935,54 @@ public class GroupScorerTest {
         return result.suggestions().stream().filter(s -> "interaction".equals(s.get("kind"))).findFirst().orElse(null);
     }
 
+
+    @Test
+    public void testPairPlacebosAreDistinct() {
+        // b is the first member of two pairs: its placebo pairs take different noise columns, so no record name repeats
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], placebo: {noise: 4}, "
+                + "conditioning: {fields: [b, x, x2]}, pairs: {among: [b, 'x*'], placebo: 2}}");
+        Assertions.assertEquals(3, spec.pairs.size());
+        Assertions.assertEquals(3 + 6, spec.pairCount());
+        final java.util.Set<String> names = new java.util.HashSet<>();
+        for (int q = 0; q < spec.pairCount(); q++) names.add(spec.pairName(q));
+        Assertions.assertEquals(spec.pairCount(), names.size(), names.toString());
+        // saturated: a member already paired with every noise column brings no further placebo (never a repeat)
+        final ScreenSpec saturated = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], placebo: {noise: 2}, "
+                + "conditioning: {fields: [b, x, x2]}, pairs: {among: [b, 'x*'], placebo: 2}}");
+        final java.util.Set<String> saturatedNames = new java.util.HashSet<>();
+        for (int q = 0; q < saturated.pairCount(); q++) saturatedNames.add(saturated.pairName(q));
+        Assertions.assertEquals(saturated.pairCount(), saturatedNames.size(), saturatedNames.toString());
+        Assertions.assertEquals(3 + 4, saturated.pairCount());
+    }
+
+    @Test
+    public void testPairColumnMissingMember() {
+        // a row missing a member is missing for the product (the recipe a * b is null there), not the fill's product
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], placebo: {noise: 1}, "
+                + "conditioning: {fields: [x, x2]}, pairs: {fields: [[x, x2]], placebo: 1}}");
+        final List<ScreenRow> rows = List.of(
+                new ScreenRow("g0", "g0:0", 0, null, 1, Double.NaN, 1, new double[]{1.0, 1.0, 2.0}),
+                new ScreenRow("g0", "g0:1", 1, null, 0, Double.NaN, 1, new double[]{-1.0, -1.0, Double.NaN}),
+                new ScreenRow("g0", "g0:2", 2, null, 0, Double.NaN, 1, new double[]{Double.NaN, Double.NaN, 0.5}),
+                new ScreenRow("g0", "g0:3", 3, null, 0, Double.NaN, 1, new double[]{0.5, 0.5, -1.0}));
+        final GroupScorer groups = new GroupScorer(spec);
+        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        final GroupScorer.Unit unit = groups.prepare(rows, "g0");
+        final double[][] f = scorer.design(unit, moments.getValues());
+        final double[][] cols = groups.columns(unit);
+        final double[] product = scorer.pairColumn(0, unit, f, cols);
+        Assertions.assertEquals(f[0][0] * f[0][1], product[0], 1e-12);
+        Assertions.assertTrue(Double.isNaN(product[1]), "x2 missing");
+        Assertions.assertTrue(Double.isNaN(product[2]), "x missing");
+        Assertions.assertEquals(f[3][0] * f[3][1], product[3], 1e-12);
+        // the placebo pair (x × noise) is missing only where x is
+        final double[] placebo = scorer.pairColumn(1, unit, f, cols);
+        Assertions.assertFalse(Double.isNaN(placebo[1]));
+        Assertions.assertTrue(Double.isNaN(placebo[2]));
+    }
+
     @Test
     public void testJointSuggestionsFromTheCandidatesSums() throws Exception {
         // independent binomial rows over three candidates (schema order b, x, x2): x carries the main effect, x2 is a
@@ -861,6 +1053,91 @@ public class GroupScorerTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {maxColumns: 2}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['b']}}"));
         Assertions.assertEquals(List.of(1, 2), spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['x*'], noise: 0}}").jointColumns);
+        // a lineage selector in joint.include needs lineage, as in candidates.include
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x, x2], joint: {include: ['block:a']}}"));
+    }
+
+    @Test
+    public void testJointGroupedWithAUnitConstantColumn() {
+        // grouped units of four: x drives the choice, x2 is a large unit-level value (constant within each unit, so it
+        // carries no within-unit information): its Fisher block is exactly 0, it is never selected nor clustered
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x, x2], transforms: [raw], placebo: {noise: 2, seed: 1}, joint: {select: 2, directions: 1}}");
+        final java.util.Random random = new java.util.Random(7);
+        final GroupScorer scorer = new GroupScorer(spec);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (int u = 0; u < 200; u++) {
+            final double[] x = new double[4];
+            final double[] weights = new double[4];
+            double total = 0;
+            for (int i = 0; i < 4; i++) {
+                x[i] = random.nextGaussian();
+                weights[i] = Math.exp(1.5 * x[i]);
+                total += weights[i];
+            }
+            double draw = random.nextDouble() * total;
+            int winner = 3;
+            for (int i = 0; i < 4; i++) {
+                draw -= weights[i];
+                if (draw <= 0) {
+                    winner = i;
+                    break;
+                }
+            }
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 4; i++) rows.add(row("g" + u, i, i == winner ? 1 : 0, Double.NaN, x[i], 1e6 + u / 3d));
+            scorer.score(rows, "g" + u, acc);
+        }
+        final double[] e = acc.get(ScoreAccumulator.JOINT_KEY).getExtra();
+        final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(4);
+        Assertions.assertEquals(0d, e[at.h() + GroupScorer.packed(4, 1, 1)]);   // x2's Fisher information: exactly 0
+        Assertions.assertEquals(200d, e[at.used()]);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc);
+        final List<Map<String, Object>> steps = result.suggestions().stream().filter(s -> "select".equals(s.get("kind"))).toList();
+        Assertions.assertFalse(steps.isEmpty(), result.suggestions().toString());
+        Assertions.assertEquals("x", steps.get(0).get("candidate"));
+        Assertions.assertTrue(steps.stream().noneMatch(s -> "x2".equals(s.get("candidate"))), steps.toString());
+        Assertions.assertTrue(result.suggestions().stream().noneMatch(s -> "redundant".equals(s.get("kind"))), result.suggestions().toString());
+    }
+
+    @Test
+    public void testJointGaussianOffsetScaleAndInterceptInvariance() {
+        // gaussian rows with a baseline and a label on a large scale (residual sd about 100): the forward selection's
+        // first step is the marginal score test on the same rows, so its gain equals the raw record's est_gain (both
+        // divided by the residual variance). Shifting the baseline by a constant (a miscalibrated baseline) moves the
+        // mean residual only: the intercept is profiled out of S, H and M alike, so nothing reported changes.
+        final ScreenSpec spec = spec("{family: gaussian, label: y, baseline: b, candidates: [x, x2], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, directions: 1, select: 2}}");
+        Assertions.assertEquals(List.of("x", "x2"), spec.candidates);
+        final List<List<Map<String, Object>>> runs = new java.util.ArrayList<>();
+        ScreenReport.Result first = null;
+        for (final double shift : new double[]{0d, 30d}) {
+            final java.util.Random random = new java.util.Random(11);
+            final GroupScorer scorer = new GroupScorer(spec);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (int i = 0; i < 300; i++) {
+                final double x = random.nextGaussian(), x2 = random.nextGaussian(), base = 5 * random.nextGaussian();
+                final double y = base + 40 * x + 15 * x * x2 + 100 * random.nextGaussian();
+                final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, base + shift, 1, new double[]{x, x2});
+                scorer.score(List.of(r), r.getIdentity(), acc);
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, acc);
+            if (first == null) first = result;
+            runs.add(result.suggestions());
+        }
+        final Map<String, Object> step1 = first.suggestions().stream().filter(s -> "select".equals(s.get("kind"))).findFirst().orElseThrow();
+        final Map<String, Object> marginal = first.records().stream().filter(r -> step1.get("candidate").equals(r.get("candidate"))).findFirst().orElseThrow();
+        Assertions.assertEquals((Double) marginal.get("est_gain"), (Double) step1.get("confirmation_gain"), 1e-9 * (Double) marginal.get("est_gain"), step1.toString());
+        Assertions.assertEquals(first.summary().get("threshold"), step1.get("threshold"));
+        // no noise column: no null scale to report
+        final Map<String, Object> phd = first.suggestions().stream().filter(s -> "phd".equals(s.get("kind"))).findFirst().orElseThrow();
+        Assertions.assertNull(phd.get("consistency"), phd.toString());
+        // the baseline shift changes nothing
+        Assertions.assertEquals(runs.get(0).size(), runs.get(1).size());
+        for (int i = 0; i < runs.get(0).size(); i++) {
+            final Map<String, Object> a = runs.get(0).get(i), b = runs.get(1).get(i);
+            Assertions.assertEquals(a.get("kind"), b.get("kind"));
+            Assertions.assertEquals(a.get("candidate"), b.get("candidate"));
+            Assertions.assertEquals((Double) a.get("chi2"), (Double) b.get("chi2"), 1e-6 * Math.abs((Double) a.get("chi2")) + 1e-12, a + " / " + b);
+        }
     }
 
     @Test
@@ -868,7 +1145,9 @@ public class GroupScorerTest {
         // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
         // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.
         Double gainOfX = null;
-        for (final String pass : new String[]{"", ", pass: {minGain: 0.001}", ", pass: {minGain: 10}"}) {
+        final Double[] floors = {null, 0.001, 10d};
+        for (final Double floor : floors) {
+            final String pass = floor == null ? "" : ", pass: {minGain: " + floor + "}";
             final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], placebo: {noise: 0}" + pass + "}");
             final GroupScorer scorer = new GroupScorer(spec);
             final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
@@ -885,19 +1164,23 @@ public class GroupScorerTest {
             final double threshold = (Double) xRaw.get("threshold");
             Assertions.assertTrue(gain > 0.001 && gain > threshold && gain < 10, pass + " gain=" + gain);
             Assertions.assertEquals(threshold, result.summary().get("threshold"), pass);
-            final boolean expected = !pass.contains("10");
+            final boolean expected = floor == null || floor < gain;
             Assertions.assertEquals(expected, xRaw.get("passed"), pass);
             Assertions.assertEquals(expected ? List.of("x") : List.of(), result.summary().get("passedColumns"), pass);
             Assertions.assertEquals(expected ? 1L : 0L, result.summary().get("nPassed"), pass);
             final String rule = (String) result.summary().get("passRule");
-            Assertions.assertEquals(pass.isEmpty() ? "est_gain > threshold" : "est_gain > max(threshold, " + (pass.contains("10") ? "10.0" : "0.001") + ")", rule);
-            Assertions.assertEquals(pass.isEmpty() ? null : pass.contains("10") ? 10d : 0.001, result.summary().get("minGain"), pass);
+            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > max(threshold, " + floor + ")", rule);
+            Assertions.assertEquals(floor, result.summary().get("minGain"), pass);
             final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
             Assertions.assertEquals(rule, selection.get("passRule").getAsString());
-            Assertions.assertEquals(pass.isEmpty(), selection.get("minGain").isJsonNull(), pass);
+            Assertions.assertEquals(floor == null, selection.get("minGain").isJsonNull(), pass);
             Assertions.assertEquals(expected ? 1 : 0, selection.getAsJsonArray("passed").size(), pass);
-            Assertions.assertEquals(!pass.isEmpty(), ScreenReport.describe(spec).contains("pass=" + rule), pass);
+            Assertions.assertEquals(floor != null, ScreenReport.describe(spec).contains("pass=" + rule), pass);
         }
+        // with conditioning the floor applies to partial_gain, and it composes with the period agreement
+        final ScreenSpec both = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], periods: year, pass: {minPeriodsAgree: 0.66, minGain: 1e-5}}");
+        Assertions.assertEquals("partial_gain > max(threshold, 1.0E-5) and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
+        Assertions.assertEquals("est_gain > max(threshold, 1.0E-5) and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
         // a floor never lowers the cut below the placebo threshold
         final ScreenSpec low = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 1e-12}}");
         Assertions.assertEquals(0.5, low.gainCut(0.5));
@@ -905,6 +1188,12 @@ public class GroupScorerTest {
         Assertions.assertTrue(Double.isNaN(low.gainCut(Double.NaN)));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: -1}}"));
+        // a declared but malformed floor is an error, never silently no floor
+        for (final String bad : new String[]{"[1e-5]", "{value: 1e-5}", "abc", "true"}) {
+            final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: " + bad + "}}"), bad);
+            Assertions.assertTrue(e.getMessage().contains("pass.minGain"), bad + ": " + e.getMessage());
+        }
     }
 
     @Test
