@@ -239,6 +239,9 @@ public class GroupScorerTest {
         Assertions.assertEquals(Boolean.TRUE, x2Raw.get("degenerate"));
         Assertions.assertEquals(Boolean.FALSE, x2Raw.get("passed"));
         Assertions.assertEquals(0d, x2Raw.get("est_gain"));
+        // the placeholder gain of a degenerate test carries no excess (not a negative df / 2N)
+        Assertions.assertNull(x2Raw.get("excess_gain"));
+        Assertions.assertEquals((Double) xRaw.get("est_gain") - 1d / 40, (Double) xRaw.get("excess_gain"), 1e-12);
         Assertions.assertEquals(List.of("x"), result.summary().get("passedColumns"));
         Assertions.assertEquals(2L, result.summary().get("nPassed"));
         Assertions.assertEquals(20L, result.summary().get("nUnits"));
@@ -438,6 +441,10 @@ public class GroupScorerTest {
         Assertions.assertEquals("x", selection.getAsJsonArray("passed").get(0).getAsJsonObject().getAsJsonObject("bins").get("candidate").getAsString());
         Assertions.assertTrue(Math.abs((Double) raw.get("z")) < 2, "raw z " + raw.get("z"));
         Assertions.assertEquals(3L, binned.get("df"));
+        // the excess gain subtracts the record's own df / 2N: 3 / 80 for the block, 1 / 80 for raw
+        Assertions.assertEquals((Double) binned.get("est_gain") - 3d / 80, (Double) binned.get("excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) raw.get("est_gain") - 1d / 80, (Double) raw.get("excess_gain"), 1e-12);
+        Assertions.assertNull(binned.get("partial_excess_gain"));
         Assertions.assertNull(binned.get("z"));
         Assertions.assertNull(binned.get("S"));
         Assertions.assertTrue((Double) binned.get("chi2") > 8, "binned chi2 " + binned.get("chi2"));   // bins 0 / 6 / 5 / 0 of 10 positives
@@ -1168,6 +1175,14 @@ public class GroupScorerTest {
         Assertions.assertTrue(js.hRaw()[0][0] > 0 && js.hRaw()[1][1] > js.h()[1][1]);
 
         final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state, new ScreenReport.Bins(groups::binRepresentatives, groups::binEdges, groups::gridEdges));
+        // under conditioning the block's partial excess subtracts the partial block's df (600 rows as units)
+        final Map<String, Object> bBinned = result.records().stream()
+                .filter(r -> "b".equals(r.get("candidate")) && ScreenSpec.TRANSFORM_BINNED.equals(r.get("transform"))).findFirst().orElseThrow();
+        Assertions.assertFalse((Boolean) bBinned.get("degenerate"));
+        Assertions.assertEquals((Double) bBinned.get("partial_gain") - ((Long) bBinned.get("partial_df")).doubleValue() / 1200,
+                (Double) bBinned.get("partial_excess_gain"), 1e-12);
+        Assertions.assertEquals((Double) bBinned.get("est_gain") - ((Long) bBinned.get("df")).doubleValue() / 1200,
+                (Double) bBinned.get("excess_gain"), 1e-12);
         final Map<String, Map<String, Object>> select = new HashMap<>();
         final List<Map<String, Object>> shapes = new ArrayList<>();
         for (final Map<String, Object> sg : result.suggestions()) {

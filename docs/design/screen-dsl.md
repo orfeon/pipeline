@@ -289,7 +289,9 @@ seeded-hash dilution.
   small to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the
   scale a trained model's excess log score is reported on, so it means the same thing whatever N. With
   `weight` (§3.4) S and H carry the weights while the gain divides by the unit count, so the floor reads the
-  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected). Both rules tighten
+  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected); the excess's
+  null term df / 2N is the unit-weight one (a null test's χ² scales as Σw² / Σw), so the weights are to be
+  normalised to mean 1 — a `minGain` scaled by the mean weight instead leaves that term unscaled. Both rules tighten
   the placebo cut and are not themselves placebo-calibrated; the record's `threshold` stays the placebo cut,
   and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`). The
   same floor holds the heterogeneity flag (§7.1, the het df), the suggestions' confirmation gains (§9.4, df = 1
@@ -466,11 +468,12 @@ declares — read it for the pairs that passed.
 ### 9.1 Scoring records (the default output)
 
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
-(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; the block test's active bins − 1),
+(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `excess_gain` (gain − df / 2N, §7; null when
+degenerate), `df` (1; the block test's active bins − 1),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
 (array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `het_chi2 / df /
 pValue / gain / levels` and `level_z` (array of {level, z, S, H, n}; §7.1, null without a modifier), `r2_F`,
-`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
+`partial_S / H / chi2 / z / gain / pValue`, `partial_excess_gain`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
 gain / levels`, `partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without
 conditioning), `threshold` (the record's kind's cut), `passed`, `leakSuspect`, `het_passed`, `placebo`,
 `degenerate`. A block record leaves the signed fields null (`S`, `H`,
@@ -539,8 +542,9 @@ while `confirmation_chi2 / share / gain / pValue` report the chosen contrast on 
 gain over the half's unit mass, in proportion to its weight). `share` and `chi2` are the discovery values.
 
 **Calibration.** Placebo columns go through the same search, so each kind takes the placebo quantile of the
-placebo columns' confirmation gains as its cut (`threshold`, lifted to `pass.minGain`; the theoretical χ²(1)
-quantile / 2N of the half without placebos), and `passed` compares the confirmation gain with it.
+placebo columns' confirmation gains as its cut (`threshold`; the theoretical χ²(1) quantile / 2N of the half
+without placebos), and `passed` compares the confirmation gain with it — under `pass.minGain` its excess (less
+1 / 2N of the half, §7) must clear the floor too.
 
 **Hypotheses, not decisions.** The score test is local to β = 0 and a shape with a large effect is
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`

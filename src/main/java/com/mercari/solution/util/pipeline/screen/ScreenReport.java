@@ -2144,11 +2144,13 @@ public final class ScreenReport {
             final long[] agreement = effectiveAgree.get(i);
             final double kindThreshold = thresholds.get(ScreenSpec.kind((String) r.get("transform")));
             // the degrees of freedom of the marginal and the effective test (a block's partial df may be fewer)
-            final double marginalDf = r.get("df") == null ? 1d : ((Long) r.get("df")).doubleValue();
+            final double marginalDf = ((Long) r.get("df")).doubleValue();
             final double effectiveDf = conditioned && r.get("partial_df") != null ? ((Long) r.get("partial_df")).doubleValue() : marginalDf;
             final Double estGain = (Double) r.get("est_gain"), partialGain = (Double) r.get("partial_gain");
-            r.put("excess_gain", estGain == null ? null : ScreenSpec.excessGain(estGain, marginalDf, nUnits));
-            r.put("partial_excess_gain", partialGain == null ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
+            // a degenerate test's gain is a placeholder 0: no excess (not a negative df / 2N) is read off it
+            final boolean marginalDegenerate = (Boolean) r.get("degenerate");
+            r.put("excess_gain", estGain == null || marginalDegenerate ? null : ScreenSpec.excessGain(estGain, marginalDf, nUnits));
+            r.put("partial_excess_gain", partialGain == null || (conditioned && st.degenerate) ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
             final boolean passed = !placebo && !st.degenerate && spec.passesGain(st.estGain, effectiveDf, nUnits, kindThreshold)
                     && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
             // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned);
@@ -2171,7 +2173,8 @@ public final class ScreenReport {
                 }
             }
             if (leak && !placebo) nLeak++;
-            // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
+            // the heterogeneity test's own flag (never folded into passed): its kind's cut, and its excess over het df / 2N
+            // above the floor
             final Het het = effectiveHet.get(i);
             Boolean hetPassed = null;
             if (het != null) {

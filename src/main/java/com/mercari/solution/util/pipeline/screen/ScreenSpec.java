@@ -519,7 +519,10 @@ public final class ScreenSpec implements Serializable {
      * The excess of a gain over its null expectation: gain − df / (2N), the average log-likelihood a null test of df
      * degrees of freedom shows (E[χ²] = df, over 2N). The floor {@code pass.minGain} reads it, so a block of df = 10
      * and a df = 1 test are held to the same practical bar (DSL doc §7): on the gain itself the block would carry
-     * df / 2N of null gain the floor cannot tell from a real one.
+     * df / 2N of null gain the floor cannot tell from a real one. The null term is the unit-weight one: under
+     * {@code weight} a null test's χ² scales with the weights too (E[χ²] ≈ df · Σw² / Σw), so the excess holds for
+     * weights normalised to mean 1 (and of a small spread), not for a {@code minGain} scaled by the mean weight (DSL
+     * doc §7).
      */
     public static double excessGain(final double gain, final double df, final double nUnits) {
         return nUnits > 0 ? gain - df / (2 * nUnits) : gain;
@@ -530,7 +533,8 @@ public final class ScreenSpec implements Serializable {
      * ({@link #excessGain}) above the floor. A NaN threshold (no scorable unit) or gain never passes.
      */
     public boolean passesGain(final double gain, final double df, final double nUnits, final double threshold) {
-        if (Double.isNaN(threshold) || !(gain > threshold)) return false;
+        // a NaN on either side fails the comparison
+        if (!(gain > threshold)) return false;
         return minGain == null || excessGain(gain, df, nUnits) > minGain;
     }
 
