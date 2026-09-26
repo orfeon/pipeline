@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.glm;
 
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
+import org.apache.beam.sdk.coders.DoubleCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CoderRegistry;
@@ -28,6 +29,8 @@ public final class SketchAccumulator implements Serializable {
     public static final int K = 400;
 
     private transient KllDoublesSketch sketch;
+    /** the running sum of the values fed (the mean is exact where the quantiles are approximate) */
+    private double sum;
     /**
      * The sketch's sorted view, built once on the first read and immutable: a sketch shared through a side input
      * is read from several bundles at once, and the sketch's own lazily cached view must not be built twice
@@ -55,6 +58,7 @@ public final class SketchAccumulator implements Serializable {
     public void update(final double v) {
         if (Double.isFinite(v)) {
             sketch.update(v);
+            sum += v;
             view = null;
         }
     }
@@ -86,6 +90,11 @@ public final class SketchAccumulator implements Serializable {
     /** The number of values fed in. */
     public long count() {
         return sketch.getN();
+    }
+
+    /** The mean of the values fed in (exact, from the running sum); NaN on an empty sketch. */
+    public double mean() {
+        return sketch.isEmpty() ? Double.NaN : sum / sketch.getN();
     }
 
     /**
@@ -135,6 +144,7 @@ public final class SketchAccumulator implements Serializable {
         } else {
             sketch.merge(other.sketch);
         }
+        sum += other.sum;
         view = null;
         return this;
     }
@@ -157,15 +167,19 @@ public final class SketchAccumulator implements Serializable {
 
     private static class SketchCoder extends AtomicCoder<SketchAccumulator> {
         private static final ByteArrayCoder BYTES = ByteArrayCoder.of();
+        private static final DoubleCoder DOUBLE = DoubleCoder.of();
 
         @Override
         public void encode(final SketchAccumulator value, final OutputStream out) throws CoderException, IOException {
             BYTES.encode(value.sketch.toByteArray(), out);
+            DOUBLE.encode(value.sum, out);
         }
 
         @Override
         public SketchAccumulator decode(final InputStream in) throws CoderException, IOException {
-            return new SketchAccumulator(KllDoublesSketch.heapify(Memory.wrap(BYTES.decode(in))));
+            final SketchAccumulator s = new SketchAccumulator(KllDoublesSketch.heapify(Memory.wrap(BYTES.decode(in))));
+            s.sum = DOUBLE.decode(in);
+            return s;
         }
     }
 

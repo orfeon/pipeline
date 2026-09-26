@@ -543,12 +543,16 @@ counts the candidates' ones (`nSuggestions`, placebo records excluded as in `nSc
 key, the candidates' *joint* sums over the joint columns — the candidates matching `include` (every
 candidate by default, at most `maxColumns` = 200) and the first `noise` (default 10) noise placebo columns
 for the null scale: the score vector S = Σ w x̃ r, the m × m Fisher matrix H = Σ w v x̃x̃' and the pHd matrix
-M = Σ w r x̃x̃' (row families: raw moments centred at report time, a row with a missing joint value left out
-so the sums share one row set, r the residual with the intercept profiled out as in S — r − v Σ w r / Σ w v,
+M = Σ w r x̃x̃' (row families: raw moments shifted by the joint columns' window means from the sketch pre-pass
+and centred at report time, r the residual with the intercept profiled out as in S — r − v Σ w r / Σ w v,
 so a miscalibrated baseline does not add its mean residual times H — gaussian S, H and M over σ² as in the
-marginal test, a column the raw moments cannot centre dropped as degenerate; grouped: centred by p̂ within the
-unit, the Fisher block diag(p) − pp', a unit with a missing joint value left out). O(m²) state and per-row
-work, hence the explicit opt-in and the bound.
+marginal test, a column the raw moments cannot centre dropped as degenerate; grouped: centred by p̂ over the
+unit's observed rows, the Fisher block diag(p) − pp'). A missing joint value follows the marginal test's rule
+(§4): it is 0 after centring — the unit's p-weighted mean (grouped) or the window mean (row families), no
+information — so the sums keep one row set (positive definite) and a unit with a missing value is not lost;
+only a row family under a merging window, which carries no sketch view, leaves such a row out. The summary
+carries the row set as `nJointUnits` / `nJointFilled` / `nJointDropped`, with a note when the filled share
+exceeds 10%. O(m²) state and per-row work, hence the explicit opt-in and the bound.
 The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:
 
 | kind | read from | record |

@@ -117,6 +117,11 @@ public final class WindowQuantiles implements Serializable {
         return c < sketches.length ? sketches[c].rank(v) : Double.NaN;
     }
 
+    /** The window mean of column {@code c} (exact, from the sketch's running sum; NaN without a value). */
+    public double mean(final int c) {
+        return c < sketches.length ? sketches[c].mean() : Double.NaN;
+    }
+
     /** The window median of column {@code c} (the type-7 median below k values; NaN without a value). */
     public double median(final int c) {
         return c < sketches.length ? sketches[c].median() : Double.NaN;

@@ -2019,6 +2019,30 @@ public final class ScreenReport {
         summary.put("conditioningGain", Double.isNaN(gain) ? null : gain);
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
         summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
+        // the joint sums' row set (DSL doc §9.5): the units added, those added with a missing joint value filled, and
+        // the rows a row family left out for want of a window mean (a merging window)
+        Long nJointUnits = null, nJointFilled = null, nJointDropped = null;
+        if (spec.jointOn) {
+            final ScoreAccumulator jointAcc = accumulators.get(ScoreAccumulator.JOINT_KEY);
+            final GroupScorer.JointLayout at = GroupScorer.JointLayout.of(spec.jointColumnCount());
+            final double[] e = jointAcc == null ? null : jointAcc.getExtra();
+            final boolean present = e != null && e.length == at.length();
+            nJointUnits = present ? (long) e[at.used()] : 0L;
+            nJointFilled = present ? (long) e[at.filled()] : 0L;
+            nJointDropped = present ? (long) e[at.dropped()] : 0L;
+            if (nJointUnits > 0 && nJointFilled > 0.1 * nJointUnits) {
+                notes.add("joint: " + nJointFilled + " of " + nJointUnits + " " + (spec.isGroupedMultinomial() ? "units" : "rows") + " ("
+                        + fmt(100d * nJointFilled / nJointUnits) + "%) had a missing joint value filled with "
+                        + (spec.isGroupedMultinomial() ? "the unit's p-weighted mean" : "the window mean")
+                        + " (no information after centring); the several-candidate suggestions read those fills");
+            }
+            if (nJointDropped > 0) {
+                notes.add("joint: " + nJointDropped + " rows with a missing joint value were left out of the joint sums (no window mean to fill with: the sketch view does not carry over a merging window)");
+            }
+        }
+        summary.put("nJointUnits", nJointUnits);
+        summary.put("nJointFilled", nJointFilled);
+        summary.put("nJointDropped", nJointDropped);
         summary.put("notes", notes);
         final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, nUnits, bins));
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
@@ -2314,6 +2338,9 @@ public final class ScreenReport {
                 .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("nSuggestions", Schema.FieldType.INT64)
                 .withField("nJointColumns", Schema.FieldType.INT64)
+                .withField("nJointUnits", Schema.FieldType.INT64)
+                .withField("nJointFilled", Schema.FieldType.INT64)
+                .withField("nJointDropped", Schema.FieldType.INT64)
                 .withField("nCategoricals", Schema.FieldType.INT64)
                 .withField("nPairs", Schema.FieldType.INT64)
                 .withField("nPairsPassed", Schema.FieldType.INT64)

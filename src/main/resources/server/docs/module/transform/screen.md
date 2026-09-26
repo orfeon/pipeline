@@ -173,8 +173,14 @@ scale) — and writes, to the same `suggestions` output, what a univariate ranki
 
 These are one-step, in-sample estimates at the null point — hypotheses for a feature spec, checked by the
 next screen. The joint sums cost O(m²) per row and `m(m + 1)` doubles of state: keep `joint.include` to the
-candidates worth combining (at most `maxColumns`, default 200). A row (grouped: a unit) with a missing value
-in any joint column is left out of the joint sums.
+candidates worth combining (at most `maxColumns`, default 200). A missing joint value follows the marginal
+test's rule — no information: the grouped family centres each column by the unit's p-weighted mean over its
+observed rows (a missing value is 0 after centring), a row family shifts each column by its window mean from
+the sketch pre-pass (a missing value is 0 after the shift) — so a unit with a missing value stays in the joint
+sums. The summary counts the joint's row set: `nJointUnits` (units — rows for a row family — in the sums),
+`nJointFilled` (of them, those with a missing joint value filled; a note reports a share above 10%) and
+`nJointDropped` (rows a row family had to leave out for want of a window mean: only under a merging window,
+which carries no sketch view).
 
 ### Categorical candidates
 
@@ -409,7 +415,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions` / `joint` / `pairs` / `categorical`), `nJointColumns` (null without `joint`), `nCategoricals` (null without `categorical`),
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier), `nPairs` / `nPairsPassed` / `passedPairs` (the declared pairs and the passing ones, `a*b`; null without `pairs`), `nSuggestions` (null without `suggestions` / `joint` / `pairs` / `categorical`), `nJointColumns` / `nJointUnits` / `nJointFilled` / `nJointDropped` (the joint columns and the joint sums' row set, see [Several candidates](#several-candidates-joint); null without `joint`), `nCategoricals` (null without `categorical`),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
