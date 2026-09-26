@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement (of the partial test too, and pass.minPeriodsAgree can require it), a practical gain floor (pass.minGain), a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -85,6 +85,16 @@ statistics); independent rows support `raw` only in this version.
   1) on top of the placebo threshold; a candidate without a usable period never passes. It is a stability
   filter on top of the calibrated cut, not calibrated by the placebo columns itself; the rule as applied is
   reported as `passRule` in the summary and the pass list.
+- `pass.minGain` is a practical floor on the gain: `passed` then requires the effective test's gain above
+  `max(threshold, minGain)`. The placebo threshold answers "is it distinguishable from noise" and shrinks with
+  the data (the χ²(1) quantile over 2N: ≈ 6.6 / 2N ≈ 3.3 / N on the gain scale at q99); on a large window it lets
+  through columns whose gain is real but too small to matter for training. `minGain` is in the unit of
+  `est_gain` — the average log-likelihood improvement per unit, the scale a trained model's excess log score is
+  reported on — so the same value means the same thing whatever N. With `weight` the gain is weight-scaled (the
+  weights multiply S and H, the gain divides by the unit count), so the floor is compared with the mean weight
+  times the per-unit gain: normalise the weights to mean 1, or scale `minGain` by the mean weight. The record's
+  `threshold` stays the placebo cut (the calibration check); `passRule` names the floor
+  (`est_gain > max(threshold, 1.0E-5)`).
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
   summary). Screening the test period is the classic way to leak the evaluation into the selection.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
@@ -193,7 +203,7 @@ is an assembly error.
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
-| pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. Default: the placebo threshold alone. |
+| pass | optional | Object | `minPeriodsAgree`: the usable period buckets of the effective test (partial with conditioning, else marginal) whose sign must agree with its overall sign for `passed` — a share in (0, 1] of `n_periods` or a count above 1; needs `periods`. `minGain`: a positive floor on the effective test's gain (`est_gain` / `partial_gain`, the average log-likelihood improvement per unit): `passed` needs the gain above `max(threshold, minGain)`. Default: the placebo threshold alone. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol, missing}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit; `missing` (`mean` (default) \| `groupMean`) how a missing conditioning value enters the fit — the window mean, or the unit's baseline-weighted mean of its observed values (`groupedMultinomial` only). Needs the global window. |
 | output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
 
@@ -222,7 +232,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
 | threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
-| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
+| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning; `max(threshold, minGain)` under `pass.minGain`), and the period agreement under `pass.minPeriodsAgree`; candidate columns only |
 | leakSuspect | BOOL | \|z\| > `flags.leakZ` (\|partial_z\| under `flags.leakZ.on: partial`) |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
@@ -230,7 +240,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `threshold`, `thresholdTheoretical`,
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -385,7 +395,7 @@ transforms:
   "version": 1,
   "columns": ["f_extra", "f_recent_bids"],
   "test": "partial",
-  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66,
+  "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66, "minGain": null,
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
   "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
@@ -429,6 +439,10 @@ transforms:
   rule such as "passes and agrees in two thirds of the years" is `pass: {minPeriodsAgree: 0.66}` (not 0.67: the
   share is compared as `agree ≥ share × n_periods`, and 2 of 3 is 0.667 < 0.67), so the pass list
   applies it too.
+- On a large window the placebo cut alone admits columns whose gain is real but negligible (the cut shrinks
+  as 1 / N). Put a practical floor under it with `pass: {minGain: 1e-5}` — in the unit of `est_gain`, so
+  compare it with the gain a model comparison would have to show to be worth a retrain; the pass list
+  records the floor (`minGain`) and the rule (`passRule`).
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome. When strong legitimate candidates trip the flag, read it on
   the partial z (`flags: {leakZ: {z: 20, on: partial}}`): a leak survives the conditioning, a re-summary of what

@@ -194,8 +194,16 @@ Default: all three with `group`, `raw` without; an explicit list is never widene
   partial test is sliced the same way (§8.2: `partial_period_z`, `partial_periods_agree`, `partial_n_periods`),
   since the marginal and the partial period signs can disagree (a suppressor).
 - **Pass rule.** `pass: {minPeriodsAgree}` adds the period agreement of the effective test to the cut: a share
-  (≤ 1) of its usable periods or a count (> 1); no usable period never passes. It tightens the placebo cut and
-  is not itself placebo-calibrated; the summary and the pass list report the rule as applied (`passRule`).
+  (≤ 1) of its usable periods or a count (> 1); no usable period never passes. `pass: {minGain}` puts a
+  practical floor under the cut: `passed` needs the effective gain above `max(threshold, minGain)`. The placebo
+  threshold is a significance cut — roughly constant on the χ² scale (≈ 6.6, the χ²(1) quantile at q99) and so
+  ≈ 6.6 / (2N) ≈ 3.3 / N on the gain scale — and on a large window it admits columns whose gain is real but too
+  small to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the
+  scale a trained model's excess log score is reported on, so it means the same thing whatever N. With
+  `weight` (§3.4) S and H carry the weights while the gain divides by the unit count, so the floor reads the
+  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected). Both rules tighten
+  the placebo cut and are not themselves placebo-calibrated; the record's `threshold` stays the placebo cut,
+  and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`).
 - **Time window.** Rows after `time.to` or before `time.from` are not screened and are counted
   (`nRowsTimeFiltered`). Screening the evaluation period leaks the evaluation into the selection.
 - **Leak flag.** `flags.leakZ` marks a candidate with |z| above it as `leakSuspect` — a flag, never a
@@ -209,7 +217,7 @@ Default: all three with `group`, `raw` without; an explicit list is never widene
   its own over F, and the bound would move with whatever F holds. Without a partial test (no accepted fit, or
   a gaussian fit without residual variance) the flag reads the marginal z and a note says so.
 - **q-values.** Benjamini–Hochberg over the candidate records' p-values (of the effective test, §8.5) gives
-  the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`). Making `passed`
+  the false-discovery view; `passed` itself is the placebo cut (`est_gain > threshold`, tightened by `pass`). Making `passed`
   follow the q-value is an extension position (§12).
 
 ## 8. Conditioning: the partial test
@@ -301,7 +309,7 @@ proposal that introduced the transform so its reference implementation compares 
 ### 9.2 Summary (`<name>.summary`)
 
 One record per run (per window under a windowing strategy): the spec's roles, `test`, `passRule` /
-`minPeriodsAgree`, the thresholds and the quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
+`minPeriodsAgree` / `minGain`, the thresholds and the quantile, the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
 transform, best gain first), the conditioning fields / size / iterations / rejected steps / convergence /
@@ -310,8 +318,8 @@ gain / l2, and `notes` (role defaults applied, columns excluded by lineage, fall
 ### 9.3 The pass list (`output.selection`)
 
 One JSON document written at the end of the run, in the shape the feature transform's `output.include`
-reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule`, the leak
-flag (`leakZ` / `leakOn`), family /
+reads (`{columns: [...]}` first) plus the provenance a consumer needs to trust it: `test`, `passRule` (with
+`minPeriodsAgree` / `minGain`), the leak flag (`leakZ` / `leakOn`), family /
 method, thresholds, quantile, counts, the time window, `planHash` / `outputHash` of the upstream feature manifest
 (when `candidates.manifest` was given), `screenHash` (the SHA-256 of the canonical parameters without the
 file locations — the same canonicalisation and width as the feature plan hash), the conditioning fields,
@@ -331,7 +339,8 @@ valid for the family; `groupedMultinomial` without `group`; `rank` / `absdev` / 
 without `group`; a role or candidate field missing from the input schema, or a non-numeric shuffle
 reference; a lineage selector without lineage; no candidate left; a conditioning pattern matching nothing
 or naming a role / the baseline, or more than 500 columns; `time.from` / `time.to` without `time.field`; an
-empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a triggered input (every Combine would fire per pane); a non-global window with
+empty `conditioning`; `pass.minPeriodsAgree` without `periods`, not positive, or a non-integer above 1; a `pass.minGain` that is
+not a positive finite number; a triggered input (every Combine would fire per pane); a non-global window with
 conditioning or `output.selection`; an unreadable or malformed manifest; streaming input.
 
 Row validity: a null / non-finite label, a null group, a negative poisson label, a null / non-finite /
@@ -373,4 +382,222 @@ negative weight → `nRowsInvalid`; a null time → the failure output. Unit ski
   (the profile sink's `KllDoublesSketch`); the grouped transforms stay exact.
 - **Windowed marginal screen** for sliding-window drift monitoring: the marginal path is one Combine and
   could run under a trigger; conditioning stays batch.
-- **Declared interaction probes** (`cross:<field>` transform variants), bounded by declaration only.
+- **Declared interaction probes** (`cross:<field>` transform variants), bounded by declaration only; the
+  stratified form in §12.1 generalises the single product column.
+- **In-screen expansion** of non-linear bases and interactions (§12.1).
+- **Pruning between passes** of candidates that cannot reach the practical floor (§12.2).
+- **Derivation suggestions**: which transform or combination of the candidates to build next (§12.3).
+
+§12.4 orders these positions into steps. The three sections below are the design positions as reviewed:
+what the proposal keeps, and where the review changed it (marked *review*).
+
+### 12.1 In-screen expansion
+
+Every statistic is a function of sums, so a basis expansion can live inside the accumulator instead of
+being materialised upstream: the cost moves from rows × expanded columns through the feature stages, storage
+and shuffles (each expanded column then a separate df = 1 candidate) to the accumulator's state. The case it
+pays for is discovery — far more expansions than survivors: screen the expansion in place, and only the
+survivors are materialised upstream through the pass list. The positions below are ordered by value per
+cost.
+
+**Binned score test** (any univariate shape, at bin resolution). Per candidate and bin, accumulate S_b (the
+residual sum) and H_b (the Fisher weight sum). With the intercept profiled out as in §3.1, the row families
+give
+
+```
+chi2 = Σ S_b² / H_b − (Σ S_b)² / Σ H_b      (χ²(k − 1))
+```
+
+in O(k) state; the grouped family needs the k × k matrix H = Σ_g [diag(P_g) − P_g P_g'] (P_g,b the baseline
+share of bin b in unit g, the one-hot rows summing to 1 within the unit, so H has rank k − 1 and the test uses
+its pseudo-inverse). Missing is a bin of its own (informative missingness), not a zero.
+
+- *Edges — two kinds, declared* (*review*). Value bins need edges over the window: the KLL pre-pass above,
+  one pass shared by every candidate, for the grouped family too. The grouped family can also bin by the
+  within-unit `rank` (exact, no pre-pass), but that is a *position* bin — the unit's ordinal position, k
+  capped by the unit size (a unit of 5 rows fills 5 bins) — not a value bin, and the two answer different
+  questions (does the column's level matter / does its standing within the unit matter). `bins: {edges:
+  value | rank, k}` names which; the pass list records the edges (value) or the rank cut points (position) so
+  the feature transform reproduces the survivor.
+- *Categorical candidates* read natively: a level → (S, H) map instead of one-hot or target encoding upstream.
+  Exact up to a `maxLevels` cap, beyond it a deterministic seeded hash into buckets (collisions dilute, the
+  result stays reproducible); a top-K cut needs a prior counting pass. (*review*: the candidates are numeric
+  today — `ScreenRow` carries `double[]`, and the lineage's numeric-column rule selects them — so this is a
+  separate step after the binned test: Prepare, the coder and the candidate rule change, the statistic does
+  not.)
+- *Report-time shapes* from the same (S_b, H_b), no further pass: a trend on the bin index (≈ `rank`), the
+  best single cut point (a max-type statistic), the full k − 1 test. It subsumes `rank` / `absdev` and the
+  one-hot case of the block tests.
+
+**Heterogeneity across a modifier** (candidate × declared field). Per candidate and modifier level l,
+accumulate S_l and H_l (centred within the level). The total Σ S_l² / H_l (df k) splits into the common
+effect (Σ S_l)² / Σ H_l (df 1) and the heterogeneity Σ S_l² / H_l − (Σ S_l)² / Σ H_l (df k − 1); the latter
+catches a candidate whose effect flips sign across levels, invisible to the marginal test. State
+O(m · k). Modifiers: a declared categorical field, the `periods` buckets (their per-bucket S and H are
+already accumulated, so the time heterogeneity test is nearly free — and under conditioning the partial
+slices S⊥_p / H⊥_p of §8.2 are too, so the partial heterogeneity comes at the same price; *review*), or bins
+of the baseline itself (does the effect depend on the predicted level).
+
+**Pairwise products** among m candidates. The product z = x̃_i x̃_j is tested with the main effects as
+nuisance: the efficient score S_z − H_zm H_mm⁻¹ S_m with variance H_zz − H_zm H_mm⁻¹ H_mz, per pair from
+Σ r x_i x_j, Σ v x_i² x_j², Σ v x_i² x_j, Σ v x_i x_j² and the shared Σ v x_i x_j. Upstream materialisation of
+m(m − 1)/2 columns is not realistic, so this is the only practical route. *Where the sums are taken*
+(*review*): not at the baseline offset with the main effects fixed at 0 — that is the score test at a point
+that is the restricted maximum only when the baseline already absorbs both main effects, and an unmodelled
+main effect leaves curvature that the product picks up (the attenuation of §11 in a second form). The pair
+sums are taken at the fitted p̂ of a conditioning fit whose F contains the members (in practice the candidate
+set itself, k ≤ 500 — the fit exists, §8, and its cost does not depend on the number of pairs), and the
+orthogonalisation is against the two members only (the cross-terms with the other members of F are
+dropped: an approximation that keeps the state at ≈ 6 doubles per pair; the exact partial test of z against
+all of F would cost |F| per pair). State: m = 200 is ≈ 1.2e5 doubles, m = 2000 ≈ 1.2e7 — beyond an
+accumulator, so a `maxPairs` bound needs a pre-selection (a declared list, or a ranking pass). A pre-selection
+by the marginal ranking misses exactly the pure interactions whose members have no marginal effect; the pHd
+loadings below are the better ranking. Fourth-order raw moments lose digits faster than §3.5's second-order
+ones: the pair path standardises from a moments pass first (or runs on `rank`).
+
+**Principal Hessian directions** (pHd, Li 1992), a diagnostic. From M = Σ w r x̃ x̃' and the candidates'
+covariance Σ (the same pass, O(m²) state), the eigenvectors of Σ^(−1/2) M Σ^(−1/2) with large |eigenvalue| are
+the directions of residual curvature — quadratic effects and interactions in bulk, with the loadings naming
+the candidates involved (the eigensolver is the feature transform's `SymmetricEigen`). Reported, never a pass
+flag; placebo noise columns included in x give the null scale of the eigenvalues and should load ≈ 0. Li's
+condition (an elliptically distributed x) does not hold for binary or heavily skewed candidates, whose
+loadings are then biased — one more reason it stays a diagnostic.
+
+Shared requirements:
+
+- **Calibration** (*review*). Placebo columns go through the same expansion (a pair's placebo is candidate ×
+  noise, which keeps x_i's marginal). The §5 pooling over transform variants assumes one df = 1 statistic;
+  with df > 1 or max-type statistics the threshold is per statistic kind — pooled, the high-df kinds would
+  lift the cut for the rest. The record's `threshold` is already per record, so each record carries its
+  kind's threshold; the summary and the pass list carry a `thresholds` map by kind next to the current
+  scalar (which stays the df = 1 cut). Alternatively the comparison moves to the p-value scale; the placebo
+  quantile per kind is the direct extension of §5 and keeps `est_gain` comparable within a kind.
+- **Conditioning.** The partial test generalises to S⊥' H⊥⁺ S⊥ with a = F̃'Wφ per basis column: state
+  m · k · |F| for the binned test.
+- **Closing the loop.** A survivor enters the pass list only in a form the feature transform can reproduce (a
+  row `bin` with the reported edges, a `cross`, a level grouping); what has no such form (pHd directions, a
+  position bin without a `rank` op upstream) stays a diagnostic.
+- **Power.** A k-bin test spends k − 1 degrees of freedom on a linear effect that `raw` tests with one; the
+  expansions sit next to `raw`, not in its place.
+- **Still out of reach**: three-way and higher interactions, and arbitrary two-variable shapes beyond what the
+  pHd directions point at.
+
+### 12.2 Pruning between passes
+
+The expensive paths — grouped `rank` / `absdev` (a per-unit sort per candidate), the binned and categorical
+maps, the partial sums at m · k · |F|, the pairwise products at O(m²) — spend per-row work on candidates that
+are clearly hopeless. Pruning them is a question of where the decision can be taken and against what
+threshold.
+
+- **Between passes only.** A Combine has no global view mid-pass, and pruning on a bundle's partial sums
+  biases the result (a column weak in one bundle can be strong globally). A pass publishes an *active set*
+  as a singleton view and the next pass evaluates only its members: the graph and the pass count stay fixed,
+  only the work inside a pass depends on the data — the mechanism by which converged Newton passes evaluate
+  nothing (engine doc §4). A pruning pass costs one more read of the input, so it pays only where the
+  per-row, per-candidate arithmetic dominates the read; for `raw` marginals alone it does not. Whether it
+  does for the expensive paths is measured on Dataflow before the pass is built (*review*).
+- **Not against the significance threshold.** The placebo threshold is roughly constant on the χ² scale
+  (≈ 6.6 at q99 — pooling the variants does not move the quantile of their χ²(1) draws, §5) whatever N: a
+  candidate that just passes has a non-centrality near 6.6, so a 10 % sample sees about 0.7 —
+  indistinguishable from the null. Sampling cannot prune near a significance cut.
+- **Against the practical floor.** With `pass.minGain` (g_min, §7) the floor's non-centrality is 2N · g_min,
+  growing with N. Example: N = 1e7 rows, g_min = 1e-5 gives λ = 200 on the full window and 20 on a 10 %
+  sample; pruning at a sample χ² below 4.6 loses a candidate sitting exactly at the floor with probability
+  ≈ 1 % (√20 − 2.33 = 2.14, 2.14² = 4.6) and prunes ≈ 97 % of the null ones (P(χ²(1) < 4.6) ≈ 0.968), so the
+  heavy work falls to ≈ 13 % plus the survivors. Pruning pays most on the large data where the cost matters.
+  The floor is useful on its own and is built (§7); the pruning pass needs it.
+
+Positions:
+
+- **Exact pruning** (no error, near-free): degenerate columns, known after the moments pass; exact duplicate
+  columns, found by an order-independent fingerprint Σ hash(row identity, value) accumulated in O(m) and
+  computed once per duplicate set. The marginal statistic cannot prune the partial test: a suppressor has
+  marginal ≈ 0 and a high partial statistic (§8.3), and no bound links the two.
+- **Nested hash samples** (the main position). The sample is a seeded hash of the unit key (grouped) or the row
+  identity (independent rows), the placebo derivation, so it is reproducible. Stages f₁ < f₂ < 1 are nested:
+  a later stage adds only the increment rows to the earlier sums (successive halving without rework). A
+  candidate is pruned when its sample χ² is below the lower ε quantile of χ²(df, 2fN · g_min); ε is declared
+  and reported. Placebo columns are never pruned — they are the calibration. A pruned candidate keeps its
+  record with `pruned: true` and its sample statistics; it does not silently disappear. Its `qValue` is null
+  and it is not in the BH input, but the BH denominator counts every candidate, pruned ones included, so the
+  q-values of the survivors stay conservative (*review*: a sample p-value is not comparable with a full-window
+  one, so it cannot enter the ranking). Under conditioning the Newton passes do not depend on the candidates,
+  so a sample partial pass goes right before the full partial pass (+1 pass). A configuration shape:
+  `prune: {sample: [0.1], epsilon: 0.01}` with the floor read from `pass.minGain` (a `prune` without a floor is
+  an assembly error).
+- **Pairs through a sketch.** A marginal pre-selection misses the pure interactions (§12.1). A randomized range
+  finder instead accumulates M Ω = Σ r x̃ (x̃'Ω) with a random Ω (m × d) in O(m · d) per row; the candidates
+  loading on M's dominant directions form the set whose pairs the next pass computes in O(m'²). M holds
+  r · x_i x_j itself, so members without a marginal effect survive; an interaction spread thinly over many
+  candidates is what the approximation loses.
+
+### 12.3 Derivation suggestions
+
+Beyond ranking, the same sums say which transform or combination of the candidates to build next. The
+binned sums of §12.1 are the gradient / Hessian histograms of a boosting round on the baseline (the split gain
+G_L² / H_L + G_R² / H_R − G² / H is the binned score test restricted to one cut), so the screen already
+computes where the next tree over the baseline would cut. Read as estimates rather than a ranking, the sums
+give recipes in the feature transform's vocabulary.
+
+**One candidate — how to transform it** (from the binned sums, no further pass):
+
+| information | read from | suggestion |
+|---|---|---|
+| effect shape | S_b / H_b per bin, the one-step partial-residual curve; each shape (linear, log, sqrt, rank, step at c, hinge max(0, x − c), \|x − c\|) scored by the share of the full binned χ² it captures (the binned test bounds every bin-constant contrast, so the share lies in [0, 1] for the step / bin shapes; a smooth shape is evaluated at the bin representatives and its share is approximate) | "log(x) captures 95 %", "no effect above c → clip at c" |
+| cut points | the best split gain (a boosting round's first split) | a row `bin` with the edges, an indicator x > c |
+| missingness | the missing bin's S / H against the other bins | an `_isnull` indicator, or the fill value whose bin matches the missing effect |
+| monotonicity | sign consistency of the bin effects, the isotonic fit's share | a monotone constraint for a boosted model, with its direction |
+| categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
+
+**Several candidates — how to combine them:**
+
+| information | needs | suggestion |
+|---|---|---|
+| redundancy clusters | the candidates' Fisher matrix H (m × m) | near-duplicate sets: keep one, or average / project them |
+| complementary set | the same H and S | a report-time forward selection: the score test of candidate j given a selected set is closed-form at β = 0 (a one-step approximation of the partial test, not the fitted one), so no pass re-reads the data — a set that works together, which a univariate ranking cannot give |
+| linear composite | the same | β = H⁻¹S, the best linear combination to add to the baseline |
+| ratios and differences | the two-dimensional Newton direction of a pair, on log-transformed candidates | coefficients ≈ (+1, −1) → x_i / x_j; on the raw scale ≈ equal and opposite → x_i − x_j; suggested only when the pair's joint χ² clearly exceeds the better single one |
+| interaction shape | a two-dimensional histogram of a selected pair (O(k²), a depth-2 tree) | "x_j matters only when x_i > c" → a conditional feature or crossed bins |
+| segment / time dependence | the heterogeneity test (§12.1) | a cross with the modifier; an effect decaying over periods → a shorter window |
+| curvature directions | pHd (§12.1) | the projection v'x and its square |
+
+**Parameter families.** When the feature transform emits a family (a window of 7 / 30 / 90 days), gain
+against the parameter gives the best value and the point where the gain saturates. The lineage today
+(scope / block / derivedFrom / evidence / kind — `FeatureLineage.Entry`) and the manifest carry no op or
+arguments, so this needs the feature transform to expose them first; it is the last step of §12.4.
+
+Guards:
+
+- **Honest gain.** A shape chosen and scored on the same data is optimistic. A seeded hash of the unit splits
+  the window into a discovery and a confirmation half, each with its own sums (twice the state): the shape is
+  chosen on the first, its gain reported on the second.
+- **Calibration.** Placebo columns go through the same search, maxima included; thresholds are per suggestion
+  kind (§12.1).
+- **Output.** A `<name>.suggestions` output: kind, inputs, parameters (edges, cut, coefficients), a feature
+  DSL fragment, the captured share, the gain over the best single candidate, the confirmation-half gain.
+- **Hypotheses, not decisions.** The score test is local to β = 0; a composite with a large effect is
+  approximate. Suggestions are never applied automatically: they go into a feature spec and are checked by
+  the next screen or by the `evaluation` transform.
+- **Out of reach.** Features from information absent from the input; temporal aggregations beyond the
+  families the candidates already span.
+
+Scope (*review*): the one-candidate table is near-free once the binned sums exist and every row of it is a
+feature op that exists today (row `bin` with hand-written edges, `cross`, an expression); the
+several-candidate table needs the m × m H and is a larger surface for a less certain use — it follows, with
+the redundancy clusters first.
+
+### 12.4 Steps
+
+In value-per-cost order, each a PR on its own; the floor is built (§7).
+
+1. **KLL pre-pass** (the extension position above): independent-row `rank` / `absdev`, and the value-bin
+   edges of §12.1 for every family. One pass shared by every candidate, before the score pass.
+2. **Binned score test** with per-kind thresholds, the missing bin, `bins: {edges, k}`, and the
+   heterogeneity test (`by: periods | <field> | baselineBins`, marginal and partial).
+3. **One-candidate suggestions** with the discovery / confirmation split and the `<name>.suggestions` output.
+4. **Pruning** (nested hash samples, the active-set view) — after a Dataflow measurement shows the
+   per-row arithmetic of steps 1–2 dominating the read.
+5. **Pairs** on the conditioning fit's p̂, `maxPairs` with a declared list or the sketch; **pHd**; the
+   several-candidate suggestions.
+6. **Categorical candidates** read natively.
+7. **Parameter families**, once the feature lineage carries op and arguments.

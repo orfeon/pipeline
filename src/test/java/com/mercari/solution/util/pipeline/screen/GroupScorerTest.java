@@ -290,6 +290,62 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testPassRuleMinGain() {
+        // x separates the positive in every group: it clears the placebo cut by far. A floor below its gain keeps
+        // it, a floor above drops it; the record's threshold stays the placebo cut, the rule names the floor.
+        Double gainOfX = null;
+        final Double[] floors = {null, 0.001, 10d};
+        for (final Double floor : floors) {
+            final String pass = floor == null ? "" : ", pass: {minGain: " + floor + "}";
+            final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], transforms: [raw], placebo: {noise: 0}" + pass + "}");
+            final GroupScorer scorer = new GroupScorer(spec);
+            final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+            for (int g = 0; g < 30; g++) {
+                scorer.score(List.of(
+                        new ScreenRow("g" + g, "p", g, null, 1, Double.NaN, 1, new double[]{3}),
+                        new ScreenRow("g" + g, "q", g, null, 0, Double.NaN, 1, new double[]{1}),
+                        new ScreenRow("g" + g, "r", g, null, 0, Double.NaN, 1, new double[]{2})), "g" + g, acc);
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, acc);
+            final Map<String, Object> xRaw = result.records().get(0);
+            final double gain = (Double) xRaw.get("est_gain");
+            if (gainOfX == null) gainOfX = gain; else Assertions.assertEquals(gainOfX, gain, pass);
+            final double threshold = (Double) xRaw.get("threshold");
+            Assertions.assertTrue(gain > 0.001 && gain > threshold && gain < 10, pass + " gain=" + gain);
+            Assertions.assertEquals(threshold, result.summary().get("threshold"), pass);
+            final boolean expected = floor == null || floor < gain;
+            Assertions.assertEquals(expected, xRaw.get("passed"), pass);
+            Assertions.assertEquals(expected ? List.of("x") : List.of(), result.summary().get("passedColumns"), pass);
+            Assertions.assertEquals(expected ? 1L : 0L, result.summary().get("nPassed"), pass);
+            final String rule = (String) result.summary().get("passRule");
+            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > max(threshold, " + floor + ")", rule);
+            Assertions.assertEquals(floor, result.summary().get("minGain"), pass);
+            final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
+            Assertions.assertEquals(rule, selection.get("passRule").getAsString());
+            Assertions.assertEquals(floor == null, selection.get("minGain").isJsonNull(), pass);
+            Assertions.assertEquals(expected ? 1 : 0, selection.getAsJsonArray("passed").size(), pass);
+            Assertions.assertEquals(floor != null, ScreenReport.describe(spec).contains("pass=" + rule), pass);
+        }
+        // with conditioning the floor applies to partial_gain, and it composes with the period agreement
+        final ScreenSpec both = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], periods: year, pass: {minPeriodsAgree: 0.66, minGain: 1e-5}}");
+        Assertions.assertEquals("partial_gain > max(threshold, 1.0E-5) and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
+        Assertions.assertEquals("est_gain > max(threshold, 1.0E-5) and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
+        // a floor never lowers the cut below the placebo threshold
+        final ScreenSpec low = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 1e-12}}");
+        Assertions.assertEquals(0.5, low.gainCut(0.5));
+        Assertions.assertEquals(1e-12, low.gainCut(1e-13));
+        Assertions.assertTrue(Double.isNaN(low.gainCut(Double.NaN)));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: -1}}"));
+        // a declared but malformed floor is an error, never silently no floor
+        for (final String bad : new String[]{"[1e-5]", "{value: 1e-5}", "abc", "true"}) {
+            final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: " + bad + "}}"), bad);
+            Assertions.assertTrue(e.getMessage().contains("pass.minGain"), bad + ": " + e.getMessage());
+        }
+    }
+
+    @Test
     public void testLeakZForms() {
         final ScreenSpec number = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], flags: {leakZ: 20}}");
         Assertions.assertEquals(20d, number.leakZ);

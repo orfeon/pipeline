@@ -180,7 +180,11 @@ k = 100 (`(1 + k) × (1 + periods)` beyond). Nothing is data-dependent in size e
 
 Implemented: everything in the DSL document's §1–§11. Deferred, with the design position recorded in the DSL
 document §12: independent-row `rank` / `absdev` (a KLL pass), block tests (`df > 1`), `passRule: fdr`,
-precision weights, a windowed marginal screen under a trigger, declared interaction probes. Engine-side
+precision weights, a windowed marginal screen under a trigger, declared interaction probes, in-screen
+expansion (binned / categorical score tests, heterogeneity across a modifier, pairwise products on the
+conditioning fit's p̂, pHd), pruning between passes against the `pass.minGain` floor (the floor itself is
+built: `ScreenSpec.gainCut`, one comparison in the report), derivation suggestions (a `<name>.suggestions`
+output) — in the step order of DSL §12.4. Engine-side
 refactors judged larger than their value so far: a `Family` enum in place of the string switches, σ² carried
 in `FitState` instead of the partial map, a typed summary record instead of the map the selection reads.
 Outside the repository: the numerical acceptance against the proposer's reference implementation and the

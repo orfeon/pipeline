@@ -99,6 +99,12 @@ public final class ScreenSpec implements Serializable {
      * sign for {@code passed} — a share in (0, 1] or a count above 1 (null = the placebo cut alone)
      */
     public Double minPeriodsAgree;
+    /**
+     * pass.minGain: a practical floor on the effective test's gain (est_gain / partial_gain, the average
+     * log-likelihood improvement per unit): {@code passed} needs the gain above {@code max(threshold, minGain)}
+     * (null = the placebo threshold alone)
+     */
+    public Double minGain;
 
     /** output.selection: URI / path of the pass-list file (null = not written) */
     public String selectionUri;
@@ -227,6 +233,15 @@ public final class ScreenSpec implements Serializable {
         if (nPeriods <= 0) return false;
         final double required = minPeriodsAgree <= 1 ? minPeriodsAgree * nPeriods - 1e-9 : minPeriodsAgree;
         return agree >= required;
+    }
+
+    /**
+     * The cut the effective test's gain must exceed for {@code passed}: the placebo (or theoretical) threshold,
+     * lifted to {@code pass.minGain} when that is declared and higher. NaN stays NaN (no scorable unit).
+     */
+    public double gainCut(final double threshold) {
+        // Math.max propagates a NaN threshold
+        return minGain == null ? threshold : Math.max(threshold, minGain);
     }
 
 
@@ -438,8 +453,16 @@ public final class ScreenSpec implements Serializable {
                     else if (s.minPeriodsAgree > 1 && s.minPeriodsAgree != Math.rint(s.minPeriodsAgree)) errors.add("pass.minPeriodsAgree above 1 is a count of periods and must be an integer");
                     if (s.periodsBucket == null) errors.add("pass.minPeriodsAgree needs periods (the sign agreement is read per period bucket)");
                 }
+                // a declared but malformed floor (a list, an object, a non-numeric string) is an error, never silently no floor
+                final JsonElement minGain = o.get("minGain");
+                if (minGain != null && !minGain.isJsonNull()) {
+                    s.minGain = numeric(minGain);
+                    if (s.minGain == null || !(s.minGain > 0 && Double.isFinite(s.minGain))) {
+                        errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                    }
+                }
             } else {
-                errors.add("pass must be an object {minPeriodsAgree}");
+                errors.add("pass must be an object {minPeriodsAgree, minGain}");
             }
         }
         final JsonElement output = p.get("output");
