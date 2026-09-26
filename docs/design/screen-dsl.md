@@ -526,9 +526,11 @@ included), recipes in the feature transform's vocabulary:
 | `missing` | the missing bin against the rest (present when the missing bin holds information), and the value bin whose effect S_b / H_b is closest to the missing bin's | `direction`, `fill`, an `isnull` indicator or the fill value |
 | `monotone` | the H-weighted isotonic fit (pool-adjacent-violators) of the bin effects in the better direction, and the sign consistency of the adjacent effect differences | `name` (increasing / decreasing), `consistency`, `share` |
 
-Shapes use a representative value per bin — the bin's median, the sketch's quantile at (b + 0.5) / k, which an
-outer bin's outliers do not pull the way a midpoint of the edges would (the `missing` fill is that value too);
-position bins the position's centre, with cuts as rank fractions. A bin enters a contrast only with information:
+Shapes use a representative value per bin — the bin's median, the sketch's quantile at the middle of the bin's
+rank interval, which an outer bin's outliers do not pull the way a midpoint of the edges would and which stays
+inside its bin when tied values collapse edges (a quantile at (b + 0.5) / k would not: on a column that is 0 in
+90% of the rows every such quantile is 0); the `missing` fill is that value too; position bins the position's
+centre, with cuts as rank fractions. A bin (a categorical level) enters a contrast only with information:
 H_b above 1e-9 of the block's bins' total and a positive mass. The confirmation half is a difference of sums, so
 a bin it does not hold keeps a rounding residue of H (and of S) that a contrast isolating the bin would divide by;
 a lone row at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would do the same — either way a χ² of 10¹⁵ that the placebo quantile then
@@ -579,14 +581,19 @@ carries the row set as `nJointUnits` / `nJointFilled` / `nJointDropped`, with a 
 exceeds 10%. O(m²) state and per-row work, hence the explicit opt-in and the bound.
 
 **Partial basis.** Under conditioning the partial pass keeps the joint sums at the fitted p̂ as well — S, H,
-M and their cross terms with the standardised F̃: A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃'
-(`3 + m + m(m + 1) + 2mk + k(k + 1)/2` doubles under one key; grouped: x̃ and f̃ centred by p̂ within the
-unit, a missing value 0 as above; row families: x shifted by the window mean, the intercept in F̃ doing the
-centring) — and the report orthogonalises them against F in closed form: Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g,
-H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ (gaussian over σ²). The pHd directions, the forward
-selection, the composite and the differences / ratios then read S⊥ / H⊥ / M⊥ — what F does not already
-carry — while the redundancy clusters keep the un-orthogonalised H at p̂ (near-duplicates are near-duplicates
-whatever F carries); a column F explains fully (H⊥_jj ≤ 1e-10 H_jj, r²_F = 1) leaves the metric. Every record
+M, their cross terms with the standardised F̃: A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃', and the
+fit's own g = Σ w r f̃ and G = Σ w v f̃f̃' over the same rows (`3 + m + m(m + 1) + 2mk + k + k(k + 1)` doubles
+under one key; grouped: x̃ and f̃ centred by p̂ within the unit, a missing value 0 as above; row families: x
+shifted by the window mean, the intercept in F̃ doing the centring, a row left out for a missing value without
+the window means left out of g and G too) — and the report orthogonalises them against F in closed form:
+Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ (gaussian over
+σ²; row families: the intercept's one-step residual r̄ = g₀ / G₀₀ profiled out of M⊥ as M⊥ − r̄ H⊥, as the
+marginal sums profile it). The pHd directions, the forward selection, the composite and the differences /
+ratios then read S⊥ / H⊥ / M⊥ — what F does not already carry — while the redundancy clusters keep H at p̂
+un-orthogonalised against F (row families: centred by the intercept only, H − a₀a₀' / G₀₀ — near-duplicates are
+near-duplicates whatever F carries); r²_F = 1 − H⊥_jj / H_jj on that H, a column whose centred spread the raw
+moments cannot hold is degenerate as on the marginal basis, and a column F explains fully (H⊥_jj ≤ 1e-10 H_jj,
+r²_F = 1) leaves the metric. Every record
 carries `basis` (`partial`; `marginal` without conditioning or when the partial sums are unusable) and, for
 `select` / `difference` / `ratio`, the named candidate's own `r2_F`.
 The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:
