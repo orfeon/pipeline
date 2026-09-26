@@ -666,9 +666,9 @@ public final class ScreenStages {
             }
             // the bins' geometry: the suggestions' representatives and the pass list's edges of a passing block
             ScreenReport.Bins bins = null;
-            if (spec.hasBinned() || spec.hasPairShape()) {
+            if (spec.hasBinned() || spec.hasPairShape() || spec.jointOn) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
-                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges);
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin);
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {

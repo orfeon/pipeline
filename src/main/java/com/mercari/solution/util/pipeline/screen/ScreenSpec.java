@@ -157,6 +157,10 @@ public final class ScreenSpec implements Serializable {
     public double jointRedundancy = 0.95;
     /** joint.select: the forward selection's maximum number of steps */
     public int jointSelect = 10;
+    /** joint.pairs: at most this many difference / ratio suggestions (the pairs with the largest joint excess) */
+    public int jointPairs = 10;
+    /** joint.excess: a pair's joint χ² must exceed the better single one by this factor for a difference / ratio suggestion */
+    public double jointExcess = 1.5;
     /** the resolved joint columns as candidate indices */
     public List<Integer> jointColumns = new ArrayList<>();
 
@@ -680,6 +684,16 @@ public final class ScreenSpec implements Serializable {
                 if (select != null) {
                     if (select < 0 || select != Math.rint(select)) errors.add("joint.select must be a non-negative integer");
                     else s.jointSelect = select.intValue();
+                }
+                final Double jp = number(o, "pairs");
+                if (jp != null) {
+                    if (jp < 0 || jp != Math.rint(jp)) errors.add("joint.pairs must be a non-negative integer");
+                    else s.jointPairs = jp.intValue();
+                }
+                final Double excess = number(o, "excess");
+                if (excess != null) {
+                    if (!(excess >= 1)) errors.add("joint.excess must be at least 1");
+                    else s.jointExcess = excess;
                 }
             } else {
                 errors.add("joint must be a boolean or an object {include, maxColumns, noise, directions, redundancy, select}");

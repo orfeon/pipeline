@@ -516,6 +516,8 @@ The report reads them as the several-candidate suggestions of §12.3, written to
 | `redundant` | single linkage at \|H_ij\| / √(H_ii H_jj) ≥ `redundancy` (default 0.95) among the candidates | one record per cluster of two or more: `candidate` the member with the largest marginal χ², `share` the cluster's smallest pairwise \|correlation\|, `fragment` the others — keep one, or average / project them |
 | `select` | a report-time forward selection: at each step the score test of every remaining candidate given the selected set A, closed form at β = 0 (S⊥ = S_j − γ'S_A, H⊥ = H_jj − γ'H_Aj, γ = H_AA⁻¹ H_Aj), the best added while its gain clears the df = 1 cut (`max(threshold, minGain)`), at most `select` (default 10) steps | one record per step: `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = its gain given A (in-sample), `fragment` "given [A]" |
 | `composite` | β = H_AA⁻¹ S_A over the selected set and the joint χ² = S_A' H_AA⁻¹ S_A | `fragment` the row expression Σ β_j x_j, `chi2`, `share` its gain |
+| `difference` | every pair of candidates: the two-dimensional Newton direction β = H₂⁻¹ S₂ — kept when the pair's joint χ² exceeds the better single one by `excess` (default 1.5) and the standardised coefficients β_i √H_ii, β_j √H_jj are opposite in sign and within a factor of two of each other; the `pairs` (default 10) largest excesses | `name` a − b, `fragment` `{scope: row, expr: "a - r*b"}` with r the raw-scale coefficient ratio, `chi2` the joint χ², `share` the excess, `consistency` the magnitudes' ratio |
+| `ratio` | the same pair when both columns are positive over the window (the sketch minima): the difference's log-scale reading, approximate | `fragment` `{scope: row, expr: "a / b"}` |
 
 One-step, in-sample, at β = 0 (a composite with a large effect is approximate): hypotheses for a feature
 spec, checked by the next screen. The pHd metric is the Fisher matrix rather than the plain covariance
@@ -720,15 +722,12 @@ open from this table:
 |---|---|---|
 | categorical grouping | levels sorted by S_l / H_l and cut optimally (the boosted-tree categorical split) — needs the categorical candidates of §12.1 | a level grouping; top-level one-hot for a few strong levels, a shrunk encoding (the feature transform's backoff) for many sparse ones |
 
-**Several candidates — how to combine them** — the first three rows and the last two are built (§9.5 over
-the joint sums: `redundant`, `select`, `composite`, `phd`; the segment / time dependence is the heterogeneity
-test of §7.1). Still open:
-
-| information | needs | suggestion |
-|---|---|---|
-| ratios and differences | the two-dimensional Newton direction of a pair, on log-transformed candidates | coefficients ≈ (+1, −1) → x_i / x_j; on the raw scale ≈ equal and opposite → x_i − x_j; suggested only when the pair's joint χ² clearly exceeds the better single one |
-
-The interaction shape (a two-dimensional histogram of a declared pair, a depth-2 tree) is built as §8.7.
+**Several candidates — how to combine them** — built: the redundancy clusters, the complementary set, the
+linear composite, the curvature directions (§9.5 over the joint sums: `redundant`, `select`, `composite`,
+`phd`), the ratios and differences (§9.5, `difference` / `ratio` — the raw-scale Newton direction of a pair
+with the sketch minima standing in for the log-scale reading, an approximation of the original position),
+the segment / time dependence (the heterogeneity test of §7.1) and the interaction shape (§8.7, a depth-2
+tree over a declared pair's grid).
 
 **Parameter families.** When the feature transform emits a family (a window of 7 / 30 / 90 days), gain
 against the parameter gives the best value and the point where the gain saturates. The lineage today
@@ -773,7 +772,7 @@ In value-per-cost order, each a PR on its own; the floor (§7) and the pre-pass 
    per-row arithmetic of steps 1–2 dominating the read.
 5. **Pairs** — built for declared pairs / sets on the conditioning fit's p̂ (§8.6); **pHd** and the
    several-candidate suggestions (redundancy clusters, forward selection, composite) — built over the joint
-   sums (§9.5); the interaction shape of a declared pair — built (§8.7). Still open: the sketch
-   pre-selection of pairs, ratios / differences.
+   sums (§9.5); the interaction shape of a declared pair — built (§8.7); ratios / differences — built
+   (§9.5). Still open: the sketch pre-selection of pairs beyond `joint.maxColumns`.
 6. **Categorical candidates** read natively.
 7. **Parameter families**, once the feature lineage carries op and arguments.
