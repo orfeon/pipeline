@@ -1614,12 +1614,16 @@ public class GroupScorerTest {
             final double threshold = (Double) xRaw.get("threshold");
             Assertions.assertTrue(gain > 0.001 && gain > threshold && gain < 10, pass + " gain=" + gain);
             Assertions.assertEquals(threshold, result.summary().get("threshold"), pass);
-            final boolean expected = floor == null || floor < gain;
+            // the floor reads the excess gain: the gain less df / 2N (30 units, df = 1)
+            final double excess = (Double) xRaw.get("excess_gain");
+            Assertions.assertEquals(gain - 1d / 60, excess, 1e-12, pass);
+            Assertions.assertNull(xRaw.get("partial_excess_gain"));
+            final boolean expected = floor == null || floor < excess;
             Assertions.assertEquals(expected, xRaw.get("passed"), pass);
             Assertions.assertEquals(expected ? List.of("x") : List.of(), result.summary().get("passedColumns"), pass);
             Assertions.assertEquals(expected ? 1L : 0L, result.summary().get("nPassed"), pass);
             final String rule = (String) result.summary().get("passRule");
-            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > max(threshold, " + floor + ")", rule);
+            Assertions.assertEquals(floor == null ? "est_gain > threshold" : "est_gain > threshold and excess_gain > " + floor, rule);
             Assertions.assertEquals(floor, result.summary().get("minGain"), pass);
             final com.google.gson.JsonObject selection = ScreenReport.selection(spec, result);
             Assertions.assertEquals(rule, selection.get("passRule").getAsString());
@@ -1629,13 +1633,22 @@ public class GroupScorerTest {
         }
         // with conditioning the floor applies to partial_gain, and it composes with the period agreement
         final ScreenSpec both = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], periods: year, pass: {minPeriodsAgree: 0.66, minGain: 1e-5}}");
-        Assertions.assertEquals("partial_gain > max(threshold, 1.0E-5) and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
-        Assertions.assertEquals("est_gain > max(threshold, 1.0E-5) and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
+        Assertions.assertEquals("partial_gain > threshold and partial_excess_gain > 1.0E-5 and partial_periods_agree >= 0.66 * partial_n_periods", ScreenReport.passRule(both, true));
+        Assertions.assertEquals("est_gain > threshold and excess_gain > 1.0E-5 and periods_agree >= 0.66 * n_periods", ScreenReport.passRule(both, false));
         // a floor never lowers the cut below the placebo threshold
         final ScreenSpec low = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 1e-12}}");
-        Assertions.assertEquals(0.5, low.gainCut(0.5));
-        Assertions.assertEquals(1e-12, low.gainCut(1e-13));
-        Assertions.assertTrue(Double.isNaN(low.gainCut(Double.NaN)));
+        Assertions.assertTrue(low.passesGain(0.5, 1, 1000, 0.4));
+        Assertions.assertFalse(low.passesGain(0.5, 1, 1000, 0.6));
+        Assertions.assertFalse(low.passesGain(0.5, 1, 1000, Double.NaN));
+        Assertions.assertFalse(low.passesGain(Double.NaN, 1, 1000, 0.4));
+        // the excess: a df = 10 block at chi2 = 10 over 100 units has gain 0.05 and no excess; the same gain with
+        // df = 1 has 0.045 of it, so a floor between the two admits the df = 1 test alone
+        Assertions.assertEquals(0d, ScreenSpec.excessGain(0.05, 10, 100), 1e-15);
+        Assertions.assertEquals(0.045, ScreenSpec.excessGain(0.05, 1, 100), 1e-15);
+        final ScreenSpec mid = spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0.02}}");
+        Assertions.assertTrue(mid.passesGain(0.05, 1, 100, 0.01));
+        Assertions.assertFalse(mid.passesGain(0.05, 10, 100, 0.01));
+        Assertions.assertTrue(spec("{family: groupedMultinomial, group: g, label: y, candidates: [x]}").passesGain(0.05, 10, 100, 0.01));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: 0}}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, group: g, label: y, candidates: [x], pass: {minGain: -1}}"));
         // a declared but malformed floor is an error, never silently no floor

@@ -315,9 +315,10 @@ public final class ScreenSpec implements Serializable {
      */
     public Double minPeriodsAgree;
     /**
-     * pass.minGain: a practical floor on the effective test's gain (est_gain / partial_gain, the average
-     * log-likelihood improvement per unit): {@code passed} needs the gain above {@code max(threshold, minGain)}
-     * (null = the placebo threshold alone)
+     * pass.minGain: a practical floor on the effective test's excess gain (est_gain / partial_gain less df / 2N, the
+     * average log-likelihood improvement per unit beyond what a null test of the same degrees of freedom shows):
+     * {@code passed} needs the gain above the threshold and the excess above the floor (null = the placebo threshold
+     * alone), see {@link #passesGain}
      */
     public Double minGain;
 
@@ -515,12 +516,22 @@ public final class ScreenSpec implements Serializable {
     }
 
     /**
-     * The cut the effective test's gain must exceed for {@code passed}: the placebo (or theoretical) threshold,
-     * lifted to {@code pass.minGain} when that is declared and higher. NaN stays NaN (no scorable unit).
+     * The excess of a gain over its null expectation: gain − df / (2N), the average log-likelihood a null test of df
+     * degrees of freedom shows (E[χ²] = df, over 2N). The floor {@code pass.minGain} reads it, so a block of df = 10
+     * and a df = 1 test are held to the same practical bar (DSL doc §7): on the gain itself the block would carry
+     * df / 2N of null gain the floor cannot tell from a real one.
      */
-    public double gainCut(final double threshold) {
-        // Math.max propagates a NaN threshold
-        return minGain == null ? threshold : Math.max(threshold, minGain);
+    public static double excessGain(final double gain, final double df, final double nUnits) {
+        return nUnits > 0 ? gain - df / (2 * nUnits) : gain;
+    }
+
+    /**
+     * Whether a gain passes: above the placebo (or theoretical) threshold and, under {@code pass.minGain}, its excess
+     * ({@link #excessGain}) above the floor. A NaN threshold (no scorable unit) or gain never passes.
+     */
+    public boolean passesGain(final double gain, final double df, final double nUnits, final double threshold) {
+        if (Double.isNaN(threshold) || !(gain > threshold)) return false;
+        return minGain == null || excessGain(gain, df, nUnits) > minGain;
     }
 
 
@@ -932,7 +943,7 @@ public final class ScreenSpec implements Serializable {
                 if (minGain != null && !minGain.isJsonNull()) {
                     s.minGain = numeric(minGain);
                     if (s.minGain == null || !(s.minGain > 0 && Double.isFinite(s.minGain))) {
-                        errors.add("pass.minGain must be a positive finite number (a floor on est_gain / partial_gain, the average log-likelihood improvement per unit)");
+                        errors.add("pass.minGain must be a positive finite number (a floor on the excess gain est_gain - df / 2N, the average log-likelihood improvement per unit beyond a null test's)");
                     }
                 }
             } else {

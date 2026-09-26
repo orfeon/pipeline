@@ -239,7 +239,7 @@ in-screen expansion (a built-in baseline-bin modifier for the heterogeneity test
 the test itself is built over the period buckets and a declared field — a pre-selection of pairs beyond a
 declared set (the declared pairs on the conditioning fit's p̂ are built, and the pHd directions over the
 joint sums name the members to declare)), pruning between passes against the `pass.minGain` floor (the floor itself is
-built: `ScreenSpec.gainCut`, one comparison in the report) — in the step order of DSL §12.4. The suggestions
+built: `ScreenSpec.passesGain`, the floor read on the excess gain — gain less df / 2N — in the report) — in the step order of DSL §12.4. The suggestions
 are built as the `suggestions` output: the one-candidate ones — shape / cut / missing / monotone with the
 discovery / confirmation split — the several-candidate ones over the joint sums — pHd, redundancy clusters,
 forward selection, composite, differences / ratios — and a declared pair's two-dimensional interaction shape. Engine-side
