@@ -59,6 +59,7 @@
 
     <maven-jib-plugin.version>3.5.1</maven-jib-plugin.version>
     <download-maven-plugin.version>1.13.0</download-maven-plugin.version>
+    <maven-antrun-plugin.version>3.1.0</maven-antrun-plugin.version>
     <maven-compiler-plugin.version>3.14.1</maven-compiler-plugin.version>
     <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
@@ -146,6 +147,34 @@
             <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
           </includeOnlyProperties>
         </configuration>
+      </plugin>
+
+      <!-- image.revision = git.commit.id, or "" when the build has no git information (no checkout,
+           -Dmaven.gitcommitid.skip). The Jib label below cannot reference git.commit.id directly: an unset
+           property evaluates to null there and Jib fails the build ("labels map contains null values"), and a
+           default in <properties> would be interpolated into the pom before the git plugin runs (the label
+           would always carry the default). Declared after the git plugin: same phase, runs after it. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>${maven-antrun-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>image-revision</id>
+            <phase>initialize</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <exportAntProperties>true</exportAntProperties>
+              <target>
+                <condition property="image.revision" value="${git.commit.id}" else="">
+                  <isset property="git.commit.id"/>
+                </condition>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
 
       <plugin>
@@ -285,10 +314,11 @@
               <APP_VERSION>${project.version}</APP_VERSION>
               <DATAFLOW_JAVA_COMMAND_SPEC>/template/MPipeline/resources/command-spec.json</DATAFLOW_JAVA_COMMAND_SPEC>
             </environment>
-            <!-- the commit the image was built from (git-commit-id-maven-plugin, initialize phase; empty without a
-                 git checkout): docker inspect / Artifact Registry show it, MPipeline.main logs the same revision -->
+            <!-- the commit the image was built from (image.revision, set at the initialize phase above: empty without
+                 git information, so run jib through a lifecycle phase, e.g. `mvn package` / `mvn compile jib:build`):
+                 docker inspect / crane config show it, MPipeline.main logs the same revision -->
             <labels>
-              <org.opencontainers.image.revision>${git.commit.id}</org.opencontainers.image.revision>
+              <org.opencontainers.image.revision>${image.revision}</org.opencontainers.image.revision>
               <org.opencontainers.image.version>${project.version}</org.opencontainers.image.version>
             </labels>
           </container>

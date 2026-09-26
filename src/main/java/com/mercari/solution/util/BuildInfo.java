@@ -8,38 +8,52 @@ import java.util.Properties;
  * The build this code came from: the git revision stamped into {@code git.properties} at build time
  * (git-commit-id-maven-plugin; see the pom). The same revision labels the Jib images
  * ({@code org.opencontainers.image.revision}) and opens the pipeline launcher's log, so the image a job ran
- * can be matched to a commit. Every accessor returns null when the build carried no git information.
+ * can be matched to a commit. Every accessor returns null when the build carried no git information
+ * (a build outside a git checkout still writes git.properties, without any of these keys).
  */
-public class BuildInfo {
+public final class BuildInfo {
 
-    private static volatile Properties properties;
+    static final String UNKNOWN = "unknown (no git information)";
+
+    private BuildInfo() {
+    }
+
+    /** Loaded once, on first use (class-holder idiom). */
+    private static final class Holder {
+        static final Properties PROPERTIES = load();
+    }
 
     /** The abbreviated commit id, or null. */
     public static String revision() {
-        return property("git.commit.id.abbrev");
+        return property(Holder.PROPERTIES, "git.commit.id.abbrev");
     }
 
     /** The full commit id, or null. */
     public static String commitId() {
-        return property("git.commit.id");
+        return property(Holder.PROPERTIES, "git.commit.id");
     }
 
     /** The branch the build was made from, or null. */
     public static String branch() {
-        return property("git.branch");
+        return property(Holder.PROPERTIES, "git.branch");
     }
 
     /** The commit's time as the plugin formats it, or null. */
     public static String commitTime() {
-        return property("git.commit.time");
+        return property(Holder.PROPERTIES, "git.commit.time");
     }
 
-    /** One line for a log: {@code <abbrev> (branch <name>, committed <time>)}, or "unknown (no git.properties)". */
+    /** One line for a log: {@code <abbrev> (branch <name>, committed <time>)}, or {@value #UNKNOWN}. */
     public static String describe() {
-        final String revision = revision();
-        if (revision == null) return "unknown (no git.properties)";
+        return describe(Holder.PROPERTIES);
+    }
+
+    static String describe(final Properties properties) {
+        final String revision = property(properties, "git.commit.id.abbrev");
+        if (revision == null) return UNKNOWN;
         final StringBuilder sb = new StringBuilder(revision);
-        final String branch = branch(), time = commitTime();
+        final String branch = property(properties, "git.branch");
+        final String time = property(properties, "git.commit.time");
         if (branch != null || time != null) {
             sb.append(" (");
             if (branch != null) sb.append("branch ").append(branch);
@@ -49,24 +63,18 @@ public class BuildInfo {
         return sb.toString();
     }
 
-    private static String property(final String name) {
-        return Optional.ofNullable(load().getProperty(name)).map(String::trim).filter(v -> !v.isEmpty()).orElse(null);
+    private static String property(final Properties properties, final String name) {
+        return Optional.ofNullable(properties.getProperty(name)).map(String::trim).filter(v -> !v.isEmpty()).orElse(null);
     }
 
     private static Properties load() {
-        Properties p = properties;
-        if (p != null) return p;
-        synchronized (BuildInfo.class) {
-            if (properties != null) return properties;
-            p = new Properties();
-            try (final InputStream is = BuildInfo.class.getResourceAsStream("/git.properties")) {
-                if (is != null) p.load(is);
-            } catch (final Exception e) {
-                // a build without git information is not an error
-            }
-            properties = p;
-            return p;
+        final Properties p = new Properties();
+        try (final InputStream is = BuildInfo.class.getResourceAsStream("/git.properties")) {
+            if (is != null) p.load(is);
+        } catch (final Exception e) {
+            // a build without git information is not an error
         }
+        return p;
     }
 
 }

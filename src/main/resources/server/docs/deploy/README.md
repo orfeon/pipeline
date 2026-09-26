@@ -41,10 +41,18 @@ launcher opens its log with the same revision (`Build: <abbrev> (branch <name>, 
 image can be matched to a commit:
 
 ```sh
-gcloud artifacts docker images describe {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest   --format 'value(image_summary.digest)' --show-all-metadata | grep opencontainers
+IMAGE={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
+# with Docker (Jib pushes straight to the registry, so pull the image first)
+docker pull $IMAGE
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' $IMAGE
+# or read only the image config, without pulling the layers (crane: github.com/google/go-containerregistry)
+crane config $IMAGE | jq -r '.config.Labels["org.opencontainers.image.revision"]'
 ```
 
-A build outside a git checkout leaves the label empty and logs `Build: unknown (no git.properties)`.
+A build outside a git checkout leaves the label empty and logs `Build: unknown (no git information)`. The label
+is resolved at Maven's `initialize` phase, so run Jib through a lifecycle phase (`mvn package`,
+`mvn compile jib:build`) rather than a bare `mvn jib:build`. The revision is the checked-out commit: uncommitted
+changes in the working tree are not reflected in it.
 
 ### Upload template file.
 
