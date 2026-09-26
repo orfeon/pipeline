@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.mercari.solution.util.domain.math.NormalDistribution;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Baselines.Skip;
@@ -131,6 +132,7 @@ public final class GroupScorer implements Serializable {
      * {@link Skip#NONE} when it was scored.
      */
     public Skip score(final List<ScreenRow> input, final String unitKey, final Map<Integer, ScoreAccumulator> into) {
+        requireWindowQuantiles(spec, quantiles);
         final Unit unit = prepare(input, unitKey);
         final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
         final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
@@ -395,6 +397,16 @@ public final class GroupScorer implements Serializable {
     }
 
     /**
+     * Fails a scoring call of independent rows with rank / absdev that was not handed the window's sketches: the
+     * within-unit fallback would read a single row (rank 0.5, absdev 0) and report degenerate records silently.
+     */
+    static void requireWindowQuantiles(final ScreenSpec spec, final WindowQuantiles quantiles) {
+        if (quantiles == null && spec.needsWindowQuantiles()) {
+            throw new IllegalStateException("rank / absdev of independent rows need the window quantile sketches (withWindowQuantiles)");
+        }
+    }
+
+    /**
      * Adds the row-family binned sums into {@code into}: per bin {@code [Σ w, Σ w r, Σ w v]} (r = y − μ and v the
      * Fisher weight in offset mode; r = y and v unused in prior mode, where the report supplies the prior weight) and
      * the window totals {@code [Σ w, Σ w r, Σ w r²]} after the bins (the prior mean and the gaussian variance).
@@ -423,12 +435,12 @@ public final class GroupScorer implements Serializable {
      */
     static double[] transform(final ScreenSpec spec, final WindowQuantiles quantiles, final int column, final String transform, final double[] v) {
         if (quantiles == null || spec.isGrouped() || ScreenSpec.TRANSFORM_RAW.equals(transform)) return transform(transform, v);
-        final boolean candidate = column < spec.candidates.size();
+        final boolean candidate = !spec.isPlacebo(column);
         final double[] out = new double[v.length];
         switch (transform) {
             case ScreenSpec.TRANSFORM_RANK -> {
                 for (int i = 0; i < v.length; i++) {
-                    out[i] = !StatMath.isFinite(v[i]) ? Double.NaN : candidate ? quantiles.rank(column, v[i]) : normalCdf(v[i]);
+                    out[i] = !StatMath.isFinite(v[i]) ? Double.NaN : candidate ? quantiles.rank(column, v[i]) : NormalDistribution.cdf(v[i]);
                 }
             }
             case ScreenSpec.TRANSFORM_ABSDEV -> {
@@ -438,11 +450,6 @@ public final class GroupScorer implements Serializable {
             default -> throw new IllegalArgumentException("unknown transform " + transform);
         }
         return out;
-    }
-
-    /** Φ(x), the standard normal cdf: the exact rank of a noise placebo value. */
-    static double normalCdf(final double x) {
-        return 0.5 * StatMath.erfc(-x / Math.sqrt(2d));
     }
 
     /** Applies a transform variant within the unit; NaN inputs stay NaN. */

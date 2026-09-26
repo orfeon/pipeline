@@ -19,15 +19,21 @@ import java.io.Serializable;
  * be a single row. Built by one pass over the prepared rows before the score pass (a KLL sketch per column,
  * {@link SketchAccumulator#K}: rank error about 0.8%), combined globally and read as a singleton side input.
  * The same sketches give the value-bin edges of §6.1. An empty instance (no column, or every sketch empty) is
- * the Combine's identity.
+ * the Combine's identity. The KLL compaction is randomised, so beyond k values per column a re-run can move a
+ * candidate's rank / absdev within the rank error (the placebo columns stay exactly reproducible).
  */
 public final class WindowQuantiles implements Serializable {
 
-    private final SketchAccumulator[] sketches;
+    private SketchAccumulator[] sketches;
 
     public WindowQuantiles(final int columns) {
-        this.sketches = new SketchAccumulator[columns];
+        this.sketches = emptySketches(columns);
+    }
+
+    private static SketchAccumulator[] emptySketches(final int columns) {
+        final SketchAccumulator[] sketches = new SketchAccumulator[columns];
         for (int i = 0; i < columns; i++) sketches[i] = new SketchAccumulator();
+        return sketches;
     }
 
     private WindowQuantiles(final SketchAccumulator[] sketches) {
@@ -53,14 +59,17 @@ public final class WindowQuantiles implements Serializable {
         return sketches[c].count();
     }
 
-    /** Mid-rank of {@code v} in column {@code c} as a fraction of the window's finite values, in (0, 1); NaN when v is not finite. */
+    /**
+     * Mid-rank of {@code v} in column {@code c} as a fraction of the window's finite values, in (0, 1); NaN when v
+     * is not finite or the window has no value (the Combine's column-less default of an empty window included).
+     */
     public double rank(final int c, final double v) {
-        return sketches[c].rank(v);
+        return c < sketches.length ? sketches[c].rank(v) : Double.NaN;
     }
 
-    /** The window median of column {@code c} (NaN without a value). */
+    /** The window median of column {@code c} (the type-7 median below k values; NaN without a value). */
     public double median(final int c) {
-        return sketches[c].quantile(0.5);
+        return c < sketches.length ? sketches[c].median() : Double.NaN;
     }
 
     /** The value of column {@code c} at normalized rank {@code q}. */
@@ -73,10 +82,13 @@ public final class WindowQuantiles implements Serializable {
         return sketches[c].edges(bins);
     }
 
-    /** Merges another window's sketches in (column by column); an empty side adopts the other's columns. */
+    /**
+     * Merges another window's sketches in (column by column); a column-less side adopts copies of the other's
+     * columns (an empty sketch copies what it merges), so {@code other} — a Combine input — is never aliased.
+     */
     public WindowQuantiles merge(final WindowQuantiles other) {
         if (other.sketches.length == 0) return this;
-        if (sketches.length == 0) return other;
+        if (sketches.length == 0) sketches = emptySketches(other.sketches.length);
         if (sketches.length != other.sketches.length) {
             throw new IllegalStateException("window quantiles of " + sketches.length + " and " + other.sketches.length + " columns cannot merge");
         }
@@ -103,7 +115,7 @@ public final class WindowQuantiles implements Serializable {
         }
     }
 
-    /** Input = accumulator = output: the score DoFn's per-bundle sketches are merged globally. */
+    /** Input = accumulator = output: the pre-pass's per-bundle sketches are merged globally. */
     public static class Fn extends Combine.CombineFn<WindowQuantiles, WindowQuantiles, WindowQuantiles> {
         @Override
         public WindowQuantiles createAccumulator() {
