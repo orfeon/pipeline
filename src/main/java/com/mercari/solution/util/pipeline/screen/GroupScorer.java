@@ -282,19 +282,12 @@ public final class GroupScorer implements Serializable {
     static void groupedContribution(final double[] v, final double[] y, final double[] p, final double weight, final double[] out) {
         final int n = v.length;
         final double pivot = pivot(v);
-        double pm = 0, psum = 0;
+        final double mean = pWeightedMean(v, p, pivot);
+        double s = 0, h = 0, px = 0;
         int nObs = 0;
         for (int i = 0; i < n; i++) {
-            if (StatMath.isFinite(v[i])) {
-                pm += p[i] * (v[i] - pivot);
-                psum += p[i];
-                nObs++;
-            }
-        }
-        final double mean = psum > 0 ? pm / psum : 0d;
-        double s = 0, h = 0, px = 0;
-        for (int i = 0; i < n; i++) {
             if (!StatMath.isFinite(v[i])) continue;
+            nObs++;
             final double xt = v[i] - pivot - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
@@ -316,6 +309,20 @@ public final class GroupScorer implements Serializable {
     static double pivot(final double[] v) {
         for (final double x : v) if (StatMath.isFinite(x)) return x;
         return 0d;
+    }
+
+    /**
+     * The p-weighted mean of {@code v − pivot} over the unit's observed (finite) rows, 0 when they carry no p mass:
+     * the grouped centre, shared by the marginal test and the joint sums so a missing value centres to 0 in both.
+     */
+    static double pWeightedMean(final double[] v, final double[] p, final double pivot) {
+        double pm = 0, psum = 0;
+        for (int i = 0; i < v.length; i++) {
+            if (!StatMath.isFinite(v[i])) continue;
+            pm += p[i] * (v[i] - pivot);
+            psum += p[i];
+        }
+        return psum > 0 ? pm / psum : 0d;
     }
 
     /**
@@ -496,13 +503,7 @@ public final class GroupScorer implements Serializable {
             for (int j = 0; j < m; j++) {
                 final double[] col = cols[spec.jointColumn(j)];
                 final double pivot = pivot(col);
-                double pm = 0, psum = 0;
-                for (int i = 0; i < n; i++) {
-                    if (!StatMath.isFinite(col[i])) continue;
-                    pm += unit.p[i] * (col[i] - pivot);
-                    psum += unit.p[i];
-                }
-                final double mean = psum > 0 ? pm / psum : 0d;
+                final double mean = pWeightedMean(col, unit.p, pivot);
                 for (int i = 0; i < n; i++) {
                     if (StatMath.isFinite(col[i])) xt[i][j] = col[i] - pivot - mean;
                     else filled = true;
@@ -566,8 +567,10 @@ public final class GroupScorer implements Serializable {
     private transient double[] jointMeansCache;
 
     /**
-     * The window mean of every joint column from the sketches (DSL doc §9.5): NaN where the column has no sketch or no
-     * value (a noise column, which is never missing), null without a sketch view.
+     * The window mean of every joint column from the sketches (DSL doc §9.5): 0 for a candidate with no value in the
+     * window (every row is then a fill — a window-constant column the report drops as degenerate — instead of every
+     * row leaving the joint sums), NaN where the column has no sketch (a noise column, which is never missing), null
+     * without a sketch view.
      */
     double[] jointMeans() {
         if (quantiles == null) return null;
@@ -576,7 +579,7 @@ public final class GroupScorer implements Serializable {
             final double[] means = new double[m];
             for (int j = 0; j < m; j++) {
                 final int c = spec.jointColumn(j);
-                means[j] = c < nCandidates && c < quantiles.columns() ? quantiles.mean(c) : Double.NaN;
+                means[j] = c < nCandidates && c < quantiles.columns() ? (quantiles.count(c) == 0 ? 0d : quantiles.mean(c)) : Double.NaN;
             }
             jointMeansCache = means;
         }

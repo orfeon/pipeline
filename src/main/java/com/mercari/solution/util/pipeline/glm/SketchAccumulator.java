@@ -20,7 +20,7 @@ import java.io.Serializable;
 /**
  * A mergeable KLL quantile sketch of one value stream (the evaluation transform's quantile-binned calibration
  * tables and discovery dimensions; the screen transform's window reference of independent-row rank / absdev).
- * Serialised as the sketch's own bytes; an empty accumulator is the identity. The sketch's compaction is
+ * Serialised as the sketch's own bytes and the running sum; an empty accumulator is the identity. The sketch's compaction is
  * randomised (datasketches' unseeded generator), so beyond k values a re-run can differ within the rank error.
  */
 public final class SketchAccumulator implements Serializable {
@@ -29,7 +29,7 @@ public final class SketchAccumulator implements Serializable {
     public static final int K = 400;
 
     private transient KllDoublesSketch sketch;
-    /** the running sum of the values fed (the mean is exact where the quantiles are approximate) */
+    /** the running sum of the values fed (the mean is read from it, not from the approximate quantiles) */
     private double sum;
     /**
      * The sketch's sorted view, built once on the first read and immutable: a sketch shared through a side input
@@ -92,9 +92,16 @@ public final class SketchAccumulator implements Serializable {
         return sketch.getN();
     }
 
-    /** The mean of the values fed in (exact, from the running sum); NaN on an empty sketch. */
+    /**
+     * The mean of the values fed in, from the running sum (not the sketch's approximation), clamped to the exact
+     * min / max: a constant stream's mean is its value exactly rather than the sum's rounding residue (0.1 fed ten
+     * times sums to 0.9999999999999999), and an overflowing sum stays within the values. NaN on an empty sketch.
+     */
     public double mean() {
-        return sketch.isEmpty() ? Double.NaN : sum / sketch.getN();
+        if (sketch.isEmpty()) return Double.NaN;
+        final double mean = sum / sketch.getN();
+        final double min = sketch.getMinItem(), max = sketch.getMaxItem();
+        return mean < min ? min : mean > max ? max : mean;
     }
 
     /**
