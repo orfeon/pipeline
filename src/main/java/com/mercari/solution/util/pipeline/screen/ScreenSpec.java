@@ -521,7 +521,10 @@ public final class ScreenSpec implements Serializable {
      * The excess of a gain over its null expectation: gain − df / (2N), the average log-likelihood a null test of df
      * degrees of freedom shows (E[χ²] = df, over 2N). The floor {@code pass.minGain} reads it, so a block of df = 10
      * and a df = 1 test are held to the same practical bar (DSL doc §7): on the gain itself the block would carry
-     * df / 2N of null gain the floor cannot tell from a real one.
+     * df / 2N of null gain the floor cannot tell from a real one. The null term is the unit-weight one: under
+     * {@code weight} a null test's χ² scales with the weights too (E[χ²] ≈ df · Σw² / Σw), so the excess holds for
+     * weights normalised to mean 1 (and of a small spread), not for a {@code minGain} scaled by the mean weight (DSL
+     * doc §7).
      */
     public static double excessGain(final double gain, final double df, final double nUnits) {
         return nUnits > 0 ? gain - df / (2 * nUnits) : gain;
@@ -532,7 +535,8 @@ public final class ScreenSpec implements Serializable {
      * ({@link #excessGain}) above the floor. A NaN threshold (no scorable unit) or gain never passes.
      */
     public boolean passesGain(final double gain, final double df, final double nUnits, final double threshold) {
-        if (Double.isNaN(threshold) || !(gain > threshold)) return false;
+        // a NaN on either side fails the comparison
+        if (!(gain > threshold)) return false;
         return minGain == null || excessGain(gain, df, nUnits) > minGain;
     }
 
@@ -1074,20 +1078,7 @@ public final class ScreenSpec implements Serializable {
                 if (reserved.contains(name)) continue;
                 final FeatureLineage.Entry entry = l.columns.get(name);
                 if (!included(includes, includeSelectors, name, entry)) continue;
-                boolean excluded = false;
-                for (final String pattern : candidateExclude) {
-                    if (FeatureLineage.isSelector(pattern)) {
-                        if (FeatureLineage.selectorMatches(pattern, entry)) {
-                            excluded = true;
-                            excludedByLineage.add(name + " (" + pattern + ")");
-                            break;
-                        }
-                    } else if (StatMath.glob(pattern).matcher(name).matches()) {
-                        excluded = true;
-                        break;
-                    }
-                }
-                if (!excluded) candidates.add(name);
+                if (!excluded(name, entry, excludedByLineage)) candidates.add(name);
             }
         }
         if (!excludedByLineage.isEmpty()) notes.add("excluded by lineage: " + excludedByLineage);
@@ -1200,21 +1191,14 @@ public final class ScreenSpec implements Serializable {
                 if (f.getFieldType().getType() != Schema.Type.string || reserved.contains(f.getName())) continue;
                 final String name = f.getName();
                 final FeatureLineage.Entry entry = l.columns.get(name);
-                boolean in = globs.stream().anyMatch(g -> g.matcher(name).matches());
-                if (!in && !selectors.isEmpty()) in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
-                if (!in) continue;
-                boolean excluded = false;
-                for (final String pattern : candidateExclude) {
-                    if (FeatureLineage.isSelector(pattern) ? FeatureLineage.selectorMatches(pattern, entry) : StatMath.glob(pattern).matcher(name).matches()) {
-                        excluded = true;
-                        if (FeatureLineage.isSelector(pattern)) categoricalExcluded.add(name + " (" + pattern + ")");
-                        break;
-                    }
-                }
-                if (!excluded) categoricals.add(name);
+                if (!included(globs, selectors, name, entry)) continue;
+                if (!excluded(name, entry, categoricalExcluded)) categoricals.add(name);
             }
             if (!categoricalExcluded.isEmpty()) notes.add("categorical excluded by lineage: " + categoricalExcluded);
-            if (categoricals.isEmpty()) errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates; candidates.exclude applies to the categoricals too)");
+            if (categoricals.isEmpty()) {
+                errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates"
+                        + (candidateExclude.isEmpty() ? "" : "; candidates.exclude applies to the categoricals too: " + candidateExclude) + ")");
+            }
             if (categoricalPlacebo > 0 && noise == 0) notes.add("categorical placebos redraw the levels from the window frequencies; they need no noise column");
             // the marginal / partial keys of the numeric columns and the pairs must stay below the categorical blocks'
             if (pairGridKey(pairs.size()) > CATEGORICAL_KEY_BASE) {
@@ -1224,8 +1208,8 @@ public final class ScreenSpec implements Serializable {
         // pass-through input fields the sources tag as outcomes among the candidates (numeric or categorical): a leak
         // unless the value is known before the event — the lineage cannot tell, so say so
         final List<String> outcomeInputs = new ArrayList<>();
-        for (final List<String> group : List.of(candidates, categoricals)) {
-            for (final String name : group) {
+        for (final List<String> columns : List.of(candidates, categoricals)) {
+            for (final String name : columns) {
                 final FeatureLineage.Entry entry = l.columns.get(name);
                 if (entry != null && "input".equals(entry.scope()) && OUTCOME_KIND.equals(entry.kind())) outcomeInputs.add(name);
             }
@@ -1241,6 +1225,24 @@ public final class ScreenSpec implements Serializable {
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
+    }
+
+    /**
+     * Whether {@code candidates.exclude} drops a column (numeric or categorical): one of its name globs, or one of its
+     * lineage selectors — a selector's exclusion is named in {@code byLineage} for the resolution notes.
+     */
+    private boolean excluded(final String name, final FeatureLineage.Entry entry, final List<String> byLineage) {
+        for (final String pattern : candidateExclude) {
+            if (FeatureLineage.isSelector(pattern)) {
+                if (FeatureLineage.selectorMatches(pattern, entry)) {
+                    byLineage.add(name + " (" + pattern + ")");
+                    return true;
+                }
+            } else if (StatMath.glob(pattern).matcher(name).matches()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether a column matches an include list: one of its name globs, or one of its lineage selectors (no entry: none). */

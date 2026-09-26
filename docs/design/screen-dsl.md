@@ -233,9 +233,9 @@ partial-residual curve the derivation suggestions of §12.3 read.
   `[s (B), H (B × B), A (B × |F|)]` give Γ = (G + l2·n·I)⁻¹ A, S⊥ = s − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ and
   `partial_chi2 = S⊥' H⊥⁺ S⊥` over the bins the marginal block kept (`partial_df`), `r2_F = 1 − tr(H⊥) /
   tr(H)`. State per column B × (1 + B + |F|) (row families: B × (2 + |F|), the block is diagonal).
-- **No sign, no periods.** The block has no direction, so `period_z`, `periods_agree` and the leak flag do
-  not apply to it (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are
-  no per-period block sums.
+- **No sign, no periods.** The block has no direction, so `period_z` and `periods_agree` do not apply to it
+  (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are no per-period
+  block sums. The leak flag reads the block's tail instead of a z (§7).
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
   list.
@@ -292,7 +292,9 @@ seeded-hash dilution.
   small to matter; the floor is in the unit of `est_gain` (average log-likelihood improvement per unit), the
   scale a trained model's excess log score is reported on, so it means the same thing whatever N. With
   `weight` (§3.4) S and H carry the weights while the gain divides by the unit count, so the floor reads the
-  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected). Both rules tighten
+  mean weight times the per-unit gain (the placebo threshold scales the same way and is unaffected); the excess's
+  null term df / 2N is the unit-weight one (a null test's χ² scales as Σw² / Σw), so the weights are to be
+  normalised to mean 1 — a `minGain` scaled by the mean weight instead leaves that term unscaled. Both rules tighten
   the placebo cut and are not themselves placebo-calibrated; the record's `threshold` stays the placebo cut,
   and the summary and the pass list report the rule as applied (`passRule`, `minPeriodsAgree`, `minGain`). The
   same floor holds the heterogeneity flag (§7.1, the het df), the suggestions' confirmation gains (§9.4, df = 1
@@ -478,11 +480,12 @@ declares — read it for the pairs that passed.
 ### 9.1 Scoring records (the default output)
 
 One record per column × transform, placebo columns included: `candidate`, `transform`, `method`
-(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `df` (1; the block test's active bins − 1),
+(`scoreTest`), `family`, `S`, `H`, `beta`, `chi2`, `z`, `est_gain`, `excess_gain` (gain − df / 2N, §7; null when
+degenerate), `df` (1; the block test's active bins − 1),
 `pValue`, `qValue` (null for placebo), `n_groups` (N), `n_obs`, `periods_agree`, `n_periods`, `period_z`
 (array of {period, z, S, H, n}), `bin_stats` (the block test only: array of {bin, S, H, n}), `het_chi2 / df /
 pValue / gain / levels` and `level_z` (array of {level, z, S, H, n}; §7.1, null without a modifier), `r2_F`,
-`partial_S / H / chi2 / z / gain / pValue`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
+`partial_S / H / chi2 / z / gain / pValue`, `partial_excess_gain`, `partial_df` (the block test), `partial_het_chi2 / df / pValue /
 gain / levels`, `partial_periods_agree`, `partial_n_periods`, `partial_period_z` (null without
 conditioning), `threshold` (the record's kind's cut), `passed`, `leakSuspect`, `het_passed`, `placebo`,
 `degenerate`. A block record leaves the signed fields null (`S`, `H`,
@@ -495,6 +498,7 @@ One record per run (per window under a windowing strategy): the spec's roles, `t
 `minPeriodsAgree` / `minGain`, the thresholds and the quantile (`threshold` / `thresholdTheoretical` = the
 df = 1 cut; `thresholds` / `thresholdsTheoretical` = the cut per statistic kind; `bins` = `edges/k` of the block test;
 `heterogeneity` = the modifier, `nHetPassed` / `hetPassedColumns` = the heterogeneity flag's count and columns;
+`nHetMixedUnits` = the grouped units whose rows carry more than one modifier level, §7.1;
 `nPairs` / `nPairsPassed` / `passedPairs` = the declared pairs and the passing ones, §8.6; `nSuggestions`), the seed, the row and unit counts (in, time-filtered, invalid, scored, skipped), the candidate /
 transform / scored / passed / placebo / leak-suspect counts, the z the leak flag read (`leakOn`), the time field and window, the scored rows' time
 range, the period bucket, `transforms`, `candidates`, `passedColumns` (candidate names with a passing
@@ -535,9 +539,11 @@ included), recipes in the feature transform's vocabulary:
 | `missing` | the missing bin against the rest (present when the missing bin holds information), and the value bin whose effect S_b / H_b is closest to the missing bin's | `direction`, `fill`, an `isnull` indicator or the fill value |
 | `monotone` | the H-weighted isotonic fit (pool-adjacent-violators) of the bin effects in the better direction, and the sign consistency of the adjacent effect differences | `name` (increasing / decreasing), `consistency`, `share` |
 
-Shapes use a representative value per bin — the bin's median, the sketch's quantile at (b + 0.5) / k, which an
-outer bin's outliers do not pull the way a midpoint of the edges would (the `missing` fill is that value too);
-position bins the position's centre, with cuts as rank fractions. A bin enters a contrast only with information:
+Shapes use a representative value per bin — the bin's median, the sketch's quantile at the middle of the bin's
+rank interval, which an outer bin's outliers do not pull the way a midpoint of the edges would and which stays
+inside its bin when tied values collapse edges (a quantile at (b + 0.5) / k would not: on a column that is 0 in
+90% of the rows every such quantile is 0); the `missing` fill is that value too; position bins the position's
+centre, with cuts as rank fractions. A bin (a categorical level) enters a contrast only with information:
 H_b above 1e-9 of the block's bins' total and a positive mass. The confirmation half is a difference of sums, so
 a bin it does not hold keeps a rounding residue of H (and of S) that a contrast isolating the bin would divide by;
 a lone row at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would do the same — either way a χ² of 10¹⁵ that the placebo quantile then
@@ -551,8 +557,9 @@ while `confirmation_chi2 / share / gain / pValue` report the chosen contrast on 
 gain over the half's unit mass, in proportion to its weight). `share` and `chi2` are the discovery values.
 
 **Calibration.** Placebo columns go through the same search, so each kind takes the placebo quantile of the
-placebo columns' confirmation gains as its cut (`threshold`, lifted to `pass.minGain`; the theoretical χ²(1)
-quantile / 2N of the half without placebos), and `passed` compares the confirmation gain with it.
+placebo columns' confirmation gains as its cut (`threshold`; the theoretical χ²(1) quantile / 2N of the half
+without placebos), and `passed` compares the confirmation gain with it — under `pass.minGain` its excess (less
+1 / 2N of the half, §7) must clear the floor too.
 
 **Hypotheses, not decisions.** The score test is local to β = 0 and a shape with a large effect is
 approximate; a suggestion goes into a feature spec and is checked by the next screen or by the `evaluation`
@@ -587,14 +594,19 @@ carries the row set as `nJointUnits` / `nJointFilled` / `nJointDropped`, with a 
 exceeds 10%. O(m²) state and per-row work, hence the explicit opt-in and the bound.
 
 **Partial basis.** Under conditioning the partial pass keeps the joint sums at the fitted p̂ as well — S, H,
-M and their cross terms with the standardised F̃: A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃'
-(`3 + m + m(m + 1) + 2mk + k(k + 1)/2` doubles under one key; grouped: x̃ and f̃ centred by p̂ within the
-unit, a missing value 0 as above; row families: x shifted by the window mean, the intercept in F̃ doing the
-centring) — and the report orthogonalises them against F in closed form: Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g,
-H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ (gaussian over σ²). The pHd directions, the forward
-selection, the composite and the differences / ratios then read S⊥ / H⊥ / M⊥ — what F does not already
-carry — while the redundancy clusters keep the un-orthogonalised H at p̂ (near-duplicates are near-duplicates
-whatever F carries); a column F explains fully (H⊥_jj ≤ 1e-10 H_jj, r²_F = 1) leaves the metric. Every record
+M, their cross terms with the standardised F̃: A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃', and the
+fit's own g = Σ w r f̃ and G = Σ w v f̃f̃' over the same rows (`3 + m + m(m + 1) + 2mk + k + k(k + 1)` doubles
+under one key; grouped: x̃ and f̃ centred by p̂ within the unit, a missing value 0 as above; row families: x
+shifted by the window mean, the intercept in F̃ doing the centring, a row left out for a missing value without
+the window means left out of g and G too) — and the report orthogonalises them against F in closed form:
+Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ (gaussian over
+σ²; row families: the intercept's one-step residual r̄ = g₀ / G₀₀ profiled out of M⊥ as M⊥ − r̄ H⊥, as the
+marginal sums profile it). The pHd directions, the forward selection, the composite and the differences /
+ratios then read S⊥ / H⊥ / M⊥ — what F does not already carry — while the redundancy clusters keep H at p̂
+un-orthogonalised against F (row families: centred by the intercept only, H − a₀a₀' / G₀₀ — near-duplicates are
+near-duplicates whatever F carries); r²_F = 1 − H⊥_jj / H_jj on that H, a column whose centred spread the raw
+moments cannot hold is degenerate as on the marginal basis, and a column F explains fully (H⊥_jj ≤ 1e-10 H_jj,
+r²_F = 1) leaves the metric. Every record
 carries `basis` (`partial`; `marginal` without conditioning or when the partial sums are unusable) and, for
 `select` / `difference` / `ratio`, the named candidate's own `r2_F`.
 The report reads them as the several-candidate suggestions of §12.3, written to the `suggestions` output:

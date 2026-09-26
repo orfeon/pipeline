@@ -28,7 +28,8 @@ import java.util.TreeMap;
  * rows before the score pass (a KLL sketch per column, {@link SketchAccumulator#K}: rank error about 0.8%),
  * combined globally and read as a singleton side input. The same pass counts the levels of the categorical
  * candidates (DSL doc §6.2): an exact {@code level → count} map per column, from which the report and the scorers
- * take the {@link Levels} dictionary (the most frequent {@code maxLevels} named, the rest folded). An empty
+ * take the {@link Levels} dictionary (the most frequent {@code maxLevels} named, {@code (null)} beside them, the rest
+ * folded). An empty
  * instance (no column, or every sketch empty) is the Combine's identity. The KLL compaction is randomised, so
  * beyond k values per column a re-run can move a candidate's rank / absdev within the rank error (the placebo
  * columns stay exactly reproducible).
@@ -117,7 +118,7 @@ public final class WindowQuantiles implements Serializable {
         return c < sketches.length ? sketches[c].rank(v) : Double.NaN;
     }
 
-    /** The window mean of column {@code c} (exact, from the sketch's running sum; NaN without a value). */
+    /** The window mean of column {@code c} (from the sketch's running sum, clamped to its exact min / max; NaN without a value). */
     public double mean(final int c) {
         return c < sketches.length ? sketches[c].mean() : Double.NaN;
     }
@@ -144,6 +145,11 @@ public final class WindowQuantiles implements Serializable {
     /** The {@code bins − 1} interior edges of column {@code c} at ranks i / bins. */
     public double[] edges(final int c, final int bins) {
         return sketches[c].edges(bins);
+    }
+
+    /** The median of the values of column {@code c} within each bin cut by {@code edges} ({@link SketchAccumulator#binMedians}). */
+    public double[] binMedians(final int c, final double[] edges) {
+        return sketches[c].binMedians(edges);
     }
 
     /**

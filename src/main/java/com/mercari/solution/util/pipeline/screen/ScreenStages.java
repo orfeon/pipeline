@@ -176,10 +176,13 @@ public final class ScreenStages {
                         .apply("ConditioningFit" + it + "_View", View.asSingleton());
             }
             fitView = state;
+            // the partial pass reads the sketches for its transforms / bins / grids only: the joint's window means are the
+            // score pass's alone
+            final PCollectionView<WindowQuantiles> partialQuantilesView = spec.needsWindowQuantiles() ? quantilesView : null;
             final List<PCollectionView<?>> partialSideInputs = new ArrayList<>(List.of(momentsView, fitView));
-            partialSideInputs.addAll(scoreSideInputs);
+            if (partialQuantilesView != null) partialSideInputs.add(partialQuantilesView);
             partialView = units
-                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView, scoreQuantilesView)).withSideInputs(partialSideInputs))
+                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView, partialQuantilesView)).withSideInputs(partialSideInputs))
                     .setCoder(KvCoder.of(VarIntCoder.of(), PartialAccumulator.CODER))
                     .apply("ConditioningPartial_Combine", Combine.perKey(new PartialAccumulator.Fn()))
                     .apply("ConditioningPartial_View", View.asMap());

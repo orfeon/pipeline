@@ -589,11 +589,12 @@ public final class ScreenReport {
             if (conditioned && gDisc != null) {
                 final PartialAccumulator pacc = partials.get(spec.key(c, t));
                 final double[] pv = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
-                final int plen = pv == null ? 0 : pv.length / 2;
-                final double[][] gamma = pv != null && pv.length % 2 == 0 && plen > 0 ? blockGamma(spec, nb, Arrays.copyOfRange(pv, 0, plen), fit, spec.conditioningL2) : null;
-                final Block window = gamma == null ? null : binnedStats(spec, full, nUnits, nObs);
-                if (gamma != null && !window.stats.degenerate) {
-                    final double[] pfull = Arrays.copyOfRange(pv, 0, plen), pdisc = Arrays.copyOfRange(pv, plen, 2 * plen), pconf = new double[plen];
+                final int plen = pv == null || pv.length % 2 != 0 ? 0 : pv.length / 2;
+                final double[] pfull = plen > 0 ? Arrays.copyOfRange(pv, 0, plen) : null;
+                // the halves are non-degenerate, so the window block (their sum) is too
+                final double[][] gamma = pfull == null ? null : blockGamma(spec, nb, pfull, fit, spec.conditioningL2);
+                if (gamma != null) {
+                    final double[] pdisc = Arrays.copyOfRange(pv, plen, 2 * plen), pconf = new double[plen];
                     for (int i = 0; i < plen; i++) pconf[i] = pfull[i] - pdisc[i];
                     final Orthogonal ow = orthogonalBlock(spec, nb, pfull, gamma, fit.bestGrad, fit.bestG, sigma2);
                     final Block pd = partialBlock(spec, nb, pdisc, orthogonalBlock(spec, nb, pdisc, gamma, gDisc, gramDisc, sigma2), bd, sigma2, nDisc, nObs);
@@ -807,11 +808,6 @@ public final class ScreenReport {
         return df < 1 ? 0d : out[0].chi2;
     }
 
-    /**
-     * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
-     * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information carry
-     * nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
-     */
     /** the share of a block's information below which a bin carries none for a contrast (DSL doc §9.4) */
     static final double CONTRAST_H_FLOOR = 1e-9;
 
@@ -829,6 +825,11 @@ public final class ScreenReport {
         return use;
     }
 
+    /**
+     * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
+     * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information
+     * ({@link #informative}) carry nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
+     */
     static double contrastChi2(final Block block, final double[] phi, final int over) {
         final boolean[] use = informative(block, over);
         double hsum = 0, hphi = 0;
@@ -1216,7 +1217,8 @@ public final class ScreenReport {
 
     /**
      * The joint sums the several-candidate suggestions read: the centred score vector S, the Fisher block H, the pHd
-     * block M, the un-orthogonalised H the redundancy clusters read ({@code hRaw}: the same as H on the marginal basis),
+     * block M, the H the redundancy clusters read ({@code hRaw}: the same as H on the marginal basis; on the partial basis
+     * the H at p̂ centred by the intercept only, not orthogonalised against the rest of F),
      * each candidate's r²_F (null on the marginal basis) and the basis ({@code marginal} / {@code partial}).
      */
     record JointSums(double[] s, double[][] h, double[][] mm, double[][] hRaw, double[] r2, String basis) {
@@ -1251,8 +1253,10 @@ public final class ScreenReport {
                     mm[j][l] = e[at.mm() + GroupScorer.packed(m, j, l)] - mu[j] * e[at.s() + l] - mu[l] * e[at.s() + j] + mu[j] * mu[l] * rsum;
                 }
             }
-            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
-            // magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding residue
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of the
+            // moments' magnitude) is degenerate, as in stats(): it leaves the joint metric rather than enter it as rounding
+            // residue. Under a sketch view the moments are shifted by the window mean, so the magnitude is the spread's own
+            // and a large-valued column the marginal record flags degenerate can stay here
             for (int j = 0; j < m; j++) {
                 if (h[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)]) continue;
                 s[j] = 0d;
@@ -1284,8 +1288,13 @@ public final class ScreenReport {
 
     /**
      * The joint sums at the fitted p̂ orthogonalised against F (DSL doc §9.5, {@link ConditioningScorer#JOINT_PARTIAL_KEY}):
-     * Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ, over σ²; a column
-     * F explains fully (H⊥_jj ≤ 1e-10 H_jj, r²_F = 1) leaves the metric. Null without the sums or when the solve fails.
+     * Γ = (G + l2·N·I)⁻¹A', S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ, over σ², with g and
+     * G the fit's gradient and Gram over the rows the joint sums keep (the fit's own unless a row family left rows out).
+     * Row families, as {@link #marginalJoint}: the intercept's one-step residual r̄ = g₀ / G₀₀ is profiled out of M⊥
+     * (M⊥ − r̄ H⊥, so the penalised or unconverged intercept does not add its mean residual times H⊥), the H the redundancy
+     * clusters and r²_F read is centred by the intercept (H − a₀a₀' / G₀₀, the Fisher-metric covariance), and a column
+     * whose centred spread the raw moments cannot hold is degenerate. A column F explains fully (H⊥_jj ≤ 1e-10 H_jj,
+     * r²_F = 1) leaves the metric. Null without the sums or when the solve fails.
      */
     static JointSums partialJoint(final ScreenSpec spec, final Map<Integer, PartialAccumulator> partials, final FitState fit, final double sigma2) {
         if (partials == null || fit == null || !fit.hasBest) return null;
@@ -1294,11 +1303,14 @@ public final class ScreenReport {
         final ConditioningScorer.JointPartialLayout at = ConditioningScorer.JointPartialLayout.of(m, k);
         final double[] e = acc == null || acc.isEmpty() ? null : acc.getTotal();
         if (e == null || e.length != at.length() || !(e[at.used()] > 0) || !allFinite(e)) return null;
+        final double[] grad = Arrays.copyOfRange(e, at.g(), at.g() + k);
+        final double[][] gram = new double[k][k];
+        for (int c = 0; c < k; c++) for (int d = 0; d < k; d++) gram[c][d] = e[at.gff() + GroupScorer.packed(k, c, d)];
         final double[][] aT = new double[k][m];   // A' : k × m, the right-hand sides
         for (int j = 0; j < m; j++) for (int c = 0; c < k; c++) aT[c][j] = e[at.a() + j * k + c];
         final double[][] gamma;
         try {
-            gamma = MatrixOps.solveGram(fit.bestG, aT, spec.conditioningL2 * fit.nUnits);   // k × m
+            gamma = MatrixOps.solveGram(gram, aT, spec.conditioningL2 * fit.nUnits);   // k × m
         } catch (final RuntimeException ex) {
             return null;
         }
@@ -1306,18 +1318,24 @@ public final class ScreenReport {
         final double[][] gG = new double[k][m], fG = new double[k][m];
         for (int c = 0; c < k; c++) {
             for (int d = 0; d < k; d++) {
-                final double g = fit.bestG[c][d], f = e[at.mff() + GroupScorer.packed(k, c, d)];
+                final double g = gram[c][d], f = e[at.mff() + GroupScorer.packed(k, c, d)];
                 for (int j = 0; j < m; j++) {
                     gG[c][j] += g * gamma[d][j];
                     fG[c][j] += f * gamma[d][j];
                 }
             }
         }
+        // row families: the intercept (F's last column) centres the raw H and profiles the residual mean out of M⊥
+        final boolean rows = !spec.isGroupedMultinomial();
+        final int i0 = k - 1;
+        final double g00 = rows && k > 0 ? gram[i0][i0] : 0d;
+        final boolean centre = g00 > 0;
+        final double rBar = centre ? grad[i0] / g00 : 0d;
         final double[] s = new double[m];
         final double[][] h = new double[m][m], mm = new double[m][m], hr = new double[m][m];
         for (int j = 0; j < m; j++) {
             double gg = 0;
-            for (int c = 0; c < k; c++) gg += gamma[c][j] * fit.bestGrad[c];
+            for (int c = 0; c < k; c++) gg += gamma[c][j] * grad[c];
             s[j] = (e[j] - gg) / sigma2;
             for (int l = 0; l < m; l++) {
                 final int q = GroupScorer.packed(m, j, l);
@@ -1330,21 +1348,32 @@ public final class ScreenReport {
                     xg += e[at.mxf() + j * k + c] * gamma[c][l];
                     gfg += gamma[c][j] * fG[c][l];
                 }
-                hr[j][l] = e[at.h() + q] / sigma2;
-                h[j][l] = (e[at.h() + q] - ga - ag + ggg) / sigma2;
-                mm[j][l] = (e[at.mm() + q] - gx - xg + gfg) / sigma2;
+                final double raw = e[at.h() + q];
+                hr[j][l] = (centre ? raw - e[at.a() + j * k + i0] * e[at.a() + l * k + i0] / g00 : raw) / sigma2;
+                h[j][l] = (raw - ga - ag + ggg) / sigma2;
+                mm[j][l] = (e[at.mm() + q] - gx - xg + gfg) / sigma2 - rBar * h[j][l];
             }
         }
         final int nCand = spec.jointColumns.size();
         final double[] r2 = new double[nCand];
         for (int j = 0; j < m; j++) {
-            final double rj = hr[j][j] > 0 ? Math.min(1d, Math.max(0d, 1d - h[j][j] / hr[j][j])) : Double.NaN;
-            if (j < nCand) r2[j] = rj;
-            if (h[j][j] > 1e-10 * hr[j][j]) continue;
-            // nothing left of the column beyond F: it leaves the metric rather than enter it as rounding residue
-            if (j < nCand) r2[j] = 1d;
+            // a column whose centred spread the raw moments cannot hold (window-constant, or a spread below 1e-6 of its
+            // magnitude) carries no information: out of the metric and the clusters, as in marginalJoint
+            final boolean spreadless = centre && !(hr[j][j] > ROW_DEGENERATE_REL * e[at.h() + GroupScorer.packed(m, j, j)] / sigma2);
+            if (!spreadless) {
+                final double rj = hr[j][j] > 0 ? Math.min(1d, Math.max(0d, 1d - h[j][j] / hr[j][j])) : Double.NaN;
+                if (j < nCand) r2[j] = rj;
+                if (h[j][j] > 1e-10 * hr[j][j]) continue;
+                // nothing left of the column beyond F: it leaves the metric rather than enter it as rounding residue
+                if (j < nCand) r2[j] = 1d;
+            } else if (j < nCand) {
+                r2[j] = Double.NaN;
+            }
             s[j] = 0d;
-            for (int l = 0; l < m; l++) h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+            for (int l = 0; l < m; l++) {
+                h[j][l] = h[l][j] = mm[j][l] = mm[l][j] = 0d;
+                if (spreadless) hr[j][l] = hr[l][j] = 0d;
+            }
         }
         return new JointSums(s, h, mm, hr, r2, "partial");
     }
@@ -1495,7 +1524,7 @@ public final class ScreenReport {
                 final Map<String, Object> rec = jointRecord(spec.pairName(q), "interaction", first + " at " + fmt(cut), Double.NaN, share, best, gain, null, Double.NaN,
                         reading + " -> " + rowBinFragment(first, new double[]{cut}));
                 rec.put("cut", cut);
-            rec.put("basis", "partial");
+                rec.put("basis", "partial");
                 out.add(rec);
                 continue;
             }
@@ -1599,9 +1628,11 @@ public final class ScreenReport {
             final Block block = binnedStats(spec, nb, acc.getExtra(), nUnits, (long) acc.getTotal()[ScoreAccumulator.N_OBS]);
             if (block.stats.degenerate || !(block.stats.chi2 > 0)) continue;
             final String name = spec.categoricals.get(c);
-            // levels by effect, the best single cut along that order
+            // levels by effect, the best single cut along that order — over the levels with information: a lone row
+            // at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would sort to an end with an effect of 10¹² and split off with a gain of 1 / H
+            final boolean[] use = informative(block, nb);
             final List<Integer> order = new ArrayList<>();
-            for (int l = 0; l < nb; l++) if (block.h[l] > 0) order.add(l);
+            for (int l = 0; l < nb; l++) if (use[l]) order.add(l);
             order.sort(Comparator.comparingDouble(l -> block.s[l] / block.h[l]));
             double bestGain = 0;
             int bestCut = -1;
@@ -1619,9 +1650,10 @@ public final class ScreenReport {
                         nUnits > 0 ? bestGain / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         "group " + name + " into " + low + " (lower effect) vs " + high + " (higher): a level grouping, or one-hot the few strong levels and a shrunk encoding for the rest"));
             }
-            // strong single levels
+            // strong single levels (their indicator names unique within the column)
+            final Set<String> indicatorNames = new HashSet<>();
             for (int l = 0; l < nb; l++) {
-                if (!(block.h[l] > 0)) continue;
+                if (!use[l]) continue;
                 final String level = levels.names().get(l);
                 // the fold of the levels beyond maxLevels is no value a row indicator can name
                 if (levels.folded() && l == nb - 1) continue;
@@ -1629,9 +1661,16 @@ public final class ScreenReport {
                 phi[l] = 1;
                 final double chi2 = contrastChi2(block, phi, nb);
                 if (chi2 < 9) continue;
+                String indicatorName = name + "_is_" + level.replaceAll("[^A-Za-z0-9_]", "_");
+                // levels that differ only in the replaced characters (non-ASCII names, "a-b" / "a b") would share a
+                // name: the later one takes its position as a suffix
+                if (!ScreenSpec.LEVEL_NULL.equals(level) && !indicatorNames.add(indicatorName)) {
+                    indicatorName = indicatorName + "_" + l;
+                    indicatorNames.add(indicatorName);
+                }
                 final String indicator = ScreenSpec.LEVEL_NULL.equals(level)
                         ? "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}"
-                        : "{name: " + name + "_is_" + level.replaceAll("[^A-Za-z0-9_]", "_") + ", scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
+                        : "{name: " + indicatorName + ", scope: row, type: indicator, input: " + name + ", values: [" + new JsonPrimitive(level) + "]}";
                 out.add(jointRecord(name, "onehot", level, Double.NaN, Math.min(1d, chi2 / block.stats.chi2), chi2,
                         nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, null, Double.NaN,
                         indicator + " (z " + fmt(contrastSign(block, phi, nb) * Math.sqrt(chi2)) + ")"));
@@ -1738,8 +1777,8 @@ public final class ScreenReport {
         final boolean unitModifier = spec.isGroupedMultinomial() && ScreenSpec.HET_FIELD.equals(spec.heterogeneityBy);
         final Long hetMixed = unitModifier ? (long) b[ScoreAccumulator.UNITS_HET_MIXED] : null;
         if (hetMixed != null && hetMixed > 0 && nUnits > 0) {
-            notes.add("heterogeneity by " + spec.heterogeneityField + ": " + hetMixed + " of " + (long) nUnits + " units (" + fmt(100d * hetMixed / nUnits)
-                    + "%) carry more than one level; each such unit takes its rows' most frequent level (ties to the smallest) — a unit-level modifier is expected");
+            notes.add("heterogeneity by " + spec.heterogeneityField + ": " + hetMixed + " of " + (long) nUnits + " units (" + Baselines.percent(hetMixed, nUnits)
+                    + ") carry more than one level; each such unit takes its rows' most frequent level (ties to the smallest) — a unit-level modifier is expected");
         }
         if (Baselines.skipShareNoted(skipped, nUnits)) {
             notes.add(skipped + " of " + (long) (nUnits + skipped) + " units skipped (" + Baselines.percent(skipped, nUnits + skipped)
@@ -1916,7 +1955,7 @@ public final class ScreenReport {
                     final List<Stats> partialPeriodStats = new ArrayList<>();
                     final List<Stats> partialLevelStats = new ArrayList<>();
                     long pAgree = 0, pPeriods = 0;
-                    if (vec != null && !st.degenerate && fitPeriods != null) {
+                    if (vec != null && !st.degenerate && fitPeriods != null && !fitPeriods.isEmpty()) {
                         // without the per-period Gram every slice scales the window's γ'Gγ: computed once per column
                         final double windowGGg = gamma != null && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k
                                 ? quadratic(gamma, fit.bestG, fit.k) : 0d;
@@ -2094,13 +2133,15 @@ public final class ScreenReport {
                 // each level against the rest: the df = 1 contrast's signed z, its score and information
                 final List<Map<String, Object>> levelRecords = new ArrayList<>();
                 if (!placebo) {
+                    // a level without information (the contrasts' rule) has no z, rather than a z of 0
+                    final boolean[] use = informative(block, nb);
                     for (int l = 0; l < nb; l++) {
                         final double[] phi = new double[nb];
                         phi[l] = 1;
                         final double chi2 = st.degenerate ? 0d : contrastChi2(block, phi, nb);
                         final Map<String, Object> lr = new LinkedHashMap<>();
                         lr.put("level", levels.names().get(l));
-                        lr.put("z", st.degenerate || !(block.h[l] > 0) ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
+                        lr.put("z", st.degenerate || !use[l] ? null : contrastSign(block, phi, nb) * Math.sqrt(chi2));
                         lr.put("S", block.s[l]);
                         lr.put("H", block.h[l]);
                         lr.put("n", Math.round(block.n[l]));
@@ -2182,33 +2223,41 @@ public final class ScreenReport {
         final Map<String, Double> passedBest = new HashMap<>();
         final Map<String, Double> hetPassedBest = new HashMap<>();
         final List<String> passedPairs = new ArrayList<>();
+        // the leak flag's tail, P(|Z| > leakZ), on the log scale: a block's χ²(df) tail is read against it there, as
+        // both underflow to 0 past a z of about 38 — where a large window's leak sits
+        final double leakLogTail = spec.leakZ == null ? Double.NaN : StatMath.logChiSquareUpperTail(spec.leakZ * spec.leakZ, 1);
         for (int i = 0; i < records.size(); i++) {
             final Map<String, Object> r = records.get(i);
             final Stats st = effective.get(i);
             final boolean placebo = (Boolean) r.get("placebo");
             final long[] agreement = effectiveAgree.get(i);
-            final double kindThreshold = thresholds.get(ScreenSpec.kind((String) r.get("transform")));
+            final String kind = ScreenSpec.kind((String) r.get("transform"));
+            final double kindThreshold = thresholds.get(kind);
             // the degrees of freedom of the marginal and the effective test (a block's partial df may be fewer)
-            final double marginalDf = r.get("df") == null ? 1d : ((Long) r.get("df")).doubleValue();
+            final double marginalDf = ((Long) r.get("df")).doubleValue();
             final double effectiveDf = conditioned && r.get("partial_df") != null ? ((Long) r.get("partial_df")).doubleValue() : marginalDf;
             final Double estGain = (Double) r.get("est_gain"), partialGain = (Double) r.get("partial_gain");
-            r.put("excess_gain", estGain == null ? null : ScreenSpec.excessGain(estGain, marginalDf, nUnits));
-            r.put("partial_excess_gain", partialGain == null ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
+            // a degenerate test's gain is a placeholder 0: no excess (not a negative df / 2N) is read off it
+            final boolean marginalDegenerate = (Boolean) r.get("degenerate");
+            r.put("excess_gain", estGain == null || marginalDegenerate ? null : ScreenSpec.excessGain(estGain, marginalDf, nUnits));
+            r.put("partial_excess_gain", partialGain == null || (conditioned && st.degenerate) ? null : ScreenSpec.excessGain(partialGain, effectiveDf, nUnits));
             final boolean passed = !placebo && !st.degenerate && spec.passesGain(st.estGain, effectiveDf, nUnits, kindThreshold)
                     && (agreement == null || spec.periodsAgree(agreement[0], agreement[1]));
             // st is the effective test: the partial statistics whenever leakOnPartial (which implies conditioned).
-            // A df = 1 test is flagged on |z| > leakZ; a block (no z) on the same tail — its p-value below
-            // P(|Z| > leakZ), so a χ²(df) as unlikely under the null as a z of leakZ flags the block too
+            // A df = 1 test is flagged on |z| > leakZ; a block (binned / levels: no z) on the same tail — its p-value
+            // below P(|Z| > leakZ), so a χ²(df) as unlikely under the null as a z of leakZ flags the block too. A pair
+            // (no marginal z) is not flagged: its members are conditioning columns, which the flag assumes do not leak
             final Double marginalZ = (Double) r.get("z");
-            final Double marginalP = (Double) r.get("pValue");
             final boolean leak;
             if (spec.leakZ == null) {
                 leak = false;
-            } else if (marginalZ != null) {
-                leak = Math.abs(leakOnPartial ? st.z() : marginalZ) > spec.leakZ;
+            } else if (ScreenSpec.KIND_BINNED.equals(kind) || ScreenSpec.KIND_LEVELS.equals(kind)) {
+                final boolean flagDegenerate = leakOnPartial ? st.degenerate : (Boolean) r.get("degenerate");
+                final double flagChi2 = leakOnPartial ? st.chi2() : (Double) r.get("chi2");
+                final int flagDf = (int) (leakOnPartial ? effectiveDf : marginalDf);
+                leak = !flagDegenerate && StatMath.logChiSquareUpperTail(flagChi2, flagDf) < leakLogTail;
             } else {
-                final double flagP = leakOnPartial ? (st.degenerate ? Double.NaN : st.pValue) : marginalP == null ? Double.NaN : marginalP;
-                leak = flagP < StatMath.chiSquare1UpperTail(spec.leakZ * spec.leakZ);
+                leak = marginalZ != null && Math.abs(leakOnPartial ? st.z() : marginalZ) > spec.leakZ;
             }
             r.put("threshold", kindThreshold);
             r.put("passed", passed);
@@ -2225,7 +2274,8 @@ public final class ScreenReport {
                 }
             }
             if (leak && !placebo) nLeak++;
-            // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
+            // the heterogeneity test's own flag (never folded into passed): its kind's cut, and its excess over het df / 2N
+            // above the floor
             final Het het = effectiveHet.get(i);
             Boolean hetPassed = null;
             if (het != null) {

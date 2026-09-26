@@ -75,13 +75,15 @@ public final class ConditioningScorer implements Serializable {
     /**
      * The offsets of the partial joint sums vector for m joint columns and k fitted coefficients (DSL doc §9.5):
      * {@code [S (m), H (packed m), M (packed m), A = Σ w v x̃ f̃' (m × k), Mxf = Σ w r x̃ f̃' (m × k), Mff = Σ w r f̃f̃'
-     * (packed k), used, filled, dropped]}; the packed blocks are upper triangles, row-major ({@link GroupScorer#packed}).
+     * (packed k), g = Σ w r f̃ (k), G = Σ w v f̃f̃' (packed k), used, filled, dropped]}; the packed blocks are upper
+     * triangles, row-major ({@link GroupScorer#packed}). g and G are the fit's gradient and Gram over the rows the joint
+     * sums keep — the fit's own {@code bestGrad} / {@code bestG} unless a row family left rows out for a missing value.
      */
-    record JointPartialLayout(int m, int k, int h, int mm, int a, int mxf, int mff, int used, int length) {
+    record JointPartialLayout(int m, int k, int h, int mm, int a, int mxf, int mff, int g, int gff, int used, int length) {
         static JointPartialLayout of(final int m, final int k) {
             final int pm = m * (m + 1) / 2, pk = k * (k + 1) / 2;
-            final int h = m, mm = h + pm, a = mm + pm, mxf = a + m * k, mff = mxf + m * k, used = mff + pk;
-            return new JointPartialLayout(m, k, h, mm, a, mxf, mff, used, used + 3);
+            final int h = m, mm = h + pm, a = mm + pm, mxf = a + m * k, mff = mxf + m * k, g = mff + pk, gff = g + k, used = gff + pk;
+            return new JointPartialLayout(m, k, h, mm, a, mxf, mff, g, gff, used, used + 3);
         }
 
         /** The slot counting the rows (grouped: units) added with a missing joint value filled. */
@@ -259,8 +261,9 @@ public final class ConditioningScorer implements Serializable {
      * P̂_b Σ_i p̂_i f_ij); row families: s_b = Σ_{i in b} w_i (y_i − p̂_i), H_bb = Σ_{i in b} w_i v̂_i,
      * A_bj = Σ_{i in b} w_i v̂_i f_ij. Only the bins the unit occupies are touched (an empty bin's sums are zero).
      */
-    private void binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into) {
-        binnedPartial(spec.binCount(), unit, bins, f, p, into, spec.suggestionsOn);
+    private void binnedPartial(final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final PartialAccumulator into,
+                               final boolean discovery) {
+        binnedPartial(spec.binCount(), unit, bins, f, p, into, spec.suggestionsOn, discovery);
     }
 
     /** The length of a block's partial sums over {@code nb} cells: {@code [s (B), H (B² grouped / B), A (B × k)]}. */
@@ -269,32 +272,26 @@ public final class ConditioningScorer implements Serializable {
     }
 
     /**
-     * {@link #binnedPartial(GroupScorer.Unit, int[], double[][], double[], PartialAccumulator)} over a block of {@code nb}
-     * cells (a categorical column's levels, DSL doc §6.2). With {@code split} the accumulator's vector is kept twice —
-     * the window's sums, then the discovery half's (the same seeded split of the units as the marginal pass,
-     * {@link GroupScorer#discovery}) — so the suggestions can be chosen and confirmed on the partial sums (DSL doc §9.4).
+     * {@link #binnedPartial(GroupScorer.Unit, int[], double[][], double[], PartialAccumulator, boolean)} over a block of
+     * {@code nb} cells (a categorical column's levels, DSL doc §6.2). With {@code split} the accumulator's vector is kept
+     * twice — the window's sums, then the discovery half's (the same seeded split of the units as the marginal pass,
+     * {@link GroupScorer#discovery}, whose verdict for the unit is {@code discovery}) — so the suggestions can be chosen
+     * and confirmed on the partial sums (DSL doc §9.4). Both halves are added in place over the occupied bins only.
      */
     private void binnedPartial(final int nb, final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p,
-                               final PartialAccumulator into, final boolean split) {
+                               final PartialAccumulator into, final boolean split, final boolean discovery) {
         final int len = binnedPartialLength(nb);
-        if (!split) {
-            binnedPartialInto(nb, unit, bins, f, p, into.total(len));
-            return;
-        }
-        final double[] sums = new double[len];
-        binnedPartialInto(nb, unit, bins, f, p, sums);
-        final double[] both = into.total(2 * len);
-        final boolean discovery = binner().discovery(unit.key);
-        for (int i = 0; i < len; i++) {
-            both[i] += sums[i];
-            if (discovery) both[len + i] += sums[i];
-        }
+        final double[] out = into.total(split ? 2 * len : len);
+        binnedPartialInto(nb, unit, bins, f, p, out, 0);
+        if (split && discovery) binnedPartialInto(nb, unit, bins, f, p, out, len);
     }
 
-    private void binnedPartialInto(final int nb, final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final double[] out) {
+    /** Adds the block's partial sums of the unit into {@code out} from {@code base} on (the window's or the discovery half's slot). */
+    private void binnedPartialInto(final int nb, final GroupScorer.Unit unit, final int[] bins, final double[][] f, final double[] p, final double[] out,
+                                   final int base) {
         final int n = unit.size();
         if (spec.isGroupedMultinomial()) {
-            final int aOffset = nb + nb * nb;
+            final int aOffset = base + nb + nb * nb;
             final double[] sb = new double[nb];
             final double[] pb = new double[nb];
             // Σ_{i in b} p̂_i f_i, allocated for the occupied bins only
@@ -319,10 +316,10 @@ public final class ConditioningScorer implements Serializable {
             final double w = unit.unitWeight;
             for (int x = 0; x < m; x++) {
                 final int b = occupied[x];
-                out[b] += w * sb[b];
+                out[base + b] += w * sb[b];
                 for (int z = 0; z < m; z++) {
                     final int c = occupied[z];
-                    out[nb + b * nb + c] += w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
+                    out[base + nb + b * nb + c] += w * ((b == c ? pb[b] : 0d) - pb[b] * pb[c]);
                 }
                 for (int j = 0; j < k; j++) out[aOffset + b * k + j] += w * (pbf[b][j] - pb[b] * pf[j]);
             }
@@ -331,9 +328,9 @@ public final class ConditioningScorer implements Serializable {
         for (int i = 0; i < n; i++) {
             final double w = unit.w[i];
             final double vv = spec.fisherWeight(p[i]);
-            out[bins[i]] += w * (unit.y[i] - p[i]);
-            out[nb + bins[i]] += w * vv;
-            for (int j = 0; j < k; j++) out[2 * nb + bins[i] * k + j] += w * vv * f[i][j];
+            out[base + bins[i]] += w * (unit.y[i] - p[i]);
+            out[base + nb + bins[i]] += w * vv;
+            for (int j = 0; j < k; j++) out[base + 2 * nb + bins[i] * k + j] += w * vv * f[i][j];
         }
     }
 
@@ -354,6 +351,8 @@ public final class ConditioningScorer implements Serializable {
         final int n = unit.size();
         final int nTransforms = spec.transforms.size();
         final boolean periods = spec.periodsBucket != null;
+        // the suggestions' half of this unit: one seeded hash per unit, not per column (as the marginal pass)
+        final boolean discovery = spec.suggestionsOn && binner().discovery(unit.key);
         if (spec.isGaussian()) {
             // residual variance at the fitted model: the report divides the partial S / H by it
             final double[] sig = new double[partialLength()];
@@ -375,7 +374,7 @@ public final class ConditioningScorer implements Serializable {
                 for (int t = 0; t < nTransforms; t++) {
                     if (ScreenSpec.isBinned(spec.transforms.get(t))) {
                         // the block's sums carry no period slices (the binned test has no sign to agree on)
-                        binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
+                        binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()), discovery);
                         continue;
                     }
                     final double[] v = GroupScorer.transform(spec, quantiles, c, spec.transforms.get(t), cols[c]);
@@ -396,7 +395,7 @@ public final class ConditioningScorer implements Serializable {
             }
             categoricalBlocks(unit, f, p, into);
             addJointPartial(unit, cols, f, p, into);
-            addDiscoveryFit(unit, f, p, into);
+            if (discovery) addDiscoveryFit(unit, f, p, into);
             return;
         }
         // row families: every row is its own period and modifier level; the rows are bucketed once into (period, level)
@@ -418,7 +417,7 @@ public final class ConditioningScorer implements Serializable {
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
                 if (ScreenSpec.isBinned(spec.transforms.get(t))) {
-                    binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()));
+                    binnedPartial(unit, bins(c, cols[c]), f, p, into.computeIfAbsent(spec.key(c, t), key -> new PartialAccumulator()), discovery);
                     continue;
                 }
                 // the transform is taken once over the whole unit (rank / absdev within the unit, or against the
@@ -450,26 +449,26 @@ public final class ConditioningScorer implements Serializable {
         }
         categoricalBlocks(unit, f, p, into);
         addJointPartial(unit, cols, f, p, into);
-        addDiscoveryFit(unit, f, p, into);
+        if (discovery) addDiscoveryFit(unit, f, p, into);
     }
 
     /**
-     * Adds the fit's {@code [n, g, G]} over the unit to the {@link #DISCOVERY_SLICE} of {@link #FIT_PERIOD_KEY} when
-     * the unit is in the suggestions' discovery half (the marginal pass's seeded split), so the report orthogonalises
-     * the halves' binned blocks exactly (DSL doc §9.4). Nothing without {@code suggestions}.
+     * Adds the fit's {@code [n, g, G]} over a unit of the suggestions' discovery half (the marginal pass's seeded split)
+     * to the {@link #DISCOVERY_SLICE} of {@link #FIT_PERIOD_KEY}, so the report orthogonalises the halves' binned blocks
+     * exactly (DSL doc §9.4). Called only with {@code suggestions}, for a discovery unit.
      */
     private void addDiscoveryFit(final GroupScorer.Unit unit, final double[][] f, final double[] p, final Map<Integer, PartialAccumulator> into) {
-        if (!spec.suggestionsOn || !binner().discovery(unit.key)) return;
         into.computeIfAbsent(FIT_PERIOD_KEY, key -> new PartialAccumulator()).addSlice(DISCOVERY_SLICE, fitPeriodSums(unit, p, f, null));
     }
 
     /**
      * Adds the unit's contribution to the joint columns' sums at the fitted p̂ (DSL doc §9.5) under
      * {@link #JOINT_PARTIAL_KEY}, laid out by {@link JointPartialLayout}: S = Σ w r x̃, H = Σ w v x̃x̃', M = Σ w r x̃x̃',
-     * A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃'. The report orthogonalises against F with Γ = G⁻¹A
-     * (S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ, M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ) and reads the several-candidate
-     * suggestions off the partial sums. Grouped: x̃ centred by p̂ over the unit's observed rows (a missing value 0,
-     * the marginal joint's rule), f̃ = f − Σ p̂ f and W = diag(p̂) − p̂p̂' as {@link #groupedPartialSums}; row families:
+     * A = Σ w v x̃ f̃', Mxf = Σ w r x̃ f̃', Mff = Σ w r f̃f̃', and the fit's own g = Σ w r f̃ and G = Σ w v f̃f̃' over the
+     * same rows. The report orthogonalises against F with Γ = G⁻¹A (S⊥ = S − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ,
+     * M⊥ = M − Γ'Mxf' − MxfΓ + Γ'MffΓ) and reads the several-candidate suggestions off the partial sums. Grouped: x̃
+     * centred by p̂ over the unit's observed rows (a missing value 0, the marginal joint's rule — Σ p̂ x̃ = 0, so W x̃
+     * needs no further centring), f̃ = f − Σ p̂ f and W = diag(p̂) − p̂p̂' as {@link #groupedPartialSums}; row families:
      * x shifted by the window mean (a missing value 0; a row missing a value without a mean is left out and counted),
      * F̃ with its intercept doing the centring, v the Fisher weight at p̂. Nothing without {@code joint}.
      */
@@ -502,19 +501,13 @@ public final class ConditioningScorer implements Serializable {
             final double[] pf = new double[k];
             for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
             final double w = unit.unitWeight;
-            final double[] px = new double[m];
             final double[] fc = new double[k];
             for (int i = 0; i < n; i++) {
                 final double r = unit.y[i] - p[i];
                 for (int a = 0; a < k; a++) fc[a] = f[i][a] - pf[a];
-                for (int j = 0; j < m; j++) {
-                    x[j] = xt[i][j];
-                    px[j] += p[i] * x[j];
-                }
+                System.arraycopy(xt[i], 0, x, 0, m);
                 addJointOuter(out, at, x, fc, w * p[i], w * r);
             }
-            // the p̂-centring of H: − (Σ p̂ x̃)(Σ p̂ x̃)' (A takes f̃, so Σ p̂ x̃ f̃' is already centred; Σ p̂ f̃ = 0)
-            for (int j = 0; j < m; j++) for (int l = j; l < m; l++) out[at.h() + GroupScorer.packed(m, j, l)] -= w * px[j] * px[l];
             out[at.used()] += 1;
             if (filled) out[at.filled()] += 1;
             return;
@@ -549,7 +542,10 @@ public final class ConditioningScorer implements Serializable {
         out[at.dropped()] += dropped;
     }
 
-    /** Adds S += b·x, H += a·xx', M += b·xx', A += a·x f', Mxf += b·x f', Mff += b·f f' (packed upper triangles). */
+    /**
+     * Adds S += b·x, H += a·xx', M += b·xx', A += a·x f', Mxf += b·x f', Mff += b·f f', g += b·f, G += a·f f' (packed
+     * upper triangles).
+     */
     private static void addJointOuter(final double[] out, final JointPartialLayout at, final double[] x, final double[] f, final double a, final double b) {
         final int m = x.length, k = f.length;
         int q = 0;
@@ -567,8 +563,12 @@ public final class ConditioningScorer implements Serializable {
         }
         q = 0;
         for (int c = 0; c < k; c++) {
-            final double bc = b * f[c];
-            for (int d = c; d < k; d++, q++) out[at.mff() + q] += bc * f[d];
+            final double ac = a * f[c], bc = b * f[c];
+            out[at.g() + c] += bc;
+            for (int d = c; d < k; d++, q++) {
+                out[at.mff() + q] += bc * f[d];
+                out[at.gff() + q] += ac * f[d];
+            }
         }
     }
 
@@ -584,7 +584,7 @@ public final class ConditioningScorer implements Serializable {
             if (levels == null || levels.size() < 2) continue;
             for (int r = -1; r < spec.categoricalPlacebo; r++) {
                 final int[] idx = r < 0 ? GroupScorer.levelIndices(unit, c, levels) : binner.placeboLevels(unit, c, r, levels);
-                binnedPartial(levels.size(), unit, idx, f, p, into.computeIfAbsent(spec.categoricalKey(c, r), key -> new PartialAccumulator()), false);
+                binnedPartial(levels.size(), unit, idx, f, p, into.computeIfAbsent(spec.categoricalKey(c, r), key -> new PartialAccumulator()), false, false);
             }
         }
     }

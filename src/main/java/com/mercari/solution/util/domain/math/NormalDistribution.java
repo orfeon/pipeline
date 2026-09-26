@@ -41,12 +41,26 @@ public final class NormalDistribution {
             }
             return 1d - 2d / SQRT_PI * sum;
         }
-        // sqrt(pi) e^{x^2} erfc(x) = 1/(x + (1/2)/(x + 1/(x + (3/2)/(x + 2/(x + ...)))))
+        return Math.exp(-x * x) / SQRT_PI / (x + erfcContinuedFraction(x));
+    }
+
+    /**
+     * ln erfc(x): {@link #erfc} on the log scale, finite past x = 27 where erfc itself underflows to 0 (the
+     * continued fraction's logarithm, {@code −x² − ln √π − ln(x + tail)}, above 2.5).
+     */
+    public static double logErfc(final double x) {
+        if (Double.isNaN(x)) return Double.NaN;
+        if (x < 2.5) return Math.log(erfc(x));
+        return -x * x - Math.log(SQRT_PI) - Math.log(x + erfcContinuedFraction(x));
+    }
+
+    /** The tail of sqrt(pi) e^{x^2} erfc(x) = 1/(x + (1/2)/(x + 1/(x + (3/2)/(x + 2/(x + ...))))), evaluated backwards. */
+    private static double erfcContinuedFraction(final double x) {
         double tail = 0d;
         for (int n = 200; n >= 1; n--) {
             tail = (n / 2d) / (x + tail);
         }
-        return Math.exp(-x * x) / SQRT_PI / (x + tail);
+        return tail;
     }
 
     /** Standard normal cdf Φ(x) = erfc(−x / √2) / 2. */

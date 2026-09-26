@@ -91,8 +91,9 @@ bins plus a missing bin (a missing value is a bin of its own, so informative mis
 catches any univariate shape at bin resolution — a band, a threshold, a U — where the linear probe of `raw`
 sees nothing. The record is one χ²(df) statistic without a sign: `chi2`, `df` (active bins − 1), `pValue`,
 `est_gain = chi2 / (2N)` on the same scale as the other transforms, and `bin_stats` (per bin: score `S`,
-information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z`, the
-period fields and the leak flag do not apply (null / false). Under conditioning the block gets its own
+information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z` and the
+period fields do not apply (null), and the leak flag reads the block's p-value (see
+[flags](#periods-time-window-and-leak-flags)). Under conditioning the block gets its own
 partial test (`partial_chi2`, `partial_df`, `partial_gain`, `partial_pValue`, `r2_F` = the share of the
 block's information F explains).
 
@@ -176,7 +177,7 @@ scale) — and writes, to the same `suggestions` output, what a univariate ranki
 |---|---|---|
 | `phd` | the principal Hessian directions: the directions of residual curvature (quadratic effects and interactions in bulk), their loadings naming the candidates involved — a diagnostic, never a pass flag; a real direction loads on candidates, not on the noise columns | `name` direction i, `candidate` the top loading (loadings are scale-free: a column's units do not decide its rank), `chi2` the eigenvalue, `share`, `consistency` the largest noise loading (null without a noise column), `fragment` the top candidates' coefficients in their own units — the recipe is the projection and its square; and the members to declare as `pairs` |
 | `redundant` | near-duplicate candidates (\|correlation\| ≥ `joint.redundancy` in the Fisher metric): keep one, or average / project them | `candidate` the strongest member, `fragment` the others, `share` the cluster's smallest \|correlation\| |
-| `select` | a forward selection: the candidate that adds most given the already selected set, step by step, while it clears the df = 1 cut — a set that works together | `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = the gain given the set (in-sample), `threshold` the cut it cleared, `fragment` "given [...]" |
+| `select` | a forward selection: the candidate that adds most given the already selected set, step by step, while it clears the df = 1 cut — a set that works together | `candidate`, `name` step k, `chi2`, `share` = `confirmation_gain` = the gain given the set (in-sample), `threshold` the df = 1 placebo cut it cleared (under `pass.minGain` its excess gain cleared the floor too), `fragment` "given [...]" |
 | `composite` | the best linear combination of the selected set to add to the baseline | `fragment` the row expression, `chi2` / `share` the joint statistic and gain |
 | `difference` | a pair whose joint statistic clearly exceeds the better single one (`joint.excess`, default 1.5×, and the other member's gain given the better one clears the df = 1 cut) with equal and opposite standardised coefficients — the label follows `a − b`; at most `joint.pairs` (default 10) pairs | `name` `a - b`, `fragment` `{scope: row, expr: "a - r*b"}`, `chi2` the joint statistic, `share` the excess factor, `consistency` how equal the magnitudes are |
 | `ratio` | the same pair when both columns are positive over the window: the difference's log-scale reading (approximate) | `fragment` `{scope: row, expr: "a / b"}` |
@@ -217,8 +218,8 @@ distribution kept, the alignment with the label broken). A passing column goes i
 (the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
 fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
 transform's row op in the fragment (`{name: <column>_is_<level>, type: indicator, input, values: [level]}`, the
-level's non-alphanumeric characters as `_` in the name; `== null` for the `(null)` level; none for the folded
-`(other)`).
+level's non-alphanumeric characters as `_` in the name, a name two strong levels would share suffixed with the
+later one's position; `== null` for the `(null)` level; none for the folded `(other)`).
 
 ### Periods, time window and leak flags
 
@@ -243,8 +244,9 @@ level's non-alphanumeric characters as `_` in the name; `== null` for the `(null
   to matter for training. `minGain` is in the unit of `est_gain` — the average log-likelihood improvement per
   unit, the scale a trained model's excess log score is reported on — so the same value means the same thing
   whatever N. With `weight` the gain is weight-scaled (the weights multiply S and H, the gain divides by the unit
-  count), so the floor is compared with the mean weight times the per-unit gain: normalise the weights to mean 1,
-  or scale `minGain` by the mean weight. The record's `threshold` stays the placebo cut (the calibration check);
+  count), so the floor is compared with the mean weight times the per-unit gain: normalise the weights to mean 1
+  (the excess subtracts the unit-weight null term df / 2N, so scaling `minGain` by the mean weight instead leaves
+  that term unscaled). The record's `threshold` stays the placebo cut (the calibration check);
   `passRule` names the floor (`est_gain > threshold and excess_gain > 1.0E-5`). The same rule holds the
   heterogeneity flag, the suggestions' confirmation gains and the joint selection to the floor.
 - `time.to` (and `time.from`) fence the window: rows outside are not screened (`nRowsTimeFiltered` in the
@@ -417,7 +419,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | method | STRING | `scoreTest` |
 | family | STRING | the family |
 | S, H, beta, chi2, z, est_gain | FLOAT64 | the statistics above (`beta` null when degenerate) |
-| excess_gain | FLOAT64 | `est_gain − df / 2N`: the gain less a null test's expectation over the same degrees of freedom — what `pass.minGain` reads |
+| excess_gain | FLOAT64 | `est_gain − df / 2N`: the gain less a null test's expectation over the same degrees of freedom — what `pass.minGain` reads (null when degenerate) |
 | df | INT64 | degrees of freedom: 1, or the binned block's active bins − 1 |
 | pValue, qValue | FLOAT64 | χ²(df) upper tail (χ²(1), or the binned block's df); Benjamini–Hochberg q-value over the candidate records (null for placebo) |
 | n_groups | INT64 | scored units (groups, or rows when independent) — the N of `est_gain` |
@@ -431,7 +433,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | het_passed | BOOL | the effective heterogeneity gain above `thresholds.het` (and its excess `het_gain − het_df / 2N` above `pass.minGain`); candidate records only, never part of `passed` |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
-| partial_excess_gain | FLOAT64 | conditioning only: `partial_gain − partial_df / 2N` (df = 1 for a scalar test) — what `pass.minGain` reads with conditioning |
+| partial_excess_gain | FLOAT64 | conditioning only: `partial_gain − partial_df / 2N` (df = 1 for a scalar test) — what `pass.minGain` reads with conditioning (null when the partial test is degenerate) |
 | partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
 | partial_periods_agree, partial_n_periods | INT64 | conditioning + periods: buckets whose partial sign agrees with the overall partial sign / non-degenerate buckets (null without conditioning) |
 | partial_period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | conditioning + periods: the partial test per bucket (S⊥, H⊥ with the window's orthogonalisation; they sum to `partial_S` / `partial_H`) |
@@ -622,7 +624,7 @@ transforms:
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
   "conditioningFields": ["model_a", "model_b"],
   "createdAt": "2026-09-05T10:00:00Z",
-  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "z": 8.95, "partial_gain": 0.00051, "partial_z": 7.1, "r2_F": 0.035, "periods_agree": 3, "n_periods": 3, "leakSuspect": false}]
+  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "excess_gain": 0.00076, "z": 8.95, "partial_gain": 0.00051, "partial_excess_gain": 0.0005, "partial_z": 7.1, "r2_F": 0.035, "periods_agree": 3, "n_periods": 3, "leakSuspect": false}]
 }
 ```
 
