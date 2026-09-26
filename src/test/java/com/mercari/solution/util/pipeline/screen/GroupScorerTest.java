@@ -1179,17 +1179,40 @@ public class GroupScorerTest {
         Assertions.assertTrue(noSketch.suggestions().stream().anyMatch(s -> "difference".equals(s.get("kind"))));
         Assertions.assertTrue(noSketch.suggestions().stream().noneMatch(s -> "ratio".equals(s.get("kind"))));
         // a pair whose members pull the same way (a sum, not a difference) is not suggested
-        final ScreenSpec sum = spec("{family: binomial, label: y, candidates: [b, x], transforms: [raw], placebo: {noise: 0}, joint: {noise: 0, select: 0, directions: 1}}");
-        final GroupScorer sumScorer = new GroupScorer(sum);
         final Map<Integer, ScoreAccumulator> sumAcc = new HashMap<>();
         for (int i = 0; i < 600; i++) {
             final double b = random.nextGaussian(), x = random.nextGaussian();
             final double y = random.nextDouble() < 1 / (1 + Math.exp(-(b + x))) ? 1 : 0;
             final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{b, x});
-            sumScorer.score(List.of(r), r.getIdentity(), sumAcc);
+            scorer.score(List.of(r), r.getIdentity(), sumAcc);
         }
-        Assertions.assertTrue(ScreenReport.build(sum, sumAcc).suggestions().stream().noneMatch(s -> "difference".equals(s.get("kind"))));
+        Assertions.assertTrue(ScreenReport.build(spec, sumAcc).suggestions().stream().noneMatch(s -> "difference".equals(s.get("kind"))));
+        // pure noise: the excess and sign rules alone let a noise pair through about one run in five (equal |z| of
+        // opposite signs: the joint chi2 up to twice the better single); the increment's df = 1 cut keeps it out
+        boolean looseSeen = false;
+        for (int seed = 0; seed < 100 && !looseSeen; seed++) {
+            final java.util.Random rnd = new java.util.Random(seed);
+            final Map<Integer, ScoreAccumulator> noiseAcc = new HashMap<>();
+            for (int i = 0; i < 600; i++) {
+                final double b = rnd.nextGaussian(), x = rnd.nextGaussian();
+                final double y = rnd.nextBoolean() ? 1 : 0;
+                final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, y, Double.NaN, 1, new double[]{b, x});
+                scorer.score(List.of(r), r.getIdentity(), noiseAcc);
+            }
+            if (ScreenReport.joint(spec, noiseAcc, 600, Double.NEGATIVE_INFINITY, null).stream().noneMatch(s -> "difference".equals(s.get("kind")))) continue;
+            looseSeen = true;
+            Assertions.assertTrue(ScreenReport.build(spec, noiseAcc).suggestions().stream().noneMatch(s -> "difference".equals(s.get("kind"))), "seed " + seed);
+        }
+        Assertions.assertTrue(looseSeen);
+        // the ratio's positivity needs the window sketches even without a rank / absdev / binned / pair-shape reader
+        Assertions.assertFalse(spec.needsWindowQuantiles());
+        Assertions.assertTrue(spec.needsJointMinima());
+        // ... and the pre-pass then feeds the candidates, so their sketches are not left empty
+        Assertions.assertArrayEquals(new int[]{0, 1}, spec.sketchedColumns());
+        Assertions.assertFalse(spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").needsJointMinima());
+        Assertions.assertArrayEquals(new int[0], spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 0}}").sketchedColumns());
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {excess: 0.5}}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [b, x], joint: {pairs: 1.5}}"));
     }
 
     @Test
