@@ -246,7 +246,7 @@ public class ScreenTransformTest {
             final Map<String, Map<String, MElement>> byCandidate = new java.util.HashMap<>();
             final java.util.Set<String> jointKinds = new java.util.HashSet<>();
             for (final MElement e : rows) {
-                if (java.util.Set.of("phd", "redundant", "select", "composite").contains(e.getAsString("kind"))) {
+                if (java.util.Set.of("phd", "redundant", "select", "composite", "difference", "ratio").contains(e.getAsString("kind"))) {
                     jointKinds.add(e.getAsString("kind"));
                     continue;
                 }

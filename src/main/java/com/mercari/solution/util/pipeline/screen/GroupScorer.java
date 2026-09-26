@@ -402,7 +402,7 @@ public final class GroupScorer implements Serializable {
     }
 
     /** The smallest finite value of a candidate column in the window (its sketch; NaN for a placebo column or without a sketch). */
-    public Double columnMin(final int column) {
+    public double columnMin(final int column) {
         if (quantiles == null || column >= nCandidates || column >= quantiles.columns() || quantiles.count(column) == 0) return Double.NaN;
         return quantiles.min(column);
     }
