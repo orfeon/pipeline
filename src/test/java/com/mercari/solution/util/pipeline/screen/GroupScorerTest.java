@@ -1170,6 +1170,35 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testOnehotNamesStayUniqueWhenLevelsShareASanitizedName() {
+        // "a b" and "a-b" both become a_b in the indicator name: the later level (by count then name) takes its position
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 5}}");
+        final String[] levels = {"a-b", "a b", "C", "D"};
+        final double[] rate = {0.05, 0.05, 0.9, 0.9};
+        final java.util.Random random = new java.util.Random(29);
+        final List<ScreenRow> rows = new ArrayList<>();
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+        for (int i = 0; i < 400; i++) {
+            final int l = i % 4;
+            final double y = random.nextDouble() < rate[l] ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, Double.NaN, 1, new double[]{random.nextGaussian()}, new String[]{levels[l]});
+            rows.add(r);
+            q.update(r.x);
+            q.updateLevels(r.cat);
+        }
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+        final Map<String, String> fragments = new HashMap<>();
+        for (final Map<String, Object> s : result.suggestions()) if ("onehot".equals(s.get("kind"))) fragments.put((String) s.get("name"), (String) s.get("fragment"));
+        Assertions.assertTrue(fragments.containsKey("a b") && fragments.containsKey("a-b"), fragments.toString());
+        Assertions.assertTrue(fragments.get("a b").startsWith("{name: g_is_a_b, "), fragments.toString());
+        Assertions.assertTrue(fragments.get("a-b").startsWith("{name: g_is_a_b_3, "), fragments.toString());
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S

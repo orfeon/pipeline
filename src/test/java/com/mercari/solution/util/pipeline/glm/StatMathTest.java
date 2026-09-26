@@ -30,6 +30,25 @@ public class StatMathTest {
     }
 
     @Test
+    public void testLogChiSquareTailsPastTheUnderflow() {
+        // the log of the tail where the tail itself is representable
+        for (final int df : new int[]{1, 2, 5, 30}) {
+            for (final double chi2 : new double[]{0.5, 3, 40, 400}) {
+                Assertions.assertEquals(Math.log(StatMath.chiSquareUpperTail(chi2, df)), StatMath.logChiSquareUpperTail(chi2, df),
+                        1e-9 * Math.max(1d, Math.abs(Math.log(StatMath.chiSquareUpperTail(chi2, df)))), "df " + df + " chi2 " + chi2);
+            }
+        }
+        Assertions.assertEquals(0d, StatMath.logChiSquareUpperTail(0d, 3));
+        // past it (z = 40: the tail is 0 as a double) the logs stay finite and ordered — a χ²(df) statistic compares
+        // with the z tail there
+        Assertions.assertEquals(0d, StatMath.chiSquare1UpperTail(1600));
+        final double z40 = StatMath.logChiSquareUpperTail(1600, 1);
+        Assertions.assertTrue(Double.isFinite(z40) && z40 < -800 && z40 > -810, Double.toString(z40));
+        Assertions.assertTrue(StatMath.logChiSquareUpperTail(1700, 4) < z40);
+        Assertions.assertTrue(StatMath.logChiSquareUpperTail(1500, 4) > z40);
+    }
+
+    @Test
     public void testInverseNormal() {
         Assertions.assertEquals(0d, StatMath.inverseNormal(0.5), 1e-15);
         Assertions.assertEquals(1.959963984540054, StatMath.inverseNormal(0.975), 1e-12);

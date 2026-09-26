@@ -233,9 +233,9 @@ partial-residual curve the derivation suggestions of §12.3 read.
   `[s (B), H (B × B), A (B × |F|)]` give Γ = (G + l2·n·I)⁻¹ A, S⊥ = s − Γ'g, H⊥ = H − Γ'A' − AΓ + Γ'GΓ and
   `partial_chi2 = S⊥' H⊥⁺ S⊥` over the bins the marginal block kept (`partial_df`), `r2_F = 1 − tr(H⊥) /
   tr(H)`. State per column B × (1 + B + |F|) (row families: B × (2 + |F|), the block is diagonal).
-- **No sign, no periods.** The block has no direction, so `period_z`, `periods_agree` and the leak flag do
-  not apply to it (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are
-  no per-period block sums.
+- **No sign, no periods.** The block has no direction, so `period_z` and `periods_agree` do not apply to it
+  (null; `pass.minPeriodsAgree` is a df = 1 rule and does not bar the block), and there are no per-period
+  block sums. The leak flag reads the block's tail instead of a z (§7).
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
   list.

@@ -89,8 +89,9 @@ bins plus a missing bin (a missing value is a bin of its own, so informative mis
 catches any univariate shape at bin resolution — a band, a threshold, a U — where the linear probe of `raw`
 sees nothing. The record is one χ²(df) statistic without a sign: `chi2`, `df` (active bins − 1), `pValue`,
 `est_gain = chi2 / (2N)` on the same scale as the other transforms, and `bin_stats` (per bin: score `S`,
-information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z`, the
-period fields and the leak flag do not apply (null / false). Under conditioning the block gets its own
+information `H`, weight mass `n` — the shape of the effect across the bins); `S`, `H`, `beta`, `z` and the
+period fields do not apply (null), and the leak flag reads the block's p-value (see
+[flags](#periods-time-window-and-leak-flags)). Under conditioning the block gets its own
 partial test (`partial_chi2`, `partial_df`, `partial_gain`, `partial_pValue`, `r2_F` = the share of the
 block's information F explains).
 
@@ -214,8 +215,8 @@ distribution kept, the alignment with the label broken). A passing column goes i
 (the levels sorted by effect and cut once at the best split — a level grouping, the two groups in the
 fragment) and an `onehot` record for every level whose own contrast is strong (|z| ≥ 3), with the feature
 transform's row op in the fragment (`{name: <column>_is_<level>, type: indicator, input, values: [level]}`, the
-level's non-alphanumeric characters as `_` in the name; `== null` for the `(null)` level; none for the folded
-`(other)`).
+level's non-alphanumeric characters as `_` in the name, a name two strong levels would share suffixed with the
+later one's position; `== null` for the `(null)` level; none for the folded `(other)`).
 
 ### Periods, time window and leak flags
 
