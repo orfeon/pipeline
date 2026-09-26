@@ -1034,6 +1034,68 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testContrastsIgnoreBinsWithoutInformation() {
+        // a block whose third bin holds a rounding residue (the confirmation half of a bin the discovery half held
+        // entirely): a contrast isolating that bin would divide S² ≈ 0.01 by H ≈ 1e-17; the guard leaves the bin out
+        final double[] s = {2, -1, 0.1, -1};
+        final double[] h = {10, 12, 1e-17, 9};
+        final double[] n = {20, 24, 0, 18};
+        final double[][] hFull = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull[b][b] = h[b];
+        final ScreenReport.Block block = new ScreenReport.Block(ScreenReport.Stats.degenerate(62), 2, s, h, n, hFull);
+        Assertions.assertArrayEquals(new boolean[]{true, true, false, true}, ScreenReport.informative(block, 4));
+        final double isolating = ScreenReport.contrastChi2(block, new double[]{0, 0, 1, 0}, 4);
+        Assertions.assertEquals(0d, isolating, 0d);
+        // a monotone contrast over the bins with information is unchanged by the residue bin's value
+        final double up = ScreenReport.contrastChi2(block, new double[]{0, 1, 2, 3}, 4);
+        final double upResidueFlipped = ScreenReport.contrastChi2(block, new double[]{0, 1, 1e9, 3}, 4);
+        Assertions.assertTrue(up > 0);
+        Assertions.assertEquals(up, upResidueFlipped, 1e-9 * up);
+        // a lone row at p̂ ≈ 0 (H ≈ 1e-12 of the block, |S| ≈ 1) is no information either; a small but real bin is
+        final double[] h2 = {10, 12, 1e-11, 9};
+        final double[] n2 = {20, 24, 1, 18};
+        final double[][] hFull2 = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull2[b][b] = h2[b];
+        Assertions.assertFalse(ScreenReport.informative(new ScreenReport.Block(ScreenReport.Stats.degenerate(63), 2, new double[]{2, -1, 1, -1}, h2, n2, hFull2), 4)[2]);
+        final double[] h3 = {10, 12, 1e-3, 9};
+        final double[][] hFull3 = new double[4][4];
+        for (int b = 0; b < 4; b++) hFull3[b][b] = h3[b];
+        Assertions.assertTrue(ScreenReport.informative(new ScreenReport.Block(ScreenReport.Stats.degenerate(63), 2, s, h3, n2, hFull3), 4)[2]);
+    }
+
+    @Test
+    public void testBinRepresentativesAreTheBinMedians() {
+        final ScreenSpec spec = spec("{family: binomial, label: y, candidates: [x], transforms: [binned], bins: {k: 4, edges: value}, placebo: {noise: 1, seed: 1}}");
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 0);
+        // 0..99 with one outlier at 10000: the top bin's midpoint of its edges would sit near 5000, its median near 87
+        for (int i = 0; i < 100; i++) q.update(new double[]{i == 99 ? 10000 : i}, spec.sketchedColumns());
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final double[] x = scorer.binRepresentatives(0);
+        Assertions.assertEquals(4, x.length);
+        Assertions.assertEquals(12, x[0], 2);
+        Assertions.assertEquals(37, x[1], 2);
+        Assertions.assertEquals(62, x[2], 2);
+        Assertions.assertEquals(87, x[3], 2);
+        // tied values collapse the edges: 0 in 90 rows and 1..10 — edges (0, 0, 0), the top bin holds the positives and
+        // its median is 5 (a quantile at 0.875 would be 0, the bottom bin's value); every representative lies in its bin
+        final WindowQuantiles tied = new WindowQuantiles(spec.sketchColumns(), 0);
+        for (int i = 0; i < 100; i++) tied.update(new double[]{i < 90 ? 0 : i - 89}, spec.sketchedColumns());
+        final GroupScorer tiedScorer = new GroupScorer(spec).withWindowQuantiles(tied);
+        final double[] tiedEdges = tiedScorer.binEdges(0);
+        Assertions.assertArrayEquals(new double[]{0, 0, 0}, tiedEdges, 0d);
+        final double[] xt = tiedScorer.binRepresentatives(0);
+        Assertions.assertEquals(0d, xt[0], 0d);
+        Assertions.assertEquals(5d, xt[3], 0d);
+        // a noise placebo: the normal quantiles at the same ranks
+        final double[] noise = scorer.binRepresentatives(1);
+        Assertions.assertEquals(StatMath.inverseNormal(0.125), noise[0], 1e-12);
+        Assertions.assertEquals(StatMath.inverseNormal(0.875), noise[3], 1e-12);
+        // position bins: the positions' centres
+        final ScreenSpec rank = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [binned], bins: {k: 4, edges: rank}, placebo: {noise: 0}}");
+        Assertions.assertArrayEquals(new double[]{0.125, 0.375, 0.625, 0.875}, new GroupScorer(rank).binRepresentatives(0), 1e-12);
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S
@@ -1676,6 +1738,40 @@ public class GroupScorerTest {
                 Assertions.assertEquals(Boolean.FALSE, g.get("passed"));
                 Assertions.assertTrue(result.suggestions().isEmpty(), result.suggestions().toString());
             }
+        }
+    }
+
+    @Test
+    public void testCategoricalLevelWithoutInformation() throws Exception {
+        // levels A / B (100 rows each at baseline 0.2) and a lone row of level C at p̂ ≈ 0 with y = 1 (H ≈ 1e-12, S ≈ 1):
+        // C has no z and takes no part in the grouping, whose split would otherwise isolate it with a gain of 1 / H
+        final ScreenSpec spec = spec("{family: binomial, label: y, baseline: {field: b, form: prob}, candidates: [nomatch], transforms: [raw], placebo: {noise: 0}, categorical: {include: [g], placebo: 0}}");
+        final WindowQuantiles q = new WindowQuantiles(spec.sketchColumns(), 1);
+        final List<ScreenRow> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < 201; i++) {
+            final String level = i < 100 ? "A" : i < 200 ? "B" : "C";
+            final double y = i == 200 || (i < 100 ? i < 30 : i - 100 < 50) ? 1 : 0;
+            final ScreenRow r = new ScreenRow("r" + i, "r" + i, i, null, null, y, i == 200 ? 0 : 0.2, 1, new double[0], new String[]{level});
+            rows.add(r);
+            q.update(r.x);
+            q.updateLevels(r.cat);
+        }
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null,
+                new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels));
+        final Map<String, Object> g = result.records().stream().filter(r -> "g".equals(r.get("candidate"))).findFirst().orElseThrow();
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> levelZ = (List<Map<String, Object>>) g.get("level_z");
+        final Map<String, Object> c = levelZ.stream().filter(l -> "C".equals(l.get("level"))).findFirst().orElseThrow();
+        Assertions.assertNull(c.get("z"), levelZ.toString());
+        Assertions.assertNotNull(levelZ.stream().filter(l -> "A".equals(l.get("level"))).findFirst().orElseThrow().get("z"), levelZ.toString());
+        Assertions.assertEquals(Boolean.TRUE, g.get("passed"), g.toString());
+        final Map<String, Object> grouping = result.suggestions().stream().filter(s -> "grouping".equals(s.get("kind"))).findFirst().orElseThrow();
+        Assertions.assertTrue(((String) grouping.get("fragment")).startsWith("group g into [A] (lower effect) vs [B]"), grouping.toString());
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("chi2") < 1e3, s.toString());
+            Assertions.assertNotEquals("C", s.get("name"), s.toString());
         }
     }
 

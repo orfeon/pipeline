@@ -141,6 +141,24 @@ public final class SketchAccumulator implements Serializable {
     }
 
     /**
+     * The median of the values in each bin cut by {@code edges} (bin i = (edge_{i−1}, edge_i], the outer bins open):
+     * the quantile at the middle of the bin's inclusive rank interval (rank(edge_{i−1}), rank(edge_i)], so inside its
+     * bin whatever the ties — a quantile at (i + 0.5) / bins lands in a neighbouring bin once tied values collapse
+     * the edges. An empty bin takes the value at its lower rank. The caller checks non-emptiness.
+     */
+    public double[] binMedians(final double[] edges) {
+        final double[] out = new double[edges.length + 1];
+        final DoublesSortedView sv = view();
+        double lower = 0d;
+        for (int i = 0; i < out.length; i++) {
+            final double upper = i < edges.length ? sv.getRank(edges[i], QuantileSearchCriteria.INCLUSIVE) : 1d;
+            out[i] = sv.getQuantile(0.5 * (lower + upper), QuantileSearchCriteria.INCLUSIVE);
+            lower = upper;
+        }
+        return out;
+    }
+
+    /**
      * Merges another sketch in. A KLL merge keeps this sketch's k, so an empty accumulator (the Combine's
      * identity, created at the default k) adopts the other's sketch instead: a table's declared k survives.
      */

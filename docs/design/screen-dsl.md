@@ -517,8 +517,15 @@ included), recipes in the feature transform's vocabulary:
 | `missing` | the missing bin against the rest (present when the missing bin holds information), and the value bin whose effect S_b / H_b is closest to the missing bin's | `direction`, `fill`, an `isnull` indicator or the fill value |
 | `monotone` | the H-weighted isotonic fit (pool-adjacent-violators) of the bin effects in the better direction, and the sign consistency of the adjacent effect differences | `name` (increasing / decreasing), `consistency`, `share` |
 
-Shapes use a representative value per bin (the midpoint of the bin's edges, the outer bins reaching the
-sketch's min / max; position bins the position's centre, with cuts as rank fractions).
+Shapes use a representative value per bin — the bin's median, the sketch's quantile at the middle of the bin's
+rank interval, which an outer bin's outliers do not pull the way a midpoint of the edges would and which stays
+inside its bin when tied values collapse edges (a quantile at (b + 0.5) / k would not: on a column that is 0 in
+90% of the rows every such quantile is 0); the `missing` fill is that value too; position bins the position's
+centre, with cuts as rank fractions. A bin (a categorical level) enters a contrast only with information:
+H_b above 1e-9 of the block's bins' total and a positive mass. The confirmation half is a difference of sums, so
+a bin it does not hold keeps a rounding residue of H (and of S) that a contrast isolating the bin would divide by;
+a lone row at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would do the same — either way a χ² of 10¹⁵ that the placebo quantile then
+carries into the kind's cut.
 
 **Honest gain.** A shape chosen and scored on the same data is optimistic. A seeded hash of the unit key
 (the placebo derivation) splits the window into a discovery and a confirmation half — the binned key's
