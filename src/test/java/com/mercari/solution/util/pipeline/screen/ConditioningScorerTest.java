@@ -231,6 +231,78 @@ public class ConditioningScorerTest {
     }
 
     @Test
+    public void testRowFamilyPartialLevelAndPeriodSlicesDecomposeTheWindow() {
+        // binomial rows in groups, each group's rows spread over two periods and two modifier levels (four cells per
+        // unit): the period slices and the level slices of the partial sums (and of the fit's [n, g, G]) each sum to
+        // the window, and the report runs the partial heterogeneity test over the two levels
+        final ScreenSpec s = spec("{family: binomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, periods: year, heterogeneity: {field: b}, conditioning: {fields: [f], l2: 0}}");
+        final GroupScorer groups = new GroupScorer(s);
+        final List<List<ScreenRow>> unitsRows = new java.util.ArrayList<>();
+        for (int j = 0; j < 8; j++) {
+            final List<ScreenRow> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                final double x = ((j * 3 + i * 5) % 7) - 3;
+                final double f = ((j + 2 * i) % 5) - 2;
+                final double y = (j + i) % 3 == 0 ? 1 : 0;
+                rows.add(new ScreenRow("u" + j, "u" + j + ":" + i, i, i < 2 ? "2024" : "2025", i % 2 == 0 ? "A" : "B", y, Double.NaN, 1d, new double[]{x, f}));
+            }
+            unitsRows.add(rows);
+        }
+        for (final boolean gram : new boolean[]{true, false}) {
+            final ConditioningScorer scorer = new ConditioningScorer(s, s.conditioningOffset(), gram);
+            final VectorAccumulator momentSums = new VectorAccumulator();
+            for (final List<ScreenRow> rows : unitsRows) for (final ScreenRow r : rows) momentSums.add(scorer.moments(r));
+            final double[] moments = momentSums.getValues();
+            FitState state = FitState.initial(scorer.k, scorer.initialTheta(moments));
+            for (int it = 0; it < 20 && !state.converged; it++) {
+                final VectorAccumulator eval = new VectorAccumulator();
+                for (final List<ScreenRow> rows : unitsRows) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).group), state.proposal, moments));
+                state.advance(eval.getValues(), 0d, 1e-10);
+            }
+            Assertions.assertTrue(state.hasBest);
+            final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+            final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+            for (final List<ScreenRow> rows : unitsRows) {
+                final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).group);
+                scorer.partial(unit, groups.columns(unit), state.bestTheta, moments, partials);
+                groups.score(rows, rows.get(0).group, marginal);
+            }
+            for (final PartialAccumulator acc : List.of(partials.get(s.key(0, 0)), partials.get(ConditioningScorer.FIT_PERIOD_KEY))) {
+                final double[] total = acc.getTotal();
+                final double[] periodSum = new double[total.length];
+                final double[] levelSum = new double[total.length];
+                int nPeriods = 0, nLevels = 0;
+                for (final Map.Entry<String, double[]> e : acc.getPeriods().entrySet()) {
+                    final boolean level = ScoreAccumulator.isLevel(e.getKey());
+                    final double[] into = level ? levelSum : periodSum;
+                    for (int i = 0; i < total.length; i++) into[i] += e.getValue()[i];
+                    if (level) nLevels++;
+                    else nPeriods++;
+                }
+                Assertions.assertEquals(2, nPeriods, "gram=" + gram);
+                Assertions.assertEquals(2, nLevels, "gram=" + gram);
+                for (int i = 0; i < total.length; i++) {
+                    Assertions.assertEquals(total[i], periodSum[i], 1e-9 * Math.max(1, Math.abs(total[i])), "gram=" + gram + " period slot " + i);
+                    Assertions.assertEquals(total[i], levelSum[i], 1e-9 * Math.max(1, Math.abs(total[i])), "gram=" + gram + " level slot " + i);
+                }
+            }
+            // the fit's slices sum to the fit's own unit mass and gradient
+            final double[] fitTotal = partials.get(ConditioningScorer.FIT_PERIOD_KEY).getTotal();
+            Assertions.assertEquals(state.nUnits, fitTotal[0], 1e-9);
+            for (int a = 0; a < scorer.k; a++) Assertions.assertEquals(state.bestGrad[a], fitTotal[1 + a], 1e-9);
+
+            final Map<String, Object> record = ScreenReport.build(s, marginal, partials, state).records().get(0);
+            Assertions.assertEquals(2L, record.get("het_levels"), "gram=" + gram);
+            Assertions.assertEquals(2L, record.get("partial_het_levels"), "gram=" + gram);
+            Assertions.assertEquals(1L, record.get("partial_het_df"), "gram=" + gram);
+            Assertions.assertTrue((Double) record.get("partial_het_chi2") >= 0, "gram=" + gram);
+            @SuppressWarnings("unchecked") final List<Map<String, Object>> levels = (List<Map<String, Object>>) record.get("level_z");
+            Assertions.assertEquals(List.of("A", "B"), levels.stream().map(l -> l.get("level")).toList());
+            Assertions.assertEquals(2, ((List<?>) record.get("partial_period_z")).size());
+        }
+    }
+
+    @Test
     public void testPartialPeriodWithoutMarginalInformationIsDegenerate() {
         // 2025: x is constant within every unit, so its marginal slice is degenerate (H = 0); the partial slice would be
         // the fit's own -gamma'g_p / gamma'G_p gamma (the conditioning model's misfit in 2025), not the candidate's

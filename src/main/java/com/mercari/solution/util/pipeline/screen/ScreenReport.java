@@ -374,6 +374,54 @@ public final class ScreenReport {
         return new BlockPartial(new Partial(out[0], r2), df);
     }
 
+    /**
+     * The heterogeneity test across a modifier's levels (DSL doc §7.1): from the levels' own score tests (each
+     * centred within its level) the total Σ S_l² / H_l (df L) splits into the common effect (Σ S_l)² / Σ H_l (df 1)
+     * and the heterogeneity Σ S_l² / H_l − (Σ S_l)² / Σ H_l (df L − 1) — a candidate whose effect differs across
+     * the levels, up to a sign flip the marginal test cannot see. Degenerate below two usable levels.
+     */
+    public record Het(double chi2, int df, double pValue, double gain, int levels, boolean degenerate) {
+        static Het degenerate(final int levels) {
+            return new Het(0d, 0, 1d, 0d, levels, true);
+        }
+    }
+
+    static Het heterogeneity(final List<Stats> levels, final double nUnits) {
+        double total = 0, s = 0, h = 0;
+        int usable = 0;
+        for (final Stats l : levels) {
+            if (l.degenerate || !(l.h > 0)) continue;
+            total += l.s * l.s / l.h;
+            s += l.s;
+            h += l.h;
+            usable++;
+        }
+        if (usable < 2 || !(h > 0)) return Het.degenerate(usable);
+        final double chi2 = Math.max(0d, total - s * s / h);
+        if (!Double.isFinite(chi2)) return Het.degenerate(usable);
+        final int df = usable - 1;
+        return new Het(chi2, df, StatMath.chiSquareUpperTail(chi2, df), nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN, usable, false);
+    }
+
+    /** One slice's entry of {@code period_z} / {@code partial_period_z} / {@code level_z}: its name, z (null when degenerate), S, H, n. */
+    private static Map<String, Object> sliceRecord(final String nameField, final String name, final Stats ps, final long n) {
+        final Map<String, Object> r = new LinkedHashMap<>();
+        r.put(nameField, name);
+        r.put("z", ps.degenerate ? null : ps.z);
+        r.put("S", ps.s);
+        r.put("H", ps.h);
+        r.put("n", n);
+        return r;
+    }
+
+    private static void putHet(final Map<String, Object> r, final String prefix, final Het het) {
+        r.put(prefix + "het_chi2", het == null ? null : het.chi2);
+        r.put(prefix + "het_df", het == null ? null : (long) het.df);
+        r.put(prefix + "het_pValue", het == null ? null : het.pValue);
+        r.put(prefix + "het_gain", het == null ? null : het.gain);
+        r.put(prefix + "het_levels", het == null ? null : (long) het.levels);
+    }
+
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
         return build(spec, accumulators, null, null);
     }
@@ -425,7 +473,9 @@ public final class ScreenReport {
             notes.add("flags.leakZ.on partial: no partial statistics (see the conditioning note); the leak flag reads the marginal z");
         }
         if (fitPeriods != null && !fitPeriods.isEmpty() && fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k) {
-            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period partial information is approximate (the window's Gram scaled by the period's unit mass); the per-period partial score and sign are exact");
+            notes.add("conditioning: k = " + fit.k + " exceeds " + ConditioningScorer.PERIOD_GRAM_MAX_K + ", so the per-period"
+                    + (spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? " / per-level" : "")
+                    + " partial information is approximate (the window's Gram scaled by the slice's unit mass); the partial score and sign per slice are exact");
         }
         // skipped units past the share worth a look: which reason, and the way out of an invalid-baseline skip
         final long skipped = (long) b[ScoreAccumulator.UNITS_SKIPPED];
@@ -443,8 +493,10 @@ public final class ScreenReport {
         final List<Stats> effective = new ArrayList<>();
         /** the effective test's {@code [periods_agree, n_periods]} per record (pass.minPeriodsAgree) */
         final List<long[]> effectiveAgree = new ArrayList<>();
-        /** the placebo columns' effective gains per statistic kind (df1 / binned): one threshold per kind */
+        /** the placebo columns' effective gains per statistic kind (df1 / binned / het): one threshold per kind */
         final Map<String, List<Double>> placeboGains = new LinkedHashMap<>();
+        /** the effective heterogeneity test per record (null without a modifier, or for a block record) */
+        final List<Het> effectiveHet = new ArrayList<>();
         for (int c = 0; c < names.size(); c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final int key = spec.key(c, t);
@@ -508,6 +560,11 @@ public final class ScreenReport {
                     }
                     effective.add(used);
                     effectiveAgree.add(null);
+                    // a block has no direction to differ across levels
+                    putHet(r, "", null);
+                    putHet(r, "partial_", null);
+                    r.put("level_z", null);
+                    effectiveHet.add(null);
                     if (spec.isPlacebo(c)) placeboGains.computeIfAbsent(ScreenSpec.KIND_BINNED, kind -> new ArrayList<>()).add(used.degenerate ? 0d : used.estGain);
                     r.put("placebo", spec.isPlacebo(c));
                     r.put("degenerate", st.degenerate);
@@ -534,16 +591,22 @@ public final class ScreenReport {
                 // periods
                 final List<Map<String, Object>> periodRecords = new ArrayList<>();
                 final Set<String> scorablePeriods = new HashSet<>();
+                final List<Stats> periodStats = new ArrayList<>();
+                // the heterogeneity modifier's level slices (a declared field) live in the same map under a prefix
+                final List<Map<String, Object>> levelRecords = new ArrayList<>();
+                final List<Stats> levelStats = new ArrayList<>();
+                final Set<String> scorableLevels = new HashSet<>();
                 long agree = 0, nPeriods = 0;
                 for (final Map.Entry<String, double[]> e : acc.getPeriods().entrySet()) {
                     final Stats ps = stats(spec, e.getValue(), nUnits);
-                    final Map<String, Object> pr = new LinkedHashMap<>();
-                    pr.put("period", e.getKey());
-                    pr.put("z", ps.degenerate ? null : ps.z);
-                    pr.put("S", ps.s);
-                    pr.put("H", ps.h);
-                    pr.put("n", ps.nObs);
-                    periodRecords.add(pr);
+                    if (ScoreAccumulator.isLevel(e.getKey())) {
+                        levelRecords.add(sliceRecord("level", ScoreAccumulator.levelName(e.getKey()), ps, ps.nObs));
+                        levelStats.add(ps);
+                        if (!ps.degenerate) scorableLevels.add(e.getKey());
+                        continue;
+                    }
+                    periodRecords.add(sliceRecord("period", e.getKey(), ps, ps.nObs));
+                    periodStats.add(ps);
                     if (!ps.degenerate) {
                         scorablePeriods.add(e.getKey());
                         nPeriods++;
@@ -554,6 +617,12 @@ public final class ScreenReport {
                 r.put("n_periods", nPeriods);
                 r.put("period_z", periodRecords);
                 r.put("bin_stats", null);
+                // the heterogeneity test across the modifier's levels (marginal; the partial one follows the partial slices)
+                final Het het = !spec.hasHeterogeneity() ? null : st.degenerate ? Het.degenerate(0)
+                        : heterogeneity(spec.heterogeneityByPeriods() ? periodStats : levelStats, nUnits);
+                putHet(r, "", het);
+                r.put("level_z", spec.hasHeterogeneity() && !spec.heterogeneityByPeriods() ? levelRecords : null);
+                Het usedHet = het;
                 // partial test
                 Stats used = st;
                 long usedAgree = agree, usedPeriods = nPeriods;
@@ -577,6 +646,8 @@ public final class ScreenReport {
                     r.put("partial_df", null);
                     // the partial statistic by period, with the window's γ: the sign agreement of the effective test
                     final List<Map<String, Object>> partialPeriods = new ArrayList<>();
+                    final List<Stats> partialPeriodStats = new ArrayList<>();
+                    final List<Stats> partialLevelStats = new ArrayList<>();
                     long pAgree = 0, pPeriods = 0;
                     if (vec != null && !st.degenerate && fitPeriods != null) {
                         // without the per-period Gram every slice scales the window's γ'Gγ: computed once per column
@@ -588,16 +659,18 @@ public final class ScreenReport {
                             // the window rule per period: a period the marginal test cannot score (no observed or
                             // within-unit variation of x) has no partial slice either — its S⊥_p / H⊥_p would be the
                             // fit's own −γ'g_p / γ'G_pγ, the conditioning model's period misfit rather than the candidate
+                            if (ScoreAccumulator.isLevel(e.getKey())) {
+                                // a modifier level: the same slice rule, feeding the partial heterogeneity test
+                                partialLevelStats.add(scorableLevels.contains(e.getKey())
+                                        ? partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma, windowGGg)
+                                        : Stats.degenerate(pObs));
+                                continue;
+                            }
                             final Stats ps = scorablePeriods.contains(e.getKey())
                                     ? partialPeriod(e.getValue(), fitPeriods.getPeriods().get(e.getKey()), fit, nUnits, pObs, sigma2, gamma, windowGGg)
                                     : Stats.degenerate(pObs);
-                            final Map<String, Object> pr = new LinkedHashMap<>();
-                            pr.put("period", e.getKey());
-                            pr.put("z", ps.degenerate ? null : ps.z);
-                            pr.put("S", ps.s);
-                            pr.put("H", ps.h);
-                            pr.put("n", pObs);
-                            partialPeriods.add(pr);
+                            partialPeriods.add(sliceRecord("period", e.getKey(), ps, pObs));
+                            partialPeriodStats.add(ps);
                             if (!ps.degenerate) {
                                 pPeriods++;
                                 if (!pst.degenerate && pst.z != 0 && Math.signum(ps.z) == Math.signum(pst.z)) pAgree++;
@@ -607,6 +680,10 @@ public final class ScreenReport {
                     r.put("partial_periods_agree", pAgree);
                     r.put("partial_n_periods", pPeriods);
                     r.put("partial_period_z", partialPeriods);
+                    final Het partialHet = !spec.hasHeterogeneity() ? null : pst.degenerate ? Het.degenerate(0)
+                            : heterogeneity(spec.heterogeneityByPeriods() ? partialPeriodStats : partialLevelStats, nUnits);
+                    putHet(r, "partial_", partialHet);
+                    usedHet = partialHet;
                     used = pst;
                     usedAgree = pAgree;
                     usedPeriods = pPeriods;
@@ -619,12 +696,15 @@ public final class ScreenReport {
                     r.put("partial_gain", null);
                     r.put("partial_pValue", null);
                     r.put("partial_df", null);
+                    putHet(r, "partial_", null);
                     r.put("partial_periods_agree", null);
                     r.put("partial_n_periods", null);
                     r.put("partial_period_z", null);
                 }
                 effective.add(used);
                 effectiveAgree.add(new long[]{usedAgree, usedPeriods});
+                effectiveHet.add(usedHet);
+                if (spec.isPlacebo(c) && usedHet != null) placeboGains.computeIfAbsent(ScreenSpec.KIND_HET, kind -> new ArrayList<>()).add(usedHet.degenerate ? 0d : usedHet.gain);
                 if (spec.isPlacebo(c)) placeboGains.computeIfAbsent(ScreenSpec.KIND_DF1, kind -> new ArrayList<>()).add(used.degenerate ? 0d : used.estGain);
                 r.put("placebo", spec.isPlacebo(c));
                 r.put("degenerate", st.degenerate);
@@ -636,8 +716,14 @@ public final class ScreenReport {
         // configured): the df = 1 transforms pool one cut, the binned block test its own
         final Map<String, Double> thresholds = new LinkedHashMap<>();
         final Map<String, Double> thresholdsTheoretical = new LinkedHashMap<>();
-        for (final String kind : spec.hasBinned() ? List.of(ScreenSpec.KIND_DF1, ScreenSpec.KIND_BINNED) : List.of(ScreenSpec.KIND_DF1)) {
-            final int df = ScreenSpec.KIND_BINNED.equals(kind) ? spec.binsK - 1 : 1;
+        final List<String> kinds = new ArrayList<>(List.of(ScreenSpec.KIND_DF1));
+        if (spec.hasBinned()) kinds.add(ScreenSpec.KIND_BINNED);
+        if (spec.hasHeterogeneity()) kinds.add(ScreenSpec.KIND_HET);
+        // the heterogeneity test's nominal df: the most levels any record found usable, less one
+        int hetDf = 1;
+        for (final Het h : effectiveHet) if (h != null && !h.degenerate) hetDf = Math.max(hetDf, h.df);
+        for (final String kind : kinds) {
+            final int df = ScreenSpec.KIND_BINNED.equals(kind) ? spec.binsK - 1 : ScreenSpec.KIND_HET.equals(kind) ? hetDf : 1;
             final double theoretical = nUnits > 0 ? StatMath.chiSquareQuantile(spec.quantile, df) / (2 * nUnits) : Double.NaN;
             final List<Double> gains = placeboGains.getOrDefault(kind, List.of());
             final double cut = gains.isEmpty() ? theoretical : StatMath.quantile(gains.stream().mapToDouble(Double::doubleValue).sorted().toArray(), spec.quantile);
@@ -657,8 +743,9 @@ public final class ScreenReport {
 
         // flags: the gain cut is the record's kind's placebo threshold lifted to pass.minGain (the practical
         // floor) when higher; the period rule applies to the df = 1 tests (a block has no sign to agree on)
-        long nPassed = 0, nLeak = 0;
+        long nPassed = 0, nLeak = 0, nHetPassed = 0;
         final Map<String, Double> passedBest = new HashMap<>();
+        final Map<String, Double> hetPassedBest = new HashMap<>();
         for (int i = 0; i < records.size(); i++) {
             final Map<String, Object> r = records.get(i);
             final Stats st = effective.get(i);
@@ -681,7 +768,21 @@ public final class ScreenReport {
                 passedBest.merge((String) r.get("candidate"), st.estGain, Math::max);
             }
             if (leak && !placebo) nLeak++;
+            // the heterogeneity test's own flag (never folded into passed): its kind's cut, lifted to the floor
+            final Het het = effectiveHet.get(i);
+            Boolean hetPassed = null;
+            if (het != null) {
+                final double hetCut = spec.gainCut(thresholds.get(ScreenSpec.KIND_HET));
+                hetPassed = !placebo && !het.degenerate && !Double.isNaN(hetCut) && het.gain > hetCut;
+                if (hetPassed) {
+                    nHetPassed++;
+                    hetPassedBest.merge((String) r.get("candidate"), het.gain, Math::max);
+                }
+            }
+            r.put("het_passed", hetPassed);
         }
+        final List<String> hetPassedColumns = new ArrayList<>(hetPassedBest.keySet());
+        hetPassedColumns.sort(Comparator.<String, Double>comparing(hetPassedBest::get, Comparator.reverseOrder()).thenComparing(Comparator.<String>naturalOrder()));
         final List<String> passedColumns = new ArrayList<>(passedBest.keySet());
         passedColumns.sort(Comparator.<String, Double>comparing(passedBest::get, Comparator.reverseOrder()).thenComparing(Comparator.<String>naturalOrder()));
 
@@ -703,6 +804,7 @@ public final class ScreenReport {
         summary.put("thresholds", new LinkedHashMap<>(thresholds));
         summary.put("thresholdsTheoretical", new LinkedHashMap<>(thresholdsTheoretical));
         summary.put("bins", spec.hasBinned() ? spec.binsEdges + "/" + spec.binsK : null);
+        summary.put("heterogeneity", spec.heterogeneityLabel());
         summary.put("quantile", spec.quantile);
         summary.put("seed", spec.seed);
         summary.put("nRows", (long) b[ScoreAccumulator.ROWS_IN]);
@@ -717,8 +819,11 @@ public final class ScreenReport {
         summary.put("nTransforms", (long) nTransforms);
         summary.put("nScored", (long) candidateRecords.size());
         summary.put("nPassed", nPassed);
-        summary.put("nPlacebo", placeboGains.values().stream().mapToLong(List::size).sum());
+        // placebo records (not the placebo gains: a df = 1 placebo record feeds both the df1 and the het kind)
+        summary.put("nPlacebo", (long) (records.size() - candidateRecords.size()));
         summary.put("nLeakSuspect", nLeak);
+        summary.put("nHetPassed", spec.hasHeterogeneity() ? nHetPassed : null);
+        summary.put("hetPassedColumns", spec.hasHeterogeneity() ? hetPassedColumns : null);
         summary.put("leakOn", spec.leakZ == null ? null : leakOnPartial ? ScreenSpec.LEAK_ON_PARTIAL : ScreenSpec.LEAK_ON_MARGINAL);
         summary.put("timeField", spec.timeField);
         summary.put("timeFrom", spec.timeFrom);
@@ -773,6 +878,13 @@ public final class ScreenReport {
         for (final Map.Entry<?, ?> e : ((Map<?, ?>) summary.get("thresholds")).entrySet()) kinds.addProperty((String) e.getKey(), finiteOrNull((Double) e.getValue()));
         o.add("thresholds", kinds);
         o.addProperty("bins", (String) summary.get("bins"));
+        // the heterogeneity test's modifier and the columns it flagged (a separate list: never part of columns)
+        o.addProperty("heterogeneity", (String) summary.get("heterogeneity"));
+        if (summary.get("hetPassedColumns") != null) {
+            final JsonArray hetColumns = new JsonArray();
+            for (final Object name : (List<?>) summary.get("hetPassedColumns")) hetColumns.add((String) name);
+            o.add("hetPassedColumns", hetColumns);
+        }
         o.addProperty("quantile", spec.quantile);
         o.addProperty("nCandidates", (Long) summary.get("nCandidates"));
         o.addProperty("nPassed", (Long) summary.get("nPassed"));
@@ -844,6 +956,13 @@ public final class ScreenReport {
                 .withField("H", Schema.FieldType.FLOAT64)
                 .withField("n", Schema.FieldType.FLOAT64)
                 .build();
+        final Schema level = Schema.builder()
+                .withField("level", Schema.FieldType.STRING)
+                .withField("z", Schema.FieldType.FLOAT64)
+                .withField("S", Schema.FieldType.FLOAT64)
+                .withField("H", Schema.FieldType.FLOAT64)
+                .withField("n", Schema.FieldType.INT64)
+                .build();
         return Schema.builder()
                 .withField("candidate", Schema.FieldType.STRING)
                 .withField("transform", Schema.FieldType.STRING)
@@ -864,6 +983,12 @@ public final class ScreenReport {
                 .withField("n_periods", Schema.FieldType.INT64)
                 .withField("period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
                 .withField("bin_stats", Schema.FieldType.array(Schema.FieldType.element(bin)))
+                .withField("het_chi2", Schema.FieldType.FLOAT64)
+                .withField("het_df", Schema.FieldType.INT64)
+                .withField("het_pValue", Schema.FieldType.FLOAT64)
+                .withField("het_gain", Schema.FieldType.FLOAT64)
+                .withField("het_levels", Schema.FieldType.INT64)
+                .withField("level_z", Schema.FieldType.array(Schema.FieldType.element(level)))
                 .withField("r2_F", Schema.FieldType.FLOAT64)
                 .withField("partial_S", Schema.FieldType.FLOAT64)
                 .withField("partial_H", Schema.FieldType.FLOAT64)
@@ -872,12 +997,18 @@ public final class ScreenReport {
                 .withField("partial_gain", Schema.FieldType.FLOAT64)
                 .withField("partial_pValue", Schema.FieldType.FLOAT64)
                 .withField("partial_df", Schema.FieldType.INT64)
+                .withField("partial_het_chi2", Schema.FieldType.FLOAT64)
+                .withField("partial_het_df", Schema.FieldType.INT64)
+                .withField("partial_het_pValue", Schema.FieldType.FLOAT64)
+                .withField("partial_het_gain", Schema.FieldType.FLOAT64)
+                .withField("partial_het_levels", Schema.FieldType.INT64)
                 .withField("partial_periods_agree", Schema.FieldType.INT64)
                 .withField("partial_n_periods", Schema.FieldType.INT64)
                 .withField("partial_period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
                 .withField("threshold", Schema.FieldType.FLOAT64)
                 .withField("passed", Schema.FieldType.BOOLEAN)
                 .withField("leakSuspect", Schema.FieldType.BOOLEAN)
+                .withField("het_passed", Schema.FieldType.BOOLEAN)
                 .withField("placebo", Schema.FieldType.BOOLEAN)
                 .withField("degenerate", Schema.FieldType.BOOLEAN)
                 .build();
@@ -901,6 +1032,7 @@ public final class ScreenReport {
                 .withField("thresholds", Schema.FieldType.map(Schema.FieldType.FLOAT64))
                 .withField("thresholdsTheoretical", Schema.FieldType.map(Schema.FieldType.FLOAT64))
                 .withField("bins", Schema.FieldType.STRING)
+                .withField("heterogeneity", Schema.FieldType.STRING)
                 .withField("quantile", Schema.FieldType.FLOAT64)
                 .withField("seed", Schema.FieldType.INT64)
                 .withField("nRows", Schema.FieldType.INT64)
@@ -917,6 +1049,8 @@ public final class ScreenReport {
                 .withField("nPassed", Schema.FieldType.INT64)
                 .withField("nPlacebo", Schema.FieldType.INT64)
                 .withField("nLeakSuspect", Schema.FieldType.INT64)
+                .withField("nHetPassed", Schema.FieldType.INT64)
+                .withField("hetPassedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("leakOn", Schema.FieldType.STRING)
                 .withField("timeField", Schema.FieldType.STRING)
                 .withField("timeFrom", Schema.FieldType.STRING)
@@ -950,6 +1084,7 @@ public final class ScreenReport {
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("candidates=" + spec.candidates.size() + " " + spec.candidates);
         parts.add("transforms=" + spec.transforms + (spec.hasBinned() ? " bins=" + spec.binsEdges + "/" + spec.binsK : ""));
+        if (spec.hasHeterogeneity()) parts.add("heterogeneity=" + spec.heterogeneityLabel());
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.minPeriodsAgree != null || spec.minGain != null) parts.add("pass=" + passRule(spec, spec.hasConditioning()));

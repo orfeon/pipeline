@@ -106,6 +106,27 @@ block's information F explains).
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; keep `binned` for the shapes `raw` and `rank` miss, and keep `k` small (10 is plenty).
 
+### Heterogeneity across a modifier
+
+`heterogeneity: periods` or `heterogeneity: {field: segment}` asks, per `raw` / `rank` / `absdev` record,
+whether the candidate's effect *differs* across the levels of a modifier — the period buckets, or a
+declared field's values. From the levels' own score tests the total splits into the common effect and the
+heterogeneity `Σ S_l² / H_l − (Σ S_l)² / Σ H_l` (χ² with levels − 1 degrees of freedom), which catches an
+effect that flips sign across segments or periods — invisible to the window statistic, whose sum cancels.
+
+- Record: `het_chi2`, `het_df`, `het_pValue`, `het_gain` (on the `est_gain` scale), `het_levels`, and for a
+  field modifier `level_z` (per level: z, S, H, n; for `periods` read `period_z`). With conditioning the same
+  decomposition runs on the partial slices (`partial_het_*`) and decides, as for the main statistic.
+- **Its own flag.** `het_passed` compares the effective heterogeneity gain with its own placebo cut
+  (`thresholds.het`, lifted to `pass.minGain`). It is **never folded into `passed`** — a candidate passes on
+  its main effect; the summary and the pass list list the flagged columns apart (`nHetPassed`,
+  `hetPassedColumns`). The reading is "cross this candidate with the modifier upstream" (a `cross` op in the
+  feature transform), not "select it as is".
+- `periods` costs nothing (the period slices are already there); a field modifier keeps one more slice per
+  level in every accumulator. For the grouped family a field modifier is a group-level attribute (the
+  value of the group's first row). "Does the effect depend on the predicted level" is the same test on a
+  field that bins the baseline upstream.
+
 ### Periods, time window and leak flags
 
 - `periods` computes S and z per calendar bucket of a time field; `periods_agree / n_periods` counts the buckets
@@ -235,6 +256,7 @@ is an assembly error.
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
 | transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`, `binned`. Default: the first three with `group`, `raw` without (independent rows take `rank` / `absdev` against a window quantile sketch when listed — one extra pass over the input). `binned` (the block test, see [Binned block test](#binned-block-test)) is never in the default list. |
 | bins | optional | Object or Integer | The binned block test's bins: `{k, edges}` or the number of bins. `k` (default 10, at most 100) value / position bins plus a missing bin; `edges`: `value` (default: the window's value quantiles, from the sketch pre-pass) or `rank` (the within-unit rank, needs `group`). Needs `binned` in `transforms`. |
+| heterogeneity | optional | String or Object | The heterogeneity test's modifier (see [Heterogeneity across a modifier](#heterogeneity-across-a-modifier)): `periods` (the period buckets; needs `periods`), a field name, or `{by: periods \| field, field}`. Needs a `raw` / `rank` / `absdev` transform (the `binned` block has no direction). A field modifier is read per row (per group, its first row's value, for `groupedMultinomial`); a null value is its own level; the field is never a candidate. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect` — a number (the marginal z) or `{z, on: marginal \| partial}` (`partial` needs `conditioning`). Default: no flag. |
@@ -263,6 +285,9 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
 | bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
+| het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
+| level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
+| het_passed | BOOL | the effective heterogeneity gain above `max(thresholds.het, minGain)`; candidate records only, never part of `passed` |
 | r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
 | partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
 | partial_df | INT64 | conditioning + the binned block test: the partial block's active bins − 1 (null for the other transforms) |
@@ -277,7 +302,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 ### Summary record
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `passRule` (the rule behind `passed` as
-applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, and `binned` with the block test), `bins` (`edges/k` of the block test, else null),
+applied, e.g. `partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods`), `minPeriodsAgree`, `minGain` (null unless declared), `threshold`, `thresholdTheoretical` (the df = 1 cut), `thresholds` / `thresholdsTheoretical` (the cut per statistic kind: `df1`, `binned` with the block test, `het` with a heterogeneity modifier), `bins` (`edges/k` of the block test, else null), `heterogeneity` (the modifier: `periods` or `field:<name>`, else null), `nHetPassed` / `hetPassedColumns` (the heterogeneity flag's count and columns, best gain first; null without a modifier),
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nUnitsSkippedInvalidBaseline` (the invalid-baseline part of it), `nRowsDropped` (rows `baseline.invalid: dropRow` removed), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `leakOn` (the z the flag read: `marginal` / `partial`; null without a flag), `timeField`, `timeFrom`, `timeTo`, `minTime`,
@@ -435,7 +460,8 @@ transforms:
   "passRule": "partial_gain > threshold and partial_periods_agree >= 0.66 * partial_n_periods", "minPeriodsAgree": 0.66, "minGain": null,
   "leakZ": 20.0, "leakOn": "partial",
   "family": "groupedMultinomial", "method": "scoreTest",
-  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null, "quantile": 0.99,
+  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "thresholds": {"df1": 0.000063}, "bins": null,
+  "heterogeneity": null, "quantile": 0.99,
   "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
   "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
   "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",

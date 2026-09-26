@@ -431,6 +431,7 @@ public class ScreenTransformTest {
                       candidates: {include: [s_supp, f_noise]}
                       transforms: [raw]
                       periods: month
+                      heterogeneity: periods
                       placebo: {noise: 30, seed: 3}
                       conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
                       pass: {minPeriodsAgree: 1.0}
@@ -441,6 +442,15 @@ public class ScreenTransformTest {
             Assertions.assertEquals(2 + 30, records.size());
             final MElement supp = records.get("s_supp:raw");
             final MElement noise = records.get("f_noise:raw");
+            // the heterogeneity test across the months, marginal and partial (from the same period slices): a stable
+            // effect leaves nothing to the heterogeneity test — its own kind's cut, never part of passed
+            Assertions.assertEquals(6L, supp.getAsLong("het_df"));
+            Assertions.assertEquals(7L, supp.getAsLong("partial_het_levels"));
+            Assertions.assertTrue(supp.getAsDouble("partial_het_chi2") >= 0);
+            Assertions.assertTrue(supp.getAsDouble("partial_het_pValue") > 0.01, "partial het p of s_supp: " + supp.getAsDouble("partial_het_pValue"));
+            Assertions.assertNull(supp.getPrimitiveValue("level_z"));
+            Assertions.assertNotNull(noise.getAsDouble("het_gain"));
+            Assertions.assertEquals(Boolean.FALSE, noise.getPrimitiveValue("het_passed"));
             // marginal: nothing to see; partial: the extra signal
             Assertions.assertTrue(Math.abs(supp.getAsDouble("z")) < 2.5, "marginal z of s_supp: " + supp.getAsDouble("z"));
             Assertions.assertTrue(supp.getAsDouble("partial_z") > 5, "partial z of s_supp: " + supp.getAsDouble("partial_z"));

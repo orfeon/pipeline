@@ -49,6 +49,12 @@ public final class PartialAccumulator implements Serializable {
         return total.length == 0;
     }
 
+    /** Adds one contribution to a slice only (a modifier level under {@link ScoreAccumulator#LEVEL_PREFIX}; the total already holds it). */
+    public PartialAccumulator addSlice(final String key, final double[] contribution) {
+        addPeriod(key, contribution);
+        return this;
+    }
+
     /**
      * The window vector for in-place sums (a sparse contribution, the binned block's occupied bins, touches only its
      * entries), allocated at {@code length} on first use.

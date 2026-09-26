@@ -83,6 +83,11 @@ public final class GroupScorer implements Serializable {
         public String period() {
             return rows.get(0).period;
         }
+
+        /** The heterogeneity modifier's level of a grouped unit: its first row's (the modifier is a unit-level field). */
+        public String level() {
+            return rows.get(0).level;
+        }
     }
 
     /**
@@ -149,6 +154,7 @@ public final class GroupScorer implements Serializable {
         final boolean prior = !spec.hasBaseline();
         final double[][] cols = columns(unit);
         final String unitPeriod = unit.period();
+        final String unitLevel = spec.isGroupedMultinomial() ? unit.level() : null;
         final int nTransforms = spec.transforms.size();
         final double[] contribution = new double[ScoreAccumulator.SLOTS];
         for (int c = 0; c < nColumns; c++) {
@@ -172,6 +178,7 @@ public final class GroupScorer implements Serializable {
                 if (spec.isGroupedMultinomial()) {
                     groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
                     acc.add(unitPeriod, contribution);
+                    if (unitLevel != null) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + unitLevel, contribution);
                 } else {
                     rowContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
                 }
@@ -274,30 +281,40 @@ public final class GroupScorer implements Serializable {
     private void rowContributions(final List<ScreenRow> rows, final double[] v, final double[] y, final double[] mu,
                                   final double[] w, final boolean prior, final ScoreAccumulator acc) {
         final Map<String, double[]> byPeriod = new HashMap<>();
+        // the heterogeneity modifier's levels: the same sums per level, added as slices (the total holds the row once)
+        final Map<String, double[]> byLevel = new HashMap<>();
+        final double[] d = new double[ScoreAccumulator.SLOTS];
         for (int i = 0; i < v.length; i++) {
             if (!StatMath.isFinite(v[i])) continue;
-            final double[] c = byPeriod.computeIfAbsent(rows.get(i).period, k -> new double[ScoreAccumulator.SLOTS]);
             final double x = v[i];
-            c[ScoreAccumulator.N_OBS] += 1;
+            d[ScoreAccumulator.N_OBS] = 1;
             if (prior) {
-                c[ScoreAccumulator.C1] += w[i] * x * y[i];
-                c[ScoreAccumulator.C2] += w[i] * y[i];
-                c[ScoreAccumulator.C3] += w[i] * x * x;
-                c[ScoreAccumulator.C4] += w[i] * x;
-                c[ScoreAccumulator.C5] += w[i];
-                c[ScoreAccumulator.C6] += w[i] * y[i] * y[i];
+                d[ScoreAccumulator.C1] = w[i] * x * y[i];
+                d[ScoreAccumulator.C2] = w[i] * y[i];
+                d[ScoreAccumulator.C3] = w[i] * x * x;
+                d[ScoreAccumulator.C4] = w[i] * x;
+                d[ScoreAccumulator.C5] = w[i];
+                d[ScoreAccumulator.C6] = w[i] * y[i] * y[i];
             } else {
                 final double r = y[i] - mu[i];
                 final double vv = spec.fisherWeight(mu[i]);
-                c[ScoreAccumulator.C1] += w[i] * x * r;
-                c[ScoreAccumulator.C2] += w[i] * r;
-                c[ScoreAccumulator.C3] += w[i] * vv * x * x;
-                c[ScoreAccumulator.C4] += w[i] * vv * x;
-                c[ScoreAccumulator.C5] += w[i] * vv;
-                c[ScoreAccumulator.C6] += w[i] * r * r;
+                d[ScoreAccumulator.C1] = w[i] * x * r;
+                d[ScoreAccumulator.C2] = w[i] * r;
+                d[ScoreAccumulator.C3] = w[i] * vv * x * x;
+                d[ScoreAccumulator.C4] = w[i] * vv * x;
+                d[ScoreAccumulator.C5] = w[i] * vv;
+                d[ScoreAccumulator.C6] = w[i] * r * r;
+            }
+            final double[] c = byPeriod.computeIfAbsent(rows.get(i).period, k -> new double[ScoreAccumulator.SLOTS]);
+            for (int s = 0; s < ScoreAccumulator.SLOTS; s++) c[s] += d[s];
+            final String level = rows.get(i).level;
+            if (level != null) {
+                final double[] cl = byLevel.computeIfAbsent(level, k -> new double[ScoreAccumulator.SLOTS]);
+                for (int s = 0; s < ScoreAccumulator.SLOTS; s++) cl[s] += d[s];
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
+        for (final Map.Entry<String, double[]> e : byLevel.entrySet()) acc.addSlice(ScoreAccumulator.LEVEL_PREFIX + e.getKey(), e.getValue());
     }
 
     /** Finite values of a column (the binned test's n_obs). */
