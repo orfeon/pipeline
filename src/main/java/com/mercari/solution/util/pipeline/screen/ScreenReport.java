@@ -61,6 +61,12 @@ public final class ScreenReport {
     static final double ROW_DEGENERATE_REL = 1e-12;
 
     /**
+     * Relative floor of a pair's per-period information b_p (of the window's b) below which the period carries none
+     * of the pair (a member missing throughout it: the sums are exactly 0) and its partial slice is degenerate.
+     */
+    static final double PAIR_PERIOD_REL = 1e-12;
+
+    /**
      * Score-test statistics from one accumulator slot array.
      *
      * @param nUnits the number of scored units (groups, or rows when independent): {@code est_gain = chi2 / (2 nUnits)}
@@ -1730,13 +1736,14 @@ public final class ScreenReport {
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
         // the df = 1 keys' γ in one batched solve; a binned key's sums have the block layout [s (B), H, A], not
-        // [s, b, a], and blockPartial solves its Γ itself
+        // [s, b, a], and blockPartial solves its Γ itself. Only a column × transform key names a transform: a pair
+        // key (after them) is a df = 1 column whatever its index modulo the transforms
         final Map<Integer, double[]> gammas;
         if (conditioned) {
             final Map<Integer, PartialAccumulator> scalar = new HashMap<>();
+            final int columnKeys = spec.pairKey(0);
             for (final Map.Entry<Integer, PartialAccumulator> e : partials.entrySet()) {
-                // a column x transform key only: the pair keys after the columns are [s, b, a] whatever their modulus
-                if (e.getKey() >= 0 && e.getKey() < spec.pairKey(0) && ScreenSpec.isBinned(spec.transforms.get(e.getKey() % nTransforms))) continue;
+                if (e.getKey() >= 0 && e.getKey() < columnKeys && ScreenSpec.isBinned(spec.transforms.get(e.getKey() % nTransforms))) continue;
                 scalar.put(e.getKey(), e.getValue());
             }
             gammas = gammas(scalar, fit, spec.conditioningL2, spec.pairGridKey(0));
@@ -1827,10 +1834,12 @@ public final class ScreenReport {
                         binStats.add(bs);
                     }
                     r.put("bin_stats", binStats);
-                    // the value edges (k − 1), the pass list's material to reproduce a passing block as a row bin op;
-                    // null for position bins or without a sketch value
+                    // the distinct value edges (k − 1 unless tied), the pass list's material to reproduce a passing
+                    // block as a row bin op; null for position bins or without a sketch value. A discrete column's
+                    // quantile edges can tie (an empty bin the block test already leaves out of df): the record and the
+                    // pass list carry the distinct edges, bin_stats keeps the k bins (a tied edge's bin empty)
                     final double[] edges = bins == null ? null : bins.edges().apply(c);
-                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(edges).boxed().toList()));
+                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(distinctEdges(edges)).boxed().toList()));
                     Stats used = st;
                     if (conditioned) {
                         final PartialAccumulator pacc = partials.get(key);
@@ -2033,8 +2042,9 @@ public final class ScreenReport {
             r.put("level_z", null);
             final PartialAccumulator pacc = conditioned ? partials.get(key) : null;
             final double[] vec = pacc == null || pacc.isEmpty() ? null : pacc.getTotal();
+            final double[] pairGamma = conditioned ? gammas.get(key) : null;
             final Partial pt = vec == null ? new Partial(Stats.degenerate((long) nUnits), Double.NaN)
-                    : partial(vec, fit, nUnits, (long) nUnits, sigma2, gammas.get(key));
+                    : partial(vec, fit, nUnits, (long) nUnits, sigma2, pairGamma);
             final Stats pst = pt.stats;
             r.put("r2_F", Double.isNaN(pt.r2) ? null : pt.r2);
             r.put("partial_S", conditioned ? pst.s : null);
@@ -2045,11 +2055,37 @@ public final class ScreenReport {
             r.put("partial_pValue", conditioned ? pst.pValue : null);
             r.put("partial_df", null);
             putHet(r, "partial_", null);
-            r.put("partial_periods_agree", null);
-            r.put("partial_n_periods", null);
-            r.put("partial_period_z", null);
+            // the pair's partial statistic by period with the window's γ, as a column's (DSL doc §8.2): the period
+            // agreement applies to a pair too; a period's rows come from the fit's own slice (no marginal pair test)
+            final boolean pairPeriodsOn = conditioned && spec.periodsBucket != null;
+            final List<Map<String, Object>> pairPeriods = new ArrayList<>();
+            long pAgree = 0, pPeriods = 0;
+            if (pairPeriodsOn && vec != null && !pst.degenerate && fitPeriods != null && pairGamma != null) {
+                final double windowGGg = fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k ? quadratic(pairGamma, fit.bestG, fit.k) : 0d;
+                for (final Map.Entry<String, double[]> e : pacc.getPeriods().entrySet()) {
+                    if (ScoreAccumulator.isLevel(e.getKey())) continue;
+                    final double[] fitVec = fitPeriods.getPeriods().get(e.getKey());
+                    // the period's share of the fit's (weighted) unit mass on the unit count's scale: a count, whatever
+                    // the weights' scale (the raw mass of weights below 1 would read as fewer than two observations)
+                    final long pObs = fitVec == null || !(fit.nUnits > 0) ? 0 : Math.round(fitVec[0] / fit.nUnits * nUnits);
+                    // the column's rule per period: a period without the pair's information (a member missing
+                    // throughout it, or no variation) has no slice — its S⊥_p / H⊥_p would be the fit's own −γ'g_p /
+                    // γ'G_pγ, the conditioning model's period misfit rather than the pair
+                    final Stats ps = e.getValue()[1] > PAIR_PERIOD_REL * vec[1]
+                            ? partialPeriod(e.getValue(), fitVec, fit, nUnits, pObs, sigma2, pairGamma, windowGGg)
+                            : Stats.degenerate(pObs);
+                    pairPeriods.add(sliceRecord("period", e.getKey(), ps, pObs));
+                    if (!ps.degenerate) {
+                        pPeriods++;
+                        if (pst.z != 0 && Math.signum(ps.z) == Math.signum(pst.z)) pAgree++;
+                    }
+                }
+            }
+            r.put("partial_periods_agree", pairPeriodsOn ? pAgree : null);
+            r.put("partial_n_periods", pairPeriodsOn ? pPeriods : null);
+            r.put("partial_period_z", pairPeriodsOn ? pairPeriods : null);
             effective.add(pst);
-            effectiveAgree.add(null);
+            effectiveAgree.add(pairPeriodsOn ? new long[]{pAgree, pPeriods} : null);
             effectiveHet.add(null);
             final boolean placebo = spec.isPlaceboPair(q);
             if (placebo) placeboGains.computeIfAbsent(ScreenSpec.KIND_PAIR, kind -> new ArrayList<>()).add(pst.degenerate ? 0d : pst.estGain);
@@ -2467,8 +2503,9 @@ public final class ScreenReport {
     }
 
     /**
-     * The recipe of a passing binned block: {@code k}, {@code edges} (value bins: the k − 1 window quantile edges,
-     * bin i = (edge_{i−1}, edge_i]) or {@code rankCuts} (position bins: the rank fractions i / k), whether the
+     * The recipe of a passing binned block: {@code k} (the configured bin count), {@code edges} (value bins: the
+     * distinct window quantile edges — k − 1, fewer when a discrete column's edges tie — bin i = (edge_{i−1}, edge_i])
+     * or {@code rankCuts} (position bins: the rank fractions i / k), whether the
      * missing values had their own bin, and the feature transform's row {@code bin} op that reproduces those bins
      * ({@link #rowBinFragment}: the next double above each edge; a position block has no row op: the within-unit
      * rank is a context op, the fragment says so).
@@ -2510,8 +2547,23 @@ public final class ScreenReport {
      */
     static String rowBinFragment(final String input, final double[] edges) {
         final StringBuilder list = new StringBuilder();
-        for (int i = 0; i < edges.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(edges[i])));
+        final double[] distinct = distinctEdges(edges);
+        for (int i = 0; i < distinct.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(distinct[i])));
         return "{scope: row, type: bin, input: " + input + ", edges: [" + list + "]}";
+    }
+
+    /**
+     * The distinct values of non-decreasing value edges, in order: an edge is kept when it is above the last one
+     * kept, by numeric comparison — so −0.0 and 0.0 are one edge (they bin alike, and {@link Math#nextUp} maps both
+     * to the same double), where {@code DoubleStream.distinct} would keep both.
+     */
+    static double[] distinctEdges(final double[] edges) {
+        final double[] out = new double[edges.length];
+        int n = 0;
+        for (final double e : edges) {
+            if (n == 0 || e > out[n - 1]) out[n++] = e;
+        }
+        return n == edges.length ? edges : Arrays.copyOf(out, n);
     }
 
     /**
