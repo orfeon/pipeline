@@ -35,6 +35,25 @@ The following command will generate a container for FlexTemplate from the source
 mvn clean package -DskipTests -Dimage={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
 ```
 
+Every image built this way carries the commit it was built from as the OCI label
+`org.opencontainers.image.revision` (and the project version as `org.opencontainers.image.version`), and the
+launcher opens its log with the same revision (`Build: <abbrev> (branch <name>, committed <time>)`), so a job's
+image can be matched to a commit:
+
+```sh
+IMAGE={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
+# with Docker (Jib pushes straight to the registry, so pull the image first)
+docker pull $IMAGE
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' $IMAGE
+# or read only the image config, without pulling the layers (crane: github.com/google/go-containerregistry)
+crane config $IMAGE | jq -r '.config.Labels["org.opencontainers.image.revision"]'
+```
+
+A build outside a git checkout leaves the label empty and logs `Build: unknown (no git information)`. The label
+is resolved at Maven's `initialize` phase, so run Jib through a lifecycle phase (`mvn package`,
+`mvn compile jib:build`) rather than a bare `mvn jib:build`. The revision is the checked-out commit: uncommitted
+changes in the working tree are not reflected in it.
+
 ### Upload template file.
 
 The next step is to generate a template file to start a job from the container image and upload it to GCS.
