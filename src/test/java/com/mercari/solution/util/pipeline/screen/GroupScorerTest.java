@@ -1170,6 +1170,70 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testPairsCarryThePartialPeriodSlices() throws Exception {
+        // the pair test of testPairsAtTheFittedMeans over two periods: the pair record decomposes its partial statistic
+        // by period like any column, so pass.minPeriodsAgree holds it — both periods carry the interaction here
+        final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, periods: year, candidates: [x], transforms: [raw], placebo: {noise: 2, seed: 7}, "
+                + "conditioning: {fields: [x, x2], l2: 1.0e-4, maxIter: 8}, pairs: {fields: [[x, x2]], placebo: 2, shape: false}, pass: {minPeriodsAgree: 1.0}}");
+        final java.util.Random random = new java.util.Random(11);
+        final List<List<ScreenRow>> units = new ArrayList<>();
+        for (int g = 0; g < 160; g++) {
+            final double[] x1 = new double[4], x2 = new double[4], score = new double[4];
+            int best = 0;
+            for (int i = 0; i < 4; i++) {
+                x1[i] = random.nextGaussian();
+                x2[i] = random.nextGaussian();
+                score[i] = x1[i] + x2[i] + 1.5 * x1[i] * x2[i] + 0.3 * random.nextGaussian();
+                if (score[i] > score[best]) best = i;
+            }
+            final String period = g % 2 == 0 ? "2024" : "2025";
+            final List<ScreenRow> rows = new ArrayList<>();
+            for (int i = 0; i < 4; i++) rows.add(new ScreenRow("g" + g, "g" + g + ":" + i, i, period, i == best ? 1 : 0, Double.NaN, 1, new double[]{x1[i], x1[i], x2[i]}));
+            units.add(rows);
+        }
+        final GroupScorer groups = new GroupScorer(spec);
+        final ConditioningScorer scorer = new ConditioningScorer(spec);
+        final com.mercari.solution.util.pipeline.glm.VectorAccumulator moments = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+        for (final List<ScreenRow> rows : units) for (final ScreenRow r : rows) moments.add(scorer.moments(r));
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(scorer.k);
+        for (int it = 0; it < 8 && !state.converged; it++) {
+            final com.mercari.solution.util.pipeline.glm.VectorAccumulator eval = new com.mercari.solution.util.pipeline.glm.VectorAccumulator();
+            for (final List<ScreenRow> rows : units) eval.add(scorer.evaluate(groups.prepare(rows, rows.get(0).getGroup()), state.proposal, moments.getValues()));
+            state.advance(eval.getValues(), spec.conditioningL2, spec.conditioningTol);
+        }
+        Assertions.assertTrue(state.hasBest);
+        final Map<Integer, PartialAccumulator> partials = new HashMap<>();
+        final Map<Integer, ScoreAccumulator> marginal = new HashMap<>();
+        for (final List<ScreenRow> rows : units) {
+            final GroupScorer.Unit unit = groups.prepare(rows, rows.get(0).getGroup());
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partials);
+            groups.score(rows, rows.get(0).getGroup(), marginal);
+        }
+        // the pair key carries the two period slices, like a column's
+        Assertions.assertEquals(java.util.Set.of("2024", "2025"), partials.get(spec.pairKey(0)).getPeriods().keySet());
+        Assertions.assertEquals(java.util.Set.of("2024", "2025"), partials.get(spec.key(0, 0)).getPeriods().keySet());
+        final ScreenReport.Result result = ScreenReport.build(spec, marginal, partials, state);
+        final Map<String, Map<String, Object>> byKey = new HashMap<>();
+        for (final Map<String, Object> r : result.records()) byKey.put(r.get("candidate") + ":" + r.get("transform"), r);
+        final Map<String, Object> pair = byKey.get("x*x2:product");
+        Assertions.assertTrue((Double) pair.get("partial_z") > 3, "partial z of the pair: " + pair.get("partial_z"));
+        Assertions.assertEquals(2L, pair.get("partial_n_periods"), pair.toString());
+        Assertions.assertEquals(2L, pair.get("partial_periods_agree"), pair.toString());
+        @SuppressWarnings("unchecked") final List<Map<String, Object>> slices = (List<Map<String, Object>>) pair.get("partial_period_z");
+        Assertions.assertEquals(2, slices.size());
+        for (final Map<String, Object> slice : slices) {
+            Assertions.assertTrue((Double) slice.get("z") > 1, slice.toString());
+            Assertions.assertTrue((Long) slice.get("n") > 0, slice.toString());
+        }
+        Assertions.assertEquals(Boolean.TRUE, pair.get("passed"));
+        Assertions.assertTrue(((String) result.summary().get("passRule")).contains("partial_periods_agree >= 1.0 * partial_n_periods"));
+        // the marginal period fields of a pair stay null (no marginal pair test); a placebo pair has the slices too
+        Assertions.assertNull(pair.get("periods_agree"));
+        Assertions.assertNotNull(byKey.get("x*__noise_0:product").get("partial_n_periods"));
+        Assertions.assertEquals(List.of("x*x2"), result.summary().get("passedPairs"));
+    }
+
+    @Test
     public void testJointFillsAMissingValueAsTheMarginalTestDoes() throws Exception {
         // grouped: a unit with a missing value in a joint column stays in the joint sums, the column centred by the
         // unit's p-weighted mean over its observed rows — so the joint's S for that column equals the marginal raw S

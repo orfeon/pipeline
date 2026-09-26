@@ -1790,7 +1790,9 @@ public final class ScreenReport {
                     // the value edges (k − 1), the pass list's material to reproduce a passing block as a row bin op;
                     // null for position bins or without a sketch value
                     final double[] edges = bins == null ? null : bins.edges().apply(c);
-                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(edges).boxed().toList()));
+                    // a discrete column's quantile edges can tie (an empty bin the block test already leaves out of df):
+                    // the record and the pass list carry the distinct edges, the row bin op's material
+                    r.put("bin_edges", edges == null ? null : new ArrayList<>(Arrays.stream(edges).distinct().boxed().toList()));
                     Stats used = st;
                     if (conditioned) {
                         final PartialAccumulator pacc = partials.get(key);
@@ -2005,11 +2007,31 @@ public final class ScreenReport {
             r.put("partial_pValue", conditioned ? pst.pValue : null);
             r.put("partial_df", null);
             putHet(r, "partial_", null);
-            r.put("partial_periods_agree", null);
-            r.put("partial_n_periods", null);
-            r.put("partial_period_z", null);
+            // the pair's partial statistic by period with the window's γ, as a column's (DSL doc §8.2): the period
+            // agreement applies to a pair too; a period's rows come from the fit's own slice (no marginal pair test)
+            final List<Map<String, Object>> pairPeriods = new ArrayList<>();
+            long pAgree = 0, pPeriods = 0;
+            final double[] pairGamma = conditioned ? gammas.get(key) : null;
+            if (vec != null && !pst.degenerate && fitPeriods != null && pairGamma != null && spec.periodsBucket != null) {
+                final double windowGGg = fitPeriods.getTotal().length < 1 + fit.k + fit.k * fit.k ? quadratic(pairGamma, fit.bestG, fit.k) : 0d;
+                for (final Map.Entry<String, double[]> e : pacc.getPeriods().entrySet()) {
+                    if (ScoreAccumulator.isLevel(e.getKey())) continue;
+                    final double[] fitVec = fitPeriods.getPeriods().get(e.getKey());
+                    final long pObs = fitVec == null ? 0 : Math.round(fitVec[0]);
+                    final Stats ps = partialPeriod(e.getValue(), fitVec, fit, nUnits, pObs, sigma2, pairGamma, windowGGg);
+                    pairPeriods.add(sliceRecord("period", e.getKey(), ps, pObs));
+                    if (!ps.degenerate) {
+                        pPeriods++;
+                        if (pst.z != 0 && Math.signum(ps.z) == Math.signum(pst.z)) pAgree++;
+                    }
+                }
+            }
+            final boolean pairPeriodsOn = conditioned && spec.periodsBucket != null;
+            r.put("partial_periods_agree", pairPeriodsOn ? pAgree : null);
+            r.put("partial_n_periods", pairPeriodsOn ? pPeriods : null);
+            r.put("partial_period_z", pairPeriodsOn ? pairPeriods : null);
             effective.add(pst);
-            effectiveAgree.add(null);
+            effectiveAgree.add(pairPeriodsOn ? new long[]{pAgree, pPeriods} : null);
             effectiveHet.add(null);
             final boolean placebo = spec.isPlaceboPair(q);
             if (placebo) placeboGains.computeIfAbsent(ScreenSpec.KIND_PAIR, kind -> new ArrayList<>()).add(pst.degenerate ? 0d : pst.estGain);
@@ -2459,7 +2481,8 @@ public final class ScreenReport {
      */
     static String rowBinFragment(final String input, final double[] edges) {
         final StringBuilder list = new StringBuilder();
-        for (int i = 0; i < edges.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(edges[i])));
+        final double[] distinct = Arrays.stream(edges).distinct().toArray();
+        for (int i = 0; i < distinct.length; i++) list.append(i == 0 ? "" : ", ").append(Double.toString(Math.nextUp(distinct[i])));
         return "{scope: row, type: bin, input: " + input + ", edges: [" + list + "]}";
     }
 

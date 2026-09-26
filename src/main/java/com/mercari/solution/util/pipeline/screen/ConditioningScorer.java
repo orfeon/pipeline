@@ -384,9 +384,10 @@ public final class ConditioningScorer implements Serializable {
                 }
             }
             // the declared pairs: the product of two standardised conditioning columns (a placebo pair: a member
-            // times a noise column) as one more column of the partial pass, no period slices (DSL doc §8.6)
+            // times a noise column) as one more column of the partial pass, with the unit's period slice (DSL doc
+            // §8.6: the period agreement applies to a pair as to any column) but no modifier level
             for (int q = 0; q < spec.pairCount(); q++) {
-                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, groupedPartialSums(unit, p, f, pf, pairColumn(q, unit, f, cols)));
+                into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(periods ? unit.period() : null, groupedPartialSums(unit, p, f, pf, pairColumn(q, unit, f, cols)));
             }
             // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
             for (int q = 0; q < spec.pairs.size(); q++) {
@@ -429,9 +430,13 @@ public final class ConditioningScorer implements Serializable {
                 }
             }
         }
-        // the declared pairs (DSL doc §8.6): one more column each over every row, no period slices
+        // the declared pairs (DSL doc §8.6): one more column each over every row, per period (no modifier level)
         for (int q = 0; q < spec.pairCount(); q++) {
-            into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator()).add(null, rowPartialSums(unit, p, f, pairColumn(q, unit, f, cols), null));
+            final double[] z = pairColumn(q, unit, f, cols);
+            final PartialAccumulator target = into.computeIfAbsent(spec.pairKey(q), key -> new PartialAccumulator());
+            for (final Map.Entry<Cell, List<Integer>> cell : cells.entrySet()) {
+                target.add(cell.getKey().period(), rowPartialSums(unit, p, f, z, cells.size() == 1 ? null : cell.getValue()));
+            }
         }
         // the real pairs' 2-D grids (DSL doc §8.7): the one-hot block of k × k cells at the fitted means
         for (int q = 0; q < spec.pairs.size(); q++) {

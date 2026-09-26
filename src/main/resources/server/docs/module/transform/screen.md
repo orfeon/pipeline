@@ -34,8 +34,10 @@ nothing to a tree model (false positive). See [Limits](#limits).
 | `gaussian` | Σ x̃ (y − μ) / σ² | Σ x̃² / σ² | independent rows, identity link; `μ` is the baseline value (`form: value`), σ² the residual variance around it (the label variance without a baseline). The statistic is invariant to the scale of the label |
 | `poisson` | Σ x̃ (y − μ) | Σ μ x̃² | independent rows, log link; `μ` is the baseline rate (`form: rate`, or `logRate` on the log scale). Without a baseline the prior rate is used |
 
-- `x̃` is the candidate centred by the p-weighted mean over the observed rows (within the group for
-  `groupedMultinomial`, over the window for `binomial`); a missing value after centring is 0 (no information).
+- `x̃` is the candidate centred by the Fisher-weighted mean over the observed rows — within the group for
+  `groupedMultinomial` (weights p), over the window for the row families (weights W = μ(1 − μ) for `binomial`,
+  μ for `poisson`, 1 for `gaussian`: the intercept profiled out of the score test); a missing value after
+  centring is 0 (no information).
   The statistic is invariant to the scale of x and to a constant shift within the group.
 - Output per column × transform: `S`, `H`, `beta = S/H`, `chi2 = S²/H` (χ²(1) under the null), `z = sign(S)·√chi2`,
   `est_gain = chi2 / (2N)`, `pValue` (χ²(1) upper tail), `qValue` (Benjamini–Hochberg over the candidate records).
@@ -303,7 +305,9 @@ two conditioning columns — an interaction — beyond what the model of those c
 must be in `conditioning.fields`: a product is meaningful only at the fitted means of a model that holds
 its main effects (at the baseline alone, an unmodelled main effect leaves curvature the product would pick
 up as a spurious interaction). The pair record (`candidate: a*b`, `transform: product`) carries the partial
-statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null), has its own placebo
+statistics only (`partial_z`, `partial_gain`, `r2_F`, …; the marginal fields are null) with the partial period
+decomposition of any column (`partial_period_z`, `partial_periods_agree` / `partial_n_periods`, so
+`pass.minPeriodsAgree` applies to a pair too; no heterogeneity slice), has its own placebo
 kind — each pair brings `pairs.placebo` placebo pairs, its first member times a noise column (pairs sharing a
 member take different noise columns, so no placebo repeats), whose gains give
 `thresholds.pair` — and `passed` compares its partial gain with that cut (under `pass.minGain` its excess gain must clear the floor). A row
@@ -420,7 +424,7 @@ the derivation suggestions under `suggestions: true` (see [Suggestions record](#
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
 | bin_stats | ARRAY<STRUCT<bin INT64, S FLOAT64, H FLOAT64, n FLOAT64\>\> | the binned block test only: per bin (the last index is the missing bin) the score, the information and the weight mass; null for the other transforms |
-| bin_edges | ARRAY<FLOAT64\> | the binned block test with `edges: value`: the k − 1 window quantile edges (bin i = `(edge_{i−1}, edge_i]`); null for position bins, a column without a sketch value and the other transforms |
+| bin_edges | ARRAY<FLOAT64\> | the binned block test with `edges: value`: the distinct window quantile edges (bin i = `(edge_{i−1}, edge_i]`; a discrete column's tied edges are dropped, so fewer than k − 1 then — the empty bin is already out of `df`); null for position bins, a column without a sketch value and the other transforms |
 | het_chi2, het_df, het_pValue, het_gain, het_levels | FLOAT64 / INT64 | the heterogeneity test across the modifier's levels (`heterogeneity`; null without one, and for the block test); `partial_het_*` the same on the partial slices under conditioning |
 | level_z | ARRAY<STRUCT<level STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | a field modifier: the score test per level; null for `periods` (read `period_z`) |
 | het_passed | BOOL | the effective heterogeneity gain above `thresholds.het` (and its excess `het_gain − het_df / 2N` above `pass.minGain`); candidate records only, never part of `passed` |

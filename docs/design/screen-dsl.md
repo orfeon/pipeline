@@ -239,7 +239,8 @@ partial-residual curve the derivation suggestions of §12.3 read.
 - **Power.** The block spends k − 1 degrees of freedom on what `raw` tests with one: a linear effect passes
   `raw` first; the block is for the shapes `raw` and `rank` miss. It sits next to them, never in the default
   list.
-- **Closing the loop.** The record carries `bin_edges` (the k − 1 value edges; null for position bins), and a
+- **Closing the loop.** The record carries `bin_edges` (the distinct value edges — a discrete column's tied
+  quantile edges are dropped, the empty bin being out of df already; null for position bins), and a
   passing block goes into the pass list as a recipe the feature transform reproduces: `passedBlocks` (and the
   `bins` member of its `passed` entry) with `k`, `edges` / `rankCuts`, `missingBin` and the fragment
   `{scope: row, type: bin, input: x, edges: [...]}` (a position block names the within-unit rank cuts, a
@@ -433,7 +434,9 @@ pair's members **must be conditioning fields**: the pair is tested at the fitted
 both, orthogonalised against the whole of F by the same γ solve as any column (§8.2, exact — the cost is
 2 + k doubles per pair, not the 6 of a two-member approximation, and the bound is `maxPairs`, default 200).
 A pair record (`candidate: a*b`, `transform: product`) carries the partial statistics only (`partial_z`,
-`partial_gain`, `r2_F`, …; the marginal fields are null), no period slices, and its own placebo kind
+`partial_gain`, `r2_F`, …; the marginal fields are null), the period slices of any column (§8.2:
+`partial_period_z`, `partial_periods_agree` / `partial_n_periods`, so `pass.minPeriodsAgree` holds a pair as it
+holds a column; no modifier level slice), and its own placebo kind
 (`pair`): each pair brings `pairs.placebo` (default 5) placebo pairs — its first member times a noise
 placebo column, a standard normal draw independent of everything, which keeps the member's marginal; pairs
 sharing a member take different noise columns, so no placebo column repeats —
