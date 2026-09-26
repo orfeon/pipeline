@@ -295,7 +295,16 @@ public final class ScreenStages {
                     final Object v = values.get(spec.heterogeneityField);
                     level = v == null ? ScreenSpec.LEVEL_NULL : String.valueOf(v);
                 }
-                final ScreenRow row = new ScreenRow(group, identity, time, period, level, label, baseline == null ? Double.NaN : baseline, weight, x);
+                // the categorical candidates' values as text (a null value is its own level)
+                String[] cat = null;
+                if (spec.hasCategoricals()) {
+                    cat = new String[spec.categoricals.size()];
+                    for (int i = 0; i < cat.length; i++) {
+                        final Object v = values.get(spec.categoricals.get(i));
+                        cat[i] = v == null ? ScreenSpec.LEVEL_NULL : String.valueOf(v);
+                    }
+                }
+                final ScreenRow row = new ScreenRow(group, identity, time, period, level, label, baseline == null ? Double.NaN : baseline, weight, x, cat);
                 c.output(rowTag, KV.of(group == null ? identity : group, row));
                 count(window, book);
             } catch (final Throwable e) {
@@ -376,7 +385,9 @@ public final class ScreenStages {
             if (spec.hasBaseline() && !Baselines.validRow(spec.baselineForm, row.baseline)) return;
             // the candidates, the shuffle reference (the binned test's shuffle placebos) and, for a pair's 2-D grid,
             // the conditioning columns — the leading columns of x in that order
-            partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns())).update(row.x);
+            final WindowQuantiles q = partials.computeIfAbsent(window, w -> new WindowQuantiles(spec.sketchColumns(), spec.categoricals.size()));
+            q.update(row.x);
+            q.updateLevels(row.cat);
         }
 
         @FinishBundle
@@ -666,9 +677,9 @@ public final class ScreenStages {
             }
             // the bins' geometry: the suggestions' representatives and the pass list's edges of a passing block
             ScreenReport.Bins bins = null;
-            if (spec.hasBinned() || spec.hasPairShape() || spec.jointOn) {
+            if (spec.hasBinned() || spec.hasPairShape() || spec.jointOn || spec.hasCategoricals()) {
                 final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(quantilesView == null ? null : c.sideInput(quantilesView));
-                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin);
+                bins = new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges, scorer::gridEdges, scorer::columnMin, scorer::categoricalLevels);
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit, bins);
             for (final Map<String, Object> record : result.records()) {

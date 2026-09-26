@@ -167,6 +167,39 @@ public final class ScreenSpec implements Serializable {
     public static final int JOINT_MAX_COLUMNS_DEFAULT = 200;
     public static final int JOINT_NOISE_DEFAULT = 10;
 
+    /** categorical.include: globs / lineage selectors choosing the categorical candidates among the string fields (DSL doc §6.2) */
+    public List<String> categoricalInclude = new ArrayList<>();
+    /** categorical.maxLevels: the named levels kept (the most frequent); the rest fold into one "(other)" level */
+    public int categoricalMaxLevels = CATEGORICAL_MAX_LEVELS_DEFAULT;
+    /** categorical.placebo: placebo columns per categorical candidate (levels redrawn from the window frequencies) */
+    public int categoricalPlacebo = CATEGORICAL_PLACEBO_DEFAULT;
+    /** the resolved categorical candidates (field names) */
+    public List<String> categoricals = new ArrayList<>();
+
+    public static final int CATEGORICAL_MAX_LEVELS_DEFAULT = 32;
+    public static final int CATEGORICAL_PLACEBO_DEFAULT = 5;
+    /** the categorical block test's record transform and placebo kind */
+    public static final String TRANSFORM_LEVELS = "levels";
+    public static final String KIND_LEVELS = "levels";
+    /** the level a null categorical value takes, and the fold of the levels beyond maxLevels */
+    public static final String LEVEL_OTHER = "(other)";
+    /** the marginal / partial keys of the categorical blocks start here (real columns, then their placebos) */
+    public static final int CATEGORICAL_KEY_BASE = 1_000_000;
+
+    public boolean hasCategoricals() {
+        return !categoricals.isEmpty();
+    }
+
+    /** The key of categorical column {@code c} (real), or of its placebo {@code r} ({@code r >= 0}). */
+    public int categoricalKey(final int c, final int r) {
+        return CATEGORICAL_KEY_BASE + c * (1 + categoricalPlacebo) + (r + 1);
+    }
+
+    /** The name of categorical column {@code c}'s placebo {@code r}. */
+    public String categoricalPlaceboName(final int c, final int r) {
+        return categoricals.get(c) + "*" + NOISE_PREFIX + r;
+    }
+
     /** Joint columns carried: the chosen candidates, then the noise columns. */
     public int jointColumnCount() {
         return jointColumns.size() + jointNoiseCount();
@@ -385,7 +418,8 @@ public final class ScreenSpec implements Serializable {
     public boolean needsWindowQuantiles() {
         return (group == null && (transforms.contains(TRANSFORM_RANK) || transforms.contains(TRANSFORM_ABSDEV)))
                 || (hasBinned() && EDGES_VALUE.equals(binsEdges))
-                || hasPairShape();
+                || hasPairShape()
+                || hasCategoricals();
     }
 
     public boolean hasBinned() {
@@ -398,7 +432,7 @@ public final class ScreenSpec implements Serializable {
 
     /** The statistic kind a transform's placebo threshold is pooled over. */
     public static String kind(final String transform) {
-        return isBinned(transform) ? KIND_BINNED : TRANSFORM_PRODUCT.equals(transform) ? KIND_PAIR : KIND_DF1;
+        return isBinned(transform) ? KIND_BINNED : TRANSFORM_PRODUCT.equals(transform) ? KIND_PAIR : TRANSFORM_LEVELS.equals(transform) ? KIND_LEVELS : KIND_DF1;
     }
 
     /** Bins of the binned test: {@code bins.k} value / position bins plus the missing bin (the last index). */
@@ -697,6 +731,28 @@ public final class ScreenSpec implements Serializable {
                 }
             } else {
                 errors.add("joint must be a boolean or an object {include, maxColumns, noise, directions, redundancy, select}");
+            }
+        }
+        final JsonElement categorical = p.get("categorical");
+        if (categorical != null && !categorical.isJsonNull()) {
+            if (categorical.isJsonObject()) {
+                final JsonObject o = categorical.getAsJsonObject();
+                s.categoricalInclude = strings(o, "include", errors);
+                final Double maxLevels = number(o, "maxLevels");
+                if (maxLevels != null) {
+                    if (maxLevels < 2 || maxLevels > 1000 || maxLevels != Math.rint(maxLevels)) errors.add("categorical.maxLevels must be an integer in [2, 1000]");
+                    else s.categoricalMaxLevels = maxLevels.intValue();
+                }
+                final Double placebo = number(o, "placebo");
+                if (placebo != null) {
+                    if (placebo < 0 || placebo != Math.rint(placebo)) errors.add("categorical.placebo must be a non-negative integer");
+                    else s.categoricalPlacebo = placebo.intValue();
+                }
+                if (s.categoricalInclude.isEmpty()) errors.add("categorical needs include ([names / globs / selectors] of the string fields to test)");
+            } else if (categorical.isJsonArray()) {
+                s.categoricalInclude = strings(p, "categorical", errors);
+            } else {
+                errors.add("categorical must be an object {include, maxLevels, placebo} or a list of include globs");
             }
         }
         s.transformsExplicit = !s.transforms.isEmpty();
@@ -1028,6 +1084,21 @@ public final class ScreenSpec implements Serializable {
             }
             if (jointColumns.size() < 2) errors.add("joint needs at least two candidate columns (joint.include " + jointInclude + " kept " + jointColumns.size() + ")");
             if (jointColumns.size() > jointMaxColumns) errors.add("joint: " + jointColumns.size() + " columns exceed joint.maxColumns " + jointMaxColumns + " (the joint sums are m x m per bundle and O(m²) per row; narrow joint.include or raise the bound)");
+        }
+        // categorical candidates: the string fields matching categorical.include, never a role field
+        categoricals = new ArrayList<>();
+        if (!categoricalInclude.isEmpty() && inputSchema != null) {
+            final List<Pattern> globs = categoricalInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
+            final List<String> selectors = categoricalInclude.stream().filter(FeatureLineage::isSelector).toList();
+            for (final Schema.Field f : inputSchema.getFields()) {
+                if (f.getFieldType().getType() != Schema.Type.string || reserved.contains(f.getName())) continue;
+                final String name = f.getName();
+                boolean in = globs.stream().anyMatch(g -> g.matcher(name).matches());
+                if (!in && !selectors.isEmpty()) in = selectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, l.columns.get(name)));
+                if (in) categoricals.add(name);
+            }
+            if (categoricals.isEmpty()) errors.add("categorical.include " + categoricalInclude + " matched no string input field (role fields cannot be candidates)");
+            if (categoricalPlacebo > 0 && noise == 0) notes.add("categorical placebos redraw the levels from the window frequencies; they need no noise column");
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;

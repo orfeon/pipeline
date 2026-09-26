@@ -48,6 +48,7 @@ public final class GroupScorer implements Serializable {
         if (this.quantiles != quantiles) {
             edgesCache = null;
             gridEdgesCache = null;
+            levelsCache = null;
         }
         this.quantiles = quantiles;
         return this;
@@ -190,6 +191,23 @@ public final class GroupScorer implements Serializable {
                 } else {
                     rowContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
                 }
+            }
+        }
+        // the categorical candidates (DSL doc §6.2): the block of a column's levels, and its placebos (the levels
+        // redrawn from the window frequencies, the alignment with the label broken)
+        for (int c = 0; c < spec.categoricals.size(); c++) {
+            final WindowQuantiles.Levels levels = categoricalLevels(c);
+            if (levels == null || levels.size() < 2) continue;
+            final int nb = levels.size();
+            for (int r = -1; r < spec.categoricalPlacebo; r++) {
+                final int[] idx = r < 0 ? levelIndices(unit, c, levels) : placeboLevels(unit, c, r, levels);
+                final ScoreAccumulator acc = into.computeIfAbsent(spec.categoricalKey(c, r), k -> new ScoreAccumulator());
+                Arrays.fill(contribution, 0d);
+                contribution[ScoreAccumulator.N_OBS] = n;
+                acc.add(unitPeriod, contribution);
+                acc.addExtra(spec.isGroupedMultinomial()
+                        ? binnedGroupedContribution(nb, idx, unit.y, unit.p, unit.unitWeight)
+                        : binnedRowContribution(nb, idx, unit.y, unit.p, unit.w, prior));
             }
         }
         if (spec.jointOn) {
@@ -483,6 +501,54 @@ public final class GroupScorer implements Serializable {
         return out;
     }
 
+    /** the categorical columns' level dictionaries, from the window sketches' counts (reset with them) */
+    private transient WindowQuantiles.Levels[] levelsCache;
+
+    /** Categorical column {@code c}'s level dictionary (null without the pre-pass counts). */
+    WindowQuantiles.Levels categoricalLevels(final int c) {
+        if (quantiles == null || c >= quantiles.categoricals()) return null;
+        if (levelsCache == null) levelsCache = new WindowQuantiles.Levels[spec.categoricals.size()];
+        if (levelsCache[c] == null) levelsCache[c] = quantiles.levels(c, spec.categoricalMaxLevels);
+        return levelsCache[c];
+    }
+
+    /** The unit's rows' level slots of categorical column {@code c} (the folded slot for a level beyond the named ones). */
+    static int[] levelIndices(final Unit unit, final int c, final WindowQuantiles.Levels levels) {
+        final int n = unit.size();
+        final int[] out = new int[n];
+        for (int i = 0; i < n; i++) {
+            final String[] cat = unit.rows.get(i).cat;
+            final int idx = cat == null || c >= cat.length ? -1 : levels.indexOf(cat[c]);
+            // a level the dictionary never saw (impossible after the counting pass) folds into the last slot
+            out[i] = idx >= 0 ? idx : levels.size() - 1;
+        }
+        return out;
+    }
+
+    /**
+     * A placebo column of categorical {@code c}: every row's level redrawn from the window frequencies (the marginal
+     * distribution kept, the alignment with the label broken), from {@code seededRandom(seed, unitKey + "cat" + c + r)}
+     * in row order — reproducible, as the noise placebos.
+     */
+    int[] placeboLevels(final Unit unit, final int c, final int r, final WindowQuantiles.Levels levels) {
+        final SplittableRandom rng = FeatureValues.seededRandom(spec.seed, unit.key + SEP + "cat" + c + SEP + r);
+        final int n = unit.size();
+        final int[] out = new int[n];
+        for (int i = 0; i < n; i++) {
+            double u = rng.nextDouble();
+            int slot = levels.size() - 1;
+            for (int j = 0; j < levels.frequency().length; j++) {
+                u -= levels.frequency()[j];
+                if (u < 0) {
+                    slot = j;
+                    break;
+                }
+            }
+            out[i] = slot;
+        }
+        return out;
+    }
+
     /** Finite values of a column (the binned test's n_obs). */
     static int observed(final double[] v) {
         int n = 0;
@@ -541,7 +607,11 @@ public final class GroupScorer implements Serializable {
      * its Fisher block diag(P) − P P' (DSL doc §12.1).
      */
     double[] binnedGroupedContribution(final int[] bins, final double[] y, final double[] p, final double weight) {
-        final int nb = spec.binCount();
+        return binnedGroupedContribution(spec.binCount(), bins, y, p, weight);
+    }
+
+    /** {@link #binnedGroupedContribution(int[], double[], double[], double)} over a block of {@code nb} cells (a categorical column's levels, DSL doc §6.2). */
+    double[] binnedGroupedContribution(final int nb, final int[] bins, final double[] y, final double[] p, final double weight) {
         final double[] s = new double[nb];
         final double[] pb = new double[nb];
         for (int i = 0; i < bins.length; i++) {
@@ -563,7 +633,11 @@ public final class GroupScorer implements Serializable {
      * {@code [Σ w, Σ w r, Σ w r²]} after the bins (the prior mean and the gaussian variance).
      */
     double[] binnedRowContribution(final int[] bins, final double[] y, final double[] mu, final double[] w, final boolean prior) {
-        final int nb = spec.binCount();
+        return binnedRowContribution(spec.binCount(), bins, y, mu, w, prior);
+    }
+
+    /** {@link #binnedRowContribution(int[], double[], double[], double[], boolean)} over a block of {@code nb} cells. */
+    double[] binnedRowContribution(final int nb, final int[] bins, final double[] y, final double[] mu, final double[] w, final boolean prior) {
         final double[] out = new double[3 * nb + 3];
         for (int i = 0; i < bins.length; i++) {
             final double r = prior ? y[i] : y[i] - mu[i];
