@@ -160,7 +160,8 @@ scorable candidate, recipes in the feature transform's vocabulary to the `<name>
   of their confirmation gains, and `passed` compares the confirmation gain with it (under `pass.minGain` the
   confirmation excess — the gain less 1 / 2N of the confirmation half — must clear the floor too). A contrast
   constant over the bins (the isotonic fit against the data's direction pools into one value) reads 0, and a
-  recipe whose share would exceed 1 is a numerical failure: it is left out and named in the summary notes.
+  share above 1 is a numerical failure: such a contrast is not chosen on the discovery half (the best in-bound
+  one is), a recipe past the confirmation half's bound is left out, and both are named in the summary notes.
 - **Basis.** Without `conditioning` the recipes are read on the marginal binned sums (what the baseline
   misses). With it they are read on the partial block — both halves orthogonalised against the conditioning
   set — so a recipe says what the conditioning set does not already carry, not a re-encoding of it; `basis`
