@@ -547,7 +547,13 @@ centre, with cuts as rank fractions. A bin (a categorical level) enters a contra
 H_b above 1e-9 of the block's bins' total and a positive mass. The confirmation half is a difference of sums, so
 a bin it does not hold keeps a rounding residue of H (and of S) that a contrast isolating the bin would divide by;
 a lone row at p̂ ≈ 0 (H ≈ 0, |S| ≈ 1) would do the same — either way a χ² of 10¹⁵ that the placebo quantile then
-carries into the kind's cut.
+carries into the kind's cut. A contrast constant over the bins with information is no contrast and reads 0: the
+isotonic fit in the direction against the data pools every bin into one value, and centring leaves it a rounding
+residue of the same value in every bin — the intercept direction, which the row families' profiled H nulls while
+their S keeps the window's total residual Σ(y − p) (nonzero under a binomial baseline; the grouped shares sum it
+to 0 per unit), so S²/H would read the residue as a χ² of 10¹⁵ too. A contrast whose φ'Hφ is below 10⁻¹⁰ of
+Σ φ_b² H_bb (H's null space) reads 0 as well, and a recipe whose share of either half's bound still exceeds 1 is
+a numerical failure: it is left out (neither a record nor a placebo gain) and named in the notes.
 
 **Honest gain.** A shape chosen and scored on the same data is optimistic. A seeded hash of the unit key
 (the placebo derivation) splits the window into a discovery and a confirmation half — the binned key's

@@ -530,9 +530,11 @@ public final class ScreenReport {
      */
     static List<Map<String, Object>> suggestions(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
                                                  final Map<Integer, PartialAccumulator> partials, final FitState fit, final boolean conditioned,
-                                                 final double sigma2, final double nUnits, final Bins bins) {
+                                                 final double sigma2, final double nUnits, final Bins bins, final List<String> notes) {
         final List<Map<String, Object>> out = new ArrayList<>();
         if (!spec.suggestionsOn || bins == null) return out;
+        // the contrasts past their block's bound (a numerical failure: a share is at most 1), left out and counted
+        final List<String> outOfBound = new ArrayList<>();
         final int t = spec.transforms.indexOf(ScreenSpec.TRANSFORM_BINNED);
         if (t < 0) return out;
         final List<String> names = spec.columnNames();
@@ -634,13 +636,13 @@ public final class ScreenReport {
                     }
                 }
                 if (best != null) {
-                    candidates.add(suggestion(name, placebo, "shape", best.name, best.cut, direction(bd, best.phi, k), Double.NaN, Double.NaN,
-                            bestChi2 / blockDisc, bestChi2, bc, best.phi, k, blockConf, nConf, fragment(name, best, position), placeboGains));
+                    keep(candidates, suggestion(name, placebo, "shape", best.name, best.cut, direction(bd, best.phi, k), Double.NaN, Double.NaN,
+                            bestChi2 / blockDisc, bestChi2, bc, best.phi, k, blockConf, nConf, fragment(name, best, position), placeboGains, outOfBound));
                 }
                 if (bestStep != null) {
-                    candidates.add(suggestion(name, placebo, "cut", "step", bestStep.cut, direction(bd, bestStep.phi, k), Double.NaN, Double.NaN,
+                    keep(candidates, suggestion(name, placebo, "cut", "step", bestStep.cut, direction(bd, bestStep.phi, k), Double.NaN, Double.NaN,
                             bestStepChi2 / blockDisc, bestStepChi2, bc, bestStep.phi, k, blockConf, nConf,
-                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : rowBinFragment(name, new double[]{bestStep.cut}), placeboGains));
+                            position ? "the rows above rank " + fmt(bestStep.cut) + " within the unit" : rowBinFragment(name, new double[]{bestStep.cut}), placeboGains, outOfBound));
                 }
                 // monotone: the isotonic fit of the bin effects (H-weighted) in the better direction, over the bins
                 // with information (a bin without it would put an arbitrary effect into the fit)
@@ -666,9 +668,9 @@ public final class ScreenReport {
                     previous = b;
                 }
                 if (pairs > 0) {
-                    candidates.add(suggestion(name, placebo, "monotone", increasing ? "increasing" : "decreasing", Double.NaN, increasing ? "+" : "-", Double.NaN,
+                    keep(candidates, suggestion(name, placebo, "monotone", increasing ? "increasing" : "decreasing", Double.NaN, increasing ? "+" : "-", Double.NaN,
                             (double) consistent / pairs, Math.max(chiUp, chiDown) / blockDisc, Math.max(chiUp, chiDown), bc, phi, k, blockConf, nConf,
-                            "a monotone " + (increasing ? "increasing" : "decreasing") + " constraint on " + name, placeboGains));
+                            "a monotone " + (increasing ? "increasing" : "decreasing") + " constraint on " + name, placeboGains, outOfBound));
                 }
             }
             // missingness: the missing bin against the rest, and the value bin whose effect matches it (both halves
@@ -693,9 +695,9 @@ public final class ScreenReport {
                 // miscalibrated overall would carry)
                 final String fillText = Double.isNaN(fill) ? ""
                         : position ? ", or place it at rank " + fmt(fill) + " within the unit" : ", or fill with " + fmt(fill);
-                candidates.add(suggestion(name, placebo, "missing", "isnull", Double.NaN, direction(bd, phiMiss, nb), fill, Double.NaN,
+                keep(candidates, suggestion(name, placebo, "missing", "isnull", Double.NaN, direction(bd, phiMiss, nb), fill, Double.NaN,
                         blockAllDisc > 0 ? chiDisc / blockAllDisc : 0d, chiDisc, bc, phiMiss, nb, blockAllConf, nConf,
-                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains));
+                        "{scope: row, expr: \"" + name + " == null ? 1 : 0\"}" + fillText, placeboGains, outOfBound));
             }
             for (int i = before; i < candidates.size(); i++) {
                 candidates.get(i).put("basis", basis);
@@ -721,16 +723,35 @@ public final class ScreenReport {
             s.put("passed", !(Boolean) s.get("placebo") && spec.passesGain(gain, 1, nConf, cut));
             out.add(s);
         }
+        if (!outOfBound.isEmpty()) {
+            notes.add("suggestions: " + outOfBound.size() + " contrasts left out, their χ² past the block's bound (share above 1, a numerical failure): "
+                    + (outOfBound.size() > 10 ? outOfBound.subList(0, 10) + " ..." : outOfBound));
+        }
         return out;
+    }
+
+    /** the share above which a contrast's χ² is past its block's bound (rounding aside, a share is at most 1) */
+    static final double SHARE_BOUND_TOLERANCE = 1e-6;
+
+    /** Adds a suggestion unless {@link #suggestion} left it out (null: past its block's bound). */
+    private static void keep(final List<Map<String, Object>> candidates, final Map<String, Object> suggestion) {
+        if (suggestion != null) candidates.add(suggestion);
     }
 
     /** One suggestion record; the confirmation statistics come from the confirmation block along the chosen contrast. */
     private static Map<String, Object> suggestion(final String candidate, final boolean placebo, final String kind, final String name, final double cut,
                                                   final String direction, final double fill, final double consistency, final double share,
                                                   final double chi2, final Block confirmation, final double[] phi, final int over, final double blockConf,
-                                                  final double nConf, final String fragment, final Map<String, List<Double>> placeboGains) {
+                                                  final double nConf, final String fragment, final Map<String, List<Double>> placeboGains,
+                                                  final List<String> outOfBound) {
         final double chiConf = contrastChi2(confirmation, phi, over);
         final double gainConf = nConf > 0 ? chiConf / (2 * nConf) : Double.NaN;
+        final double shareConf = blockConf > 0 ? chiConf / blockConf : 0d;
+        // past the bound on either half: not a record, and not a placebo gain either (it would lift the kind's cut)
+        if (share > 1 + SHARE_BOUND_TOLERANCE || shareConf > 1 + SHARE_BOUND_TOLERANCE) {
+            outOfBound.add(candidate + " " + kind);
+            return null;
+        }
         final Map<String, Object> s = new LinkedHashMap<>();
         s.put("candidate", candidate);
         s.put("kind", kind);
@@ -742,7 +763,7 @@ public final class ScreenReport {
         s.put("share", share);
         s.put("chi2", chi2);
         s.put("confirmation_chi2", chiConf);
-        s.put("confirmation_share", blockConf > 0 ? chiConf / blockConf : 0d);
+        s.put("confirmation_share", shareConf);
         s.put("confirmation_gain", gainConf);
         s.put("confirmation_pValue", StatMath.chiSquare1UpperTail(chiConf));
         s.put("threshold", null);
@@ -829,28 +850,42 @@ public final class ScreenReport {
      * The df = 1 score test along a bin-constant contrast φ over the first {@code over} bins: φ centred by the
      * H-weighted mean (the intercept profiled out), S_φ = φ_c'S, H_φ = φ_c'Hφ_c. Bins without information
      * ({@link #informative}) carry nothing. Bounded by the block's χ² (the block is the maximum over its contrasts).
+     * A contrast constant over those bins is no contrast (0): centring leaves it a rounding residue of the same value
+     * in every bin — the intercept direction, which the row families' profiled H nulls while their raw S keeps the
+     * window's total residual Σ(y − p), so S²/H would read that residue as a χ² near 1e15 (the isotonic fit in the
+     * direction against the data pools every bin into one value). Past the constant check, a contrast whose
+     * information is below {@link #CONTRAST_NULL_FLOOR} of its diagonal share lies in H's null space and reads 0 too.
      */
     static double contrastChi2(final Block block, final double[] phi, final int over) {
         final boolean[] use = informative(block, over);
-        double hsum = 0, hphi = 0;
+        double hsum = 0, hphi = 0, lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
         for (int b = 0; b < over; b++) {
             if (!use[b] || !Double.isFinite(phi[b])) continue;
             hsum += block.h[b];
             hphi += block.h[b] * phi[b];
+            lo = Math.min(lo, phi[b]);
+            hi = Math.max(hi, phi[b]);
         }
         if (!(hsum > 0)) return 0d;
+        if (!(hi - lo > CONTRAST_CONSTANT_FLOOR * Math.max(Math.abs(hi), Math.abs(lo)))) return 0d;
         final double mean = hphi / hsum;
         final double[] pc = new double[over];
         for (int b = 0; b < over; b++) pc[b] = use[b] && Double.isFinite(phi[b]) ? phi[b] - mean : 0d;
-        double s = 0, h = 0;
+        double s = 0, h = 0, diagonal = 0;
         for (int b = 0; b < over; b++) {
             s += pc[b] * block.s[b];
+            diagonal += pc[b] * pc[b] * block.hFull[b][b];
             for (int c = 0; c < over; c++) h += pc[b] * block.hFull[b][c] * pc[c];
         }
-        if (!(h > 1e-300)) return 0d;
+        if (!(h > 1e-300) || !(h > CONTRAST_NULL_FLOOR * diagonal)) return 0d;
         final double chi2 = s * s / h;
         return Double.isFinite(chi2) ? chi2 : 0d;
     }
+
+    /** the relative spread of a contrast over the bins with information at and below which it is constant */
+    static final double CONTRAST_CONSTANT_FLOOR = 1e-12;
+    /** the share of a contrast's diagonal information (Σ φ_b² H_bb) at and below which φ'Hφ is H's null space */
+    static final double CONTRAST_NULL_FLOOR = 1e-10;
 
     /** The sign of the contrast's score on the discovery block: "+" when the label rises with φ. */
     private static String direction(final Block block, final double[] phi, final int over) {
@@ -2380,7 +2415,7 @@ public final class ScreenReport {
         summary.put("nJointFilled", nJointFilled);
         summary.put("nJointDropped", nJointDropped);
         summary.put("notes", notes);
-        final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, bins));
+        final List<Map<String, Object>> suggested = new ArrayList<>(suggestions(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, bins, notes));
         // the several-candidate suggestions from the joint sums (the df = 1 cut is the forward selection's stop rule)
         suggested.addAll(joint(spec, accumulators, partials, fit, conditioned, sigma2, nUnits, threshold, bins));
         // the real pairs' interaction shapes from their 2-D grids at the fitted means
