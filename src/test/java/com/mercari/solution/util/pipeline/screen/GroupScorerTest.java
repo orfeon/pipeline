@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1068,6 +1069,99 @@ public class GroupScorerTest {
         final double[][] hFull3 = new double[4][4];
         for (int b = 0; b < 4; b++) hFull3[b][b] = h3[b];
         Assertions.assertTrue(ScreenReport.informative(new ScreenReport.Block(ScreenReport.Stats.degenerate(63), 2, s, h3, n2, hFull3), 4)[2]);
+    }
+
+    @Test
+    public void testConstantContrastReadsZero() {
+        // a row-family block under a miscalibrated baseline: H profiled (D − dd' / Σd, the intercept direction in its
+        // null space) while S keeps the window's total residual (Σ S ≈ −420). A constant φ — the isotonic fit against
+        // the data's direction pools every bin into one value — centres to a rounding residue of the same value in
+        // every bin, whose S² / H read 4.7e16 before the guard
+        final double[] d = {5551.547, 4669.331, 7219.766, 4269.425, 6632.998, 5765.013, 4195.795, 6487.922, 4091.228, 6111.593};
+        final double[] s = {-73.713, -71.836, -41.793, -5.583, -68.858, -59.908, -23.531, 5.294, -28.061, -44.299};
+        final int k = d.length;
+        double total = 0;
+        for (final double v : d) total += v;
+        final double[][] hFull = new double[k][k];
+        for (int b = 0; b < k; b++) for (int c = 0; c < k; c++) hFull[b][c] = (b == c ? d[b] : 0d) - d[b] * d[c] / total;
+        final double[] n = new double[k];
+        Arrays.fill(n, 100);
+        final ScreenReport.Block block = new ScreenReport.Block(ScreenReport.Stats.degenerate(1000), k - 1, s, d, n, hFull);
+        final double[] constant = new double[k];
+        Arrays.fill(constant, -0.007496879058238026);
+        Assertions.assertEquals(0d, ScreenReport.contrastChi2(block, constant, k), 0d);
+        // the isotonic fits of increasing effects: the decreasing one pools into a constant (0), the increasing one
+        // is a real contrast, bounded by the block's Σ S̃_b² / H_b (a diagonal H once the intercept is profiled)
+        final double[] effects = new double[k], increasing = new double[k];
+        for (int b = 0; b < k; b++) {
+            effects[b] = -0.012 + 0.001 * b;
+            increasing[b] = effects[b] * d[b];
+        }
+        final ScreenReport.Block rising = new ScreenReport.Block(ScreenReport.Stats.degenerate(1000), k - 1, increasing, d, n, hFull);
+        final double[] down = ScreenReport.isotonic(effects, d, false);
+        for (int b = 1; b < k; b++) Assertions.assertEquals(down[0], down[b], 0d);
+        Assertions.assertEquals(0d, ScreenReport.contrastChi2(rising, down, k), 0d);
+        final double up = ScreenReport.contrastChi2(rising, ScreenReport.isotonic(effects, d, true), k);
+        double sumS = 0;
+        for (final double v : increasing) sumS += v;
+        double bound = 0;
+        for (int b = 0; b < k; b++) bound += Math.pow(increasing[b] - d[b] * sumS / total, 2) / d[b];
+        Assertions.assertTrue(up > 0 && up <= bound * (1 + 1e-9), up + " vs " + bound);
+        // a one-hot φ over a single bin with information is constant there too
+        Assertions.assertEquals(0d, ScreenReport.contrastChi2(new ScreenReport.Block(ScreenReport.Stats.degenerate(62), 2,
+                new double[]{2, -1, 0.1, -1}, new double[]{10, 1e-17, 1e-17, 1e-17}, new double[]{20, 0, 0, 0}, new double[4][4]),
+                new double[]{1, 0, 0, 0}, 4), 0d);
+    }
+
+    @Test
+    public void testMonotoneSuggestionUnderMiscalibratedBaseline() throws Exception {
+        // independent binomial rows against a flat baseline of 0.1 while the rate is 0.05 + 0.3 x1 (x2..x6 carry
+        // nothing): Σ(y − p) is far from 0, so a monotone recipe read in the direction against the data (a constant)
+        // took its χ² from the rounding residue — before the guard x1's and x2's monotone shares were 8e15 / 1.5e17 on
+        // this draw. Every share stays in [0, 1], x1's monotone recipe is the increasing one and passes, and the placebo
+        // columns' monotone cut is a gain, not 10¹⁵
+        final Schema schema = Schema.builder()
+                .withField("y", Schema.FieldType.INT64)
+                .withField("b", Schema.FieldType.FLOAT64)
+                .withField("x1", Schema.FieldType.FLOAT64).withField("x2", Schema.FieldType.FLOAT64).withField("x3", Schema.FieldType.FLOAT64)
+                .withField("x4", Schema.FieldType.FLOAT64).withField("x5", Schema.FieldType.FLOAT64).withField("x6", Schema.FieldType.FLOAT64)
+                .build();
+        final ScreenSpec spec = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, baseline: {field: b, form: prob}, "
+                + "candidates: [x1, x2, x3, x4, x5, x6], transforms: [binned], bins: {k: 10}, suggestions: true, placebo: {noise: 20, seed: 11}}")
+                .getAsJsonObject()).resolve(schema, null);
+        final java.util.Random random = new java.util.Random(0);
+        final List<ScreenRow> rows = new ArrayList<>();
+        for (int i = 0; i < 4000; i++) {
+            final double[] x = new double[6];
+            for (int c = 0; c < 6; c++) x[c] = random.nextDouble();
+            final double y = random.nextDouble() < 0.05 + 0.3 * x[0] ? 1 : 0;
+            rows.add(new ScreenRow("r" + i, "r" + i, i, null, y, 0.1, 1, x));
+        }
+        final WindowQuantiles q = new WindowQuantiles(6);
+        for (final ScreenRow r : rows) q.update(r.x);
+        final GroupScorer scorer = new GroupScorer(spec).withWindowQuantiles(q);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        for (final ScreenRow r : rows) scorer.score(List.of(r), r.getIdentity(), acc);
+        final ScreenReport.Result result = ScreenReport.build(spec, acc, null, null, new ScreenReport.Bins(scorer::binRepresentatives, scorer::binEdges));
+        Map<String, Object> monotone = null;
+        int monotoneRecords = 0;
+        for (final Map<String, Object> s : result.suggestions()) {
+            Assertions.assertTrue((Double) s.get("share") >= 0 && (Double) s.get("share") <= 1 + 1e-6, s.toString());
+            Assertions.assertTrue((Double) s.get("confirmation_share") >= 0 && (Double) s.get("confirmation_share") <= 1 + 1e-6, s.toString());
+            if (!"monotone".equals(s.get("kind"))) continue;
+            monotoneRecords++;
+            Assertions.assertTrue((Double) s.get("threshold") < 0.01, s.toString());
+            if ("x1".equals(s.get("candidate"))) monotone = s;
+        }
+        // one per candidate and placebo column: none left out
+        Assertions.assertEquals(26, monotoneRecords);
+        Assertions.assertNotNull(monotone, result.suggestions().toString());
+        Assertions.assertEquals("increasing", monotone.get("name"));
+        Assertions.assertTrue((Double) monotone.get("share") > 0.5, monotone.toString());
+        Assertions.assertEquals(Boolean.TRUE, monotone.get("passed"), monotone.toString());
+        @SuppressWarnings("unchecked")
+        final List<String> notes = (List<String>) result.summary().get("notes");
+        Assertions.assertTrue(notes.stream().noneMatch(n -> n.startsWith("suggestions:")), notes.toString());
     }
 
     @Test
