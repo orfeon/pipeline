@@ -647,9 +647,42 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     each other by category — so read them in sums or relative to the contest. The `count` of a pairing member
     (`sellerAgent`) is how many contests that pairing has run. A component's keys are a member's keys: a row
     with a null `category` joins no contest at all (see above), so the seller's overall level and the agent no
-    longer learn from it either — add a component only where its keys are always present.
-- Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or named
-  twice, an entity called `team`, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
+    longer learn from it either — add a component only where its keys are always present, or declare it
+    `optional: true`.
+  - **Weighted components (`weight`, `name`).** A member may count with a weight read from the row:
+    `{entity: ..., weight: <numeric column>}` makes the team's strength `Σ a_j · mu_j` (variance `Σ a_j² · sigma_j²`),
+    and the member takes `a_j · sigma_j² / sigma²` of the change and `a_j² · sigma_j² / sigma²` of the shrinkage.
+    With a condition of the row as the weight, the member is the entity's **slope** in that condition — and
+    `name:` lets the block's own entity (or any entity a second time) be such a component, under a pool and
+    columns of its own:
+
+    ```yaml
+    - type: rating
+      field: final_price
+      context: session
+      order: descending
+      as: shape
+      with:
+        - {entity: seller, name: priceSlope, weight: start_price_z, mu: 0, sigma: 1}   # the seller's slope in the (standardised) start price
+      funcs: [mu, sigma]
+      team: [mu, sigma]
+    # skill_all_shape_mu                 the seller's level at start_price_z = 0
+    # skill_all_shape_priceSlope_mu      how much stronger the seller is per unit of start_price_z
+    # skill_all_shape_team_mu            level + slope · this row's start_price_z: the strength its contest sees
+    ```
+
+    Several such members over the columns of a condition encoding (distance, surface, …) are a low-rank model of
+    the entity's condition-specific strength with the conditions known — the per-entity loadings are what the
+    contests estimate. Centre / standardise a weight: a slope identifies the change *across* its values, and the
+    level reads the strength at weight 0. A weight of 0 leaves the member out of that row's team (no update); a
+    missing weight is a missing member (the row joins no contest, or — `optional: true` — the member is absent).
+    The weight is read from the row by the team readouts too (the strength *this* row's contest will see), so it
+    must be known at the row's `computeAt`. Within one contest a slope and the level it belongs to move together
+    (each takes its share of the row's change); they are told apart across the entity's contests at different
+    values of the weight — an entity always seen at one value never learns its slope beyond the prior.
+- Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or a member
+  name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
+  member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside

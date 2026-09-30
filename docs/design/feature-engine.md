@@ -346,7 +346,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   returns null — the row joins no contest), `update` skips it in the sums and the shares, `readTeam` sums the members
   present, and the team id writes it as the empty text (a state key never is), so the seller alone is a team of its own.
   A contest none of whose rows has an optional member is the rating of the others to the last bit (a team of one is a
-  player). The members' levels
+  player). A **weighted** member (`Member.weightField`, `|weight=<field>` in `teamMembers`; DSL `weight:`, with
+  `name:` as the pool / column segment, so the block's entity can be a component of its own team) counts `a · mu`
+  and `a² · v`: `update` sums `m = Σ a_j mu_j`, `v = Σ a_j² v_j` and shares `a_j v_j / v` of `Ω`, `a_j² v_j / v` of
+  `Δ` — the member reparametrised (`RatingTest.testWeightedMember`: weight `a` and prior sd `σ` is the unweighted
+  member of prior sd `|a| σ`, read back divided by `a`). `Entry.weights` (null = all 1) comes from `weightsOf(row)`;
+  a weight of 0 empties the member's slot in `teamOf`, a missing one is a missing member; `readTeam` takes the
+  row's weights, so the weight field is a self input of every column of the op as well as a past input. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no

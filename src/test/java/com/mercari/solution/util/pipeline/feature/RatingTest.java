@@ -1189,6 +1189,115 @@ public class RatingTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> Rating.decodeMembers("agent|agent_id|0.0|4.0|0.5|maybe"));
     }
 
+    /**
+     * A weighted member counts {@code a · mu} with variance {@code a² · v}. That is the member reparametrised: a contest
+     * with an agent of weight {@code a} and prior sd {@code sigma} is the contest with an unweighted agent of prior sd
+     * {@code |a| · sigma}, the agent's result read back divided by {@code a} (every Bayesian method, fresh players, no
+     * drift). A weight of 1 is the unweighted team to the last bit; a weight of 0 leaves the member out of the row's
+     * team; a missing weight is a missing member (the row out, or — optional — the member absent). The team readout
+     * is the weighted strength the row's contest sees.
+     */
+    @Test
+    public void testWeightedMember() {
+        final double a = -1.7, sigma = 3;
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce, Rating.Method.gaussian)) {
+            final Rating solo = method == Rating.Method.gaussian
+                    ? Rating.of(method, true, 0d, 1d, 0.5, 0d, null, null, List.of("seller_id"), List.of("c"), "y")
+                    : Rating.of(method, true, null, null, null, 0d, null, null, List.of("seller_id"), List.of("c"), "y");
+            final Rating weighted = solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, sigma, 0d, false, "w")));
+            final Rating scaled = solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, Math.abs(a) * sigma, 0d)));
+            final Rating plain = solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, sigma, 0d)));
+            final java.util.function.Function<Double, List<SequenceEvaluator.Past>> contest = w -> List.of(
+                    row(1L, "c1", "x", 1, "seller_id", "s1", "agent_id", "g1", "w", w), row(1L, "c1", "x", 2, "seller_id", "s2", "agent_id", "g2", "w", w),
+                    row(1L, "c1", "x", 3, "seller_id", "s3", "agent_id", "g1", "w", w));
+            final Rating.State byWeight = new Rating.State(), byScale = new Rating.State();
+            weighted.fold(byWeight, contest.apply(a));
+            scaled.fold(byScale, contest.apply(a));
+            final Map<String, Object> first = contest.apply(a).get(0).values();
+            for (final String agentId : List.of("g1", "g2")) {
+                final String key = weighted.memberKey(Map.of("agent_id", agentId), 1);
+                Assertions.assertEquals(byScale.players.get(key).mu / a, byWeight.players.get(key).mu, 1e-12, method + " " + agentId);
+                Assertions.assertEquals(byScale.players.get(key).sigma / Math.abs(a), byWeight.players.get(key).sigma, 1e-12, method + " " + agentId);
+            }
+            for (final String seller : List.of("s1", "s2", "s3")) {
+                final String key = weighted.memberKey(Map.of("seller_id", seller), 0);
+                Assertions.assertEquals(byScale.players.get(key).mu, byWeight.players.get(key).mu, 1e-12, method + " " + seller);
+                Assertions.assertEquals(byScale.players.get(key).sigma, byWeight.players.get(key).sigma, 1e-12, method + " " + seller);
+            }
+            // the team readout: a · mu of the agent, a² · v
+            final List<String> team = weighted.teamOf(first);
+            final double sellerMu = byWeight.players.get(team.get(0)).mu, agentMu = byWeight.players.get(team.get(1)).mu;
+            final double sellerSigma = byWeight.players.get(team.get(0)).sigma, agentSigma = byWeight.players.get(team.get(1)).sigma;
+            Assertions.assertEquals(sellerMu + a * agentMu, (Double) weighted.readTeam(byWeight, team, "mu", 1L, Double.NaN, weighted.weightsOf(first)), 1e-12);
+            Assertions.assertEquals(Math.sqrt(sellerSigma * sellerSigma + a * a * agentSigma * agentSigma),
+                    (Double) weighted.readTeam(byWeight, team, "sigma", 1L, Double.NaN, weighted.weightsOf(first)), 1e-12);
+
+            // weight 1: the unweighted team, to the last bit
+            final Rating.State one = new Rating.State(), unweighted = new Rating.State();
+            weighted.fold(one, contest.apply(1d));
+            plain.fold(unweighted, contest.apply(1d));
+            Assertions.assertEquals(unweighted.players.keySet(), one.players.keySet());
+            for (final String key : unweighted.players.keySet()) {
+                Assertions.assertEquals(unweighted.players.get(key).mu, one.players.get(key).mu, 0d, method + " " + key);
+                Assertions.assertEquals(unweighted.players.get(key).sigma, one.players.get(key).sigma, 0d, method + " " + key);
+            }
+            // weight 0: the agent is no part of the row's team (not updated, the sellers rated as themselves)
+            final Rating.State zero = new Rating.State();
+            weighted.fold(zero, contest.apply(0d));
+            Assertions.assertEquals(3, zero.players.size(), method + ": the sellers alone");
+            Assertions.assertNull(weighted.teamOf(contest.apply(0d).get(0).values()).get(1), "a weight of 0 is no member");
+            // a missing weight is a missing member: the row out when required, the member absent when optional
+            final List<SequenceEvaluator.Past> gap = List.of(row(1L, "c1", "x", 1, "seller_id", "s1", "agent_id", "g1", "w", 1d),
+                    row(1L, "c1", "x", 2, "seller_id", "s2", "agent_id", "g2"), row(1L, "c1", "x", 3, "seller_id", "s3", "agent_id", "g1", "w", 1d));
+            final Rating.State required = new Rating.State(), optional = new Rating.State();
+            weighted.fold(required, gap);
+            solo.withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, sigma, 0d, true, "w"))).fold(optional, gap);
+            Assertions.assertFalse(required.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": required");
+            Assertions.assertTrue(optional.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": optional");
+            Assertions.assertFalse(optional.players.containsKey(weighted.memberKey(Map.of("agent_id", "g2"), 1)), method + ": the absent agent");
+        }
+        // the flags ride the coordinates, each at most once
+        final Rating.Member both = new Rating.Member("slope", List.of("seller_id"), 0d, 1d, 0d, true, "price_z");
+        Assertions.assertEquals("slope|seller_id|0.0|1.0|0.0|optional|weight=price_z", Rating.encodeMembers(List.of(both)));
+        Assertions.assertEquals(List.of(both), Rating.decodeMembers(Rating.encodeMembers(List.of(both))));
+        Assertions.assertEquals("price_z", Rating.decodeMembers("slope|seller_id|0.0|1.0|0.0|weight=price_z").get(0).weightField());
+        for (final String bad : List.of("slope|seller_id|0.0|1.0|0.0|weight=", "slope|seller_id|0.0|1.0|0.0|optional|optional", "slope|seller_id|0.0|1.0")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> Rating.decodeMembers(bad), bad);
+        }
+    }
+
+    /**
+     * A named member: the block's own entity (or another entity twice) as a further component of the team, here the
+     * seller's slope in the start price — its pool and columns under the name, its weight a past and a self input of
+     * every column of the op.
+     */
+    @Test
+    public void testCompileNamedWeightedMember() {
+        final String slope = DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]",
+                "with: [{entity: agent, mu: 0, sigma: 4}, {entity: seller, name: priceSlope, weight: start_price, mu: 0, sigma: 1}]");
+        final FeaturePlan plan = compileTeam(slope);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn member = plan.getColumn("skill_all_duo_priceSlope_mu");
+        Assertions.assertNotNull(member, plan::describe);
+        Assertions.assertEquals("priceSlope", member.getCoordinates().get("member"));
+        Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5;priceSlope|seller_id|0.0|1.0|0.5|weight=start_price", member.getCoordinates().get("teamMembers"));
+        for (final OutputColumn c : plan.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList()) {
+            Assertions.assertTrue(c.getPastInputs().contains("start_price") && c.getInputs().contains("start_price"), c.getCanonicalName());
+        }
+        Assertions.assertEquals("start_price", Rating.of(member.getCoordinates()).members().get(2).weightField());
+
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4, weight: category}"), "a weight is numeric");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4}, {entity: agent, weight: start_price}"), "one entity twice without a name");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: seller, weight: start_price}"), "the block's entity without a name of its own");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: seller}"), "a name taken by the block's entity");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: team}"), "team is the team's own segment");
+        for (final Map.Entry<String, String> e : cases.entrySet()) {
+            final FeaturePlan invalid = compileTeam(e.getKey());
+            Assertions.assertTrue(invalid.getDiagnostics().hasErrors() && hasCode(invalid, "sequence.rating.with"), () -> e.getValue() + "\n" + invalid.describe());
+        }
+    }
+
     @Test
     public void testCompileTeamErrors() {
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
@@ -1228,10 +1337,12 @@ public class RatingTest {
         final String ops = "      - {type: rating, field: final_price, context: session, order: descending, as: duo, tau: 1.5, tauPer: P1D,"
                 + " with: [{entity: agent, mu: 0, sigma: 4, tau: 0.5}], funcs: [mu, sigma, count, delta], team: [mu, sigma]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj, with: [agent]}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, as: opt, with: [{entity: agent, optional: true}], team: [mu, sigma, count]}";
+                + "      - {type: rating, field: final_price, context: session, order: descending, as: opt, with: [{entity: agent, optional: true}], team: [mu, sigma, count]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 2, beta: 1, as: slope,"
+                + " with: [{entity: seller, name: priceSlope, weight: start_price, mu: 0, sigma: 1, optional: true}], team: [mu, sigma]}";
         final FeaturePlan plan = compileTeam(ops);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
-        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2 + 2 + 2 + 3);
+        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2 + 2 + 2 + 3 + 2 + 2 + 2);
     }
 
     @Test
@@ -1846,10 +1957,13 @@ public class RatingTest {
                         // a column reads null when the row lacks what it reads: the seller (the player's columns), the agent
                         // (a member's), either (the team's)
                         final String readout = c.getCoordinates().get("readout");
-                        // an optional agent: the row's team is the seller alone when the agent is missing
-                        final boolean agentOptional = c.getCoordinates().getOrDefault("teamMembers", "").endsWith("|optional");
-                        final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null && !agentOptional
-                                : "member".equals(readout) ? row.get("agent_id") == null : row.get("seller_id") == null;
+                        // the team needs the agent only when the agent is a required member of it
+                        boolean agentRequired = false;
+                        for (final String member : c.getCoordinates().getOrDefault("teamMembers", "").split(";")) {
+                            if (member.startsWith("agent|") && !member.contains("|optional")) agentRequired = true;
+                        }
+                        final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null && agentRequired
+                                : "member".equals(readout) && "agent".equals(c.getCoordinates().get("member")) ? row.get("agent_id") == null : row.get("seller_id") == null;
                         if (missing) Assertions.assertNull(scan, c.getCanonicalName());
                         if (c.getCanonicalName().endsWith("_count") && scan != null && (Long) scan > 0) rated++;
                         compared++;
