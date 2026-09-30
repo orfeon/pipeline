@@ -314,7 +314,14 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   choices deeper than `top` add no factor — the entries behind stay in the remaining pool of every choice read, so
   they lose to the first `top` without being ranked among themselves — and the place-`q` choice runs at the scale
   `c · depthScale^(q − 1)` (Hausman–Ruud). Place 1 keeps `c`, so `ratingProb` is unchanged; the defaults divide by
-  1.0 and reproduce the plain update bit for bit. The
+  1.0 and reproduce the plain update bit for bit. Two per-row inputs (`Rating.withRowInputs`; coordinates
+  `offsetField` / `tauField`, past inputs of every readout column): the offset is added to the entry's summed
+  strength before the method runs — the contest expects `m_i + offset_i`, the offset itself is no member and is never
+  rated — and a row without a finite offset joins no contest; `tauBy` replaces the rated player's (member 0's) `tau`
+  in `drifted` for that entry — once per player and contest, at the largest valid value among the player's rows (its
+  drift is its state: every row of it enters the contest with one prior variance) — the other members keep theirs. Under `tauPer` a read drifts up to the row at the
+  row's own value (`Rating.rowTau(row)` → `read(..., rowTau)` / `readTeam(..., rowTau)`), so the field is also a self
+  input of every column of the op — one availability contract for the shared fold pointer. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters
   `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. **Teams** (`Rating.withTeam`; DSL `with:` / `team:` on the op → the coordinates
   `teamPool` + `teamMembers` = `pool|keys|mu|sigma|tau;…`, written only when declared, and per column `readout` =

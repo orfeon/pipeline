@@ -542,6 +542,9 @@ public final class FeaturePlanCompiler {
             refs.addAll(op.regressors);
             // the uncertainty column of a ratingProb: it may come from a block declared after this one
             if (op.sigmaField != null) refs.add(op.sigmaField);
+            // a rating's per-row inputs: the known shift of a row's performance and the rated player's drift
+            if (def.scope == Scope.sequence && op.offset != null) refs.add(op.offset);
+            if (op.tauBy != null) refs.add(op.tauBy);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {
@@ -1729,6 +1732,11 @@ public final class FeaturePlanCompiler {
             }
         }
         if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
+        // per-row inputs: a numeric column (or a baseline) each; tauBy drifts an uncertainty elo does not keep
+        final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, in the rating's units", loc);
+        final Ref tauRef = elo ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
+        if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian");
+        if (op.offset != null && offsetRef == null || op.tauBy != null && tauRef == null) valid = false;
         if (!valid) return;
         // a margin model has no scale of its own: sigma (how far strengths spread) and beta (the noise of one outcome) are
         // in the outcome's units and must be declared - the defaults derive from the prior mu (a rating's level)
@@ -1763,9 +1771,11 @@ public final class FeaturePlanCompiler {
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
+            if (tauRef != null) shared.put("tauField", tauRef.canonical());
             if (!op.top.isEmpty()) shared.put("top", Integer.toString(op.top.get(0)));
             if (op.depthScale != null && op.depthScale != 1d) shared.put("depthScale", Double.toString(op.depthScale));
         }
+        if (offsetRef != null) shared.put("offsetField", offsetRef.canonical());
         shared.put("context", contest.name());
         // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a
         // snapshot is an explicit choice of the block (a spec whose encodings persist artifacts would otherwise start
@@ -1853,6 +1863,13 @@ public final class FeaturePlanCompiler {
             addPastInput(c, field);
             for (final String key : entity.keys()) addPastInput(c, key);
             for (final String key : contest.keys()) addPastInput(c, key);
+            // what the contests read of their rows; under tauPer a read drifts up to the row at the row's own tauBy, so
+            // every column of the op (one fold pointer, one availability contract) reads it from the row too
+            if (offsetRef != null) addPastInput(c, offsetRef.canonical());
+            if (tauRef != null) {
+                addPastInput(c, tauRef.canonical());
+                if (tauPerMillis > 0) addSelfInput(c, tauRef.canonical());
+            }
             for (final EntityDef member : teamEntities) {
                 for (final String key : member.keys()) {
                     addPastInput(c, key);
@@ -1870,6 +1887,22 @@ public final class FeaturePlanCompiler {
                     + " entities - read a member relative to its contest (a context block over the column) or to its pool (func z), or the team's sum"
                     + " (team: [mu, sigma, count, deviation])");
         }
+    }
+
+    /**
+     * A per-row input of a rating ({@code offset} / {@code tauBy}): a baseline or a numeric column, or null when not
+     * declared or invalid (reported under {@code sequence.rating.<parameter>}). A baseline name comes first, as for
+     * the softmax {@code offset}: one name reads the same value whichever op it is the offset of.
+     */
+    private Ref ratingRowInput(final String reference, final String parameter, final String what, final String loc) {
+        if (reference == null) return null;
+        final Ref ref = resolve(baselineColumns.getOrDefault(reference, reference));
+        if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
+            diagnostics.error("sequence.rating." + parameter, loc, "rating " + parameter + " must name a numeric column or baselines[].name (" + what + "): "
+                    + reference + (ref == null ? "" : " is not numeric"));
+            return null;
+        }
+        return ref;
     }
 
     /**

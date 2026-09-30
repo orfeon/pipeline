@@ -396,6 +396,11 @@ not alter values).
   similar strength; a lopsided deep place can count more, being less predictable). Do not emulate `top` by clamping the
   outcome to `k + 1`: that is a tie, which still moves and narrows the entries behind. Compare a few depths with
   the evaluation / screen transforms rather than guessing one.
+- **`rating` with known conditions** (a handicap, a covariate whose effect you already estimated): `offset:` a row
+  column in the rating's units — the contest expects `mu + offset` and rates only the rest, so the condition is not
+  absorbed into the entities' ratings; add it back in the model. Entities whose strength is still changing:
+  `tauBy:` a pre-event row column giving the drift per contest (or per `tauPer`) in place of `tau`. How erratic an
+  entity is has no op: the module doc's *Inconsistency* recipe reads it as the spread of its contest-net surprises.
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`

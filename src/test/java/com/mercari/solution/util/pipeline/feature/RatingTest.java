@@ -1333,12 +1333,216 @@ public class RatingTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> plain.withDepth(0, Double.POSITIVE_INFINITY));
     }
 
-    private static SequenceEvaluator.Past past(final String contest, final String player, final double outcome) {
+    /** The state key the fold gives player {@code p} of a rating without a team (a {@link FeatureValues#key} text). */
+    private static String key(final String player) {
+        return FeatureValues.key(Map.of("p", player), List.of("p"));
+    }
+
+    /** A past row of contest {@code c}: player, outcome and any other fields ({@code null} values are kept as absent). */
+    private static SequenceEvaluator.Past row(final long millis, final String contest, final String player, final double outcome, final Object... fields) {
         final Map<String, Object> values = new HashMap<>();
         values.put("c", contest);
         values.put("p", player);
         values.put("y", outcome);
-        return new SequenceEvaluator.Past(1_000L, values);
+        for (int i = 0; i < fields.length; i += 2) values.put((String) fields[i], fields[i + 1]);
+        return new SequenceEvaluator.Past(millis, values);
+    }
+
+    /**
+     * {@code offset}: a known shift of a row's performance. The contest expects {@code m_i + offset_i}, so a contest
+     * with an offset moves the players exactly as the same contest would move them from priors raised by that offset
+     * (every method), and it is never rated itself: {@code mu} stays the player's own strength. A row without a finite
+     * offset joins no contest.
+     */
+    @Test
+    public void testRowOffset() {
+        for (final Rating.Method method : Rating.Method.values()) {
+            final Rating plain = method == Rating.Method.gaussian
+                    ? Rating.of(method, false, 0d, 1d, 0.5, 0d, null, null, List.of("p"), List.of("c"), "y")
+                    : Rating.of(method, false, null, null, null, 0d, null, null, List.of("p"), List.of("c"), "y");
+            final Rating offset = plain.withRowInputs("x", null);
+            final double prior = (Double) plain.read(null, "a", "mu"), sigma = (Double) plain.read(null, "a", "sigma"); // elo keeps it untouched, but shares by it
+            final Rating.State shifted = new Rating.State();
+            offset.fold(shifted, List.of(row(1L, "c1", "a", 2, "x", 1.5), row(1L, "c1", "b", 1, "x", 0d), row(1L, "c1", "d", 0, "x", -0.5)));
+            // the same contest from priors raised by the offsets
+            final Rating.State raised = new Rating.State();
+            for (final Map.Entry<String, Double> e : Map.of("a", 1.5, "d", -0.5).entrySet()) {
+                final Rating.Player player = new Rating.Player();
+                player.mu = prior + e.getValue();
+                player.sigma = sigma;
+                raised.players.put(key(e.getKey()), player);
+            }
+            plain.fold(raised, List.of(row(1L, "c1", "a", 2), row(1L, "c1", "b", 1), row(1L, "c1", "d", 0)));
+            for (final String player : List.of("a", "b", "d")) {
+                final double lift = "a".equals(player) ? 1.5 : "d".equals(player) ? -0.5 : 0;
+                Assertions.assertEquals(raised.players.get(key(player)).mu - lift, shifted.players.get(key(player)).mu, 1e-9, method + " " + player);
+                Assertions.assertEquals(raised.players.get(key(player)).sigma, shifted.players.get(key(player)).sigma, 1e-12, method + " " + player);
+            }
+            // the expected winner won: it moves less than without the offset
+            final Rating.State unshifted = new Rating.State();
+            plain.fold(unshifted, List.of(row(1L, "c1", "a", 2), row(1L, "c1", "b", 1), row(1L, "c1", "d", 0)));
+            Assertions.assertTrue(shifted.players.get(key("a")).mu < unshifted.players.get(key("a")).mu, method.name());
+            // a row without an offset takes no part; a rating that reads none ignores the field
+            final Rating.State partial = new Rating.State();
+            offset.fold(partial, List.of(row(1L, "c1", "a", 2, "x", 1d), row(1L, "c1", "b", 1)));
+            Assertions.assertTrue(partial.players.isEmpty(), method.name());
+            final Rating.State ignored = new Rating.State();
+            plain.fold(ignored, List.of(row(1L, "c1", "a", 2, "x", 1.5), row(1L, "c1", "b", 1, "x", 0d), row(1L, "c1", "d", 0, "x", -0.5)));
+            for (final String player : List.of("a", "b", "d")) {
+                Assertions.assertEquals(unshifted.players.get(key(player)).mu, ignored.players.get(key(player)).mu, 0d, method + " " + player);
+            }
+        }
+    }
+
+    /**
+     * {@code tauBy}: the rated player's drift read from the row, in place of {@code tau}; a row without a valid value
+     * drifts by {@code tau}; the other members of a team keep their own; under {@code tauPer} a read drifts up to the row
+     * at the row's own value.
+     */
+    @Test
+    public void testRowDrift() {
+        final Rating fixed2 = rating(Rating.Method.plackettLuce, true, 2d), fixed0 = rating(Rating.Method.plackettLuce, true, 0d);
+        final Rating byRow = fixed0.withRowInputs(null, "t");
+        final Rating.State reference = new Rating.State(), rowState = new Rating.State();
+        fixed2.fold(reference, List.of(row(1L, "c1", "a", 1), row(1L, "c1", "b", 2)));
+        fixed2.fold(reference, List.of(row(2L, "c2", "a", 2), row(2L, "c2", "b", 1)));
+        // a drift of 2 declared by the rows is the drift of a rating whose tau is 2
+        byRow.fold(rowState, List.of(row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "b", 2, "t", 2d)));
+        // missing / negative / not finite: the rating's tau (2 here, as a fallback of the same size)
+        final Rating byRowTau2 = fixed2.withRowInputs(null, "t");
+        byRowTau2.fold(rowState, List.of(row(2L, "c2", "a", 2, "t", -1d), row(2L, "c2", "b", 1, "t", Double.NaN)));
+        for (final String player : List.of("a", "b")) {
+            Assertions.assertEquals(reference.players.get(key(player)).mu, rowState.players.get(key(player)).mu, 0d, player);
+            Assertions.assertEquals(reference.players.get(key(player)).sigma, rowState.players.get(key(player)).sigma, 0d, player);
+        }
+        // a larger drift for one player only: its variance opens, the other's does not
+        final Rating.State mixed = new Rating.State();
+        byRow.fold(mixed, List.of(row(1L, "c1", "a", 1, "t", 0d), row(1L, "c1", "b", 2, "t", 0d)));
+        byRow.fold(mixed, List.of(row(2L, "c2", "a", 1, "t", 5d), row(2L, "c2", "b", 2, "t", 0d)));
+        final Rating.State still = new Rating.State();
+        fixed0.fold(still, List.of(row(1L, "c1", "a", 1), row(1L, "c1", "b", 2)));
+        fixed0.fold(still, List.of(row(2L, "c2", "a", 1), row(2L, "c2", "b", 2)));
+        Assertions.assertTrue(mixed.players.get(key("a")).sigma > still.players.get(key("a")).sigma);
+        Assertions.assertTrue(mixed.players.get(key("a")).mu - 25 > still.players.get(key("a")).mu - 25, "a wider prior takes the win further");
+
+        // a team: the row's drift is the rated player's; the agent keeps its own tau (0 here)
+        final Rating duo = fixed0.withRowInputs(null, "t").withTeam("seller", List.of(new Rating.Member("agent", List.of("g"), 0d, 4d, 0d)));
+        final Rating.State teams = new Rating.State();
+        duo.fold(teams, List.of(row(1L, "c1", "s1", 1, "g", "g1", "t", 0d), row(1L, "c1", "s2", 2, "g", "g2", "t", 0d)));
+        final double agentSigma = teams.players.get(duo.memberKey(Map.of("p", "s1", "g", "g1"), 1)).sigma;
+        duo.fold(teams, List.of(row(2L, "c2", "s1", 1, "g", "g1", "t", 50d), row(2L, "c2", "s2", 2, "g", "g2", "t", 50d)));
+        final Rating.State calm = new Rating.State();
+        final Rating calmDuo = fixed0.withTeam("seller", List.of(new Rating.Member("agent", List.of("g"), 0d, 4d, 0d)));
+        calmDuo.fold(calm, List.of(row(1L, "c1", "s1", 1, "g", "g1"), row(1L, "c1", "s2", 2, "g", "g2")));
+        calmDuo.fold(calm, List.of(row(2L, "c2", "s1", 1, "g", "g1"), row(2L, "c2", "s2", 2, "g", "g2")));
+        Assertions.assertTrue(agentSigma > 0);
+        Assertions.assertTrue(teams.players.get(duo.memberKey(Map.of("p", "s1", "g", "g1"), 0)).sigma > calm.players.get(duo.memberKey(Map.of("p", "s1", "g", "g1"), 0)).sigma, "the seller drifted");
+        Assertions.assertTrue(teams.players.get(duo.memberKey(Map.of("p", "s1", "g", "g1"), 1)).sigma > calm.players.get(duo.memberKey(Map.of("p", "s1", "g", "g1"), 1)).sigma,
+                "the agent's share of the variance fell, so it narrows less - but its own drift added nothing");
+
+        // tauPer: the read at a row drifts at the row's own value
+        final long day = 24L * 3600 * 1000;
+        final Rating perDay = Rating.of(Rating.Method.plackettLuce, true, null, null, null, 1d, null, null, day, null, List.of("p"), List.of("c"), "y")
+                .withRowInputs(null, "t");
+        final Rating.State timed = new Rating.State();
+        perDay.fold(timed, List.of(row(0L, "c1", "a", 1, "t", 1d), row(0L, "c1", "b", 2, "t", 1d)));
+        final double settled = timed.players.get(key("a")).sigma;
+        Assertions.assertEquals(Math.sqrt(settled * settled + 9 * 4), (Double) perDay.read(timed, 0, key("a"), "sigma", 4 * day, 3d), 1e-12);
+        Assertions.assertEquals(Math.sqrt(settled * settled + 4), (Double) perDay.read(timed, 0, key("a"), "sigma", 4 * day, Double.NaN), 1e-12, "no row value: tau");
+        Assertions.assertEquals(3d, perDay.rowTau(Map.of("t", 3d)));
+        Assertions.assertTrue(Double.isNaN(perDay.rowTau(Map.of("t", -3d))));
+        // a drift whose variance overflows is no drift: the rating's tau, not a NaN rating
+        Assertions.assertTrue(Double.isNaN(perDay.rowTau(Map.of("t", 1e200))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.elo, true, null).withRowInputs(null, "t"));
+    }
+
+    /**
+     * Two rows of one player with one outcome may differ in their per-row inputs: the contest must not depend on the
+     * order they arrive in (the replay does not fix the row order inside an event time), to the last bit.
+     */
+    @Test
+    public void testRowInputsOrderFree() {
+        for (final Rating.Method method : Rating.Method.values()) {
+            final Rating base = method == Rating.Method.gaussian
+                    ? Rating.of(method, false, 0d, 1d, 0.5, 0.3, null, null, List.of("p"), List.of("c"), "y")
+                    : Rating.of(method, false, null, null, null, 0.3, null, null, List.of("p"), List.of("c"), "y");
+            final Rating byRow = base.withRowInputs("x", method == Rating.Method.elo ? null : "t");
+            final List<SequenceEvaluator.Past> rows = List.of(
+                    row(1L, "c1", "a", 1, "x", 0.7, "t", 2d), row(1L, "c1", "a", 1, "x", -0.4, "t", 0.1d),
+                    row(1L, "c1", "b", 2, "x", 0.2, "t", 1d), row(1L, "c1", "d", 0, "x", 0d, "t", 1d));
+            final Rating.State forward = new Rating.State(), backward = new Rating.State();
+            byRow.fold(forward, rows);
+            byRow.fold(backward, List.of(rows.get(1), rows.get(0), rows.get(3), rows.get(2)));
+            for (final String player : List.of("a", "b", "d")) {
+                Assertions.assertEquals(forward.players.get(key(player)).mu, backward.players.get(key(player)).mu, 0d, method + " " + player);
+                Assertions.assertEquals(forward.players.get(key(player)).sigma, backward.players.get(key(player)).sigma, 0d, method + " " + player);
+            }
+        }
+    }
+
+    /**
+     * A player with several rows in one contest drifts once, by the largest valid {@code tauBy} its rows declare: the
+     * contest is the one where every row declares that value (to the last bit), whatever the other rows say — a
+     * smaller value, an invalid one (the rating's tau otherwise) or none.
+     */
+    @Test
+    public void testRowDriftIsOnePerPlayer() {
+        final Rating byRow = rating(Rating.Method.plackettLuce, true, 0.5).withRowInputs(null, "t");
+        final Rating.State mixed = new Rating.State(), uniform = new Rating.State();
+        byRow.fold(mixed, List.of(row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", -1d),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        byRow.fold(uniform, List.of(row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", 2d),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        for (final String player : List.of("a", "b", "d")) {
+            Assertions.assertEquals(uniform.players.get(key(player)).mu, mixed.players.get(key(player)).mu, 0d, player);
+            Assertions.assertEquals(uniform.players.get(key(player)).sigma, mixed.players.get(key(player)).sigma, 0d, player);
+        }
+        // the largest, not the smallest: the rows all declaring 0.1 leave the player narrower
+        final Rating.State small = new Rating.State();
+        byRow.fold(small, List.of(row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 0.1),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        Assertions.assertTrue(mixed.players.get(key("a")).sigma > small.players.get(key("a")).sigma);
+    }
+
+    /**
+     * The documented recipe for an entity's inconsistency (feature.md, "Inconsistency"): the outcome against the rating's
+     * pre-contest expectation in units of its own uncertainty, net of what the whole contest shared, and its spread
+     * over the entity's past contests. It compiles as documented: the surprise reads the outcome, so it and its
+     * contest-net form stay intermediates, and the spread is a strictly-past read of them (never a violation).
+     */
+    @Test
+    public void testInconsistencyRecipe() {
+        final String recipe = SPEC.substring(0, SPEC.indexOf("features:")) + """
+                features:
+                  - name: skill
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 40, beta: 20, as: gs}
+                  - name: surprise
+                    scope: row
+                    expr: "(final_price - skill_all_gs_mu) / sqrt(skill_all_gs_sigma * skill_all_gs_sigma + 400)"
+                  - name: net
+                    scope: context
+                    context: session
+                    inputs: [surprise]
+                    ops: [median_diff]
+                  - name: form
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: aggregate, field: net_surprise_median_diff, funcs: [std, count]}
+                """;
+        final FeaturePlan plan = compile(recipe);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn spread = plan.getColumn("form_all_net_surprise_median_diff_std");
+        Assertions.assertNotNull(spread, plan::describe);
+        Assertions.assertNotEquals(OutputColumn.Status.violation, spread.getStatus(), plan::describe);
+        Assertions.assertFalse(spread.isIntermediate(), plan::describe);
+    }
+
+    private static SequenceEvaluator.Past past(final String contest, final String player, final double outcome) {
+        return row(1_000L, contest, player, outcome);
     }
 
     /**
@@ -1465,6 +1669,11 @@ public class RatingTest {
         cases.put("      - {type: rating, field: final_price, context: session, top: [2, 3]}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, top: 2.5}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, depthScale: 0.5}", "sequence.rating.parameter");
+        // per-row inputs: numeric columns; tauBy drifts an uncertainty elo does not keep
+        cases.put("      - {type: rating, field: final_price, context: session, offset: category}", "sequence.rating.offset");
+        cases.put("      - {type: rating, field: final_price, context: session, tauBy: category}", "sequence.rating.tauBy");
+        cases.put("      - {type: rating, field: final_price, context: session, offset: nowhere}", "reference.unresolved");
+        cases.put("      - {type: rating, field: final_price, context: session, method: elo, tauBy: start_price}", "sequence.rating.parameter");
         // two ops of one block on the same segment with different parameters: they would share one running state
         cases.put("      - {type: rating, field: final_price, context: session, funcs: [mu]}\n"
                 + "      - {type: rating, field: final_price, context: session, method: elo, funcs: [count]}", "sequence.rating.as");
@@ -1505,7 +1714,8 @@ public class RatingTest {
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, top: 2, depthScale: 1.5, as: deep}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, top: 2, depthScale: 1.5, as: deep}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, offset: start_price, tauBy: start_price, tau: 1, tauPer: P1D, as: rowwise}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -1516,7 +1726,13 @@ public class RatingTest {
         Assertions.assertEquals("2", plan.getColumn("skill_all_deep_mu").getCoordinates().get("top"));
         Assertions.assertEquals("1.5", plan.getColumn("skill_all_deep_mu").getCoordinates().get("depthScale"));
         Assertions.assertNull(plan.getColumn("skill_all_pl_mu").getCoordinates().get("top"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 12);
+        final OutputColumn rowwise = plan.getColumn("skill_all_rowwise_sigma");
+        Assertions.assertEquals("start_price", rowwise.getCoordinates().get("offsetField"));
+        Assertions.assertEquals("start_price", rowwise.getCoordinates().get("tauField"));
+        Assertions.assertTrue(rowwise.getPastInputs().contains("start_price"), rowwise.getPastInputs().toString());
+        Assertions.assertTrue(plan.getColumn("skill_all_rowwise_mu").getInputs().contains("start_price"), "under tauPer every column of the op reads tauBy from the row");
+        Assertions.assertNull(plan.getColumn("skill_all_pl_mu").getCoordinates().get("offsetField"));
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 14);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {
@@ -1556,6 +1772,7 @@ public class RatingTest {
                     row.put("seller_id", random.nextInt(40) == 0 ? null : "seller" + random.nextInt(8));
                     row.put("final_price", random.nextInt(15) == 0 ? null : (double) random.nextInt(6));
                     row.put("agent_id", random.nextInt(25) == 0 ? null : "agent" + random.nextInt(5));
+                    row.put("start_price", random.nextInt(20) == 0 ? null : random.nextInt(4) * 0.5);
                     final Map<String, Object> trimmedRow = new HashMap<>(row);
                     for (final OutputColumn c : columns) {
                         final Object incremental = evaluator.evaluateColumn(c, row, millis, history, state);
