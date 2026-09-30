@@ -1681,6 +1681,19 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.rating.parameter", loc, "unknown pairs: " + op.pairs + " (available: " + String.join(" | ", Rating.PAIRS) + ")");
             valid = false;
         }
+        // the depth of a ranking: the choices of a Plackett-Luce contest, one per place (the other methods have no places)
+        final boolean ranking = method == Rating.Method.plackettLuce;
+        if ((!op.top.isEmpty() || op.depthScale != null) && !ranking) {
+            diagnostics.error("sequence.rating.parameter", loc, "top / depthScale read a contest's ranking place by place: plackettLuce parameters, " + methodName + " has no places"
+                    + (method == Rating.Method.bradleyTerry ? " (pairs: adjacent pairs the rank neighbours only)" : ""));
+            valid = false;
+        } else if (op.top.size() > 1 || op.top.size() == 1 && op.top.get(0) < 1) {
+            diagnostics.error("sequence.rating.parameter", loc, "top is the one place a ranking is read to (an integer >= 1, e.g. top: 3): " + op.top);
+            valid = false;
+        } else if (op.depthScale != null && !(op.depthScale >= 1 && Double.isFinite(op.depthScale))) {
+            diagnostics.error("sequence.rating.parameter", loc, "depthScale is the factor the scale of a choice grows by per place (finite, >= 1; 1 reads every place alike): " + op.depthScale);
+            valid = false;
+        }
         // the coordinate is a millisecond count, so the DURATION being non-zero is not enough: one that rounds to 0 ms
         // (or does not fit in millis at all, where toMillis() would throw instead of reporting) would silently fall
         // back to the per-contest drift — with a tau this very check makes the spec size for a whole period
@@ -1746,6 +1759,8 @@ public final class FeaturePlanCompiler {
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
+            if (!op.top.isEmpty()) shared.put("top", Integer.toString(op.top.get(0)));
+            if (op.depthScale != null && op.depthScale != 1d) shared.put("depthScale", Double.toString(op.depthScale));
         }
         shared.put("context", contest.name());
         // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a

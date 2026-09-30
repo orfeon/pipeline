@@ -308,7 +308,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   the row (`Rating.read(state, player, func, nowMillis)`) — the one readout of the op that depends on the row's time,
   served alike by the fold pointer and the scan reference. `bradleyTerry` takes a pairing (`Rating.Pairs`: `all` |
   `adjacent` | `mean`); `adjacent` is defined on the outcomes (the opponents at the player's own, the nearest better
-  and the nearest worse outcome), never on the position of an entry, so ties cannot make it order-dependent. The
+  and the nearest worse outcome), never on the position of an entry, so ties cannot make it order-dependent.
+  `plackettLuce` takes a depth (`Rating.withDepth`; coordinates `top` / `depthScale`): an entry's place is 1 + the
+  entries that did strictly better (a tie group shares it, so the depth is again a function of the outcomes), the
+  choices deeper than `top` add no factor — the entries behind stay in the remaining pool of every choice read, so
+  they lose to the first `top` without being ranked among themselves — and the place-`q` choice runs at the scale
+  `c · depthScale^(q − 1)` (Hausman–Ruud). Place 1 keeps `c`, so `ratingProb` is unchanged; the defaults divide by
+  1.0 and reproduce the plain update bit for bit. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters
   `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. **Teams** (`Rating.withTeam`; DSL `with:` / `team:` on the op → the coordinates
   `teamPool` + `teamMembers` = `pool|keys|mu|sigma|tau;…`, written only when declared, and per column `readout` =
