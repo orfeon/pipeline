@@ -1099,6 +1099,10 @@ public class RatingTest {
         }
         // the lineage of every column names both entities' keys (the contests it folds are made of them)
         for (final OutputColumn c : List.of(seller, agent, team)) Assertions.assertTrue(c.getInputs().containsAll(List.of("seller_id", "agent_id")), c.getInputs().toString());
+        final FeaturePlan optionalPlan = compileTeam(DUO.replace("sigma: 4}", "sigma: 4, optional: true}"));
+        Assertions.assertFalse(optionalPlan.getDiagnostics().hasErrors(), optionalPlan::describe);
+        Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5|optional", optionalPlan.getColumn("skill_all_duo_team_mu").getCoordinates().get("teamMembers"));
+        Assertions.assertTrue(Rating.of(optionalPlan.getColumn("skill_all_duo_mu").getCoordinates()).members().get(1).optional());
         final Rating.Member member = Rating.of(team.getCoordinates()).members().get(1);
         Assertions.assertEquals(new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.5), member);
         // the contests per team are kept only for an op that reads them (team: [count]) — on every column of the op
@@ -1128,6 +1132,63 @@ public class RatingTest {
         Assertions.assertEquals("category", pooled.getColumn("skill_all_duo_team_mu").getCoordinates().get("stageKeys"));
     }
 
+    /**
+     * An optional member: a row without it is rated as the team of the members it has instead of taking no part. A
+     * contest none of whose rows has the agent is the rating of the sellers alone, to the last bit (a team of one is
+     * a player); the team readout of such a row is the seller's, its member readout null; a required agent keeps
+     * the row out, as before.
+     */
+    @Test
+    public void testOptionalMember() {
+        final Rating solo = Rating.of(Rating.Method.plackettLuce, true, null, null, null, 0.5, null, null, List.of("seller_id"), List.of("c"), "y");
+        final Rating.Member agent = new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.5, true);
+        final Rating optional = solo.withTeam("seller", List.of(agent), true), required = duo(Rating.Method.plackettLuce, 0.5, null, 0d, 4d);
+        final java.util.function.BiFunction<String, String, SequenceEvaluator.Past> sale = (seller, agentId) -> {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("c", "c1");
+            values.put("seller_id", seller);
+            values.put("agent_id", agentId);
+            values.put("y", (double) Integer.parseInt(seller.substring(1)));
+            return new SequenceEvaluator.Past(1_000L, values);
+        };
+        // no agent anywhere: the sellers alone
+        final List<SequenceEvaluator.Past> alone = List.of(sale.apply("s1", null), sale.apply("s2", null), sale.apply("s3", null));
+        final Rating.State teams = new Rating.State(), players = new Rating.State();
+        optional.fold(teams, alone);
+        solo.fold(players, alone);
+        for (final SequenceEvaluator.Past p : alone) {
+            final Rating.Player asMember = teams.players.get(optional.memberKey(p.values(), 0)), asPlayer = players.players.get(solo.player(p.values()));
+            Assertions.assertEquals(asPlayer.mu, asMember.mu, 0d);
+            Assertions.assertEquals(asPlayer.sigma, asMember.sigma, 0d);
+        }
+        // a mixed contest: every row takes part under the optional agent; the required one keeps s2 out
+        final List<SequenceEvaluator.Past> mixed = List.of(sale.apply("s1", "a1"), sale.apply("s2", null), sale.apply("s3", "a3"));
+        final Rating.State withOptional = new Rating.State(), withRequired = new Rating.State();
+        optional.fold(withOptional, mixed);
+        required.fold(withRequired, mixed);
+        final Map<String, Object> noAgent = mixed.get(1).values();
+        Assertions.assertEquals(1L, optional.read(withOptional, 0, optional.memberKey(noAgent, 0), "count", 1_000L));
+        Assertions.assertEquals(0L, required.read(withRequired, 0, required.memberKey(noAgent, 0), "count", 1_000L));
+        Assertions.assertEquals(5, withOptional.players.size(), "three sellers and two agents, no player for the missing one");
+        // the row's team is the members it has: the seller's rating, uncertainty and count of this exact (agent-less) team
+        final List<String> team = optional.teamOf(noAgent);
+        Assertions.assertEquals(2, team.size());
+        Assertions.assertNull(team.get(1));
+        Assertions.assertEquals(optional.read(withOptional, 0, team.get(0), "mu", 1_000L), optional.readTeam(withOptional, team, "mu", 1_000L));
+        Assertions.assertEquals(optional.read(withOptional, 0, team.get(0), "sigma", 1_000L), optional.readTeam(withOptional, team, "sigma", 1_000L));
+        Assertions.assertEquals(1L, optional.readTeam(withOptional, team, "count", 1_000L));
+        Assertions.assertNull(optional.read(withOptional, 1, optional.memberKey(noAgent, 1), "mu", 1_000L), "no member readout without the member");
+        Assertions.assertNull(required.teamOf(noAgent), "a required member still keeps the row out");
+        // the seller alone and the seller with an agent are different teams
+        final Map<String, Object> withAgent = sale.apply("s2", "a9").values();
+        Assertions.assertEquals(0L, optional.readTeam(withOptional, optional.teamOf(withAgent), "count", 1_000L));
+        // the flag rides the coordinates
+        Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5|optional", Rating.encodeMembers(List.of(agent)));
+        Assertions.assertEquals(List.of(agent), Rating.decodeMembers(Rating.encodeMembers(List.of(agent))));
+        Assertions.assertFalse(Rating.decodeMembers("agent|agent_id|0.0|4.0|0.5").get(0).optional());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Rating.decodeMembers("agent|agent_id|0.0|4.0|0.5|maybe"));
+    }
+
     @Test
     public void testCompileTeamErrors() {
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
@@ -1142,6 +1203,7 @@ public class RatingTest {
         cases.put(DUO.replace("sigma: 4", "sigma: 4, beta: 2"), "beta is the team's, not a member's");
         cases.put(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [3]"), "neither a name nor a member");
         cases.put(DUO.replace("team: [mu, sigma]", "team: [{mu: true}]"), "a team readout is a name: reported, not dropped");
+        cases.put(DUO.replace("sigma: 4}", "sigma: 4, optional: yes}"), "optional is a boolean (yes is a string under YAML 1.2)");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan plan = compileTeam(e.getKey());
             Assertions.assertTrue(plan.getDiagnostics().hasErrors() && hasCode(plan, "sequence.rating.with"), () -> e.getValue() + "\n" + plan.describe());
@@ -1165,10 +1227,11 @@ public class RatingTest {
     public void testIncrementalMatchesScanAndTrimmedWithTeams() {
         final String ops = "      - {type: rating, field: final_price, context: session, order: descending, as: duo, tau: 1.5, tauPer: P1D,"
                 + " with: [{entity: agent, mu: 0, sigma: 4, tau: 0.5}], funcs: [mu, sigma, count, delta], team: [mu, sigma]}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj, with: [agent]}";
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj, with: [agent]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, as: opt, with: [{entity: agent, optional: true}], team: [mu, sigma, count]}";
         final FeaturePlan plan = compileTeam(ops);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
-        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2);
+        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2 + 2 + 2 + 3);
     }
 
     @Test
@@ -1783,7 +1846,9 @@ public class RatingTest {
                         // a column reads null when the row lacks what it reads: the seller (the player's columns), the agent
                         // (a member's), either (the team's)
                         final String readout = c.getCoordinates().get("readout");
-                        final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null
+                        // an optional agent: the row's team is the seller alone when the agent is missing
+                        final boolean agentOptional = c.getCoordinates().getOrDefault("teamMembers", "").endsWith("|optional");
+                        final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null && !agentOptional
                                 : "member".equals(readout) ? row.get("agent_id") == null : row.get("seller_id") == null;
                         if (missing) Assertions.assertNull(scan, c.getCanonicalName());
                         if (c.getCanonicalName().endsWith("_count") && scan != null && (Long) scan > 0) rated++;

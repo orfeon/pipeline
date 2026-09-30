@@ -598,7 +598,13 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     member's pool of rated players, which is that comparison without the contest (a pool's shift and scale
     cancel out of it) — and `deviation`, what the contests added to the member's prior.
   - A row without one of the members' keys joins no contest and reads null for that member and for the team;
-    its other members still read. A member never rated reads its prior, so a known seller with a new agent
+    its other members still read. **`optional: true`** on a member (`with: [{entity: agent, optional: true}]`)
+    changes that for this member: a row without it is rated as the team of the members it has — the absent member
+    adds nothing and is not updated — so a missing agent no longer keeps the seller out of the contest. Such a row
+    reads null for the absent member, and its `team` readouts are the members it has (`team: [count]` counts
+    "the seller without an agent" as a team of its own). Declare a member optional when its absence is a fact
+    of the row (sold without an agent), not a data gap you would rather see as missing; the block's entity is
+    never optional. A member never rated reads its prior, so a known seller with a new agent
     reads a team. A member of several teams of one contest (one agent, two listings) receives the sum of its
     shares. The rows of one and the same team are not compared with each other.
   - `plackettLuce` / `bradleyTerry` / `gaussian` only: `elo` keeps no variance to share by. The state, the stage key (global,

@@ -184,7 +184,7 @@ public class FeatureSpec implements Serializable {
     }
 
     /** The keys a {@link TeamMember} accepts; anything else is reported (see {@link TeamMember#unknown}). */
-    static final List<String> TEAM_MEMBER_KEYS = List.of("entity", "mu", "sigma", "tau");
+    static final List<String> TEAM_MEMBER_KEYS = List.of("entity", "mu", "sigma", "tau", "optional");
 
     /** A member of a rating team: an {@code entities[].name} and its own prior / drift (null = the op's). */
     public static class TeamMember implements Serializable {
@@ -192,7 +192,12 @@ public class FeatureSpec implements Serializable {
         public Double mu;
         public Double sigma;
         public Double tau;
-        /** Keys other than entity / mu / sigma / tau (reported, so a misspelled parameter does not silently default). */
+        /**
+         * Whether a row may lack this member: the row is then rated as the team of the members it has, instead of taking
+         * no part in its contest.
+         */
+        public boolean optional;
+        /** Keys other than entity / mu / sigma / tau / optional (reported, so a misspelled parameter does not silently default). */
         public List<String> unknown = new ArrayList<>();
     }
 
@@ -1387,6 +1392,12 @@ public class FeatureSpec implements Serializable {
                     member.mu = doubleOf(mo, "mu", diagnostics, loc);
                     member.sigma = doubleOf(mo, "sigma", diagnostics, loc);
                     member.tau = doubleOf(mo, "tau", diagnostics, loc);
+                    if (mo.has("optional") && !mo.get("optional").isJsonNull()) {
+                        // a boolean only: `optional: yes` is a string under YAML 1.2, which parseBoolean would read as false
+                        final JsonElement flag = mo.get("optional");
+                        if (flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean()) member.optional = flag.getAsBoolean();
+                        else op.withInvalid = "optional of member " + member.entity + " must be true or false: " + flag;
+                    }
                     for (final String key : mo.keySet()) if (!TEAM_MEMBER_KEYS.contains(key)) member.unknown.add(key);
                 } else {
                     op.withInvalid = "with must list entity names or {entity, mu, sigma, tau} members: " + m;

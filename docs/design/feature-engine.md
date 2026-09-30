@@ -341,7 +341,12 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   last bit, which `RatingTest.testPlayerArithmeticIsUnchangedByTeams` pins against a frozen copy of the update as it
   stood before teams (`PlayersOnly`), run side by side in one JVM — not against recorded numbers: `Math.exp` / `Math.pow`
   are specified to an ulp, not to a bit, so a constant would pin a platform's libm rather than the property. The rated
-  player's prior, drift and key fields live in `members.get(0)` and nowhere else. `elo` has no variance to share by and takes no team. The members' levels
+  player's prior, drift and key fields live in `members.get(0)` and nowhere else. `elo` has no variance to share by and takes no team. An **optional** member (`Rating.Member.optional`, `|optional`
+  appended to its `teamMembers` entry) may be absent: `teamOf` puts null in its place (a required member missing still
+  returns null — the row joins no contest), `update` skips it in the sums and the shares, `readTeam` sums the members
+  present, and the team id writes it as the empty text (a state key never is), so the seller alone is a team of its own.
+  A contest none of whose rows has an optional member is the rating of the others to the last bit (a team of one is a
+  player). The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no

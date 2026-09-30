@@ -155,7 +155,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   A rating without a team must stay bit-identical — `testPlayerArithmeticIsUnchangedByTeams` compares it bit for bit with
   `PlayersOnly`, a FROZEN copy of the pre-team update inside `RatingTest` (an oracle in the same JVM, not recorded numbers:
   `Math.exp` is 1-ulp-specified, a constant would be platform-bound); if it fails, the change moved a player's numbers (sum
-  start, share, clamp position, accumulation order). `withTeam` declares the whole team at once and rejects what would
+  start, share, clamp position, accumulation order). Optional members (`Member.optional`, DSL `with: [{entity, optional: true}]`, `|optional` in `teamMembers`): `teamOf` puts null for an absent optional member (the row still joins), `update` / `readTeam` skip it, `teamId` writes it as "" — every loop over `Entry.members()` must tolerate a null at j > 0 (never at 0). `withTeam` declares the whole team at once and rejects what would
   mis-key the state (no key fields, an empty / repeated call, a separator inside a pool); state keys are
   `FeatureValues.key` texts (`<len>:<value>\u0001` per component) — never build one by hand, use `memberKey` / `teamOf`. Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no

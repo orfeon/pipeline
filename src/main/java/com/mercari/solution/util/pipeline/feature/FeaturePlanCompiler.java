@@ -1806,7 +1806,8 @@ public final class FeaturePlanCompiler {
                 final EntityDef member = entities.get(m.entity);
                 final List<String> keys = new ArrayList<>();
                 for (final String key : member.keys()) keys.add(canonicalOf(key));
-                members.add(new Rating.Member(member.name(), keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau));
+                members.add(new Rating.Member(member.name(), keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
+                        m.optional));
                 teamEntities.add(member);
             }
             shared.put("teamPool", entity.name());
