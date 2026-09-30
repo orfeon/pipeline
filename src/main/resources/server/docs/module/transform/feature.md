@@ -699,6 +699,7 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     the contest's gradient along its weights and narrow it by the contest's information along them. Contests read
     strengths only relative to each other, so a shared member learns only from contests whose rows **differ** in
     its weight: a weight equal on every row of a contest leaves it at its prior, mean and `sigma` alike. Its prior
+    `mu` defaults to 0 (no effect — not the op's `mu`, which is a player's level); its prior
     `sigma` is how large you expect the effect to be (in the rating's units per unit of weight); a `tau` of 0 keeps it
     a constant of the pool, a small one lets it drift. A missing weight is a missing member (the row out, or absent
     with `optional: true`). Its readouts are the same on every row; `z` is null (a pool of one).

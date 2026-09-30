@@ -456,7 +456,8 @@ public final class Rating implements Serializable {
                 throw new IllegalArgumentException("a pool cannot hold the key separators U+0001 / U+0002 (two pools would meet on one state key): '" + member.pool() + "'");
             }
             if (!pools.add(member.pool())) throw new IllegalArgumentException("two members of one team share the pool '" + member.pool() + "'");
-            // an empty key list would name every row the same member; a null one fails per row, deep in the fold
+            // an empty key list names every row the same member: a shared one, which only a weight tells apart per row
+            // (without one it would be the contest's common shift); a null one fails per row, deep in the fold
             if (member.weightField() != null && member.weightField().isEmpty()) {
                 throw new IllegalArgumentException("a member's weight names a field of the row: " + member);
             }
@@ -771,15 +772,16 @@ public final class Rating implements Serializable {
         }
         if (sharedCount > 0 && method != Method.gaussian) {
             // the gradient of the contest at each team's strength (Ω = v · g) moves a shared member by v_c · Σ a_i g_i;
-            // its Fisher information along its weights narrows it
+            // its Fisher information along its weights narrows it (the choice / pair probabilities are computed once
+            // for every shared member of the contest)
+            final double[] information = method == Method.plackettLuce
+                    ? plackettLuceInformation(entries, m, v, sharedWeights)
+                    : bradleyTerryInformation(entries, ids, m, v, sharedWeights);
             for (int c = 0; c < sharedCount; c++) {
                 double gradient = 0;
                 for (int i = 0; i < n; i++) gradient += sharedWeights[c][i] * dMu[i] / v[i];
                 sharedChange[c] = sharedVariance[c] * gradient;
-                final double information = method == Method.plackettLuce
-                        ? plackettLuceInformation(entries, m, v, sharedWeights[c])
-                        : bradleyTerryInformation(entries, ids, m, v, sharedWeights[c]);
-                sharedPosterior[c] = 1d / (1d / sharedVariance[c] + information);
+                sharedPosterior[c] = 1d / (1d / sharedVariance[c] + information[c]);
             }
         }
 
@@ -1041,20 +1043,23 @@ public final class Rating implements Serializable {
     }
 
     /**
-     * The Fisher information of a {@code plackettLuce} contest along the weights {@code a} of a shared member: per
-     * choice read (every place up to {@code top}, at its scale {@code c_q}, a tie group's choices weighted by 1 / its
-     * size) the variance of {@code a} under the choice's probabilities, {@code (Σ π a² − (Σ π a)²) / c_q²} — zero for a
-     * weight equal on every entry, as the ranking cannot tell a common shift.
+     * The Fisher information of a {@code plackettLuce} contest along the weights {@code a[c]} of each shared member c:
+     * per choice read (every place up to {@code top}, at its scale {@code c_q}, a tie group's choices weighted by 1 / its
+     * size) the variance of {@code a[c]} under the choice's probabilities, {@code (Σ π a² − (Σ π a)²) / c_q²} — zero for a
+     * weight equal on every entry, as the ranking cannot tell a common shift. The choices' probabilities are computed
+     * once for all the shared members (at the contest's scale they are the strengths {@link #plackettLuce} reads).
      */
-    private double plackettLuceInformation(final List<Entry> entries, final double[] m, final double[] v, final double[] a) {
-        final int n = entries.size();
+    private double[] plackettLuceInformation(final List<Entry> entries, final double[] m, final double[] v, final double[][] a) {
+        final int n = entries.size(), p = a.length;
         double c2 = 0, best = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             c2 += v[i] + beta * beta;
             best = Math.max(best, m[i]);
         }
         final double c = Math.sqrt(c2);
-        double information = 0;
+        final double[] e = new double[n];
+        for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
+        final double[] information = new double[p], first = new double[p], second = new double[p];
         for (int q = 0; q < n; q++) {
             final Entry at = entries.get(q);
             int place = 1, ties = 0;
@@ -1065,43 +1070,52 @@ public final class Rating implements Serializable {
             }
             if (top > 0 && place > top) continue;
             final double ratio = depthScale == 1d ? 1d : Math.pow(depthScale, place - 1), scale = c * ratio;
-            double total = 0, first = 0, second = 0;
+            double total = 0;
+            Arrays.fill(first, 0d);
+            Arrays.fill(second, 0d);
             for (int s = 0; s < n; s++) {
                 if (score(entries.get(s), at) > 0.5) continue;
-                final double strength = Math.exp((m[s] - best) / scale);
+                final double strength = strength(e, m, best, c, ratio, s);
                 total += strength;
-                first += strength * a[s];
-                second += strength * a[s] * a[s];
+                for (int k = 0; k < p; k++) {
+                    first[k] += strength * a[k][s];
+                    second[k] += strength * a[k][s] * a[k][s];
+                }
             }
-            final double mean = first / total;
-            information += Math.max(second / total - mean * mean, 0d) / ties / (scale * scale);
+            for (int k = 0; k < p; k++) {
+                final double mean = first[k] / total;
+                information[k] += Math.max(second[k] / total - mean * mean, 0d) / ties / (scale * scale);
+            }
         }
         return information;
     }
 
     /**
-     * The Fisher information of a {@code bradleyTerry} contest along the weights {@code a} of a shared member: per pair
-     * the pairing reads, {@code (a_i − a_q)² p (1 − p) / c²} (each pair counted once; under {@code mean} a player's pairs
-     * weigh 1 / its opponents, as its update does) — zero for a weight equal on every entry.
+     * The Fisher information of a {@code bradleyTerry} contest along the weights {@code a[c]} of each shared member c:
+     * per pair the pairing reads, {@code (a_i − a_q)² p (1 − p) / c²} (each pair counted once; under {@code mean} a
+     * player's pairs weigh 1 / its opponents, as its update does) — zero for a weight equal on every entry. The pairs'
+     * probabilities are computed once for all the shared members.
      */
-    private double bradleyTerryInformation(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] a) {
-        final int n = entries.size();
+    private double[] bradleyTerryInformation(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[][] a) {
+        final int n = entries.size(), p = a.length;
         final double[] adjacent = new double[2];
-        double information = 0;
+        final double[] information = new double[p], sum = new double[p];
         for (int i = 0; i < n; i++) {
             if (pairs == Pairs.adjacent) neighbours(entries, ids, i, adjacent);
-            double sum = 0;
+            Arrays.fill(sum, 0d);
             int opponents = 0;
             for (int q = 0; q < n; q++) {
                 if (!paired(entries, ids, i, q, adjacent)) continue;
                 final double c2 = v[i] + v[q] + 2 * beta * beta;
                 final double prob = 1d / (1d + Math.exp((m[q] - m[i]) / Math.sqrt(c2)));
-                sum += (a[i] - a[q]) * (a[i] - a[q]) * prob * (1 - prob) / c2;
+                for (int k = 0; k < p; k++) sum[k] += (a[k][i] - a[k][q]) * (a[k][i] - a[k][q]) * prob * (1 - prob) / c2;
                 opponents++;
             }
-            if (pairs == Pairs.mean && opponents > 0) sum /= opponents;
-            // every pair is read from both of its sides
-            information += sum / 2;
+            for (int k = 0; k < p; k++) {
+                if (pairs == Pairs.mean && opponents > 0) sum[k] /= opponents;
+                // every pair is read from both of its sides
+                information[k] += sum[k] / 2;
+            }
         }
         return information;
     }

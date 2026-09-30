@@ -1406,11 +1406,11 @@ public class FeatureSpec implements Serializable {
                         // a boolean only: `optional: yes` is a string under YAML 1.2, which parseBoolean would read as false
                         final JsonElement flag = mo.get("optional");
                         if (flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean()) member.optional = flag.getAsBoolean();
-                        else op.withInvalid = "optional of member " + member.entity + " must be true or false: " + flag;
+                        else op.withInvalid = "optional of member " + (member.entity != null ? member.entity : member.name) + " must be true or false: " + flag;
                     }
                     for (final String key : mo.keySet()) if (!TEAM_MEMBER_KEYS.contains(key)) member.unknown.add(key);
                 } else {
-                    op.withInvalid = "with must list entity names or {entity, name, weight, mu, sigma, tau, optional} members: " + m;
+                    op.withInvalid = "with must list entity names, {entity, name, weight, mu, sigma, tau, optional} members or shared {name, weight} members: " + m;
                     continue;
                 }
                 op.with.add(member);

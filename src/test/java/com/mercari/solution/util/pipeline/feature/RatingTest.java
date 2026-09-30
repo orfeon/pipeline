@@ -1420,6 +1420,11 @@ public class RatingTest {
         Assertions.assertNotNull(burden, plan::describe);
         Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5;burden||0.0|0.5|0.0|weight=start_price", burden.getCoordinates().get("teamMembers"));
         Assertions.assertTrue(Rating.of(burden.getCoordinates()).members().get(2).shared());
+        // a shared member is a coefficient: without a mu of its own its prior mean is 0 (no effect), not the op's
+        // player-level mu (25 under plackettLuce)
+        final FeaturePlan defaulted = compileTeam(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden, weight: start_price, sigma: 0.5}"));
+        Assertions.assertFalse(defaulted.getDiagnostics().hasErrors(), defaulted::describe);
+        Assertions.assertEquals(0d, Rating.of(defaulted.getColumn("skill_all_duo_burden_mu").getCoordinates()).members().get(1).mu());
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden}"), "a shared member needs a weight");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: agent, weight: start_price}"), "an entity's name");

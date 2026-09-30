@@ -1814,7 +1814,10 @@ public final class FeaturePlanCompiler {
                 final String name = m.name != null ? m.name : member.name();
                 // a baseline name first, as for offset / tauBy: one name reads one value whichever parameter names it
                 final String weight = m.weight == null ? null : canonicalOf(baselineColumns.getOrDefault(m.weight, m.weight));
-                members.add(new Rating.Member(name, keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
+                // a shared member is a coefficient per unit of its weight, not a player's level: its prior mean defaults
+                // to 0 (no effect) rather than the op's mu (25 under plackettLuce / bradleyTerry = 25 per unit of weight)
+                final double memberMu = m.mu != null ? m.mu : member == null ? 0d : mu;
+                members.add(new Rating.Member(name, keys, memberMu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
                         m.optional, weight));
                 teamEntities.add(member);
                 memberNames.add(name);
@@ -2014,35 +2017,19 @@ public final class FeaturePlanCompiler {
             if (!validTeamName(name, loc)) valid = false;
             String weightColumn = null;
             if (m.weight != null) {
-                final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
-                if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
-                    diagnostics.error("sequence.rating.with", loc, "the weight of member " + name + " must name a numeric column (the member counts a * mu in the team): " + m.weight
-                            + (weight == null ? "" : " is not numeric"));
-                    valid = false;
-                } else if (!validTeamName(weight.canonical(), loc)) {
-                    valid = false;
-                } else {
-                    weightColumn = weight.canonical();
-                }
+                weightColumn = memberWeight(m, "member " + name, loc);
+                if (weightColumn == null) valid = false;
             }
             // (b) a component is an entity with a weight: two of one entity with one weight (none included) always move
             // together, so neither is identified - a repeat of an entity must count with a weight of its own
-            if (!components.add(member.name() + "\u0000" + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
+            if (!components.add(member.name() + " " + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
                 diagnostics.error("sequence.rating.with", loc, "member " + name + " repeats the component " + member.name()
                         + (m.weight == null ? " (unweighted)" : " x " + m.weight) + " of the team: two members of one entity with one weight always move"
                         + " together and neither is identified - give the repeat a weight of its own (a condition it is the slope in)");
                 valid = false;
             }
             for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
-            if (!m.unknown.isEmpty()) {
-                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + name
-                        + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
-                valid = false;
-            }
-            if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
-                diagnostics.error("sequence.rating.with", loc, "member " + name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
-                valid = false;
-            }
+            if (!validMemberSettings(m, name, loc)) valid = false;
         }
         for (final String func : op.team) {
             if (!Rating.TEAM_FUNCS.contains(func)) {
@@ -2072,21 +2059,35 @@ public final class FeaturePlanCompiler {
                     + " the rows of a contest tells it anything (a constant is the contest's common shift)");
             return false;
         }
-        // a baseline name first, as for every weight / offset / tauBy
+        if (memberWeight(m, "shared member " + m.name, loc) == null) valid = false;
+        if (!validMemberSettings(m, m.name, loc)) valid = false;
+        return valid;
+    }
+
+    /**
+     * A team member's weight ({@code label}: how the member is named in the message): a numeric column - a baseline name
+     * first, as for offset / tauBy - whose name is free of the separators. The canonical column, or null when invalid.
+     */
+    private String memberWeight(final FeatureSpec.TeamMember m, final String label, final String loc) {
         final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
         if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
-            diagnostics.error("sequence.rating.with", loc, "the weight of shared member " + m.name + " must name a numeric column: " + m.weight
+            diagnostics.error("sequence.rating.with", loc, "the weight of " + label + " must name a numeric column (the member counts a * mu in the team): " + m.weight
                     + (weight == null ? "" : " is not numeric"));
-            valid = false;
-        } else if (!validTeamName(weight.canonical(), loc)) {
-            valid = false;
+            return null;
         }
+        return validTeamName(weight.canonical(), loc) ? weight.canonical() : null;
+    }
+
+    /** A team member's keys (the accepted ones only) and its prior (finite mu, sigma > 0, tau >= 0). */
+    private boolean validMemberSettings(final FeatureSpec.TeamMember m, final String name, final String loc) {
+        boolean valid = true;
         if (!m.unknown.isEmpty()) {
-            diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + m.name + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
+            diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + name
+                    + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
             valid = false;
         }
         if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
-            diagnostics.error("sequence.rating.with", loc, "member " + m.name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
+            diagnostics.error("sequence.rating.with", loc, "member " + name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
             valid = false;
         }
         return valid;
