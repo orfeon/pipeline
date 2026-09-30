@@ -367,7 +367,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
   default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
   time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*), `top` /
-  `depthScale` (`plackettLuce` only, see *Depth of a ranking*); elo: `kFactor` (32), `scale` (400).
+  `depthScale` (`plackettLuce` only, see *Depth of a ranking*), `offset` / `tauBy` (see *Per-row inputs*); elo:
+  `kFactor` (32), `scale` (400).
 - **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
   months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
   is the very thing that makes a strength uncertain. With `tauPer: P30D` the variance grows by `tau² · Δt /
@@ -482,6 +483,58 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     `ratingProb` reads is the same.
   - Together: `top` is the hard cut, `depthScale` the soft decay above it. Two ops over the same outcome with
     different depths need their own `as`.
+- **Per-row inputs (`offset`, `tauBy`).** Two things a contest may know about a row beyond who it is:
+  - **`offset: <column or baselines[].name>`** — a known shift of the row's performance, in the rating's units and
+    signed like a strength (positive = expected to do better, whatever the `order`). The contest expects
+    `mu + offset` of the row and rates only what is left, so a condition whose effect is known (a handicap, a
+    fixed coefficient times a covariate, computed by a row op) is not absorbed into the ratings. The offset is
+    never rated: `mu` stays the entity's own strength, and a model adds the row's offset back
+    (`ratingProb` over a row `expr` `mu + offset`). A row without a finite offset joins no contest (like one without
+    an outcome) — give it a default in the row op if it should still count. All methods.
+  - **`tauBy: <column>`** — the rated entity's drift read from the row, in place of `tau` (per contest, or per
+    `tauPer` of absence): an entity whose strength is still changing (early in its career) reopens more
+    uncertainty before each contest than a settled one. A row whose value is missing, negative or not finite
+    drifts by `tau`; the other members of a team keep their own `tau`. Under `tauPer` the `sigma` a row reads
+    drifts up to the row at **the row's own** value — the uncertainty its contest will start from — so the column
+    must be known at the row's `computeAt` (a pre-event field). Not elo.
+
+  ```yaml
+  - {type: rating, field: final_price, context: session, order: descending, as: adj,
+     offset: listing_boost,        # a row op: e.g. "0.8 * has_photos" - the fitted effect of a known condition
+     tauBy: seller_tau,            # a row op: e.g. "seller_age_days < 90 ? 3 : 1"
+     tau: 1, tauPer: P30D}
+  ```
+- **Inconsistency (no op of its own).** A rating keeps one `beta` for everyone; how erratic an entity is can be
+  read with the existing ops as the spread of its **surprises** — the outcome against the rating's pre-contest
+  expectation, in units of its own uncertainty, net of what the whole contest shared (the update itself only
+  reads each outcome relative to its contest):
+
+  ```yaml
+  features:
+    - name: skill
+      scope: sequence
+      entity: seller
+      ops:
+        - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 40, beta: 20, as: gs}
+    - name: surprise                  # (y − mu) / sqrt(sigma² + beta²); subtract the row's offset too when the rating reads one
+      scope: row
+      expr: "(final_price - skill_all_gs_mu) / sqrt(skill_all_gs_sigma * skill_all_gs_sigma + 400)"
+    - name: net                       # net of the contest: what every row of the session shared
+      scope: context
+      context: session
+      inputs: [surprise]
+      ops: [median_diff]
+    - name: form
+      scope: sequence
+      entity: seller
+      ops:
+        - {type: aggregate, field: net_surprise_median_diff, funcs: [std, count]}   # form_all_net_surprise_median_diff_std
+  ```
+
+  The surprise reads the outcome, so it and its contest-net form are intermediates; the spread is a strictly-past
+  read of them. Dividing by `sqrt(sigma² + beta²)` keeps an entity that is merely *little known* (a wide `sigma`)
+  from reading as erratic. For an ordinal rating (`plackettLuce` / `bradleyTerry`), the surprise is the gap
+  between the outcome's and the rating's `percentile` within the contest.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
@@ -593,7 +646,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
-  `top` / `depthScale` outside `plackettLuce`, a `top` that is not one integer place >= 1, a `depthScale` below 1),
+  `top` / `depthScale` outside `plackettLuce`, a `top` that is not one integer place >= 1, a `depthScale` below 1,
+  `tauBy` under elo), `sequence.rating.offset` / `sequence.rating.tauBy` (not a numeric column or baseline),
   `sequence.rating.gaussian.units` (error: `gaussian` without `sigma` or `beta` — a margin model has no scale of its
   own; declare them in the outcome's units),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column

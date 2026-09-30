@@ -623,8 +623,9 @@ public class SequenceEvaluator implements Serializable {
 
     /** A rating column's value for a row: the rating of the member it reads — the rated player unless told otherwise — or of the row's whole team. */
     private static Object readRating(final ColumnPlan plan, final Rating.State ratings, final Map<String, Object> row, final long nowMillis) {
-        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis);
-        return plan.rating.read(ratings, plan.ratingMember, plan.rating.memberKey(row, plan.ratingMember), plan.func, nowMillis);
+        final double rowTau = plan.rating.rowTau(row);
+        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis, rowTau);
+        return plan.rating.read(ratings, plan.ratingMember, plan.rating.memberKey(row, plan.ratingMember), plan.func, nowMillis, rowTau);
     }
 
     /**

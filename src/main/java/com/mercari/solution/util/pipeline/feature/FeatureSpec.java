@@ -167,6 +167,12 @@ public class FeatureSpec implements Serializable {
         /** rating (plackettLuce): the factor the scale of a place's choice grows by per place below the first (Hausman–Ruud; 1 = none). */
         public Double depthScale;
         /**
+         * rating: a numeric column giving the rated player's drift per row, in place of {@code tau} (a row without a valid
+         * value drifts by {@code tau}). The rating's {@code offset} is the shared {@link #offset} field: a baseline or a
+         * numeric column shifting the strength a contest expects of the row.
+         */
+        public String tauBy;
+        /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is
          * the sum of its members', a contest's change is shared among them by their part of the team's variance).
          */
@@ -1369,6 +1375,7 @@ public class FeatureSpec implements Serializable {
         op.tauPer = Json.duration(o, "tauPer", null, diagnostics, loc);
         op.pairs = Json.string(o, "pairs");
         op.depthScale = doubleOf(o, "depthScale", diagnostics, loc);
+        op.tauBy = Json.string(o, "tauBy");
         if (o.has("with") && !o.get("with").isJsonNull()) {
             for (final JsonElement m : arrayOf(o.get("with"))) {
                 final TeamMember member = new TeamMember();
