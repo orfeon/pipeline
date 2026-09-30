@@ -1674,12 +1674,29 @@ public final class FeaturePlanCompiler {
         }
         final boolean pairwise = method == Rating.Method.bradleyTerry;
         if (op.pairs != null && !pairwise) {
-            // elo already shares kFactor over the opponents, and plackettLuce has no pairs: it reads the whole ranking
+            // elo already shares kFactor over the opponents, and plackettLuce has no pairs: it reads the ranking (to top)
             diagnostics.error("sequence.rating.parameter", loc, "pairs chooses the opponents of a bradleyTerry update (" + String.join(" | ", Rating.PAIRS) + "): " + methodName + " has none" + (method == Rating.Method.gaussian ? " (gaussian conditions on the whole contest at once)" : ""));
             valid = false;
         } else if (op.pairs != null && !Rating.PAIRS.contains(op.pairs)) {
             diagnostics.error("sequence.rating.parameter", loc, "unknown pairs: " + op.pairs + " (available: " + String.join(" | ", Rating.PAIRS) + ")");
             valid = false;
+        }
+        // the depth of a ranking: the choices of a Plackett-Luce contest, one per place (the other methods have no places)
+        final boolean ranking = method == Rating.Method.plackettLuce;
+        if ((!op.top.isEmpty() || op.depthScale != null) && !ranking) {
+            diagnostics.error("sequence.rating.parameter", loc, "top / depthScale read a contest's ranking place by place: plackettLuce parameters, " + methodName + " has no places"
+                    + (method == Rating.Method.bradleyTerry ? " (pairs: adjacent pairs the rank neighbours only)" : ""));
+            valid = false;
+        } else {
+            // two independent parameters: both are checked, so one run reports both
+            if (op.top.size() > 1 || op.top.size() == 1 && op.top.get(0) < 1) {
+                diagnostics.error("sequence.rating.parameter", loc, "top is the one place a ranking is read to (an integer >= 1, e.g. top: 3): " + op.top);
+                valid = false;
+            }
+            if (op.depthScale != null && !(op.depthScale >= 1 && Double.isFinite(op.depthScale))) {
+                diagnostics.error("sequence.rating.parameter", loc, "depthScale is the factor the scale of a choice grows by per place (finite, >= 1; 1 reads every place alike): " + op.depthScale);
+                valid = false;
+            }
         }
         // the coordinate is a millisecond count, so the DURATION being non-zero is not enough: one that rounds to 0 ms
         // (or does not fit in millis at all, where toMillis() would throw instead of reporting) would silently fall
@@ -1746,6 +1763,8 @@ public final class FeaturePlanCompiler {
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
+            if (!op.top.isEmpty()) shared.put("top", Integer.toString(op.top.get(0)));
+            if (op.depthScale != null && op.depthScale != 1d) shared.put("depthScale", Double.toString(op.depthScale));
         }
         shared.put("context", contest.name());
         // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a

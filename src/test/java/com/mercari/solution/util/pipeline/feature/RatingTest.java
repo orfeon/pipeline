@@ -1231,6 +1231,108 @@ public class RatingTest {
         }
     }
 
+    /**
+     * The depth of a plackettLuce ranking. Three fresh equals (no drift) finishing a / b / c: the choices are the winner
+     * out of three (every quotient 1/3) and the second out of two (1/2), so without depth the second's omega is
+     * {@code −1/3 + 1/2} and the third's {@code −1/3 − 1/2}. {@code top: 1} reads the first choice alone: b and c both lose
+     * to a and are not ranked against each other. {@code depthScale: 2} makes the second choice at twice the scale, so its
+     * terms count {@code 1/2} in omega and {@code 1/4} in the shrinkage.
+     */
+    @Test
+    public void testPlackettLuceDepth() {
+        final Rating plain = rating(Rating.Method.plackettLuce, true, 0d);
+        final double v = PRIOR_SIGMA * PRIOR_SIGMA, beta = PRIOR_SIGMA / 2, c2 = 3 * (v + beta * beta), c = Math.sqrt(c2);
+        final java.util.function.BiConsumer<Rating, double[]> expect = (rating, omegaDelta) -> {
+            final Rating.State state = new Rating.State();
+            rating.update(state, List.of(entry("a", 1), entry("b", 2), entry("c", 3)));
+            final List<String> players = List.of("a", "b", "c");
+            for (int i = 0; i < 3; i++) {
+                final double omega = omegaDelta[2 * i], delta = omegaDelta[2 * i + 1];
+                Assertions.assertEquals(25 + v / c * omega, (Double) rating.read(state, players.get(i), "mu"), 1e-9, players.get(i));
+                Assertions.assertEquals(Math.sqrt(v * (1 - Math.sqrt(v) / c * (v / c2) * delta)), (Double) rating.read(state, players.get(i), "sigma"), 1e-9, players.get(i));
+            }
+        };
+        final double first = 1d / 3 * (2d / 3), second = 0.5 * 0.5;
+        expect.accept(plain, new double[]{2d / 3, first, -1d / 3 + 0.5, first + second, -1d / 3 - 0.5, first + second});
+        expect.accept(plain.withDepth(1, 1d), new double[]{2d / 3, first, -1d / 3, first, -1d / 3, first});
+        expect.accept(plain.withDepth(0, 2d), new double[]{2d / 3, first, -1d / 3 + 0.5 / 2, first + second / 4, -1d / 3 - 0.5 / 2, first + second / 4});
+
+        // a depth that reaches the last place, and a scale of 1, are the plain update to the last bit
+        final List<Rating.Entry> contest = List.of(entry("a", 1), entry("b", 2), entry("c", 2), entry("d", 4), entry("e", 5));
+        final Rating.State reference = new Rating.State(), deep = new Rating.State();
+        plain.update(reference, contest);
+        plain.withDepth(5, 1d).update(deep, contest);
+        for (final String player : List.of("a", "b", "c", "d", "e")) {
+            Assertions.assertEquals(reference.players.get(player).mu, deep.players.get(player).mu, 0d, player);
+            Assertions.assertEquals(reference.players.get(player).sigma, deep.players.get(player).sigma, 0d, player);
+        }
+
+        // top-k is not a tie of the rest: the order behind the first k does not reach the state, to the last bit, and the
+        // entries behind — fresh equals — move alike and narrow less than the tie form (outcomes clamped to k + 1) narrows them
+        final Rating top2 = plain.withDepth(2, 1d);
+        final Rating.State ordered = new Rating.State(), reordered = new Rating.State(), tied = new Rating.State();
+        top2.update(ordered, List.of(entry("a", 1), entry("b", 2), entry("c", 3), entry("d", 4), entry("e", 5)));
+        top2.update(reordered, List.of(entry("a", 1), entry("b", 2), entry("c", 5), entry("d", 3), entry("e", 4)));
+        plain.update(tied, List.of(entry("a", 1), entry("b", 2), entry("c", 3), entry("d", 3), entry("e", 3)));
+        for (final String player : List.of("a", "b", "c", "d", "e")) {
+            Assertions.assertEquals(ordered.players.get(player).mu, reordered.players.get(player).mu, 0d, player);
+            Assertions.assertEquals(ordered.players.get(player).sigma, reordered.players.get(player).sigma, 0d, player);
+        }
+        for (final String player : List.of("d", "e")) {
+            Assertions.assertEquals(ordered.players.get("c").mu, ordered.players.get(player).mu, 0d, player);
+            Assertions.assertTrue(ordered.players.get(player).sigma > tied.players.get(player).sigma, player);
+        }
+        Assertions.assertTrue(ordered.players.get("b").mu > ordered.players.get("c").mu, "the second still beats the rest");
+        // a tie group straddling the depth is read whole: its place is 1 + the entries that did strictly better
+        final Rating.State straddling = new Rating.State();
+        top2.update(straddling, List.of(entry("a", 1), entry("b", 2), entry("c", 2), entry("d", 4)));
+        Assertions.assertEquals(straddling.players.get("b").mu, straddling.players.get("c").mu, 0d);
+        Assertions.assertTrue(straddling.players.get("c").mu > straddling.players.get("d").mu);
+
+        // the rows of a contest arrive in any order: the same state to the last bit under top and depthScale too
+        final Rating both = plain.withDepth(3, 1.5);
+        final Rating.State once = new Rating.State();
+        both.update(once, contest);
+        final Random random = new Random(11);
+        for (int i = 0; i < 10; i++) {
+            final List<Rating.Entry> shuffled = new ArrayList<>(contest);
+            Collections.shuffle(shuffled, random);
+            final Rating.State other = new Rating.State();
+            both.update(other, shuffled);
+            for (final String player : List.of("a", "b", "c", "d", "e")) {
+                Assertions.assertEquals(once.players.get(player).mu, other.players.get(player).mu, 0d, player);
+                Assertions.assertEquals(once.players.get(player).sigma, other.players.get(player).sigma, 0d, player);
+            }
+        }
+
+        // the coordinates the compiler writes build the same rating: top / depthScale reach the engine through Rating.of
+        final Map<String, String> coordinates = new HashMap<>();
+        coordinates.put("method", "plackettLuce");
+        coordinates.put("order", "ascending");
+        coordinates.put("mu", "25.0");
+        coordinates.put("sigma", Double.toString(PRIOR_SIGMA));
+        coordinates.put("tau", "0.0");
+        coordinates.put("playerKeys", "p");
+        coordinates.put("contestKeys", "c");
+        coordinates.put("field", "y");
+        coordinates.put("top", "3");
+        coordinates.put("depthScale", "1.5");
+        final Rating.State fromCoordinates = new Rating.State();
+        Rating.of(coordinates).update(fromCoordinates, contest);
+        for (final String player : List.of("a", "b", "c", "d", "e")) {
+            Assertions.assertEquals(once.players.get(player).mu, fromCoordinates.players.get(player).mu, 0d, player);
+            Assertions.assertEquals(once.players.get(player).sigma, fromCoordinates.players.get(player).sigma, 0d, player);
+        }
+        Assertions.assertNotEquals(reference.players.get("e").mu, fromCoordinates.players.get("e").mu, "the depth took effect");
+
+        // the depth is a plackettLuce notion; a place count and a scale factor are validated
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.bradleyTerry, true, 0d).withDepth(2, 1d));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.gaussian, true, 0d).withDepth(0, 1.5));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> plain.withDepth(-1, 1d));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> plain.withDepth(0, 0.5));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> plain.withDepth(0, Double.POSITIVE_INFINITY));
+    }
+
     private static SequenceEvaluator.Past past(final String contest, final String player, final double outcome) {
         final Map<String, Object> values = new HashMap<>();
         values.put("c", contest);
@@ -1356,6 +1458,13 @@ public class RatingTest {
         cases.put("      - {type: rating, field: final_price, context: session, method: elo, tauPer: P30D}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, tauPer: P30D}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, tau: 2, tauPer: PT0S}", "sequence.rating.parameter");
+        // the depth of a ranking: plackettLuce only, one integer place >= 1, a scale factor >= 1
+        cases.put("      - {type: rating, field: final_price, context: session, method: bradleyTerry, top: 3}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, method: elo, depthScale: 1.2}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, top: 0}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, top: [2, 3]}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, top: 2.5}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, depthScale: 0.5}", "sequence.rating.parameter");
         // two ops of one block on the same segment with different parameters: they would share one running state
         cases.put("      - {type: rating, field: final_price, context: session, funcs: [mu]}\n"
                 + "      - {type: rating, field: final_price, context: session, method: elo, funcs: [count]}", "sequence.rating.as");
@@ -1363,6 +1472,13 @@ public class RatingTest {
             final FeaturePlan plan = compile(SPEC.replace(op, e.getKey()));
             Assertions.assertTrue(hasCode(plan, e.getValue()), () -> e.getKey() + "\n" + plan.describe());
         }
+        // top and depthScale are independent: both invalid, both reported in one run
+        final FeaturePlan depths = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, top: 0, depthScale: 0.5}"));
+        Assertions.assertEquals(2, depths.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.parameter")).count(), depths::describe);
+        // a place beyond int range is reported, not wrapped into a small one (4294967298 would read as 2)
+        final FeaturePlan wrapped = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, top: 4294967298}"));
+        Assertions.assertTrue(hasCode(wrapped, "sequence.rating.parameter"), wrapped::describe);
+        Assertions.assertTrue(wrapped.getColumns().stream().noneMatch(c -> "2".equals(c.getCoordinates().get("top"))), wrapped::describe);
         // a rating has no bounded window, no general filter and no future direction
         for (final String windows : List.of("[{maxAge: P365D}]", "[{maxEvents: 10}]", "[{filter: \"start_price > 10\"}]", "[{filter: \"final_price = $self.final_price\"}]")) {
             final FeaturePlan plan = compile(SPEC.replace("    entity: seller\n    ops:", "    entity: seller\n    windows: " + windows + "\n    ops:"));
@@ -1388,7 +1504,8 @@ public class RatingTest {
         final String ops = "      - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P1D, as: pl, funcs: [mu, sigma, count, delta]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, top: 2, depthScale: 1.5, as: deep}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -1396,7 +1513,10 @@ public class RatingTest {
         Assertions.assertNull(plan.getColumn("skill_all_pl_sigma").getCoordinates().get("pairs"));
         Assertions.assertEquals("adjacent", plan.getColumn("skill_all_adj_mu").getCoordinates().get("pairs"));
         Assertions.assertNull(plan.getColumn("skill_all_adj_mu").getCoordinates().get("tauPerMillis"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 10);
+        Assertions.assertEquals("2", plan.getColumn("skill_all_deep_mu").getCoordinates().get("top"));
+        Assertions.assertEquals("1.5", plan.getColumn("skill_all_deep_mu").getCoordinates().get("depthScale"));
+        Assertions.assertNull(plan.getColumn("skill_all_pl_mu").getCoordinates().get("top"));
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 12);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {

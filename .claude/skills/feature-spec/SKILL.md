@@ -390,6 +390,12 @@ not alter values).
   `plackettLuce`'s `sigma` hardly shrinks in a large field (about a percent per contest for the last players
   of a field of 16, next to nothing for the leaders, whatever `beta`): it is a function of the contest count,
   so use `count` for "how well known".
+- **`rating` where the lower places are noise** (the order behind the leaders says little about strength):
+  `plackettLuce` with `top: k` reads the first `k` places only — the rest lose to them but are not ranked among
+  themselves — and `depthScale: g` (≥ 1) reads each deeper place as noisier (it counts less between entries of
+  similar strength; a lopsided deep place can count more, being less predictable). Do not emulate `top` by clamping the
+  outcome to `k + 1`: that is a tie, which still moves and narrows the entries behind. Compare a few depths with
+  the evaluation / screen transforms rather than guessing one.
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`

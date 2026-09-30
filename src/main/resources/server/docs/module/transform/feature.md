@@ -366,8 +366,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
   default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
   default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
-  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*); elo: `kFactor`
-  (32), `scale` (400).
+  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*), `top` /
+  `depthScale` (`plackettLuce` only, see *Depth of a ranking*); elo: `kFactor` (32), `scale` (400).
 - **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
   months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
   is the very thing that makes a strength uncertain. With `tauPer: P30D` the variance grows by `tau² · Δt /
@@ -463,6 +463,25 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   `1 − w · (1 − 1/k)` of their variance (`w = sigma² / (sigma² + beta²)`, 0.8 with `beta = sigma / 2`: `sigma` × 0.5
   at `k = 16`, × 0.63 at `k = 4`) and the winner's move is `w · (y − ȳ)` — the contest's spread, not the field
   size, sets it.
+- **Depth of a ranking (`top`, `depthScale`; `plackettLuce` only).** `plackettLuce` reads a contest as a sequence
+  of choices — the first place out of everyone, the second out of the rest, … — and by default believes every one
+  of them alike. Where the order behind the leaders is mostly noise (the contest is decided before those places
+  are, and what happens behind says little about strength), read less of it:
+  - **`top: k`** reads the first `k` places only. The entries behind still lose to each of the first `k` (they
+    finished behind them) but are not ranked among themselves — the top-k likelihood, so their order does not
+    reach the ratings at all. That is not the same as clamping the outcome to `k + 1` with a row op: a tie is
+    still information (the tie form moves tied entries toward each other and narrows them), `top` reads nothing
+    there. A tie group reaching into the depth is read whole (a place is 1 + the entries that did strictly better).
+  - **`depthScale: g`** (≥ 1, default 1) makes the choice at place `q` at the scale `c · g^(q − 1)` — the
+    rank-ordered logit with a scale per depth (Hausman & Ruud): between entries of equal strength a deeper place
+    moves `mu` by `1 / g^(q − 1)` and narrows `sigma` by `1 / g^(2(q − 1))` of what it otherwise would (`g: 1.2`:
+    the 5th place counts 48% in `mu`, the 10th 19%). The choice's probabilities are read at the wider scale too, so
+    they are flatter: a lopsided choice deep in the ranking (a strong entry expectedly ahead of weak ones by a couple
+    of `c` or more — small fields of well-known entries) is less predictable there, and its expected result can move
+    and narrow them *more* than the plain update. The first place keeps the scale `c`, so the win probability
+    `ratingProb` reads is the same.
+  - Together: `top` is the hard cut, `depthScale` the soft decay above it. Two ops over the same outcome with
+    different depths need their own `as`.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
   pool are close together and spread out only as contests accumulate — the distribution of `mu` (and of any
   gap between ratings) drifts until the pool has warmed up, which a model reads as a trend in time. Keep that
@@ -573,7 +592,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
-  `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`),
+  `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
+  `top` / `depthScale` outside `plackettLuce`, a `top` that is not one integer place >= 1, a `depthScale` below 1),
   `sequence.rating.gaussian.units` (error: `gaussian` without `sigma` or `beta` — a margin model has no scale of its
   own; declare them in the outcome's units),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column

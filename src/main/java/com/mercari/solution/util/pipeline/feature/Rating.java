@@ -214,12 +214,21 @@ public final class Rating implements Serializable {
     private final List<Member> members;
     /** Whether {@link #update} keeps the contests per team ({@code State.teams}, the {@code team: [count]} readout). */
     private final boolean countTeams;
+    /**
+     * {@code plackettLuce}: the depth of the ranking a contest reveals — the places up to {@code top} are read, deeper
+     * ones are not (0: every place) — and Hausman &amp; Ruud's scale per depth: the place-{@code q} choice is made at
+     * the scale {@code c · depthScale^(q − 1)} (1: every place alike). See {@link #plackettLuce}.
+     */
+    private final int top;
+    private final double depthScale;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
                    final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
-                   final boolean countTeams) {
+                   final boolean countTeams, final int top, final double depthScale) {
         this.members = members;
         this.countTeams = countTeams;
+        this.top = top;
+        this.depthScale = depthScale;
         this.tauPerMillis = tauPerMillis;
         this.pairs = pairs;
         this.method = method;
@@ -278,7 +287,7 @@ public final class Rating implements Serializable {
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
                 tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
-                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false);
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false, 0, 1d);
     }
 
     /**
@@ -288,7 +297,10 @@ public final class Rating implements Serializable {
      * op coordinate, so every column of the op agrees) keeps the contests per team for a {@code team: [count]} column.
      */
     public static Rating of(final Map<String, String> coordinates) {
-        final Rating players = playersOf(coordinates);
+        // the defaults (0, 1) are valid for every method: a rating without a depth is the plain one
+        final String top = coordinates.get("top"), depthScale = coordinates.get("depthScale");
+        final Rating players = playersOf(coordinates)
+                .withDepth(top == null ? 0 : Integer.parseInt(top), depthScale == null ? 1d : Double.parseDouble(depthScale));
         final String members = coordinates.get("teamMembers");
         return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members),
                 "true".equals(coordinates.get("teamCounts")));
@@ -373,7 +385,20 @@ public final class Rating implements Serializable {
                 throw new IllegalArgumentException("a member needs a finite mu, sigma > 0 and tau >= 0: " + member);
             }
         }
-        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team), countTeams);
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team), countTeams, top, depthScale);
+    }
+
+    /**
+     * This {@code plackettLuce} rating reading a contest's ranking only to the depth {@code top} (0: every place) and
+     * at a scale growing by the factor {@code depthScale} per place (1: every place alike) — see {@link #plackettLuce}.
+     */
+    public Rating withDepth(final int top, final double depthScale) {
+        if (top < 0) throw new IllegalArgumentException("top is a number of places (0: every place): " + top);
+        if (!(depthScale >= 1) || !Double.isFinite(depthScale)) throw new IllegalArgumentException("depthScale must be finite and >= 1: " + depthScale);
+        if ((top > 0 || depthScale != 1d) && method != Method.plackettLuce) {
+            throw new IllegalArgumentException("top / depthScale read the depth of a ranking: a plackettLuce parameter, not " + method);
+        }
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale);
     }
 
     /** The members of the team a row is rated as (one: a player). */
@@ -694,25 +719,52 @@ public final class Rating implements Serializable {
         }
     }
 
+    /**
+     * The Plackett–Luce ranking update (Weng &amp; Lin): the contest is read as a sequence of choices — the winner out
+     * of everyone, the second out of the rest, … — at the scale {@code c² = Σ (v + beta²)}. An entry's place is
+     * {@code 1 +} the entries that did strictly better, so a tie group shares one place (Weng &amp; Lin's tie form: each
+     * of its members is a choice out of the same remaining pool, weighted by 1 / the group's size).
+     *
+     * <p>Two readings of the depth (Hausman &amp; Ruud): the lower places of a ranking are the noisier ones — the
+     * contest is decided before they are, and what happens behind carries little of the entries' strength.
+     * {@code top} reads the choices up to that place only: the entries behind it still lose to every one of the first
+     * {@code top} (they sit in each of those choices' remaining pool) but are not ranked among themselves — the top-k
+     * likelihood, not a tie of the rest (a tie would still move them against each other). {@code depthScale} makes
+     * the place-{@code q} choice at the scale {@code c_q = c · depthScale^(q − 1)}: a deeper choice is noisier — its
+     * terms are divided by {@code c_q / c} (omega) and {@code (c_q / c)²} (the shrinkage), and its quotients are read at
+     * the wider scale, so they are flatter. Between entries of similar strength that moves and narrows them less; a
+     * lopsided choice (a gap of a couple of {@code c} or more) is less predictable at the wider scale, so its expected
+     * result can move and narrow them more than the plain update would. The first choice keeps the
+     * scale {@code c}, so the win probability a rating implies ({@code ratingProb}) is the same. With {@code top} 0 and
+     * {@code depthScale} 1 every ratio is 1.0 and the update is the plain one to the last bit.
+     */
     private void plackettLuce(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
-        double c2 = 0, top = Double.NEGATIVE_INFINITY;
+        double c2 = 0, best = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             c2 += v[i] + beta * beta;
-            top = Math.max(top, m[i]);
+            best = Math.max(best, m[i]);
         }
         final double c = Math.sqrt(c2);
         // exp((mu − max) / c): the ratios below are shift-invariant, the shift keeps exp in range
         final double[] e = new double[n];
-        for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - top) / c);
-        // per entry q: the strength still in the race when q's place is decided (q and everything not better), and its ties
-        final double[] remaining = new double[n];
-        final int[] ties = new int[n];
+        for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
+        // per entry q: its place, the scale of the choice made there (c · ratio), and the strength still in the race
+        // when that choice is made (q and everything not better) with its ties. Without a depth every place reads
+        // alike, so the places are not counted (the plain update pays nothing for them)
+        final boolean deep = top > 0 || depthScale != 1d;
+        final int[] place = new int[n], ties = new int[n];
+        final double[] ratio = new double[n], remaining = new double[n];
         for (int q = 0; q < n; q++) {
-            final Entry place = entries.get(q);
+            final Entry at = entries.get(q);
+            place[q] = 1;
+            if (deep) for (int s = 0; s < n; s++) if (score(entries.get(s), at) == 1d) place[q]++;
+            // a choice deeper than top is never read below: its pool is not summed
+            if (top > 0 && place[q] > top) continue;
+            ratio[q] = depthScale == 1d ? 1d : Math.pow(depthScale, place[q] - 1);
             for (int s = 0; s < n; s++) {
-                final double sc = score(entries.get(s), place);
-                if (sc <= 0.5) remaining[q] += e[s];
+                final double sc = score(entries.get(s), at);
+                if (sc <= 0.5) remaining[q] += strength(e, m, best, c, ratio[q], s);
                 if (sc == 0.5) ties[q]++;
             }
         }
@@ -720,15 +772,21 @@ public final class Rating implements Serializable {
             final Entry self = entries.get(i);
             double omega = 0, delta = 0;
             for (int q = 0; q < n; q++) {
-                // the places decided while i was still in the race: q's own and every better one
+                // the choices made while i was still in the race: q's own and every better one — up to the depth read
                 if (q != i && score(entries.get(q), self) < 0.5) continue;
-                final double quotient = e[i] / remaining[q];
-                omega += (q == i ? 1 - quotient : -quotient) / ties[q];
-                delta += quotient * (1 - quotient) / ties[q];
+                if (top > 0 && place[q] > top) continue;
+                final double quotient = strength(e, m, best, c, ratio[q], i) / remaining[q];
+                omega += (q == i ? 1 - quotient : -quotient) / ties[q] / ratio[q];
+                delta += quotient * (1 - quotient) / ties[q] / (ratio[q] * ratio[q]);
             }
             dMu[i] = v[i] / c * omega;
             deltas[i] = Math.sqrt(v[i]) / c * (v[i] / c2) * delta;
         }
+    }
+
+    /** {@code exp((mu_s − max) / (c · ratio))}: entry s's strength in a choice made at {@code ratio} times the contest's scale. */
+    private static double strength(final double[] e, final double[] m, final double best, final double c, final double ratio, final int s) {
+        return ratio == 1d ? e[s] : Math.exp((m[s] - best) / (c * ratio));
     }
 
     /**

@@ -124,7 +124,10 @@ public class FeatureSpec implements Serializable {
         public Long seed;
         /** residualize (context): the fields the op's field is regressed against within the group ({@code against: [a, b]}). */
         public List<String> regressors = new ArrayList<>();
-        /** harville (context): the places {@code k} whose "finishes within the first k" probability is emitted (1..3). */
+        /**
+         * harville (context): the places {@code k} whose "finishes within the first k" probability is emitted (1..3).
+         * rating (plackettLuce): one place, the depth of the ranking a contest is read to.
+         */
         public List<Integer> top = new ArrayList<>();
         /** harville: the exponents applied to the probabilities when the 2nd / 3rd place is drawn (1 = plain Harville). */
         public List<Double> discount = new ArrayList<>();
@@ -161,6 +164,8 @@ public class FeatureSpec implements Serializable {
         public Duration tauPer;
         /** rating (bradleyTerry): which opponents a player is paired with — {@code all} (default) | {@code adjacent} | {@code mean}. */
         public String pairs;
+        /** rating (plackettLuce): the factor the scale of a place's choice grows by per place below the first (Hausman–Ruud; 1 = none). */
+        public Double depthScale;
         /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is
          * the sum of its members', a contest's change is shared among them by their part of the team's variance).
@@ -1363,6 +1368,7 @@ public class FeatureSpec implements Serializable {
         op.scale = doubleOf(o, "scale", diagnostics, loc);
         op.tauPer = Json.duration(o, "tauPer", null, diagnostics, loc);
         op.pairs = Json.string(o, "pairs");
+        op.depthScale = doubleOf(o, "depthScale", diagnostics, loc);
         if (o.has("with") && !o.get("with").isJsonNull()) {
             for (final JsonElement m : arrayOf(o.get("with"))) {
                 final TeamMember member = new TeamMember();
@@ -1404,7 +1410,10 @@ public class FeatureSpec implements Serializable {
             op.regressors.add(op.against);
         }
         for (final JsonElement k : arrayOf(o.get("top"))) {
-            if (k.isJsonPrimitive() && k.getAsJsonPrimitive().isNumber() && k.getAsDouble() == Math.rint(k.getAsDouble())) op.top.add(k.getAsInt());
+            // in int range before getAsInt, which would wrap a larger place silently (4294967298 → 2)
+            if (k.isJsonPrimitive() && k.getAsJsonPrimitive().isNumber() && k.getAsDouble() == Math.rint(k.getAsDouble())
+                    && Math.abs(k.getAsDouble()) <= Integer.MAX_VALUE) op.top.add(k.getAsInt());
+            else if ("rating".equals(op.type)) diagnostics.error("sequence.rating.parameter", loc, "top must be an integer place: " + k);
             else diagnostics.error("context.harville.top", loc, "top must list integer places: " + k);
         }
         op.discount = doubles(o, "discount", diagnostics, loc);
