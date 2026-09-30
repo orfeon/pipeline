@@ -1734,7 +1734,7 @@ public final class FeaturePlanCompiler {
         if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
         // per-row inputs: a numeric column (or a baseline) each; tauBy drifts an uncertainty elo does not keep
         final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, in the rating's units", loc);
-        final Ref tauRef = elo && op.tauBy != null ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
+        final Ref tauRef = elo ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
         if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian");
         if (op.offset != null && offsetRef == null || op.tauBy != null && tauRef == null) valid = false;
         if (!valid) return;
@@ -1891,11 +1891,12 @@ public final class FeaturePlanCompiler {
 
     /**
      * A per-row input of a rating ({@code offset} / {@code tauBy}): a baseline or a numeric column, or null when not
-     * declared or invalid (reported under {@code sequence.rating.<parameter>}).
+     * declared or invalid (reported under {@code sequence.rating.<parameter>}). A baseline name comes first, as for
+     * the softmax {@code offset}: one name reads the same value whichever op it is the offset of.
      */
     private Ref ratingRowInput(final String reference, final String parameter, final String what, final String loc) {
         if (reference == null) return null;
-        final Ref ref = resolve(reference);
+        final Ref ref = resolve(baselineColumns.getOrDefault(reference, reference));
         if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
             diagnostics.error("sequence.rating." + parameter, loc, "rating " + parameter + " must name a numeric column or baselines[].name (" + what + "): "
                     + reference + (ref == null ? "" : " is not numeric"));

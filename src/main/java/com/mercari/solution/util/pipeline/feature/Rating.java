@@ -438,11 +438,15 @@ public final class Rating implements Serializable {
                 offsetField, tauField);
     }
 
-    /** The rated player's drift a row declares ({@link #withRowInputs}), or NaN: the rating's own {@code tau}. */
+    /**
+     * The rated player's drift a row declares ({@link #withRowInputs}), or NaN: the rating's own {@code tau}. A value
+     * whose square overflows is no drift either: its infinite variance would turn the player's rating — and the moments
+     * of its pool — into NaN for the rest of the replay.
+     */
     public double rowTau(final Map<String, Object> row) {
         if (tauField == null || row == null) return Double.NaN;
         final Double tau = SequenceEvaluator.finite(row.get(tauField));
-        return tau == null || !(tau >= 0) ? Double.NaN : tau;
+        return tau == null || !(tau >= 0) || !Double.isFinite(tau * tau) ? Double.NaN : tau;
     }
 
     /** The members of the team a row is rated as (one: a player). */
@@ -565,10 +569,15 @@ public final class Rating implements Serializable {
         }
     }
 
-    /** Applies one contest held at {@code millis}. The entries' order does not matter (they are sorted by team, then outcome). */
+    /**
+     * Applies one contest held at {@code millis}. The entries' order does not matter: they are sorted by team, then
+     * outcome, offset and drift — two rows of one team with one outcome may still differ in their per-row inputs, and
+     * the sums below (and the variance a member's change starts from) must not take their arrival order.
+     */
     public void update(final State state, final List<Entry> contest, final long millis) {
         final List<Entry> entries = new ArrayList<>(contest);
-        entries.sort(Comparator.comparing(Rating::id).thenComparingDouble(Entry::outcome));
+        entries.sort(Comparator.comparing(Rating::id).thenComparingDouble(Entry::outcome)
+                .thenComparingDouble(Entry::offset).thenComparingDouble(Entry::tau));
         final int n = entries.size(), k = members.size();
         final String[] ids = new String[n];
         for (int i = 0; i < n; i++) {
@@ -594,9 +603,9 @@ public final class Rating implements Serializable {
                 m[i] = j == 0 ? mus[i * k + j] : m[i] + mus[i * k + j];
                 v[i] = j == 0 ? variances[i * k + j] : v[i] + variances[i * k + j];
             }
+            // a known shift of the row's performance: the contest expects it, and rates only what is left
+            if (entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
         }
-        // a known shift of the row's performance: the contest expects it, and rates only what is left
-        for (int i = 0; i < n; i++) if (entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
         // Ω and Δ per entry: the change of its mu, and the part of its variance the contest takes away
         final double[] dMu = new double[n], deltas = new double[n];
         switch (method) {

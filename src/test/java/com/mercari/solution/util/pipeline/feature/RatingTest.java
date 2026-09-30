@@ -1451,7 +1451,33 @@ public class RatingTest {
         Assertions.assertEquals(Math.sqrt(settled * settled + 4), (Double) perDay.read(timed, 0, key("a"), "sigma", 4 * day, Double.NaN), 1e-12, "no row value: tau");
         Assertions.assertEquals(3d, perDay.rowTau(Map.of("t", 3d)));
         Assertions.assertTrue(Double.isNaN(perDay.rowTau(Map.of("t", -3d))));
+        // a drift whose variance overflows is no drift: the rating's tau, not a NaN rating
+        Assertions.assertTrue(Double.isNaN(perDay.rowTau(Map.of("t", 1e200))));
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.elo, true, null).withRowInputs(null, "t"));
+    }
+
+    /**
+     * Two rows of one player with one outcome may differ in their per-row inputs: the contest must not depend on the
+     * order they arrive in (the replay does not fix the row order inside an event time), to the last bit.
+     */
+    @Test
+    public void testRowInputsOrderFree() {
+        for (final Rating.Method method : Rating.Method.values()) {
+            final Rating base = method == Rating.Method.gaussian
+                    ? Rating.of(method, false, 0d, 1d, 0.5, 0.3, null, null, List.of("p"), List.of("c"), "y")
+                    : Rating.of(method, false, null, null, null, 0.3, null, null, List.of("p"), List.of("c"), "y");
+            final Rating byRow = base.withRowInputs("x", method == Rating.Method.elo ? null : "t");
+            final List<SequenceEvaluator.Past> rows = List.of(
+                    row(1L, "c1", "a", 1, "x", 0.7, "t", 2d), row(1L, "c1", "a", 1, "x", -0.4, "t", 0.1d),
+                    row(1L, "c1", "b", 2, "x", 0.2, "t", 1d), row(1L, "c1", "d", 0, "x", 0d, "t", 1d));
+            final Rating.State forward = new Rating.State(), backward = new Rating.State();
+            byRow.fold(forward, rows);
+            byRow.fold(backward, List.of(rows.get(1), rows.get(0), rows.get(3), rows.get(2)));
+            for (final String player : List.of("a", "b", "d")) {
+                Assertions.assertEquals(forward.players.get(key(player)).mu, backward.players.get(key(player)).mu, 0d, method + " " + player);
+                Assertions.assertEquals(forward.players.get(key(player)).sigma, backward.players.get(key(player)).sigma, 0d, method + " " + player);
+            }
+        }
     }
 
     /**
@@ -1492,11 +1518,7 @@ public class RatingTest {
     }
 
     private static SequenceEvaluator.Past past(final String contest, final String player, final double outcome) {
-        final Map<String, Object> values = new HashMap<>();
-        values.put("c", contest);
-        values.put("p", player);
-        values.put("y", outcome);
-        return new SequenceEvaluator.Past(1_000L, values);
+        return row(1_000L, contest, player, outcome);
     }
 
     /**
