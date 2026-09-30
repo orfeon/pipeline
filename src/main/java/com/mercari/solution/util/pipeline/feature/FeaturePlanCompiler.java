@@ -1912,8 +1912,8 @@ public final class FeaturePlanCompiler {
                 diagnostics.info("sequence.rating.shared", loc, "rating '" + segment + "' has shared members - one rating for the whole pool each, entering every row"
                         + " with its weight (a coefficient learned from the contests). A contest reads strengths only relative to each other, so a shared member"
                         + " learns only from contests whose rows differ in its weight: one equal on every row of a contest leaves it at its prior."
-                        + " gaussian conditions on the shared members exactly (jointly with the contest's common shift); plackettLuce / bradleyTerry move them by"
-                        + " their gradient and narrow them by their Fisher information");
+                        + " gaussian conditions on the shared members exactly (jointly with the contest's common shift); plackettLuce / bradleyTerry take one"
+                        + " joint Laplace step for them (the contest's gradient and Fisher information along their weights, cross terms included)");
             }
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
@@ -2022,7 +2022,7 @@ public final class FeaturePlanCompiler {
             }
             // (b) a component is an entity with a weight: two of one entity with one weight (none included) always move
             // together, so neither is identified - a repeat of an entity must count with a weight of its own
-            if (!components.add(member.name() + " " + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
+            if (!components.add(member.name() + "\u0000" + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
                 diagnostics.error("sequence.rating.with", loc, "member " + name + " repeats the component " + member.name()
                         + (m.weight == null ? " (unweighted)" : " x " + m.weight) + " of the team: two members of one entity with one weight always move"
                         + " together and neither is identified - give the repeat a weight of its own (a condition it is the slope in)");

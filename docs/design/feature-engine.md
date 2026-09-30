@@ -364,9 +364,16 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   conditions on it once per contest: `gaussianJoint` is exact — `ξ = (θ_shared, u)` with `u` the flat common shift,
   precision `diag(1/V, 0) + Σ w_i x_i x_iᵀ` ((p + 1)-square, `Rating.invert`), each team then given `ξ` with its
   uncertainty (`v β² w + (v w)² xᵀ S x`) — and reduces to `gaussian` without shared members;
-  `plackettLuce` / `bradleyTerry` move it by `V Σ a_i g_i` (`g_i = Ω_i / v_i`) and narrow it to `1 / (1/V + aᵀ H a)`
-  (`plackettLuceInformation`: per choice the variance of `a` under its probabilities / `c_q²`; `bradleyTerryInformation`:
-  per pair `(a_i − a_q)² p (1 − p) / c²`), both zero for a constant weight. `RatingTest.testSharedMemberGaussianIsExact`
+  `plackettLuce` / `bradleyTerry` take one joint Laplace step for the op's shared members: gradient `G` and Fisher
+  information `I` along their weights, cross terms included, step `(V⁻¹ + I)⁻¹ G` and variances `diag (V⁻¹ + I)⁻¹`
+  (a step at the prior variance, `V G`, overshoots by `1 + V I`; members stepping one by one each take an effect their
+  correlated weights share — `testSharedMembersStepJointly`). `plackettLuceInformation`: per choice the covariance of
+  the weights under its probabilities / `c_q²`, with `G_c = Σ a_i g_i` (`g_i = Ω_i / v_i`; the choices' gradients sum to
+  zero per pool). `bradleyTerryShared`: both read per pair in the weights' DIFFERENCE, `(a_i − a_q)(s − p) / c` and
+  `(a_ci − a_cq)(a_di − a_dq) p (1 − p) / c²`, each pair weighted by the mean of its sides' pairing weights — the teams'
+  own updates normalise each side apart (`mean`), so `Σ a_i g_i` does not vanish along a constant weight where the
+  sides' opponent counts differ; the difference form does. Both are zero for a constant weight. A row's team `sigma`
+  includes `a² V` of each shared member, which is common to the contest's rows (it cancels between them). `RatingTest.testSharedMemberGaussianIsExact`
   checks the joint update against the dense posterior of the whole linear model. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests

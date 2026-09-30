@@ -1409,6 +1409,75 @@ public class RatingTest {
                 List.of("seller_id"), List.of("c"), "y").withTeam("seller", List.of(new Rating.Member("burden", List.of(), 0d, 0.5, 0d))), "a shared member needs a weight");
     }
 
+    /**
+     * plackettLuce / bradleyTerry step the shared members jointly (Laplace: {@code (V⁻¹ + I)⁻¹ G} with the cross
+     * terms). Two members on one weight column are one coefficient of prior variance V1 + V2 split in two: their sum
+     * moves exactly as that single coefficient does (Sherman–Morrison), where members stepping one by one would each take
+     * the whole effect — twice the move. The teams, rated with the members at their means, are the same either way.
+     */
+    @Test
+    public void testSharedMembersStepJointly() {
+        final double v1 = 0.49, v2 = 0.36;
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce)) {
+            final Rating solo = Rating.of(method, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of("c"), "y");
+            final Rating split = solo.withTeam("seller", List.of(new Rating.Member("partA", List.of(), 0d, Math.sqrt(v1), 0d, false, "w"),
+                    new Rating.Member("partB", List.of(), 0d, Math.sqrt(v2), 0d, false, "w2")));
+            final Rating single = solo.withTeam("seller", List.of(new Rating.Member("whole", List.of(), 0d, Math.sqrt(v1 + v2), 0d, false, "w")));
+            final double[] weights = {1.5, 0.5, -0.5, -1.5};
+            final List<SequenceEvaluator.Past> contest = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                contest.add(row(1L, "c1", "x", 3 - i, "seller_id", "s" + i, "w", weights[i], "w2", weights[i]));
+            }
+            final Rating.State twoParts = new Rating.State(), onePart = new Rating.State();
+            split.fold(twoParts, contest);
+            single.fold(onePart, contest);
+            final double sum = twoParts.players.get(split.memberKey(Map.of(), 1)).mu + twoParts.players.get(split.memberKey(Map.of(), 2)).mu;
+            final double whole = onePart.players.get(single.memberKey(Map.of(), 1)).mu;
+            Assertions.assertTrue(whole > 0, method.name());
+            Assertions.assertEquals(whole, sum, 1e-12, method + ": the parts' sum moves as the whole");
+            // the split follows the prior variances: V1 / (V1 + V2) of the move to the first
+            Assertions.assertEquals(whole * v1 / (v1 + v2), twoParts.players.get(split.memberKey(Map.of(), 1)).mu, 1e-12, method.name());
+            for (int i = 0; i < 4; i++) {
+                final String seller = split.memberKey(Map.of("seller_id", "s" + i), 0);
+                Assertions.assertEquals(onePart.players.get(seller).mu, twoParts.players.get(seller).mu, 1e-12, method + " s" + i);
+                Assertions.assertEquals(onePart.players.get(seller).sigma, twoParts.players.get(seller).sigma, 1e-12, method + " s" + i);
+            }
+            // the step is the posterior variance times the gradient (Laplace), not the prior variance times it: the
+            // move over the posterior variance is the contest's gradient, whatever the prior (a prior-variance step
+            // would overshoot by 1 + V I, a factor that grows with V)
+            final double[] perGradient = new double[2];
+            final double[] priors = {1e-4, 100d};
+            for (int t = 0; t < 2; t++) {
+                final Rating wide = solo.withTeam("seller", List.of(new Rating.Member("whole", List.of(), 0d, Math.sqrt(priors[t]), 0d, false, "w")));
+                final Rating.State state = new Rating.State();
+                wide.fold(state, contest);
+                final Rating.Player coefficient = state.players.get(wide.memberKey(Map.of(), 1));
+                perGradient[t] = coefficient.mu / (coefficient.sigma * coefficient.sigma);
+                Assertions.assertTrue(coefficient.sigma * coefficient.sigma < priors[t], method.name());
+            }
+            Assertions.assertEquals(perGradient[0], perGradient[1], 1e-9 * Math.abs(perGradient[0]), method + ": the step is V_post · G");
+        }
+    }
+
+    /**
+     * bradleyTerry's pairings normalise each side apart (mean: 1 / the side's opponents), so where the sides' opponent
+     * counts differ — a seller with two rows, whose own rows are no opponents — the teams' gradients do not sum to zero.
+     * The shared member reads each pair in its weights' difference instead: a weight equal on every row still moves
+     * nothing and narrows nothing, under every pairing.
+     */
+    @Test
+    public void testSharedMemberIgnoresAConstantWeightUnderEveryPairing() {
+        for (final Rating.Pairs pairing : Rating.Pairs.values()) {
+            final Rating rating = Rating.of(Rating.Method.bradleyTerry, false, null, null, null, 0d, null, null, null, pairing,
+                    List.of("seller_id"), List.of("c"), "y").withTeam("seller", List.of(new Rating.Member("burden", List.of(), 0d, 1d, 0d, false, "w")));
+            final Rating.State state = new Rating.State();
+            rating.fold(state, List.of(sale("s1", 3, 2d), sale("s1", 1, 2d), sale("s2", 2, 2d), sale("s3", 0, 2d), sale("s4", 2.5, 2d)));
+            final Rating.Player coefficient = state.players.get(rating.memberKey(Map.of(), 1));
+            Assertions.assertEquals(0d, coefficient.mu, 1e-12, pairing.name());
+            Assertions.assertEquals(1d, coefficient.sigma, 1e-12, pairing.name());
+        }
+    }
+
     /** A shared member at compile time: a name and a weight, no entity; its columns under the name; the info describes it. */
     @Test
     public void testCompileSharedMember() {
