@@ -405,7 +405,9 @@ not alter values).
   the entity itself, `with: [{entity: <block entity>, name: <x>Slope, weight: <standardised condition column>,
   mu: 0, sigma: <expected slope size>}]` — the contests estimate each entity's slope; read `team: [mu]` for the
   strength at this row's condition. The weight must be pre-event, and an entity learns its slope only across
-  contests at different values of it.
+  contests at different values of it. One coefficient for everyone instead (a condition's effect learned rather than
+  fixed in `offset`): a shared member `{name: <x>Effect, weight: <column>, mu: 0, sigma: <effect size>, tau: 0}` —
+  no entity; it learns only from contests whose rows differ in the weight.
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`

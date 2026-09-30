@@ -352,7 +352,19 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `Δ` — the member reparametrised (`RatingTest.testWeightedMember`: weight `a` and prior sd `σ` is the unweighted
   member of prior sd `|a| σ`, read back divided by `a`). `Entry.weights` (null = all 1) comes from `weightsOf(row)`;
   a weight of 0 empties the member's slot in `teamOf`, a missing one is a missing member; `readTeam` takes the
-  row's weights, so the weight field is a self input of every column of the op as well as a past input. The members' levels
+  row's weights, so the weight field is a self input of every column of the op as well as a past input. A **shared**
+  member has no keys (`Member.shared()`; DSL `{name, weight}` without an entity; `teamMembers` `name||mu|sigma|tau|...`):
+  one state key per pool (`pool + U+0001`), in every row with the row's weight. It is NOT shared out per row like a
+  member of several teams — every row of a contest carries it, the rows are correlated through it, and multiplying
+  its per-row shrink factors narrowed it n times over even when its weight was equal on every row (contests are read
+  up to a common shift: no information). `update` keeps it out of the rows' variances (in `m` at its mean) and
+  conditions on it once per contest: `gaussianJoint` is exact — `ξ = (θ_shared, u)` with `u` the flat common shift,
+  precision `diag(1/V, 0) + Σ w_i x_i x_iᵀ` ((p + 1)-square, `Rating.invert`), each team then given `ξ` with its
+  uncertainty (`v β² w + (v w)² xᵀ S x`) — and reduces to `gaussian` without shared members;
+  `plackettLuce` / `bradleyTerry` move it by `V Σ a_i g_i` (`g_i = Ω_i / v_i`) and narrow it to `1 / (1/V + aᵀ H a)`
+  (`plackettLuceInformation`: per choice the variance of `a` under its probabilities / `c_q²`; `bradleyTerryInformation`:
+  per pair `(a_i − a_q)² p (1 − p) / c²`), both zero for a constant weight. `RatingTest.testSharedMemberGaussianIsExact`
+  checks the joint update against the dense posterior of the whole linear model. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no

@@ -1266,6 +1266,139 @@ public class RatingTest {
         }
     }
 
+    /** A rating of sellers with one shared member (no keys) weighted by the row's field {@code w}. */
+    private static Rating withShared(final Rating.Method method, final double sharedSigma) {
+        final Rating solo = method == Rating.Method.gaussian
+                ? Rating.of(method, false, 0d, 1d, 0.5, 0d, null, null, List.of("seller_id"), List.of("c"), "y")
+                : Rating.of(method, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of("c"), "y");
+        return solo.withTeam("seller", List.of(new Rating.Member("burden", List.of(), 0d, sharedSigma, 0d, false, "w")));
+    }
+
+    private static SequenceEvaluator.Past sale(final String seller, final double outcome, final Double weight) {
+        return weight == null ? row(1L, "c1", "x", outcome, "seller_id", seller) : row(1L, "c1", "x", outcome, "seller_id", seller, "w", weight);
+    }
+
+    /**
+     * gaussian with a shared member is exact Gaussian conditioning: the sellers, the shared coefficient and the contest's
+     * common shift (a prior sd of 1e5: flat) conditioned on the outcomes by the dense posterior of the whole linear model
+     * — an independent computation — give the ratings the update leaves, to 1e-6.
+     */
+    @Test
+    public void testSharedMemberGaussianIsExact() {
+        final double sharedSigma = 0.7, beta = 0.5, shiftVariance = 1e10;
+        final Rating rating = withShared(Rating.Method.gaussian, sharedSigma);
+        final double[] outcomes = {2.0, 0.5, -0.3, 1.1}, weights = {1.5, -0.5, 0.2, 0.9};
+        final List<SequenceEvaluator.Past> contest = new ArrayList<>();
+        for (int i = 0; i < 4; i++) contest.add(sale("s" + i, outcomes[i], weights[i]));
+        final Rating.State state = new Rating.State();
+        rating.fold(state, contest);
+
+        // parameters: s0..s3, the coefficient, the shift; prior means 0, variances 1 / sharedSigma² / flat
+        final int d = 6;
+        final double[][] precision = new double[d][d];
+        final double[] b = new double[d];
+        for (int j = 0; j < 4; j++) precision[j][j] = 1d;
+        precision[4][4] = 1d / (sharedSigma * sharedSigma);
+        precision[5][5] = 1d / shiftVariance;
+        for (int i = 0; i < 4; i++) {
+            final double[] x = new double[d];
+            x[i] = 1;
+            x[4] = weights[i];
+            x[5] = 1;
+            for (int s = 0; s < d; s++) {
+                b[s] += x[s] * outcomes[i] / (beta * beta);
+                for (int t = 0; t < d; t++) precision[s][t] += x[s] * x[t] / (beta * beta);
+            }
+        }
+        final double[][] covariance = Rating.invert(precision);
+        final double[] mean = new double[d];
+        for (int s = 0; s < d; s++) for (int t = 0; t < d; t++) mean[s] += covariance[s][t] * b[t];
+        for (int i = 0; i < 4; i++) {
+            final Rating.Player seller = state.players.get(rating.memberKey(Map.of("seller_id", "s" + i), 0));
+            Assertions.assertEquals(mean[i], seller.mu, 1e-6, "s" + i);
+            Assertions.assertEquals(Math.sqrt(covariance[i][i]), seller.sigma, 1e-6, "s" + i);
+        }
+        final Rating.Player coefficient = state.players.get(rating.memberKey(Map.of(), 1));
+        Assertions.assertEquals(mean[4], coefficient.mu, 1e-6);
+        Assertions.assertEquals(Math.sqrt(covariance[4][4]), coefficient.sigma, 1e-6);
+        Assertions.assertEquals(1L, coefficient.count, "one contest, whatever its rows");
+    }
+
+    /**
+     * A shared member is one coefficient, not one member of n independent teams: a weight equal on every row of a
+     * contest is its common shift and leaves it at its prior (mean and sigma), and the sellers rated as without it; a
+     * weight that grows with the result moves it up. Every Bayesian method.
+     */
+    @Test
+    public void testSharedMemberLearnsOnlyFromDifferences() {
+        for (final Rating.Method method : List.of(Rating.Method.bradleyTerry, Rating.Method.plackettLuce, Rating.Method.gaussian)) {
+            final Rating rating = withShared(method, 1d);
+            final String coefficient = rating.memberKey(Map.of(), 1);
+            final Rating.State constant = new Rating.State();
+            rating.fold(constant, List.of(sale("s1", 3, 2d), sale("s2", 2, 2d), sale("s3", 1, 2d), sale("s4", 0, 2d)));
+            Assertions.assertEquals(0d, constant.players.get(coefficient).mu, 1e-9, method + ": a constant weight moves nothing");
+            Assertions.assertEquals(1d, constant.players.get(coefficient).sigma, 1e-9, method + ": ... and narrows nothing");
+            // the sellers: as a rating of sellers alone (the constant enters every row alike)
+            final Rating alone = method == Rating.Method.gaussian
+                    ? Rating.of(method, false, 0d, 1d, 0.5, 0d, null, null, List.of("seller_id"), List.of("c"), "y").withTeam("seller", List.of(
+                            new Rating.Member("agent", List.of("agent_id"), 0d, 1d, 0d, true)))
+                    : Rating.of(method, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of("c"), "y").withTeam("seller", List.of(
+                            new Rating.Member("agent", List.of("agent_id"), 0d, 1d, 0d, true)));
+            final Rating.State sellers = new Rating.State();
+            alone.fold(sellers, List.of(sale("s1", 3, null), sale("s2", 2, null), sale("s3", 1, null), sale("s4", 0, null)));
+            for (final String seller : List.of("s1", "s2", "s3", "s4")) {
+                final String key = rating.memberKey(Map.of("seller_id", seller), 0);
+                Assertions.assertEquals(sellers.players.get(key).mu, constant.players.get(key).mu, 1e-9, method + " " + seller);
+                Assertions.assertEquals(sellers.players.get(key).sigma, constant.players.get(key).sigma, 1e-9, method + " " + seller);
+            }
+            // better results with larger weights: a positive coefficient, narrowed
+            final Rating.State varying = new Rating.State();
+            rating.fold(varying, List.of(sale("s1", 3, 1.5), sale("s2", 2, 0.5), sale("s3", 1, -0.5), sale("s4", 0, -1.5)));
+            Assertions.assertTrue(varying.players.get(coefficient).mu > 0, method.name());
+            Assertions.assertTrue(varying.players.get(coefficient).sigma < 1d, method.name());
+            // a row without the weight: a missing member (the row joins no contest)
+            final Rating.State gap = new Rating.State();
+            rating.fold(gap, List.of(sale("s1", 3, 1d), sale("s2", 2, null), sale("s3", 1, -1d)));
+            Assertions.assertFalse(gap.players.containsKey(rating.memberKey(Map.of("seller_id", "s2"), 0)), method.name());
+            // the member readout: the coefficient, whatever the row
+            Assertions.assertEquals(varying.players.get(coefficient).mu, rating.read(varying, 1, rating.memberKey(Map.of(), 1), "mu", 1L));
+        }
+        // only a member beside the rated player is shared: a rating whose player has no key fields (entries built by hand)
+        // still rates its players
+        final Rating keyless = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of(), List.of(), "y");
+        final Rating.State byHand = new Rating.State();
+        keyless.update(byHand, List.of(new Rating.Entry("s1", 2), new Rating.Entry("s2", 1)));
+        Assertions.assertEquals(8.065506316323548, (Double) keyless.read(byHand, "s1", "sigma"), 1e-9);
+        final Rating.Member shared = new Rating.Member("burden", List.of(), 0d, 0.5, 0d, false, "w");
+        Assertions.assertEquals("burden||0.0|0.5|0.0|weight=w", Rating.encodeMembers(List.of(shared)));
+        Assertions.assertEquals(List.of(shared), Rating.decodeMembers(Rating.encodeMembers(List.of(shared))));
+        Assertions.assertTrue(Rating.decodeMembers("burden||0.0|0.5|0.0|weight=w").get(0).shared());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null,
+                List.of("seller_id"), List.of("c"), "y").withTeam("seller", List.of(new Rating.Member("burden", List.of(), 0d, 0.5, 0d))), "a shared member needs a weight");
+    }
+
+    /** A shared member at compile time: a name and a weight, no entity; its columns under the name; the info describes it. */
+    @Test
+    public void testCompileSharedMember() {
+        final String op = DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [{entity: agent, mu: 0, sigma: 4}, {name: burden, weight: start_price, mu: 0, sigma: 0.5, tau: 0}]");
+        final FeaturePlan plan = compileTeam(op);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "sequence.rating.shared"), plan::describe);
+        final OutputColumn burden = plan.getColumn("skill_all_duo_burden_mu");
+        Assertions.assertNotNull(burden, plan::describe);
+        Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5;burden||0.0|0.5|0.0|weight=start_price", burden.getCoordinates().get("teamMembers"));
+        Assertions.assertTrue(Rating.of(burden.getCoordinates()).members().get(2).shared());
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden}"), "a shared member needs a weight");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: agent, weight: start_price}"), "an entity's name");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden, weight: category}"), "a numeric weight");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden, weight: start_price, sigma: 0}"), "a positive sigma");
+        for (final Map.Entry<String, String> e : cases.entrySet()) {
+            final FeaturePlan invalid = compileTeam(e.getKey());
+            Assertions.assertTrue(invalid.getDiagnostics().hasErrors() && hasCode(invalid, "sequence.rating.with"), () -> e.getValue() + "\n" + invalid.describe());
+        }
+    }
+
     /**
      * A named member: the block's own entity (or another entity twice) as a further component of the team, here the
      * seller's slope in the start price — its pool and columns under the name, its weight a past and a self input of
@@ -1339,10 +1472,14 @@ public class RatingTest {
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj, with: [agent]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, as: opt, with: [{entity: agent, optional: true}], team: [mu, sigma, count]}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 2, beta: 1, as: slope,"
-                + " with: [{entity: seller, name: priceSlope, weight: start_price, mu: 0, sigma: 1, optional: true}], team: [mu, sigma]}";
+                + " with: [{entity: seller, name: priceSlope, weight: start_price, mu: 0, sigma: 1, optional: true}], team: [mu, sigma]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 2, beta: 1, as: gshared,"
+                + " with: [{entity: agent, optional: true}, {name: burden, weight: start_price, mu: 0, sigma: 0.5, tau: 0, optional: true}], team: [mu, sigma]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, as: plshared,"
+                + " with: [{name: burden, weight: start_price, mu: 0, sigma: 0.5, tau: 0.1, optional: true}], team: [mu]}";
         final FeaturePlan plan = compileTeam(ops);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
-        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2 + 2 + 2 + 3 + 2 + 2 + 2);
+        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2 + 2 + 2 + 3 + 2 + 2 + 2 + (2 + 2 + 2 + 2) + (2 + 2 + 1));
     }
 
     @Test
@@ -1962,7 +2099,11 @@ public class RatingTest {
                         for (final String member : c.getCoordinates().getOrDefault("teamMembers", "").split(";")) {
                             if (member.startsWith("agent|") && !member.contains("|optional")) agentRequired = true;
                         }
+                        // a shared member (no keys) is one rating read by every row
+                        final boolean sharedMember = "member".equals(readout)
+                                && c.getCoordinates().getOrDefault("teamMembers", "").contains(c.getCoordinates().get("member") + "||");
                         final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null && agentRequired
+                                : sharedMember ? false
                                 : "member".equals(readout) && "agent".equals(c.getCoordinates().get("member")) ? row.get("agent_id") == null : row.get("seller_id") == null;
                         if (missing) Assertions.assertNull(scan, c.getCanonicalName());
                         if (c.getCanonicalName().endsWith("_count") && scan != null && (Long) scan > 0) rated++;

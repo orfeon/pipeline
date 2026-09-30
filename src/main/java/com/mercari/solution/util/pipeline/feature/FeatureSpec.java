@@ -191,7 +191,8 @@ public class FeatureSpec implements Serializable {
         public String entity;
         /**
          * The member's name in the team (its pool and column segment; default: the entity's name). Naming a member lets an
-         * entity appear more than once — the block's own entity included — as separate components of the team.
+         * entity appear more than once — the block's own entity included — as separate components of the team. A member
+         * with a name and no entity is <b>shared</b>: one rating for the whole pool, entering every row with its weight.
          */
         public String name;
         /** A numeric column of the row: the member's weight in the team (null: 1). */
