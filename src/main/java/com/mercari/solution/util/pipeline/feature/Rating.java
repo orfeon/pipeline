@@ -42,6 +42,11 @@ import java.util.TreeMap;
  * the arithmetic of a player, to the last bit. A member of several teams of one contest receives the sum of its
  * shares, as a player of several rows does. An <b>optional</b> member may be missing from a row: the row is then rated
  * as the team of the members it has (the absent one adds nothing and is not updated), instead of taking no part.
+ * A <b>weighted</b> member counts with a weight read from the row ({@link Member#weightField}): the team's strength is
+ * {@code Σ a_j mu_j} with variance {@code Σ a_j² v_j}, and member j takes {@code a_j v_j / v} of the change and
+ * {@code a_j² v_j / v} of the shrinkage — a member whose weight is a condition of the row (a price, a distance) is the
+ * entity's slope in that condition. A weight of 0 leaves the member out of that row's team; a missing one is a missing
+ * member. The rated player always counts with weight 1.
  *
  * <p><b>Per row</b> ({@link #withRowInputs}). A known shift of a row's performance ({@code offset}: a covariate whose
  * effect is fixed — {@code m_i + offset_i} is the strength the contest expects, the offset itself is never rated) and
@@ -171,15 +176,24 @@ public final class Rating implements Serializable {
      * One row of a contest: the team it is rated as — the state keys of its members ({@link #teamOf}), the rated
      * player first — and its outcome. A row of one member is a player: every rating without a team. {@code offset}
      * shifts the strength the contest expects of the row (0: none), {@code tau} is the rated player's drift read from
-     * the row (NaN: the rating's own).
+     * the row (NaN: the rating's own), {@code weights} the members' weights in the team (null: all 1).
      */
-    public record Entry(List<String> members, double outcome, double offset, double tau) {
+    public record Entry(List<String> members, double outcome, double offset, double tau, double[] weights) {
         public Entry(final String player, final double outcome) {
             this(List.of(player), outcome);
         }
 
         public Entry(final List<String> members, final double outcome) {
-            this(members, outcome, 0d, Double.NaN);
+            this(members, outcome, 0d, Double.NaN, null);
+        }
+
+        public Entry(final List<String> members, final double outcome, final double offset, final double tau) {
+            this(members, outcome, offset, tau, null);
+        }
+
+        /** The weight of member j in this row's team (1 without weights). */
+        double weight(final int j) {
+            return weights == null ? 1d : weights[j];
         }
 
         /** The rated player: the first member. */
@@ -190,14 +204,20 @@ public final class Rating implements Serializable {
 
     /**
      * A member of the team a row is rated as: the fields of the row that name it, its prior and its drift, and whether a
-     * row may lack it ({@code optional}: the row is rated as the team of the members it has). {@code pool}
+     * row may lack it ({@code optional}: the row is rated as the team of the members it has), and the field of the row
+     * giving its weight in the team ({@code weightField}, null: 1). {@code pool}
      * is the namespace of its keys in the state — members of different entities live in one {@link State}, and a seller
      * and an agent may well share an id — or null: the keys themselves, for the single player of a rating without a team,
      * whose state is keyed as it always was.
      */
-    public record Member(String pool, List<String> keys, double mu, double sigma, double tau, boolean optional) implements Serializable {
+    public record Member(String pool, List<String> keys, double mu, double sigma, double tau, boolean optional, String weightField)
+            implements Serializable {
         public Member(final String pool, final List<String> keys, final double mu, final double sigma, final double tau) {
-            this(pool, keys, mu, sigma, tau, false);
+            this(pool, keys, mu, sigma, tau, false, null);
+        }
+
+        public Member(final String pool, final List<String> keys, final double mu, final double sigma, final double tau, final boolean optional) {
+            this(pool, keys, mu, sigma, tau, optional, null);
         }
     }
 
@@ -240,11 +260,14 @@ public final class Rating implements Serializable {
     private final double depthScale;
     /** The fields of a row giving its known performance shift and the rated player's drift (null: none). See {@link #withRowInputs}. */
     private final String offsetField, tauField;
+    /** Whether any member counts with a weight read from the row ({@link Member#weightField}); derived from {@code members}. */
+    private final boolean weighted;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
                    final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
                    final boolean countTeams, final int top, final double depthScale, final String offsetField, final String tauField) {
         this.members = members;
+        this.weighted = members.stream().anyMatch(m -> m.weightField() != null);
         this.countTeams = countTeams;
         this.top = top;
         this.depthScale = depthScale;
@@ -329,13 +352,14 @@ public final class Rating implements Serializable {
     }
 
     /**
-     * {@code pool|key,key|mu|sigma|tau[|optional]} per member, joined by {@code ;} (names are checked for the separators at
-     * compile time); the flag is written only for an optional member.
+     * {@code pool|key,key|mu|sigma|tau[|optional][|weight=<field>]} per member, joined by {@code ;} (names are checked
+     * for the separators at compile time); the flags are written only when set.
      */
     public static String encodeMembers(final List<Member> members) {
         final List<String> parts = new ArrayList<>();
         for (final Member m : members) {
-            parts.add(m.pool() + "|" + String.join(",", m.keys()) + "|" + m.mu() + "|" + m.sigma() + "|" + m.tau() + (m.optional() ? "|optional" : ""));
+            parts.add(m.pool() + "|" + String.join(",", m.keys()) + "|" + m.mu() + "|" + m.sigma() + "|" + m.tau()
+                    + (m.optional() ? "|optional" : "") + (m.weightField() != null ? "|weight=" + m.weightField() : ""));
         }
         return String.join(";", parts);
     }
@@ -344,10 +368,16 @@ public final class Rating implements Serializable {
         final List<Member> members = new ArrayList<>();
         for (final String part : text.split(";")) {
             final String[] f = part.split("\\|");
-            if (f.length != 5 && !(f.length == 6 && "optional".equals(f[5]))) {
-                throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau[|optional]): " + part);
+            boolean optional = false, valid = f.length >= 5;
+            String weight = null;
+            // the flags after the five fixed fields, each at most once
+            for (int i = 5; valid && i < f.length; i++) {
+                if ("optional".equals(f[i]) && !optional) optional = true;
+                else if (f[i].startsWith("weight=") && f[i].length() > 7 && weight == null) weight = f[i].substring(7);
+                else valid = false;
             }
-            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]), f.length == 6));
+            if (!valid) throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau[|optional][|weight=<field>]): " + part);
+            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]), optional, weight));
         }
         return members;
     }
@@ -407,6 +437,9 @@ public final class Rating implements Serializable {
             }
             if (!pools.add(member.pool())) throw new IllegalArgumentException("two members of one team share the pool '" + member.pool() + "'");
             // an empty key list would name every row the same member; a null one fails per row, deep in the fold
+            if (member.weightField() != null && member.weightField().isEmpty()) {
+                throw new IllegalArgumentException("a member's weight names a field of the row: " + member);
+            }
             if (member.keys() == null || member.keys().isEmpty()) {
                 throw new IllegalArgumentException("a member needs the key fields that name it: " + member);
             }
@@ -481,16 +514,41 @@ public final class Rating implements Serializable {
 
     /**
      * The team a row is rated as — the state keys of its members, null in the place of an absent optional member — or
-     * null when a required member is missing: the row joins no contest.
+     * null when a required member is missing (a key or its weight): the row joins no contest. A member whose weight is
+     * 0 keeps its key (the team is who takes part, whatever the weights: its identity does not hinge on a weight being
+     * exactly 0) and counts nothing — {@link #update} and {@link #readTeam} skip it; with no key it is left out rather
+     * than missing (a weight of 0 needs none).
      */
     public List<String> teamOf(final Map<String, Object> row) {
         final String[] team = new String[members.size()];
         for (int j = 0; j < team.length; j++) {
-            final String key = memberKey(row, j);
-            if (key == null && !members.get(j).optional()) return null;
+            // a missing weight is a missing member (1 for an unweighted one)
+            final double weight = weightOf(row, j);
+            final String key = Double.isNaN(weight) ? null : memberKey(row, j);
+            if (key == null && weight != 0d && !members.get(j).optional()) return null;
             team[j] = key;
         }
         return java.util.Collections.unmodifiableList(Arrays.asList(team));
+    }
+
+    /**
+     * The weight of a row's {@code member}-th member: 1 without a weight field, NaN when the field holds no finite
+     * number — or one whose square overflows: its infinite variance would turn the team's update, and so its members'
+     * ratings and the moments of their pools, into NaN for the rest of the replay (as {@link #rowTau} guards a drift).
+     */
+    private double weightOf(final Map<String, Object> row, final int member) {
+        final String field = members.get(member).weightField();
+        if (field == null) return 1d;
+        final Double weight = row == null ? null : SequenceEvaluator.finite(row.get(field));
+        return weight == null || !Double.isFinite(weight * weight) ? Double.NaN : weight;
+    }
+
+    /** The weights of a row's members (null: no member is weighted, every weight is 1), aligned with {@link #teamOf}. */
+    public double[] weightsOf(final Map<String, Object> row) {
+        if (!weighted) return null;
+        final double[] weights = new double[members.size()];
+        for (int j = 0; j < weights.length; j++) weights[j] = weightOf(row, j);
+        return weights;
     }
 
     /** What makes two rows the same team: all their members (a player's own rows, in a rating without a team). */
@@ -531,7 +589,7 @@ public final class Rating implements Serializable {
             final Double outcome = SequenceEvaluator.finite(p.values().get(field));
             final Double offset = offsetField == null ? (Double) 0d : SequenceEvaluator.finite(p.values().get(offsetField));
             if (contest == null || team == null || outcome == null || offset == null) continue;
-            contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(team, outcome, offset, rowTau(p.values())));
+            contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(team, outcome, offset, rowTau(p.values()), weightsOf(p.values())));
         }
         for (final List<Entry> entries : contests.values()) update(state, entries, millis);
     }
@@ -594,18 +652,25 @@ public final class Rating implements Serializable {
 
     /**
      * Applies one contest held at {@code millis}. The entries' order does not matter: they are sorted by team, then
-     * outcome, offset and drift — two rows of one team with one outcome may still differ in their per-row inputs, and
+     * outcome, offset, drift and weights — two rows of one team with one outcome may still differ in their per-row inputs, and
      * the sums below (and the variance a member's change starts from) must not take their arrival order.
      */
     public void update(final State state, final List<Entry> contest, final long millis) {
         final List<Entry> entries = new ArrayList<>(contest);
         entries.sort(Comparator.comparing(Rating::id).thenComparingDouble(Entry::outcome)
-                .thenComparingDouble(Entry::offset).thenComparingDouble(Entry::tau));
+                .thenComparingDouble(Entry::offset).thenComparingDouble(Entry::tau).thenComparing(Entry::weights, Arrays::compare));
         final int n = entries.size(), k = members.size();
         final String[] ids = new String[n];
         for (int i = 0; i < n; i++) {
             if (entries.get(i).members().size() != k) {
                 throw new IllegalArgumentException("an entry of " + entries.get(i).members().size() + " member(s) in a rating of teams of " + k);
+            }
+            if (entries.get(i).weights() != null && entries.get(i).weights().length != k) {
+                throw new IllegalArgumentException("an entry of " + entries.get(i).weights().length + " weight(s) in a rating of teams of " + k);
+            }
+            // a weighted rating read with weights of 1 would be silently wrong: an entry must carry the row's weights
+            if (weighted && entries.get(i).weights() == null) {
+                throw new IllegalArgumentException("a rating with weighted members needs the entries' weights (Rating.weightsOf(row) - fold builds them)");
             }
             ids[i] = id(entries.get(i));
         }
@@ -624,16 +689,19 @@ public final class Rating implements Serializable {
         final double[] m = new double[n], v = new double[n];
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
-                // an absent optional member adds nothing to the team (never member 0: the rated player is required)
-                if (entries.get(i).members().get(j) == null) continue;
+                // an absent optional member, or one of weight 0, adds nothing to the team (never member 0: the rated
+                // player is required and weighs 1)
+                if (entries.get(i).members().get(j) == null || entries.get(i).weight(j) == 0d) continue;
                 final Player p = state.players.get(entries.get(i).members().get(j));
                 mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
                 // the row's own drift is the rated player's (member 0); the other members keep theirs
                 variances[i * k + j] = drifted(members.get(j), p, millis, true,
                         j == 0 ? rowTaus.getOrDefault(entries.get(i).members().get(0), Double.NaN) : Double.NaN);
-                // the first member starts the sums (not 0 +): a team of one is its member to the last bit
-                m[i] = j == 0 ? mus[i * k + j] : m[i] + mus[i * k + j];
-                v[i] = j == 0 ? variances[i * k + j] : v[i] + variances[i * k + j];
+                // the first member starts the sums (not 0 +): a team of one is its member to the last bit. A weighted
+                // member counts a · mu and a² · v (the rated player's weight is 1)
+                final double a = entries.get(i).weight(j);
+                m[i] = j == 0 ? mus[i * k + j] : m[i] + a * mus[i * k + j];
+                v[i] = j == 0 ? variances[i * k + j] : v[i] + a * a * variances[i * k + j];
             }
             // a known shift of the row's performance: the contest expects it, and rates only what is left
             if (entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
@@ -654,15 +722,17 @@ public final class Rating implements Serializable {
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
                 final String key = entries.get(i).members().get(j);
-                if (key == null) continue;
+                // an absent member, or one of weight 0, took no part: no share, no count
+                if (key == null || entries.get(i).weight(j) == 0d) continue;
                 Change c = changes.get(key);
                 if (c == null) {
                     c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
                     changes.put(key, c);
                 }
-                final double share = variances[i * k + j] / v[i];
-                c.change += share * dMu[i];
-                c.factor *= Math.max(1 - share * deltas[i], KAPPA);
+                // a weighted member takes a · v_j / v of the change and a² · v_j / v of the shrinkage (a = 1: v_j / v)
+                final double share = variances[i * k + j] / v[i], a = entries.get(i).weight(j);
+                c.change += a * share * dMu[i];
+                c.factor *= Math.max(1 - a * a * share * deltas[i], KAPPA);
             }
         }
         for (final Map.Entry<String, Change> e : changes.entrySet()) {
@@ -958,7 +1028,20 @@ public final class Rating implements Serializable {
 
     /** {@link #readTeam(State, List, String, long)} with the rated player drifting at the row's {@code rowTau}. */
     public Object readTeam(final State state, final List<String> team, final String func, final long nowMillis, final double rowTau) {
+        return readTeam(state, team, func, nowMillis, rowTau, null);
+    }
+
+    /**
+     * {@link #readTeam(State, List, String, long, double)} of a team whose members count with the row's {@code weights}
+     * ({@link #weightsOf}; null: all 1): {@code mu} / {@code deviation} are the weighted sums, {@code sigma} the root of
+     * {@code Σ a² v} — the strength the row's contest will see.
+     */
+    public Object readTeam(final State state, final List<String> team, final String func, final long nowMillis, final double rowTau, final double[] weights) {
         if (team == null) return null;
+        // a team's count is of the team itself; its strength needs the row's weights (weights of 1 would be silently wrong)
+        if (weighted && weights == null && !"count".equals(func)) {
+            throw new IllegalArgumentException("team: [" + func + "] of a rating with weighted members needs the row's weights (Rating.weightsOf(row))");
+        }
         // func null first: TEAM_FUNCS is an immutable list, whose contains(null) throws
         if (func == null || !TEAM_FUNCS.contains(func)) {
             throw new IllegalArgumentException("unknown team readout: " + func + " (available: " + TEAM_FUNCS + ")");
@@ -975,16 +1058,17 @@ public final class Rating implements Serializable {
         }
         double sum = 0;
         for (int j = 0; j < members.size(); j++) {
-            // an absent optional member is no part of the row's team
-            if (team.get(j) == null) continue;
+            // an absent optional member, or one of weight 0, is no part of the row's strength
+            if (team.get(j) == null || weights != null && weights[j] == 0d) continue;
             final Member m = members.get(j);
             final Player p = state == null ? null : state.players.get(team.get(j));
+            final double a = weights == null ? 1d : weights[j];
             switch (func) {
-                case "mu" -> sum += p == null ? m.mu() : p.mu;
-                case "deviation" -> sum += p == null ? 0d : p.mu - m.mu();
+                case "mu" -> sum += a * (p == null ? m.mu() : p.mu);
+                case "deviation" -> sum += a * (p == null ? 0d : p.mu - m.mu());
                 default -> {
                     final double s = p == null ? m.sigma() : sigmaAt(m, p, nowMillis, j == 0 ? rowTau : Double.NaN);
-                    sum += s * s;
+                    sum += a * a * s * s;
                 }
             }
         }

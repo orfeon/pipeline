@@ -184,11 +184,18 @@ public class FeatureSpec implements Serializable {
     }
 
     /** The keys a {@link TeamMember} accepts; anything else is reported (see {@link TeamMember#unknown}). */
-    static final List<String> TEAM_MEMBER_KEYS = List.of("entity", "mu", "sigma", "tau", "optional");
+    static final List<String> TEAM_MEMBER_KEYS = List.of("entity", "name", "weight", "mu", "sigma", "tau", "optional");
 
     /** A member of a rating team: an {@code entities[].name} and its own prior / drift (null = the op's). */
     public static class TeamMember implements Serializable {
         public String entity;
+        /**
+         * The member's name in the team (its pool and column segment; default: the entity's name). Naming a member lets an
+         * entity appear more than once — the block's own entity included — as separate components of the team.
+         */
+        public String name;
+        /** A numeric column of the row: the member's weight in the team (null: 1). */
+        public String weight;
         public Double mu;
         public Double sigma;
         public Double tau;
@@ -197,7 +204,7 @@ public class FeatureSpec implements Serializable {
          * no part in its contest.
          */
         public boolean optional;
-        /** Keys other than entity / mu / sigma / tau / optional (reported, so a misspelled parameter does not silently default). */
+        /** Keys other than entity / name / weight / mu / sigma / tau / optional (reported, so a misspelled parameter does not silently default). */
         public List<String> unknown = new ArrayList<>();
     }
 
@@ -1389,6 +1396,8 @@ public class FeatureSpec implements Serializable {
                 } else if (m.isJsonObject()) {
                     final JsonObject mo = m.getAsJsonObject();
                     member.entity = Json.string(mo, "entity");
+                    member.name = Json.string(mo, "name");
+                    member.weight = Json.string(mo, "weight");
                     member.mu = doubleOf(mo, "mu", diagnostics, loc);
                     member.sigma = doubleOf(mo, "sigma", diagnostics, loc);
                     member.tau = doubleOf(mo, "tau", diagnostics, loc);
@@ -1400,7 +1409,7 @@ public class FeatureSpec implements Serializable {
                     }
                     for (final String key : mo.keySet()) if (!TEAM_MEMBER_KEYS.contains(key)) member.unknown.add(key);
                 } else {
-                    op.withInvalid = "with must list entity names or {entity, mu, sigma, tau} members: " + m;
+                    op.withInvalid = "with must list entity names or {entity, name, weight, mu, sigma, tau, optional} members: " + m;
                     continue;
                 }
                 op.with.add(member);

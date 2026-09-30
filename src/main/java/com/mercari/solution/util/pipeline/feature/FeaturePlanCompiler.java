@@ -545,6 +545,8 @@ public final class FeaturePlanCompiler {
             // a rating's per-row inputs: the known shift of a row's performance and the rated player's drift
             if (def.scope == Scope.sequence && op.offset != null) refs.add(op.offset);
             if (op.tauBy != null) refs.add(op.tauBy);
+            // the weights of a rating team's members
+            for (final FeatureSpec.TeamMember member : op.with) if (member.weight != null) refs.add(member.weight);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {
@@ -1799,6 +1801,8 @@ public final class FeaturePlanCompiler {
         // (the op's unless declared). Without `with` neither coordinate is written — the rating, its state keys and its
         // columns are those of a rating of players
         final List<EntityDef> teamEntities = new ArrayList<>();
+        // per member: its name (pool, column segment) and its weight column (null: 1)
+        final List<String> memberNames = new ArrayList<>(), memberWeights = new ArrayList<>();
         if (!op.with.isEmpty()) {
             final double tau = op.tau != null ? op.tau : Rating.defaultTau(sigma);
             final List<Rating.Member> members = new ArrayList<>();
@@ -1806,9 +1810,14 @@ public final class FeaturePlanCompiler {
                 final EntityDef member = entities.get(m.entity);
                 final List<String> keys = new ArrayList<>();
                 for (final String key : member.keys()) keys.add(canonicalOf(key));
-                members.add(new Rating.Member(member.name(), keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
-                        m.optional));
+                final String name = m.name != null ? m.name : member.name();
+                // a baseline name first, as for offset / tauBy: one name reads one value whichever parameter names it
+                final String weight = m.weight == null ? null : canonicalOf(baselineColumns.getOrDefault(m.weight, m.weight));
+                members.add(new Rating.Member(name, keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
+                        m.optional, weight));
                 teamEntities.add(member);
+                memberNames.add(name);
+                memberWeights.add(weight);
             }
             shared.put("teamPool", entity.name());
             shared.put("teamMembers", Rating.encodeMembers(members));
@@ -1845,7 +1854,7 @@ public final class FeaturePlanCompiler {
         final List<Readout> readouts = new ArrayList<>();
         for (final String func : funcs) readouts.add(new Readout("", func, 0));
         for (int j = 0; j < teamEntities.size(); j++) {
-            for (final String func : funcs) readouts.add(new Readout(teamEntities.get(j).name() + "_", func, j + 1));
+            for (final String func : funcs) readouts.add(new Readout(memberNames.get(j) + "_", func, j + 1));
         }
         for (final String func : op.team) readouts.add(new Readout("team_", func, -1));
         for (final Readout r : readouts) {
@@ -1858,7 +1867,7 @@ public final class FeaturePlanCompiler {
                 c.coordinates.put("readout", "team");
             } else if (r.member() > 0) {
                 c.coordinates.put("readout", "member");
-                c.coordinates.put("member", teamEntities.get(r.member() - 1).name());
+                c.coordinates.put("member", memberNames.get(r.member() - 1));
                 c.coordinates.put("memberIndex", Integer.toString(r.member()));
             }
             addPastInput(c, field);
@@ -1877,11 +1886,20 @@ public final class FeaturePlanCompiler {
                     addSelfInput(c, key);
                 }
             }
+            // a member's weight: read by the contests (past) and by the team readouts of the row (self) - one contract
+            for (final String weight : memberWeights) {
+                if (weight == null) continue;
+                addPastInput(c, weight);
+                addSelfInput(c, weight);
+            }
             finishSequence(c, def, entity, window, null, reducedKey, op, List.of(), true);
         }
         if (!teamEntities.isEmpty() && hintedBlocks.add("sequence.rating.with:" + stateKey)) {
             final List<String> names = new ArrayList<>(List.of(entity.name()));
-            for (final EntityDef member : teamEntities) names.add(member.name());
+            for (int j = 0; j < memberNames.size(); j++) {
+                names.add(memberNames.get(j) + (memberNames.get(j).equals(teamEntities.get(j).name()) ? "" : " (" + teamEntities.get(j).name() + ")")
+                        + (memberWeights.get(j) == null ? "" : " x " + memberWeights.get(j)));
+            }
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
                     + " (a well-known member hardly moves, an uncertain one takes the update). The members' levels are identified up to a shift between the"
@@ -1943,6 +1961,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final Set<String> seen = new HashSet<>();
+        // the components of the team (entity x weight column): the rated player is its entity, unweighted
+        final Set<String> components = new HashSet<>(List.of(entity.name() + "\u0000"));
         // the rated player's pool is the block's entity name: checked once, not once per member
         if (!validTeamName(entity.name(), loc)) valid = false;
         for (final FeatureSpec.TeamMember m : op.with) {
@@ -1953,26 +1973,57 @@ public final class FeaturePlanCompiler {
                 valid = false;
                 continue;
             }
-            if (member.name().equals(entity.name())) {
-                diagnostics.error("sequence.rating.with", loc, "with lists the OTHER members of the team: " + entity.name() + " is the block's entity, the rated player itself");
+            // a member's name is its pool and column segment: the entity's unless declared, so naming it is what lets
+            // an entity - the block's own included - be a second component of the team
+            final String name = m.name != null ? m.name : member.name();
+            if (name.isBlank()) {
+                // an empty pool is no namespace (Rating.withTeam rejects it - at plan time, a crash of the compiler) and an
+                // empty column segment reads <as>__<func>
+                diagnostics.error("sequence.rating.with", loc, "the name of member " + member.name() + " is empty: name: is the member's pool and column segment");
                 valid = false;
-            } else if (!seen.add(member.name())) {
-                diagnostics.error("sequence.rating.with", loc, "with names " + member.name() + " twice");
+            } else if (name.equals(entity.name())) {
+                diagnostics.error("sequence.rating.with", loc, "with lists the OTHER members of the team: " + entity.name() + " is the block's entity, the rated player itself"
+                        + (member.name().equals(entity.name()) ? " - give a further component of it a name: of its own (e.g. {entity: " + entity.name()
+                        + ", name: " + entity.name() + "Slope, weight: <column>})" : ""));
+                valid = false;
+            } else if (!seen.add(name)) {
+                diagnostics.error("sequence.rating.with", loc, "with names " + name + " twice" + (m.name == null ? " (name: tells two members of one entity apart)" : ""));
                 valid = false;
             }
-            if ("team".equals(member.name())) {
-                diagnostics.error("sequence.rating.with", loc, "an entity named 'team' cannot be a member: <as>_team_<func> are the columns of the whole team");
+            if ("team".equals(name)) {
+                diagnostics.error("sequence.rating.with", loc, "a member named 'team' cannot be: <as>_team_<func> are the columns of the whole team");
                 valid = false;
             }
-            if (!validTeamName(member.name(), loc)) valid = false;
+            if (!validTeamName(name, loc)) valid = false;
+            String weightColumn = null;
+            if (m.weight != null) {
+                final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
+                if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
+                    diagnostics.error("sequence.rating.with", loc, "the weight of member " + name + " must name a numeric column (the member counts a * mu in the team): " + m.weight
+                            + (weight == null ? "" : " is not numeric"));
+                    valid = false;
+                } else if (!validTeamName(weight.canonical(), loc)) {
+                    valid = false;
+                } else {
+                    weightColumn = weight.canonical();
+                }
+            }
+            // (b) a component is an entity with a weight: two of one entity with one weight (none included) always move
+            // together, so neither is identified - a repeat of an entity must count with a weight of its own
+            if (!components.add(member.name() + "\u0000" + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " repeats the component " + member.name()
+                        + (m.weight == null ? " (unweighted)" : " x " + m.weight) + " of the team: two members of one entity with one weight always move"
+                        + " together and neither is identified - give the repeat a weight of its own (a condition it is the slope in)");
+                valid = false;
+            }
             for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
             if (!m.unknown.isEmpty()) {
-                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name()
+                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + name
                         + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
                 valid = false;
             }
             if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
-                diagnostics.error("sequence.rating.with", loc, "member " + member.name() + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
                 valid = false;
             }
         }
