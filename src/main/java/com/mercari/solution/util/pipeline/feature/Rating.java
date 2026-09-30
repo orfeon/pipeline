@@ -297,8 +297,9 @@ public final class Rating implements Serializable {
      * op coordinate, so every column of the op agrees) keeps the contests per team for a {@code team: [count]} column.
      */
     public static Rating of(final Map<String, String> coordinates) {
+        // the defaults (0, 1) are valid for every method: a rating without a depth is the plain one
         final String top = coordinates.get("top"), depthScale = coordinates.get("depthScale");
-        final Rating players = top == null && depthScale == null ? playersOf(coordinates) : playersOf(coordinates)
+        final Rating players = playersOf(coordinates)
                 .withDepth(top == null ? 0 : Integer.parseInt(top), depthScale == null ? 1d : Double.parseDouble(depthScale));
         final String members = coordinates.get("teamMembers");
         return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members),
@@ -729,8 +730,11 @@ public final class Rating implements Serializable {
      * {@code top} reads the choices up to that place only: the entries behind it still lose to every one of the first
      * {@code top} (they sit in each of those choices' remaining pool) but are not ranked among themselves — the top-k
      * likelihood, not a tie of the rest (a tie would still move them against each other). {@code depthScale} makes
-     * the place-{@code q} choice at the scale {@code c_q = c · depthScale^(q − 1)}: a deeper choice is noisier, so it
-     * moves the ratings (by {@code 1 / c_q}) and narrows them (by {@code 1 / c_q²}) less. The first choice keeps the
+     * the place-{@code q} choice at the scale {@code c_q = c · depthScale^(q − 1)}: a deeper choice is noisier — its
+     * terms are divided by {@code c_q / c} (omega) and {@code (c_q / c)²} (the shrinkage), and its quotients are read at
+     * the wider scale, so they are flatter. Between entries of similar strength that moves and narrows them less; a
+     * lopsided choice (a gap of a couple of {@code c} or more) is less predictable at the wider scale, so its expected
+     * result can move and narrow them more than the plain update would. The first choice keeps the
      * scale {@code c}, so the win probability a rating implies ({@code ratingProb}) is the same. With {@code top} 0 and
      * {@code depthScale} 1 every ratio is 1.0 and the update is the plain one to the last bit.
      */
@@ -746,13 +750,17 @@ public final class Rating implements Serializable {
         final double[] e = new double[n];
         for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
         // per entry q: its place, the scale of the choice made there (c · ratio), and the strength still in the race
-        // when that choice is made (q and everything not better) with its ties
+        // when that choice is made (q and everything not better) with its ties. Without a depth every place reads
+        // alike, so the places are not counted (the plain update pays nothing for them)
+        final boolean deep = top > 0 || depthScale != 1d;
         final int[] place = new int[n], ties = new int[n];
         final double[] ratio = new double[n], remaining = new double[n];
         for (int q = 0; q < n; q++) {
             final Entry at = entries.get(q);
             place[q] = 1;
-            for (int s = 0; s < n; s++) if (score(entries.get(s), at) == 1d) place[q]++;
+            if (deep) for (int s = 0; s < n; s++) if (score(entries.get(s), at) == 1d) place[q]++;
+            // a choice deeper than top is never read below: its pool is not summed
+            if (top > 0 && place[q] > top) continue;
             ratio[q] = depthScale == 1d ? 1d : Math.pow(depthScale, place[q] - 1);
             for (int s = 0; s < n; s++) {
                 final double sc = score(entries.get(s), at);

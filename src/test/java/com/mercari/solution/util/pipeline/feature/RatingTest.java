@@ -1305,6 +1305,26 @@ public class RatingTest {
             }
         }
 
+        // the coordinates the compiler writes build the same rating: top / depthScale reach the engine through Rating.of
+        final Map<String, String> coordinates = new HashMap<>();
+        coordinates.put("method", "plackettLuce");
+        coordinates.put("order", "ascending");
+        coordinates.put("mu", "25.0");
+        coordinates.put("sigma", Double.toString(PRIOR_SIGMA));
+        coordinates.put("tau", "0.0");
+        coordinates.put("playerKeys", "p");
+        coordinates.put("contestKeys", "c");
+        coordinates.put("field", "y");
+        coordinates.put("top", "3");
+        coordinates.put("depthScale", "1.5");
+        final Rating.State fromCoordinates = new Rating.State();
+        Rating.of(coordinates).update(fromCoordinates, contest);
+        for (final String player : List.of("a", "b", "c", "d", "e")) {
+            Assertions.assertEquals(once.players.get(player).mu, fromCoordinates.players.get(player).mu, 0d, player);
+            Assertions.assertEquals(once.players.get(player).sigma, fromCoordinates.players.get(player).sigma, 0d, player);
+        }
+        Assertions.assertNotEquals(reference.players.get("e").mu, fromCoordinates.players.get("e").mu, "the depth took effect");
+
         // the depth is a plackettLuce notion; a place count and a scale factor are validated
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.bradleyTerry, true, 0d).withDepth(2, 1d));
         Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.gaussian, true, 0d).withDepth(0, 1.5));
@@ -1452,6 +1472,13 @@ public class RatingTest {
             final FeaturePlan plan = compile(SPEC.replace(op, e.getKey()));
             Assertions.assertTrue(hasCode(plan, e.getValue()), () -> e.getKey() + "\n" + plan.describe());
         }
+        // top and depthScale are independent: both invalid, both reported in one run
+        final FeaturePlan depths = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, top: 0, depthScale: 0.5}"));
+        Assertions.assertEquals(2, depths.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.parameter")).count(), depths::describe);
+        // a place beyond int range is reported, not wrapped into a small one (4294967298 would read as 2)
+        final FeaturePlan wrapped = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, top: 4294967298}"));
+        Assertions.assertTrue(hasCode(wrapped, "sequence.rating.parameter"), wrapped::describe);
+        Assertions.assertTrue(wrapped.getColumns().stream().noneMatch(c -> "2".equals(c.getCoordinates().get("top"))), wrapped::describe);
         // a rating has no bounded window, no general filter and no future direction
         for (final String windows : List.of("[{maxAge: P365D}]", "[{maxEvents: 10}]", "[{filter: \"start_price > 10\"}]", "[{filter: \"final_price = $self.final_price\"}]")) {
             final FeaturePlan plan = compile(SPEC.replace("    entity: seller\n    ops:", "    entity: seller\n    windows: " + windows + "\n    ops:"));

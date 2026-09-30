@@ -1410,7 +1410,9 @@ public class FeatureSpec implements Serializable {
             op.regressors.add(op.against);
         }
         for (final JsonElement k : arrayOf(o.get("top"))) {
-            if (k.isJsonPrimitive() && k.getAsJsonPrimitive().isNumber() && k.getAsDouble() == Math.rint(k.getAsDouble())) op.top.add(k.getAsInt());
+            // in int range before getAsInt, which would wrap a larger place silently (4294967298 → 2)
+            if (k.isJsonPrimitive() && k.getAsJsonPrimitive().isNumber() && k.getAsDouble() == Math.rint(k.getAsDouble())
+                    && Math.abs(k.getAsDouble()) <= Integer.MAX_VALUE) op.top.add(k.getAsInt());
             else if ("rating".equals(op.type)) diagnostics.error("sequence.rating.parameter", loc, "top must be an integer place: " + k);
             else diagnostics.error("context.harville.top", loc, "top must list integer places: " + k);
         }

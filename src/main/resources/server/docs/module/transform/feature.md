@@ -473,9 +473,13 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     still information (the tie form moves tied entries toward each other and narrows them), `top` reads nothing
     there. A tie group reaching into the depth is read whole (a place is 1 + the entries that did strictly better).
   - **`depthScale: g`** (≥ 1, default 1) makes the choice at place `q` at the scale `c · g^(q − 1)` — the
-    rank-ordered logit with a scale per depth (Hausman & Ruud): a deeper place moves `mu` by `1 / g^(q − 1)` and
-    narrows `sigma` by `1 / g^(2(q − 1))` of what it otherwise would (`g: 1.2`: the 5th place counts 48% in `mu`,
-    the 10th 19%). The first place keeps the scale `c`, so the win probability `ratingProb` reads is the same.
+    rank-ordered logit with a scale per depth (Hausman & Ruud): between entries of equal strength a deeper place
+    moves `mu` by `1 / g^(q − 1)` and narrows `sigma` by `1 / g^(2(q − 1))` of what it otherwise would (`g: 1.2`:
+    the 5th place counts 48% in `mu`, the 10th 19%). The choice's probabilities are read at the wider scale too, so
+    they are flatter: a lopsided choice deep in the ranking (a strong entry expectedly ahead of weak ones by a couple
+    of `c` or more — small fields of well-known entries) is less predictable there, and its expected result can move
+    and narrow them *more* than the plain update. The first place keeps the scale `c`, so the win probability
+    `ratingProb` reads is the same.
   - Together: `top` is the hard cut, `depthScale` the soft decay above it. Two ops over the same outcome with
     different depths need their own `as`.
 - **Warm-up.** Every player starts from the prior, so over the first stretch of the input the ratings of a
