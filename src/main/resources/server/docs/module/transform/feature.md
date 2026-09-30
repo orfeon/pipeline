@@ -671,7 +671,7 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     # skill_all_shape_team_mu            level + slope · this row's start_price_z: the strength its contest sees
     ```
 
-    Several such members over the columns of a condition encoding (distance, surface, …) are a low-rank model of
+    Several such members over the columns of a condition encoding (price band, region, …) are a low-rank model of
     the entity's condition-specific strength with the conditions known — the per-entity loadings are what the
     contests estimate. Centre / standardise a weight: a slope identifies the change *across* its values, and the
     level reads the strength at weight 0. A weight of 0 leaves the member out of that row's team (no update); a

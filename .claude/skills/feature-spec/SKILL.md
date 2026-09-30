@@ -401,7 +401,7 @@ not alter values).
   absorbed into the entities' ratings; add it back in the model. Entities whose strength is still changing:
   `tauBy:` a pre-event row column giving the drift per contest (or per `tauPer`) in place of `tau`. How erratic an
   entity is has no op: the module doc's *Inconsistency* recipe reads it as the spread of its contest-net surprises.
-- **`rating` whose strength depends on a condition** (price level, distance, surface): add weighted components of
+- **`rating` whose strength depends on a condition** (price level, region, item condition): add weighted components of
   the entity itself, `with: [{entity: <block entity>, name: <x>Slope, weight: <standardised condition column>,
   mu: 0, sigma: <expected slope size>}]` — the contests estimate each entity's slope; read `team: [mu]` for the
   strength at this row's condition. The weight must be pre-event, and an entity learns its slope only across

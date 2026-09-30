@@ -625,7 +625,9 @@ public class SequenceEvaluator implements Serializable {
     private static Object readRating(final ColumnPlan plan, final Rating.State ratings, final Map<String, Object> row, final long nowMillis) {
         // the row's own drift reaches a sigma read only (under tauPer): the other readouts do not look it up
         final double rowTau = "sigma".equals(plan.func) ? plan.rating.rowTau(row) : Double.NaN;
-        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis, rowTau, plan.rating.weightsOf(row));
+        // a team's count is of the team itself: only its mu / sigma / deviation read the members' weights
+        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis, rowTau,
+                "count".equals(plan.func) ? null : plan.rating.weightsOf(row));
         return plan.rating.read(ratings, plan.ratingMember, plan.rating.memberKey(row, plan.ratingMember), plan.func, nowMillis, rowTau);
     }
 

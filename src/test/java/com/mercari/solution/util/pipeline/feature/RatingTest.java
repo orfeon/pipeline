@@ -1255,6 +1255,12 @@ public class RatingTest {
             Assertions.assertFalse(required.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": required");
             Assertions.assertTrue(optional.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": optional");
             Assertions.assertFalse(optional.players.containsKey(weighted.memberKey(Map.of("agent_id", "g2"), 1)), method + ": the absent agent");
+            // a weight of 0 leaves the member out whatever its keys: a row without the agent's id still joins
+            final List<String> noAgent = weighted.teamOf(Map.of("seller_id", "s1", "w", 0d));
+            Assertions.assertNotNull(noAgent, method + ": weight 0, no agent id");
+            Assertions.assertNull(noAgent.get(1), method + ": weight 0, no agent id");
+            // a weight whose square overflows is no weight (its infinite variance would turn the replay into NaN)
+            Assertions.assertNull(weighted.teamOf(Map.of("seller_id", "s1", "agent_id", "g1", "w", 1e200)), method + ": an overflowing weight");
         }
         // the flags ride the coordinates, each at most once
         final Rating.Member both = new Rating.Member("slope", List.of("seller_id"), 0d, 1d, 0d, true, "price_z");
@@ -1292,6 +1298,7 @@ public class RatingTest {
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: seller, weight: start_price}"), "the block's entity without a name of its own");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: seller}"), "a name taken by the block's entity");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: team}"), "team is the team's own segment");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: ''}"), "an empty name is no pool");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan invalid = compileTeam(e.getKey());
             Assertions.assertTrue(invalid.getDiagnostics().hasErrors() && hasCode(invalid, "sequence.rating.with"), () -> e.getValue() + "\n" + invalid.describe());

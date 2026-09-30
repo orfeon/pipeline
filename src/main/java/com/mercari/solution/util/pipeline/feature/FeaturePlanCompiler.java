@@ -1973,7 +1973,12 @@ public final class FeaturePlanCompiler {
             // a member's name is its pool and column segment: the entity's unless declared, so naming it is what lets
             // an entity - the block's own included - be a second component of the team
             final String name = m.name != null ? m.name : member.name();
-            if (name.equals(entity.name())) {
+            if (name.isBlank()) {
+                // an empty pool is no namespace (Rating.withTeam rejects it - at plan time, a crash of the compiler) and an
+                // empty column segment reads <as>__<func>
+                diagnostics.error("sequence.rating.with", loc, "the name of member " + member.name() + " is empty: name: is the member's pool and column segment");
+                valid = false;
+            } else if (name.equals(entity.name())) {
                 diagnostics.error("sequence.rating.with", loc, "with lists the OTHER members of the team: " + entity.name() + " is the block's entity, the rated player itself"
                         + (member.name().equals(entity.name()) ? " - give a further component of it a name: of its own (e.g. {entity: " + entity.name()
                         + ", name: " + entity.name() + "Slope, weight: <column>})" : ""));
@@ -1999,12 +2004,12 @@ public final class FeaturePlanCompiler {
             }
             for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
             if (!m.unknown.isEmpty()) {
-                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name()
+                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + name
                         + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
                 valid = false;
             }
             if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
-                diagnostics.error("sequence.rating.with", loc, "member " + member.name() + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
                 valid = false;
             }
         }

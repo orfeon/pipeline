@@ -1409,7 +1409,7 @@ public class FeatureSpec implements Serializable {
                     }
                     for (final String key : mo.keySet()) if (!TEAM_MEMBER_KEYS.contains(key)) member.unknown.add(key);
                 } else {
-                    op.withInvalid = "with must list entity names or {entity, mu, sigma, tau} members: " + m;
+                    op.withInvalid = "with must list entity names or {entity, name, weight, mu, sigma, tau, optional} members: " + m;
                     continue;
                 }
                 op.with.add(member);
