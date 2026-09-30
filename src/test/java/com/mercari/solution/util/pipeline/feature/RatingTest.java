@@ -1245,7 +1245,11 @@ public class RatingTest {
             final Rating.State zero = new Rating.State();
             weighted.fold(zero, contest.apply(0d));
             Assertions.assertEquals(3, zero.players.size(), method + ": the sellers alone");
-            Assertions.assertNull(weighted.teamOf(contest.apply(0d).get(0).values()).get(1), "a weight of 0 is no member");
+            // ... but keeps its key: the team is who takes part, whatever the weights (its strength counts nothing of it)
+            final Map<String, Object> zeroRow = contest.apply(0d).get(0).values();
+            final List<String> zeroTeam = weighted.teamOf(zeroRow);
+            Assertions.assertEquals(weighted.memberKey(zeroRow, 1), zeroTeam.get(1), "a weight of 0 keeps the member's identity");
+            Assertions.assertEquals(zero.players.get(zeroTeam.get(0)).mu, weighted.readTeam(zero, zeroTeam, "mu", 1L, Double.NaN, weighted.weightsOf(zeroRow)));
             // a missing weight is a missing member: the row out when required, the member absent when optional
             final List<SequenceEvaluator.Past> gap = List.of(row(1L, "c1", "x", 1, "seller_id", "s1", "agent_id", "g1", "w", 1d),
                     row(1L, "c1", "x", 2, "seller_id", "s2", "agent_id", "g2"), row(1L, "c1", "x", 3, "seller_id", "s3", "agent_id", "g1", "w", 1d));
@@ -1255,7 +1259,30 @@ public class RatingTest {
             Assertions.assertFalse(required.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": required");
             Assertions.assertTrue(optional.players.containsKey(weighted.memberKey(Map.of("seller_id", "s2"), 0)), method + ": optional");
             Assertions.assertFalse(optional.players.containsKey(weighted.memberKey(Map.of("agent_id", "g2"), 1)), method + ": the absent agent");
+            // a weight of 0 leaves the member out whatever its keys: a row without the agent's id still joins
+            final List<String> noAgent = weighted.teamOf(Map.of("seller_id", "s1", "w", 0d));
+            Assertions.assertNotNull(noAgent, method + ": weight 0, no agent id");
+            Assertions.assertNull(noAgent.get(1), method + ": weight 0, no agent id");
+            // a weight whose square overflows is no weight (its infinite variance would turn the replay into NaN)
+            Assertions.assertNull(weighted.teamOf(Map.of("seller_id", "s1", "agent_id", "g1", "w", 1e200)), method + ": an overflowing weight");
         }
+        // a team's identity does not hinge on a weight being exactly 0: the same seller and agent at weights 0 and 0.5 are one
+        // team (two contests of it), and the agent counts the contest it took part in only
+        final Rating counted = Rating.of(Rating.Method.plackettLuce, true, null, null, null, 0d, null, null, List.of("seller_id"), List.of("c"), "y")
+                .withTeam("seller", List.of(new Rating.Member("agent", List.of("agent_id"), 0d, 2d, 0d, false, "w")), true);
+        final Rating.State twice = new Rating.State();
+        counted.fold(twice, List.of(row(1L, "c1", "x", 1, "seller_id", "s1", "agent_id", "g1", "w", 0d), row(1L, "c1", "x", 2, "seller_id", "s2", "agent_id", "g2", "w", 1d)));
+        counted.fold(twice, List.of(row(2L, "c2", "x", 1, "seller_id", "s1", "agent_id", "g1", "w", 0.5), row(2L, "c2", "x", 2, "seller_id", "s2", "agent_id", "g2", "w", 1d)));
+        final Map<String, Object> pair = Map.of("seller_id", "s1", "agent_id", "g1", "w", 0.5);
+        Assertions.assertEquals(2L, counted.readTeam(twice, counted.teamOf(pair), "count", 2L, Double.NaN, null));
+        Assertions.assertEquals(1L, counted.read(twice, 1, counted.memberKey(pair, 1), "count", 2L), "the weight-0 contest is not the agent's");
+        Assertions.assertEquals(2L, counted.read(twice, 0, counted.memberKey(pair, 0), "count", 2L));
+        // a weighted rating is never read with weights of 1 by default: an entry or a team read without the row's weights fails
+        Assertions.assertThrows(IllegalArgumentException.class, () -> counted.update(new Rating.State(), List.of(
+                new Rating.Entry(counted.teamOf(pair), 1), new Rating.Entry(counted.teamOf(Map.of("seller_id", "s2", "agent_id", "g2", "w", 1d)), 2))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> counted.readTeam(twice, counted.teamOf(pair), "mu", 2L));
+        Assertions.assertEquals(2L, counted.readTeam(twice, counted.teamOf(pair), "count", 2L), "a count needs no weights");
+
         // the flags ride the coordinates, each at most once
         final Rating.Member both = new Rating.Member("slope", List.of("seller_id"), 0d, 1d, 0d, true, "price_z");
         Assertions.assertEquals("slope|seller_id|0.0|1.0|0.0|optional|weight=price_z", Rating.encodeMembers(List.of(both)));
@@ -1356,6 +1383,11 @@ public class RatingTest {
             rating.fold(varying, List.of(sale("s1", 3, 1.5), sale("s2", 2, 0.5), sale("s3", 1, -0.5), sale("s4", 0, -1.5)));
             Assertions.assertTrue(varying.players.get(coefficient).mu > 0, method.name());
             Assertions.assertTrue(varying.players.get(coefficient).sigma < 1d, method.name());
+            // a weight of 0 on every row: the coefficient takes no part (not created, no count)
+            final Rating.State zeros = new Rating.State();
+            rating.fold(zeros, List.of(sale("s1", 3, 0d), sale("s2", 2, 0d), sale("s3", 1, 0d)));
+            Assertions.assertFalse(zeros.players.containsKey(coefficient), method + ": weight 0 everywhere");
+            Assertions.assertEquals(3, zeros.players.size(), method.name());
             // a row without the weight: a missing member (the row joins no contest)
             final Rating.State gap = new Rating.State();
             rating.fold(gap, List.of(sale("s1", 3, 1d), sale("s2", 2, null), sale("s3", 1, -1d)));
@@ -1418,6 +1450,18 @@ public class RatingTest {
             Assertions.assertTrue(c.getPastInputs().contains("start_price") && c.getInputs().contains("start_price"), c.getCanonicalName());
         }
         Assertions.assertEquals("start_price", Rating.of(member.getCoordinates()).members().get(2).weightField());
+        // one entity twice with different weights (none is one) is two components: the agent's level and its price slope
+        final FeaturePlan twoComponents = compileTeam(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]",
+                "with: [{entity: agent, mu: 0, sigma: 4}, {entity: agent, name: agentPrice, weight: start_price, mu: 0, sigma: 1}]"));
+        Assertions.assertFalse(twoComponents.getDiagnostics().hasErrors(), twoComponents::describe);
+        Assertions.assertNotNull(twoComponents.getColumn("skill_all_duo_agentPrice_mu"), twoComponents::describe);
+        // a weight names a baseline first, as offset / tauBy do
+        final FeaturePlan baseline = compileTeamSpec(teamSpec(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4, weight: priceWeight}"))
+                .replace("entities:", "baselines:\n  - {name: priceWeight, expr: \"start_price / 100\"}\nentities:"));
+        Assertions.assertFalse(baseline.getDiagnostics().hasErrors(), baseline::describe);
+        final String baselineWeight = Rating.of(baseline.getColumn("skill_all_duo_mu").getCoordinates()).members().get(1).weightField();
+        Assertions.assertNotEquals("priceWeight", baselineWeight, "the baseline's column, not its name");
+        Assertions.assertNotNull(baseline.getColumn(baselineWeight), baseline::describe);
 
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4, weight: category}"), "a weight is numeric");
@@ -1425,6 +1469,11 @@ public class RatingTest {
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: seller, weight: start_price}"), "the block's entity without a name of its own");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: seller}"), "a name taken by the block's entity");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: team}"), "team is the team's own segment");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, name: ''}"), "an empty name is no pool");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4}, {entity: agent, name: agentB}"), "an unweighted repeat of an entity");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: agent, mu: 0, sigma: 4}, {entity: seller, name: sellerB}"), "an unweighted repeat of the rated entity");
+        cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{entity: seller, name: s1, weight: start_price}, {entity: seller, name: s2, weight: start_price}"),
+                "two components of one entity with one weight");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan invalid = compileTeam(e.getKey());
             Assertions.assertTrue(invalid.getDiagnostics().hasErrors() && hasCode(invalid, "sequence.rating.with"), () -> e.getValue() + "\n" + invalid.describe());

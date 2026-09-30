@@ -278,11 +278,14 @@ public final class Rating implements Serializable {
     private final double depthScale;
     /** The fields of a row giving its known performance shift and the rated player's drift (null: none). See {@link #withRowInputs}. */
     private final String offsetField, tauField;
+    /** Whether any member counts with a weight read from the row ({@link Member#weightField}); derived from {@code members}. */
+    private final boolean weighted;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
                    final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
                    final boolean countTeams, final int top, final double depthScale, final String offsetField, final String tauField) {
         this.members = members;
+        this.weighted = members.stream().anyMatch(m -> m.weightField() != null);
         this.countTeams = countTeams;
         this.top = top;
         this.depthScale = depthScale;
@@ -531,44 +534,38 @@ public final class Rating implements Serializable {
 
     /**
      * The team a row is rated as — the state keys of its members, null in the place of an absent optional member — or
-     * null when a required member is missing: the row joins no contest.
+     * null when a required member is missing (a key or its weight): the row joins no contest. A member whose weight is
+     * 0 keeps its key (the team is who takes part, whatever the weights: its identity does not hinge on a weight being
+     * exactly 0) and counts nothing — {@link #update} and {@link #readTeam} skip it; with no key it is left out rather
+     * than missing (a weight of 0 needs none).
      */
     public List<String> teamOf(final Map<String, Object> row) {
         final String[] team = new String[members.size()];
         for (int j = 0; j < team.length; j++) {
-            String key = memberKey(row, j);
-            // a weighted member: a missing weight is a missing member, a weight of 0 leaves it out of this row's team
-            if (key != null && members.get(j).weightField() != null) {
-                final double weight = weightOf(row, j);
-                if (Double.isNaN(weight)) key = null;
-                else if (weight == 0d) {
-                    team[j] = null;
-                    continue;
-                }
-            }
-            if (key == null && !members.get(j).optional()) return null;
+            // a missing weight is a missing member (1 for an unweighted one)
+            final double weight = weightOf(row, j);
+            final String key = Double.isNaN(weight) ? null : memberKey(row, j);
+            if (key == null && weight != 0d && !members.get(j).optional()) return null;
             team[j] = key;
         }
         return java.util.Collections.unmodifiableList(Arrays.asList(team));
     }
 
-    /** Whether any member counts with a weight read from the row. */
-    private boolean weighted() {
-        for (final Member m : members) if (m.weightField() != null) return true;
-        return false;
-    }
-
-    /** The weight of a row's {@code member}-th member: 1 without a weight field, NaN when the field holds no finite number. */
+    /**
+     * The weight of a row's {@code member}-th member: 1 without a weight field, NaN when the field holds no finite
+     * number — or one whose square overflows: its infinite variance would turn the team's update, and so its members'
+     * ratings and the moments of their pools, into NaN for the rest of the replay (as {@link #rowTau} guards a drift).
+     */
     private double weightOf(final Map<String, Object> row, final int member) {
         final String field = members.get(member).weightField();
         if (field == null) return 1d;
         final Double weight = row == null ? null : SequenceEvaluator.finite(row.get(field));
-        return weight == null ? Double.NaN : weight;
+        return weight == null || !Double.isFinite(weight * weight) ? Double.NaN : weight;
     }
 
     /** The weights of a row's members (null: no member is weighted, every weight is 1), aligned with {@link #teamOf}. */
     public double[] weightsOf(final Map<String, Object> row) {
-        if (!weighted()) return null;
+        if (!weighted) return null;
         final double[] weights = new double[members.size()];
         for (int j = 0; j < weights.length; j++) weights[j] = weightOf(row, j);
         return weights;
@@ -688,6 +685,13 @@ public final class Rating implements Serializable {
             if (entries.get(i).members().size() != k) {
                 throw new IllegalArgumentException("an entry of " + entries.get(i).members().size() + " member(s) in a rating of teams of " + k);
             }
+            if (entries.get(i).weights() != null && entries.get(i).weights().length != k) {
+                throw new IllegalArgumentException("an entry of " + entries.get(i).weights().length + " weight(s) in a rating of teams of " + k);
+            }
+            // a weighted rating read with weights of 1 would be silently wrong: an entry must carry the row's weights
+            if (weighted && entries.get(i).weights() == null) {
+                throw new IllegalArgumentException("a rating with weighted members needs the entries' weights (Rating.weightsOf(row) - fold builds them)");
+            }
             ids[i] = id(entries.get(i));
         }
         // a contest needs two distinct players (teams); the entries are sorted by them, so the ends decide it
@@ -705,8 +709,9 @@ public final class Rating implements Serializable {
         final double[] m = new double[n], v = new double[n];
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
-                // an absent optional member adds nothing to the team (never member 0: the rated player is required)
-                if (entries.get(i).members().get(j) == null) continue;
+                // an absent optional member, or one of weight 0, adds nothing to the team (never member 0: the rated
+                // player is required and weighs 1)
+                if (entries.get(i).members().get(j) == null || entries.get(i).weight(j) == 0d) continue;
                 final Player p = state.players.get(entries.get(i).members().get(j));
                 mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
                 // the row's own drift is the rated player's (member 0); the other members keep theirs
@@ -727,8 +732,9 @@ public final class Rating implements Serializable {
         final List<Integer> sharedIndex = new ArrayList<>();
         for (int j = 1; j < k; j++) {
             if (!members.get(j).shared()) continue;
+            // in the contest when a row carries it with a weight (a weight of 0 counts nothing, as for any member)
             for (int i = 0; i < n; i++) {
-                if (entries.get(i).members().get(j) != null) {
+                if (entries.get(i).members().get(j) != null && entries.get(i).weight(j) != 0d) {
                     sharedIndex.add(j);
                     break;
                 }
@@ -741,7 +747,7 @@ public final class Rating implements Serializable {
         for (int c = 0; c < sharedCount; c++) {
             final int j = sharedIndex.get(c);
             for (int i = 0; i < n; i++) {
-                if (entries.get(i).members().get(j) == null) continue;
+                if (entries.get(i).members().get(j) == null || entries.get(i).weight(j) == 0d) continue;
                 sharedWeights[c][i] = entries.get(i).weight(j);
                 if (sharedKey[c] == null) {
                     sharedKey[c] = entries.get(i).members().get(j);
@@ -784,8 +790,9 @@ public final class Rating implements Serializable {
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
                 final String key = entries.get(i).members().get(j);
-                // a shared member is conditioned on once for the contest (below), not per row
-                if (key == null || j > 0 && members.get(j).shared()) continue;
+                // an absent member, or one of weight 0, took no part (no share, no count); a shared member is
+                // conditioned on once for the contest (below), not per row
+                if (key == null || entries.get(i).weight(j) == 0d || j > 0 && members.get(j).shared()) continue;
                 Change c = changes.get(key);
                 if (c == null) {
                     c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
@@ -1256,6 +1263,10 @@ public final class Rating implements Serializable {
      */
     public Object readTeam(final State state, final List<String> team, final String func, final long nowMillis, final double rowTau, final double[] weights) {
         if (team == null) return null;
+        // a team's count is of the team itself; its strength needs the row's weights (weights of 1 would be silently wrong)
+        if (weighted && weights == null && !"count".equals(func)) {
+            throw new IllegalArgumentException("team: [" + func + "] of a rating with weighted members needs the row's weights (Rating.weightsOf(row))");
+        }
         // func null first: TEAM_FUNCS is an immutable list, whose contains(null) throws
         if (func == null || !TEAM_FUNCS.contains(func)) {
             throw new IllegalArgumentException("unknown team readout: " + func + " (available: " + TEAM_FUNCS + ")");
@@ -1272,8 +1283,8 @@ public final class Rating implements Serializable {
         }
         double sum = 0;
         for (int j = 0; j < members.size(); j++) {
-            // an absent optional member is no part of the row's team
-            if (team.get(j) == null) continue;
+            // an absent optional member, or one of weight 0, is no part of the row's strength
+            if (team.get(j) == null || weights != null && weights[j] == 0d) continue;
             final Member m = members.get(j);
             final Player p = state == null ? null : state.players.get(team.get(j));
             final double a = weights == null ? 1d : weights[j];

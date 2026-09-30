@@ -1812,7 +1812,8 @@ public final class FeaturePlanCompiler {
                 final List<String> keys = new ArrayList<>();
                 if (member != null) for (final String key : member.keys()) keys.add(canonicalOf(key));
                 final String name = m.name != null ? m.name : member.name();
-                final String weight = m.weight == null ? null : canonicalOf(m.weight);
+                // a baseline name first, as for offset / tauBy: one name reads one value whichever parameter names it
+                final String weight = m.weight == null ? null : canonicalOf(baselineColumns.getOrDefault(m.weight, m.weight));
                 members.add(new Rating.Member(name, keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
                         m.optional, weight));
                 teamEntities.add(member);
@@ -1972,6 +1973,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final Set<String> seen = new HashSet<>();
+        // the components of the team (entity x weight column): the rated player is its entity, unweighted
+        final Set<String> components = new HashSet<>(List.of(entity.name() + "\u0000"));
         // the rated player's pool is the block's entity name: checked once, not once per member
         if (!validTeamName(entity.name(), loc)) valid = false;
         for (final FeatureSpec.TeamMember m : op.with) {
@@ -1990,7 +1993,12 @@ public final class FeaturePlanCompiler {
             // a member's name is its pool and column segment: the entity's unless declared, so naming it is what lets
             // an entity - the block's own included - be a second component of the team
             final String name = m.name != null ? m.name : member.name();
-            if (name.equals(entity.name())) {
+            if (name.isBlank()) {
+                // an empty pool is no namespace (Rating.withTeam rejects it - at plan time, a crash of the compiler) and an
+                // empty column segment reads <as>__<func>
+                diagnostics.error("sequence.rating.with", loc, "the name of member " + member.name() + " is empty: name: is the member's pool and column segment");
+                valid = false;
+            } else if (name.equals(entity.name())) {
                 diagnostics.error("sequence.rating.with", loc, "with lists the OTHER members of the team: " + entity.name() + " is the block's entity, the rated player itself"
                         + (member.name().equals(entity.name()) ? " - give a further component of it a name: of its own (e.g. {entity: " + entity.name()
                         + ", name: " + entity.name() + "Slope, weight: <column>})" : ""));
@@ -2004,24 +2012,35 @@ public final class FeaturePlanCompiler {
                 valid = false;
             }
             if (!validTeamName(name, loc)) valid = false;
+            String weightColumn = null;
             if (m.weight != null) {
-                final Ref weight = resolve(m.weight);
+                final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
                 if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
                     diagnostics.error("sequence.rating.with", loc, "the weight of member " + name + " must name a numeric column (the member counts a * mu in the team): " + m.weight
                             + (weight == null ? "" : " is not numeric"));
                     valid = false;
                 } else if (!validTeamName(weight.canonical(), loc)) {
                     valid = false;
+                } else {
+                    weightColumn = weight.canonical();
                 }
+            }
+            // (b) a component is an entity with a weight: two of one entity with one weight (none included) always move
+            // together, so neither is identified - a repeat of an entity must count with a weight of its own
+            if (!components.add(member.name() + "\u0000" + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " repeats the component " + member.name()
+                        + (m.weight == null ? " (unweighted)" : " x " + m.weight) + " of the team: two members of one entity with one weight always move"
+                        + " together and neither is identified - give the repeat a weight of its own (a condition it is the slope in)");
+                valid = false;
             }
             for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
             if (!m.unknown.isEmpty()) {
-                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name()
+                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + name
                         + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
                 valid = false;
             }
             if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
-                diagnostics.error("sequence.rating.with", loc, "member " + member.name() + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
                 valid = false;
             }
         }
@@ -2053,7 +2072,8 @@ public final class FeaturePlanCompiler {
                     + " the rows of a contest tells it anything (a constant is the contest's common shift)");
             return false;
         }
-        final Ref weight = resolve(m.weight);
+        // a baseline name first, as for every weight / offset / tauBy
+        final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
         if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
             diagnostics.error("sequence.rating.with", loc, "the weight of shared member " + m.name + " must name a numeric column: " + m.weight
                     + (weight == null ? "" : " is not numeric"));
