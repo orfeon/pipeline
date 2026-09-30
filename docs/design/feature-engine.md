@@ -351,7 +351,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   and `a² · v`: `update` sums `m = Σ a_j mu_j`, `v = Σ a_j² v_j` and shares `a_j v_j / v` of `Ω`, `a_j² v_j / v` of
   `Δ` — the member reparametrised (`RatingTest.testWeightedMember`: weight `a` and prior sd `σ` is the unweighted
   member of prior sd `|a| σ`, read back divided by `a`). `Entry.weights` (null = all 1) comes from `weightsOf(row)`;
-  a weight of 0 empties the member's slot in `teamOf`, a missing one is a missing member; `readTeam` takes the
+  a weight of 0 keeps the member's key in `teamOf` (the team's identity is who takes part, whatever the weights) and
+  `update` / `readTeam` skip it (no share, no count; without a key it is left out, not missing), a missing weight is a
+  missing member; a weighted rating fails an entry or a team read without the row's weights rather than read weights
+  of 1; the compiler rejects two members of one entity with one weight (none included: never identified); `readTeam` takes the
   row's weights, so the weight field is a self input of every column of the op as well as a past input. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests

@@ -1811,7 +1811,8 @@ public final class FeaturePlanCompiler {
                 final List<String> keys = new ArrayList<>();
                 for (final String key : member.keys()) keys.add(canonicalOf(key));
                 final String name = m.name != null ? m.name : member.name();
-                final String weight = m.weight == null ? null : canonicalOf(m.weight);
+                // a baseline name first, as for offset / tauBy: one name reads one value whichever parameter names it
+                final String weight = m.weight == null ? null : canonicalOf(baselineColumns.getOrDefault(m.weight, m.weight));
                 members.add(new Rating.Member(name, keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau,
                         m.optional, weight));
                 teamEntities.add(member);
@@ -1960,6 +1961,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final Set<String> seen = new HashSet<>();
+        // the components of the team (entity x weight column): the rated player is its entity, unweighted
+        final Set<String> components = new HashSet<>(List.of(entity.name() + "\u0000"));
         // the rated player's pool is the block's entity name: checked once, not once per member
         if (!validTeamName(entity.name(), loc)) valid = false;
         for (final FeatureSpec.TeamMember m : op.with) {
@@ -1992,15 +1995,26 @@ public final class FeaturePlanCompiler {
                 valid = false;
             }
             if (!validTeamName(name, loc)) valid = false;
+            String weightColumn = null;
             if (m.weight != null) {
-                final Ref weight = resolve(m.weight);
+                final Ref weight = resolve(baselineColumns.getOrDefault(m.weight, m.weight));
                 if (weight == null || !OperatorCatalog.isNumeric(weight.type())) {
                     diagnostics.error("sequence.rating.with", loc, "the weight of member " + name + " must name a numeric column (the member counts a * mu in the team): " + m.weight
                             + (weight == null ? "" : " is not numeric"));
                     valid = false;
                 } else if (!validTeamName(weight.canonical(), loc)) {
                     valid = false;
+                } else {
+                    weightColumn = weight.canonical();
                 }
+            }
+            // (b) a component is an entity with a weight: two of one entity with one weight (none included) always move
+            // together, so neither is identified - a repeat of an entity must count with a weight of its own
+            if (!components.add(member.name() + "\u0000" + (weightColumn != null ? weightColumn : m.weight != null ? m.weight : ""))) {
+                diagnostics.error("sequence.rating.with", loc, "member " + name + " repeats the component " + member.name()
+                        + (m.weight == null ? " (unweighted)" : " x " + m.weight) + " of the team: two members of one entity with one weight always move"
+                        + " together and neither is identified - give the repeat a weight of its own (a condition it is the slope in)");
+                valid = false;
             }
             for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
             if (!m.unknown.isEmpty()) {

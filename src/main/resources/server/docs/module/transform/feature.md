@@ -674,8 +674,12 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     Several such members over the columns of a condition encoding (price band, region, …) are a low-rank model of
     the entity's condition-specific strength with the conditions known — the per-entity loadings are what the
     contests estimate. Centre / standardise a weight: a slope identifies the change *across* its values, and the
-    level reads the strength at weight 0. A weight of 0 leaves the member out of that row's team (no update); a
-    missing weight is a missing member (the row joins no contest, or — `optional: true` — the member is absent).
+    level reads the strength at weight 0. A weight of 0 counts nothing of the member in that row (it is not updated
+    and the contest is not in its `count`) but keeps it in the team's identity — the same entities at weights 0 and
+    0.5 are one team for `team: [count]`; a member of weight 0 needs no key. A missing weight is a missing member
+    (the row joins no contest, or — `optional: true` — the member is absent). Two members of one entity with the
+    same weight (or both unweighted — the block's entity is one, unweighted) always move together and neither is
+    identified: a repeat of an entity must count with a weight of its own (`sequence.rating.with`).
     The weight is read from the row by the team readouts too (the strength *this* row's contest will see), so it
     must be known at the row's `computeAt`. Within one contest a slope and the level it belongs to move together
     (each takes its share of the row's change); they are told apart across the entity's contests at different
