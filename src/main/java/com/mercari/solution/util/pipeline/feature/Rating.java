@@ -48,6 +48,19 @@ import java.util.TreeMap;
  * entity's slope in that condition. A weight of 0 leaves the member out of that row's team; a missing one is a missing
  * member. The rated player always counts with weight 1.
  *
+ * <p>A <b>shared</b> member has no key fields: one rating for the whole pool, entering every row with the row's weight
+ * — a coefficient of a condition (a handicap per unit, a known covariate) learned from the contests. It is not one
+ * member of n independent teams: every row of a contest carries it, so the rows are correlated through it, and
+ * summing its per-row shares would narrow it n times over (a weight equal on every row tells nothing, contests being
+ * read up to a common shift, and must leave it at its prior). {@code gaussian} conditions on it exactly — the shared
+ * members and the contest's common shift jointly, a (p + 1)-dimensional solve, then each team given them;
+ * {@code plackettLuce} / {@code bradleyTerry} update the teams with the shared members at their means and take one
+ * Laplace step for the shared members jointly: the contest's gradient {@code G_c} and Fisher information
+ * {@code I_cd = a_cᵀ H a_d} along their weights (cross terms included, so members with correlated weights do not
+ * each take the whole effect), the step {@code (V⁻¹ + I)⁻¹ G} and the variances the diagonal of {@code (V⁻¹ + I)⁻¹}
+ * — both built from the weights' differences between the entries, so a weight equal on every row, the contest's
+ * common shift, moves nothing and narrows nothing.
+ *
  * <p><b>Per row</b> ({@link #withRowInputs}). A known shift of a row's performance ({@code offset}: a covariate whose
  * effect is fixed — {@code m_i + offset_i} is the strength the contest expects, the offset itself is never rated) and
  * the rated player's drift read from the row ({@code tauBy}: the uncertainty a contest reopens depends on the
@@ -219,6 +232,14 @@ public final class Rating implements Serializable {
         public Member(final String pool, final List<String> keys, final double mu, final double sigma, final double tau, final boolean optional) {
             this(pool, keys, mu, sigma, tau, optional, null);
         }
+
+        /**
+         * A member without key fields: one rating shared by every row of the pool (it needs a weight). Only a member
+         * beside the rated player can be one — the rated player (member 0) of a rating built without keys is a player.
+         */
+        public boolean shared() {
+            return keys.isEmpty();
+        }
     }
 
     /**
@@ -367,7 +388,7 @@ public final class Rating implements Serializable {
     static List<Member> decodeMembers(final String text) {
         final List<Member> members = new ArrayList<>();
         for (final String part : text.split(";")) {
-            final String[] f = part.split("\\|");
+            final String[] f = part.split("\\|", -1);
             boolean optional = false, valid = f.length >= 5;
             String weight = null;
             // the flags after the five fixed fields, each at most once
@@ -377,7 +398,9 @@ public final class Rating implements Serializable {
                 else valid = false;
             }
             if (!valid) throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau[|optional][|weight=<field>]): " + part);
-            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]), optional, weight));
+            // an empty key list is a shared member
+            final List<String> keys = f[1].isEmpty() ? List.of() : List.of(f[1].split(","));
+            members.add(new Member(f[0], keys, Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]), optional, weight));
         }
         return members;
     }
@@ -436,11 +459,12 @@ public final class Rating implements Serializable {
                 throw new IllegalArgumentException("a pool cannot hold the key separators U+0001 / U+0002 (two pools would meet on one state key): '" + member.pool() + "'");
             }
             if (!pools.add(member.pool())) throw new IllegalArgumentException("two members of one team share the pool '" + member.pool() + "'");
-            // an empty key list would name every row the same member; a null one fails per row, deep in the fold
+            // an empty key list names every row the same member: a shared one, which only a weight tells apart per row
+            // (without one it would be the contest's common shift); a null one fails per row, deep in the fold
             if (member.weightField() != null && member.weightField().isEmpty()) {
                 throw new IllegalArgumentException("a member's weight names a field of the row: " + member);
             }
-            if (member.keys() == null || member.keys().isEmpty()) {
+            if (member.keys() == null || member.keys().isEmpty() && member.weightField() == null) {
                 throw new IllegalArgumentException("a member needs the key fields that name it: " + member);
             }
             if (!(member.sigma() > 0) || !(member.tau() >= 0) || !Double.isFinite(member.mu())) {
@@ -701,18 +725,74 @@ public final class Rating implements Serializable {
                 // member counts a · mu and a² · v (the rated player's weight is 1)
                 final double a = entries.get(i).weight(j);
                 m[i] = j == 0 ? mus[i * k + j] : m[i] + a * mus[i * k + j];
-                v[i] = j == 0 ? variances[i * k + j] : v[i] + a * a * variances[i * k + j];
+                // a shared member enters the expectation at its mean; its uncertainty is conditioned on jointly (below),
+                // not added to each row's as if the rows' shares of it were independent
+                if (j == 0 || !members.get(j).shared()) v[i] = j == 0 ? variances[i * k + j] : v[i] + a * a * variances[i * k + j];
             }
             // a known shift of the row's performance: the contest expects it, and rates only what is left
             if (entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
         }
-        // Ω and Δ per entry: the change of its mu, and the part of its variance the contest takes away
+        // the shared members of this contest: their weight per entry (0 where absent) and their pre-contest rating
+        final List<Integer> sharedIndex = new ArrayList<>();
+        for (int j = 1; j < k; j++) {
+            if (!members.get(j).shared()) continue;
+            // in the contest when a row carries it with a weight (a weight of 0 counts nothing, as for any member)
+            for (int i = 0; i < n; i++) {
+                if (entries.get(i).members().get(j) != null && entries.get(i).weight(j) != 0d) {
+                    sharedIndex.add(j);
+                    break;
+                }
+            }
+        }
+        final int sharedCount = sharedIndex.size();
+        final double[][] sharedWeights = new double[sharedCount][n];
+        final double[] sharedMu = new double[sharedCount], sharedVariance = new double[sharedCount];
+        final String[] sharedKey = new String[sharedCount];
+        for (int c = 0; c < sharedCount; c++) {
+            final int j = sharedIndex.get(c);
+            for (int i = 0; i < n; i++) {
+                if (entries.get(i).members().get(j) == null || entries.get(i).weight(j) == 0d) continue;
+                sharedWeights[c][i] = entries.get(i).weight(j);
+                if (sharedKey[c] == null) {
+                    sharedKey[c] = entries.get(i).members().get(j);
+                    sharedMu[c] = mus[i * k + j];
+                    sharedVariance[c] = variances[i * k + j];
+                }
+            }
+        }
+        // Ω and Δ per entry: the change of its mu, and the part of its variance the contest takes away; per shared
+        // member its change and its posterior variance
         final double[] dMu = new double[n], deltas = new double[n];
+        final double[] sharedChange = new double[sharedCount], sharedPosterior = sharedVariance.clone();
         switch (method) {
             case elo -> elo(entries, ids, m, dMu);
             case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
             case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
-            case gaussian -> gaussian(entries, m, v, dMu, deltas);
+            case gaussian -> {
+                if (sharedCount == 0) gaussian(entries, m, v, dMu, deltas);
+                else gaussianJoint(entries, m, v, sharedWeights, sharedVariance, dMu, deltas, sharedChange, sharedPosterior);
+            }
+        }
+        if (sharedCount > 0 && method != Method.gaussian) {
+            // one Laplace step for the shared members jointly: the contest's gradient G and Fisher information I along
+            // their weights (cross terms included), the step (V⁻¹ + I)⁻¹ G and the variances diag (V⁻¹ + I)⁻¹ — a step at
+            // the prior variance would overshoot by (1 + V I), and members stepping one by one would each take the whole
+            // effect their correlated weights share
+            final double[] gradient = new double[sharedCount];
+            final double[][] precision = new double[sharedCount][sharedCount];
+            if (method == Method.plackettLuce) {
+                // the choices' gradients sum to zero over each pool: Σ a_i g_i (g_i = Ω_i / v_i) is shift-free as it is
+                for (int c = 0; c < sharedCount; c++) for (int i = 0; i < n; i++) gradient[c] += sharedWeights[c][i] * dMu[i] / v[i];
+                plackettLuceInformation(entries, m, v, sharedWeights, precision);
+            } else {
+                bradleyTerryShared(entries, ids, m, v, sharedWeights, gradient, precision);
+            }
+            for (int c = 0; c < sharedCount; c++) precision[c][c] += 1d / sharedVariance[c];
+            final double[][] covariance = invert(precision);
+            for (int c = 0; c < sharedCount; c++) {
+                for (int d = 0; d < sharedCount; d++) sharedChange[c] += covariance[c][d] * gradient[d];
+                sharedPosterior[c] = covariance[c][c];
+            }
         }
 
         // a team's change is shared among its members by their part of its variance (1 for a player). The entries are
@@ -722,8 +802,9 @@ public final class Rating implements Serializable {
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
                 final String key = entries.get(i).members().get(j);
-                // an absent member, or one of weight 0, took no part: no share, no count
-                if (key == null || entries.get(i).weight(j) == 0d) continue;
+                // an absent member, or one of weight 0, took no part (no share, no count); a shared member is
+                // conditioned on once for the contest (below), not per row
+                if (key == null || entries.get(i).weight(j) == 0d || j > 0 && members.get(j).shared()) continue;
                 Change c = changes.get(key);
                 if (c == null) {
                     c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
@@ -734,6 +815,12 @@ public final class Rating implements Serializable {
                 c.change += a * share * dMu[i];
                 c.factor *= Math.max(1 - a * a * share * deltas[i], KAPPA);
             }
+        }
+        for (int c = 0; c < sharedCount; c++) {
+            final Change change = new Change(members.get(sharedIndex.get(c)), sharedMu[c], sharedVariance[c]);
+            change.change = sharedChange[c];
+            change.factor = sharedPosterior[c] / sharedVariance[c];
+            changes.put(sharedKey[c], change);
         }
         for (final Map.Entry<String, Change> e : changes.entrySet()) {
             final Change c = e.getValue();
@@ -878,6 +965,182 @@ public final class Rating implements Serializable {
             final double residual = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
             dMu[i] = v[i] * w[i] * (residual - mean);
             deltas[i] = v[i] * w[i] * (1 - w[i] / total);
+        }
+    }
+
+    /**
+     * {@link #gaussian} with shared members: the outcomes are {@code y_i = t_i + Σ_c a_ic θ_c + u + e_i} — the row's
+     * own team {@code t_i ~ N(m_i, v_i)} (its shared members at their means already in {@code m_i}), the shared members'
+     * deviations {@code θ_c ~ N(0, V_c)}, the contest's common shift {@code u} (flat: outcomes are read up to it) and the
+     * noise {@code e_i ~ N(0, β²)}. Given {@code ξ = (θ, u)} the teams are independent, and integrating them out leaves
+     * {@code y_i ~ N(m_i + x_iᵀ ξ, v_i + β²)}: {@code ξ} is conditioned exactly — precision
+     * {@code diag(1/V, 0) + Σ w_i x_i x_iᵀ}, a (p + 1)-square solve — and each team given it, the uncertainty of
+     * {@code ξ} carried into its variance ({@code v_i β² w_i + (v_i w_i)² x_iᵀ S x_i}). Without shared members this is
+     * {@link #gaussian} (the shift alone: {@code r̄}). A weight equal on every row is collinear with the shift: its
+     * member keeps its prior, mean and variance.
+     */
+    private void gaussianJoint(final List<Entry> entries, final double[] m, final double[] v, final double[][] weights, final double[] priors,
+                               final double[] dMu, final double[] deltas, final double[] sharedChange, final double[] sharedPosterior) {
+        final int n = entries.size(), p = priors.length, d = p + 1;
+        final double beta2 = beta * beta;
+        final double[] w = new double[n], r = new double[n];
+        final double[][] precision = new double[d][d];
+        final double[] b = new double[d];
+        for (int c = 0; c < p; c++) precision[c][c] = 1d / priors[c];
+        final double[] x = new double[d];
+        for (int i = 0; i < n; i++) {
+            w[i] = 1d / (v[i] + beta2);
+            r[i] = (ascending ? -entries.get(i).outcome() : entries.get(i).outcome()) - m[i];
+            design(weights, i, x);
+            for (int s = 0; s < d; s++) {
+                b[s] += w[i] * x[s] * r[i];
+                for (int t = 0; t < d; t++) precision[s][t] += w[i] * x[s] * x[t];
+            }
+        }
+        final double[][] covariance = invert(precision);
+        final double[] xi = new double[d];
+        for (int s = 0; s < d; s++) for (int t = 0; t < d; t++) xi[s] += covariance[s][t] * b[t];
+        for (int i = 0; i < n; i++) {
+            design(weights, i, x);
+            double fitted = 0, spread = 0;
+            for (int s = 0; s < d; s++) {
+                fitted += x[s] * xi[s];
+                for (int t = 0; t < d; t++) spread += x[s] * covariance[s][t] * x[t];
+            }
+            final double gain = v[i] * w[i];
+            dMu[i] = gain * (r[i] - fitted);
+            final double posterior = v[i] * beta2 * w[i] + gain * gain * spread;
+            deltas[i] = 1d - posterior / v[i];
+        }
+        for (int c = 0; c < p; c++) {
+            sharedChange[c] = xi[c];
+            sharedPosterior[c] = covariance[c][c];
+        }
+    }
+
+    /** The design row of entry i: its weights of the shared members, then 1 for the common shift. */
+    private static void design(final double[][] weights, final int i, final double[] into) {
+        for (int c = 0; c < weights.length; c++) into[c] = weights[c][i];
+        into[weights.length] = 1d;
+    }
+
+    /** The inverse of a small symmetric positive-definite matrix (Gauss–Jordan with partial pivoting). */
+    static double[][] invert(final double[][] matrix) {
+        final int d = matrix.length;
+        final double[][] a = new double[d][2 * d];
+        for (int s = 0; s < d; s++) {
+            System.arraycopy(matrix[s], 0, a[s], 0, d);
+            a[s][d + s] = 1d;
+        }
+        for (int col = 0; col < d; col++) {
+            int pivot = col;
+            for (int s = col + 1; s < d; s++) if (Math.abs(a[s][col]) > Math.abs(a[pivot][col])) pivot = s;
+            final double[] swap = a[col];
+            a[col] = a[pivot];
+            a[pivot] = swap;
+            final double scale = a[col][col];
+            if (!(Math.abs(scale) > 0)) throw new IllegalStateException("a singular shared-member system (a contest of one team?)");
+            for (int t = 0; t < 2 * d; t++) a[col][t] /= scale;
+            for (int s = 0; s < d; s++) {
+                if (s == col || a[s][col] == 0d) continue;
+                final double factor = a[s][col];
+                for (int t = 0; t < 2 * d; t++) a[s][t] -= factor * a[col][t];
+            }
+        }
+        final double[][] inverse = new double[d][d];
+        for (int s = 0; s < d; s++) System.arraycopy(a[s], d, inverse[s], 0, d);
+        return inverse;
+    }
+
+    /**
+     * The Fisher information of a {@code plackettLuce} contest along the weights {@code a} of its shared members, added
+     * into {@code into} (p × p): per choice read (every place up to {@code top}, at its scale {@code c_q}, a tie group's
+     * choices weighted by 1 / its size) the covariance of the weights under the choice's probabilities,
+     * {@code (Σ π a_c a_d − Σ π a_c · Σ π a_d) / c_q²} — zero along a weight equal on every entry, as the ranking cannot
+     * tell a common shift. The choices' probabilities are computed once for all the shared members (at the contest's
+     * scale they are the strengths {@link #plackettLuce} reads).
+     */
+    private void plackettLuceInformation(final List<Entry> entries, final double[] m, final double[] v, final double[][] a, final double[][] into) {
+        final int n = entries.size(), p = a.length;
+        double c2 = 0, best = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) {
+            c2 += v[i] + beta * beta;
+            best = Math.max(best, m[i]);
+        }
+        final double c = Math.sqrt(c2);
+        final double[] e = new double[n];
+        for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
+        final double[] first = new double[p];
+        final double[][] second = new double[p][p];
+        for (int q = 0; q < n; q++) {
+            final Entry at = entries.get(q);
+            int place = 1, ties = 0;
+            for (int s = 0; s < n; s++) {
+                final double sc = score(entries.get(s), at);
+                if (sc == 1d) place++;
+                if (sc == 0.5) ties++;
+            }
+            if (top > 0 && place > top) continue;
+            final double ratio = depthScale == 1d ? 1d : Math.pow(depthScale, place - 1), scale = c * ratio;
+            double total = 0;
+            Arrays.fill(first, 0d);
+            for (final double[] row : second) Arrays.fill(row, 0d);
+            for (int s = 0; s < n; s++) {
+                if (score(entries.get(s), at) > 0.5) continue;
+                final double strength = strength(e, m, best, c, ratio, s);
+                total += strength;
+                for (int k = 0; k < p; k++) {
+                    first[k] += strength * a[k][s];
+                    for (int l = 0; l < p; l++) second[k][l] += strength * a[k][s] * a[l][s];
+                }
+            }
+            for (int k = 0; k < p; k++) {
+                for (int l = 0; l < p; l++) {
+                    final double covariance = second[k][l] / total - (first[k] / total) * (first[l] / total);
+                    // a variance never below 0 (rounding of equal weights), a covariance as it comes
+                    into[k][l] += (k == l ? Math.max(covariance, 0d) : covariance) / ties / (scale * scale);
+                }
+            }
+        }
+    }
+
+    /**
+     * The gradient and the Fisher information of a {@code bradleyTerry} contest along the weights {@code a} of its shared
+     * members, added into {@code gradient} (p) and {@code into} (p × p). Both are read pair by pair, in the weights'
+     * DIFFERENCE between the two sides — {@code (a_i − a_q)(s − p) / c} and {@code (a_ci − a_cq)(a_di − a_dq) p (1 − p) / c²}
+     * — each pair weighted by the mean of its two sides' pairing weights (1, or 1 / the side's opponents under
+     * {@code mean}): the teams' own updates normalise each side apart, so a sum of their gradients {@code Σ a_i g_i}
+     * would not vanish along a weight equal on every row where the sides' opponent counts differ, and this does.
+     */
+    private void bradleyTerryShared(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[][] a,
+                                    final double[] gradient, final double[][] into) {
+        final int n = entries.size(), p = a.length;
+        final double[] adjacent = new double[2], norm = new double[n];
+        final boolean[][] read = new boolean[n][n];
+        for (int i = 0; i < n; i++) {
+            if (pairs == Pairs.adjacent) neighbours(entries, ids, i, adjacent);
+            int opponents = 0;
+            for (int q = 0; q < n; q++) {
+                if (!paired(entries, ids, i, q, adjacent)) continue;
+                read[i][q] = true;
+                opponents++;
+            }
+            norm[i] = pairs == Pairs.mean && opponents > 0 ? 1d / opponents : 1d;
+        }
+        final double[] difference = new double[p];
+        for (int i = 0; i < n; i++) {
+            for (int q = 0; q < n; q++) {
+                // a pair read from side i weighs norm_i / 2: from both sides, the mean of the two
+                if (!read[i][q]) continue;
+                final double weight = norm[i] / 2, c2 = v[i] + v[q] + 2 * beta * beta, c = Math.sqrt(c2);
+                final double prob = 1d / (1d + Math.exp((m[q] - m[i]) / c)), residual = score(entries.get(i), entries.get(q)) - prob;
+                for (int k = 0; k < p; k++) difference[k] = a[k][i] - a[k][q];
+                for (int k = 0; k < p; k++) {
+                    // side i's view of the pair: θ moves s_i − s_q by (a_i − a_q) · θ
+                    gradient[k] += weight * difference[k] * residual / c;
+                    for (int l = 0; l < p; l++) into[k][l] += weight * difference[k] * difference[l] * prob * (1 - prob) / c2;
+                }
+            }
         }
     }
 

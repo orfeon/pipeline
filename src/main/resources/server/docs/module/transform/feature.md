@@ -684,10 +684,35 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     must be known at the row's `computeAt`. Within one contest a slope and the level it belongs to move together
     (each takes its share of the row's change); they are told apart across the entity's contests at different
     values of the weight — an entity always seen at one value never learns its slope beyond the prior.
+  - **Shared members (learned coefficients).** A member with a `name` and a `weight` but **no `entity`** is one
+    rating for the whole pool, entering every row with the row's weight — the coefficient of a condition, learned
+    from the contests instead of fixed in an `offset`:
+
+    ```yaml
+    with:
+      - {name: priceEffect, weight: start_price_z, mu: 0, sigma: 0.5, tau: 0}   # skill_all_<as>_priceEffect_mu: the pool's coefficient
+    ```
+
+    It is one coefficient, not a member of every row's team: every row of a contest carries it, so the rows are
+    correlated through it. `gaussian` conditions on it exactly — the shared members and the contest's common shift
+    jointly, then each team given them; `plackettLuce` / `bradleyTerry` rate the teams with it at its mean and take one
+    Laplace step for all the shared members of the op together — the contest's gradient and information along their
+    weights, cross terms included, so two members on correlated weights share an effect instead of each taking it
+    whole. Contests read
+    strengths only relative to each other, so a shared member learns only from contests whose rows **differ** in
+    its weight: a weight equal on every row of a contest leaves it at its prior, mean and `sigma` alike. Its prior
+    `mu` defaults to 0 (no effect — not the op's `mu`, which is a player's level); its prior
+    `sigma` is how large you expect the effect to be (in the rating's units per unit of weight); a `tau` of 0 keeps it
+    a constant of the pool, a small one lets it drift. A missing weight is a missing member (the row out, or absent
+    with `optional: true`). Its readouts are the same on every row; `z` is null (a pool of one). A row's
+    `team: [sigma]` includes `weight² · sigma²` of each shared member — the uncertainty of that row's strength —, but
+    that part is common to every row of the contest and cancels between them: summing the rows' `team_sigma²` (as a
+    `ratingProb` over them does) overstates the uncertainty of their comparison.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or a member
   name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
-  member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
-  or with an unknown readout; as an info it describes the team), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
+  shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
+  or with an unknown readout; as an info it describes the team), `sequence.rating.shared` (info: what a shared member
+  learns from), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
