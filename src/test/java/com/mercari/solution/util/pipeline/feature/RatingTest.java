@@ -1481,6 +1481,30 @@ public class RatingTest {
     }
 
     /**
+     * A player with several rows in one contest drifts once, by the largest valid {@code tauBy} its rows declare: the
+     * contest is the one where every row declares that value (to the last bit), whatever the other rows say — a
+     * smaller value, an invalid one (the rating's tau otherwise) or none.
+     */
+    @Test
+    public void testRowDriftIsOnePerPlayer() {
+        final Rating byRow = rating(Rating.Method.plackettLuce, true, 0.5).withRowInputs(null, "t");
+        final Rating.State mixed = new Rating.State(), uniform = new Rating.State();
+        byRow.fold(mixed, List.of(row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", -1d),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        byRow.fold(uniform, List.of(row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", 2d), row(1L, "c1", "a", 1, "t", 2d),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        for (final String player : List.of("a", "b", "d")) {
+            Assertions.assertEquals(uniform.players.get(key(player)).mu, mixed.players.get(key(player)).mu, 0d, player);
+            Assertions.assertEquals(uniform.players.get(key(player)).sigma, mixed.players.get(key(player)).sigma, 0d, player);
+        }
+        // the largest, not the smallest: the rows all declaring 0.1 leave the player narrower
+        final Rating.State small = new Rating.State();
+        byRow.fold(small, List.of(row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 0.1), row(1L, "c1", "a", 1, "t", 0.1),
+                row(1L, "c1", "b", 2), row(1L, "c1", "d", 3, "t", 1d)));
+        Assertions.assertTrue(mixed.players.get(key("a")).sigma > small.players.get(key("a")).sigma);
+    }
+
+    /**
      * The documented recipe for an entity's inconsistency (feature.md, "Inconsistency"): the outcome against the rating's
      * pre-contest expectation in units of its own uncertainty, net of what the whole contest shared, and its spread
      * over the entity's past contests. It compiles as documented: the surprise reads the outcome, so it and its

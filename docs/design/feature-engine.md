@@ -318,7 +318,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `offsetField` / `tauField`, past inputs of every readout column): the offset is added to the entry's summed
   strength before the method runs — the contest expects `m_i + offset_i`, the offset itself is no member and is never
   rated — and a row without a finite offset joins no contest; `tauBy` replaces the rated player's (member 0's) `tau`
-  in `drifted` for that entry, the other members keep theirs. Under `tauPer` a read drifts up to the row at the
+  in `drifted` for that entry — once per player and contest, at the largest valid value among the player's rows (its
+  drift is its state: every row of it enters the contest with one prior variance) — the other members keep theirs. Under `tauPer` a read drifts up to the row at the
   row's own value (`Rating.rowTau(row)` → `read(..., rowTau)` / `readTeam(..., rowTau)`), so the field is also a self
   input of every column of the op — one availability contract for the shared fold pointer. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters

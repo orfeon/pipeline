@@ -588,6 +588,12 @@ public final class Rating implements Serializable {
         }
         // a contest needs two distinct players (teams); the entries are sorted by them, so the ends decide it
         if (n < 2 || ids[0].equals(ids[n - 1])) return;
+        // the rated player's drift is its state, not a row's: it drifts once per contest, by the largest valid value its
+        // rows declare (the wider uncertainty), so every row of the player enters the contest with one prior variance
+        final Map<String, Double> rowTaus = new HashMap<>();
+        if (tauField != null) {
+            for (final Entry e : entries) if (!Double.isNaN(e.tau())) rowTaus.merge(e.members().get(0), e.tau(), Math::max);
+        }
 
         // pre-contest ratings per entry (the variance already carries the drift): a team is the sum of its members.
         // The per-member values are held flat (index i * k + j): one array rather than one per entry
@@ -598,7 +604,8 @@ public final class Rating implements Serializable {
                 final Player p = state.players.get(entries.get(i).members().get(j));
                 mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
                 // the row's own drift is the rated player's (member 0); the other members keep theirs
-                variances[i * k + j] = drifted(members.get(j), p, millis, true, j == 0 ? entries.get(i).tau() : Double.NaN);
+                variances[i * k + j] = drifted(members.get(j), p, millis, true,
+                        j == 0 ? rowTaus.getOrDefault(entries.get(i).members().get(0), Double.NaN) : Double.NaN);
                 // the first member starts the sums (not 0 +): a team of one is its member to the last bit
                 m[i] = j == 0 ? mus[i * k + j] : m[i] + mus[i * k + j];
                 v[i] = j == 0 ? variances[i * k + j] : v[i] + variances[i * k + j];

@@ -494,7 +494,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   - **`tauBy: <column>`** — the rated entity's drift read from the row, in place of `tau` (per contest, or per
     `tauPer` of absence): an entity whose strength is still changing (early in its career) reopens more
     uncertainty before each contest than a settled one. A row whose value is missing, negative or not finite
-    drifts by `tau`; the other members of a team keep their own `tau`. Under `tauPer` the `sigma` a row reads
+    drifts by `tau` (so does a value whose square overflows); an entity with several rows in one contest drifts
+    once, by the largest value its rows declare; the other members of a team keep their own `tau`. Under `tauPer`
+    the `sigma` a row reads
     drifts up to the row at **the row's own** value — the uncertainty its contest will start from — so the column
     must be known at the row's `computeAt` (a pre-event field). Not elo.
 
