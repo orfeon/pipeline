@@ -40,7 +40,8 @@ import java.util.TreeMap;
  * Lin's team form). The well-known member hardly moves and the uncertain one takes the update, which is what lets a
  * member's contribution be told apart from that of the company it keeps. A team of one member has the share 1:
  * the arithmetic of a player, to the last bit. A member of several teams of one contest receives the sum of its
- * shares, as a player of several rows does.
+ * shares, as a player of several rows does. An <b>optional</b> member may be missing from a row: the row is then rated
+ * as the team of the members it has (the absent one adds nothing and is not updated), instead of taking no part.
  *
  * <p><b>Per row</b> ({@link #withRowInputs}). A known shift of a row's performance ({@code offset}: a covariate whose
  * effect is fixed — {@code m_i + offset_i} is the strength the contest expects, the offset itself is never rated) and
@@ -188,12 +189,17 @@ public final class Rating implements Serializable {
     }
 
     /**
-     * A member of the team a row is rated as: the fields of the row that name it, its prior and its drift. {@code pool}
+     * A member of the team a row is rated as: the fields of the row that name it, its prior and its drift, and whether a
+     * row may lack it ({@code optional}: the row is rated as the team of the members it has). {@code pool}
      * is the namespace of its keys in the state — members of different entities live in one {@link State}, and a seller
      * and an agent may well share an id — or null: the keys themselves, for the single player of a rating without a team,
      * whose state is keyed as it always was.
      */
-    public record Member(String pool, List<String> keys, double mu, double sigma, double tau) implements Serializable {}
+    public record Member(String pool, List<String> keys, double mu, double sigma, double tau, boolean optional) implements Serializable {
+        public Member(final String pool, final List<String> keys, final double mu, final double sigma, final double tau) {
+            this(pool, keys, mu, sigma, tau, false);
+        }
+    }
 
     /**
      * The team readouts: the sum of the members' ratings, the uncertainty of that sum, the contests this very team
@@ -322,10 +328,15 @@ public final class Rating implements Serializable {
                 "true".equals(coordinates.get("teamCounts")));
     }
 
-    /** {@code pool|key,key|mu|sigma|tau} per member, joined by {@code ;} (names are checked for the separators at compile time). */
+    /**
+     * {@code pool|key,key|mu|sigma|tau[|optional]} per member, joined by {@code ;} (names are checked for the separators at
+     * compile time); the flag is written only for an optional member.
+     */
     public static String encodeMembers(final List<Member> members) {
         final List<String> parts = new ArrayList<>();
-        for (final Member m : members) parts.add(m.pool() + "|" + String.join(",", m.keys()) + "|" + m.mu() + "|" + m.sigma() + "|" + m.tau());
+        for (final Member m : members) {
+            parts.add(m.pool() + "|" + String.join(",", m.keys()) + "|" + m.mu() + "|" + m.sigma() + "|" + m.tau() + (m.optional() ? "|optional" : ""));
+        }
         return String.join(";", parts);
     }
 
@@ -333,8 +344,10 @@ public final class Rating implements Serializable {
         final List<Member> members = new ArrayList<>();
         for (final String part : text.split(";")) {
             final String[] f = part.split("\\|");
-            if (f.length != 5) throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau): " + part);
-            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4])));
+            if (f.length != 5 && !(f.length == 6 && "optional".equals(f[5]))) {
+                throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau[|optional]): " + part);
+            }
+            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]), f.length == 6));
         }
         return members;
     }
@@ -466,15 +479,18 @@ public final class Rating implements Serializable {
         return key == null || m.pool() == null ? key : m.pool() + POOL_SEPARATOR + key;
     }
 
-    /** The team a row is rated as — the state keys of its members — or null when a member is missing: the row joins no contest. */
+    /**
+     * The team a row is rated as — the state keys of its members, null in the place of an absent optional member — or
+     * null when a required member is missing: the row joins no contest.
+     */
     public List<String> teamOf(final Map<String, Object> row) {
         final String[] team = new String[members.size()];
         for (int j = 0; j < team.length; j++) {
             final String key = memberKey(row, j);
-            if (key == null) return null;
+            if (key == null && !members.get(j).optional()) return null;
             team[j] = key;
         }
-        return List.of(team);
+        return java.util.Collections.unmodifiableList(Arrays.asList(team));
     }
 
     /** What makes two rows the same team: all their members (a player's own rows, in a rating without a team). */
@@ -482,8 +498,15 @@ public final class Rating implements Serializable {
         return teamId(entry.members());
     }
 
+    /** An absent optional member is the empty text: a state key is never empty (a {@link FeatureValues#key} is length-prefixed). */
     private static String teamId(final List<String> members) {
-        return members.size() == 1 ? members.get(0) : String.join(String.valueOf(MEMBER_SEPARATOR), members);
+        if (members.size() == 1) return members.get(0);
+        final StringBuilder sb = new StringBuilder();
+        for (int j = 0; j < members.size(); j++) {
+            if (j > 0) sb.append(MEMBER_SEPARATOR);
+            if (members.get(j) != null) sb.append(members.get(j));
+        }
+        return sb.toString();
     }
 
     /**
@@ -601,6 +624,8 @@ public final class Rating implements Serializable {
         final double[] m = new double[n], v = new double[n];
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
+                // an absent optional member adds nothing to the team (never member 0: the rated player is required)
+                if (entries.get(i).members().get(j) == null) continue;
                 final Player p = state.players.get(entries.get(i).members().get(j));
                 mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
                 // the row's own drift is the rated player's (member 0); the other members keep theirs
@@ -629,6 +654,7 @@ public final class Rating implements Serializable {
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < k; j++) {
                 final String key = entries.get(i).members().get(j);
+                if (key == null) continue;
                 Change c = changes.get(key);
                 if (c == null) {
                     c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
@@ -949,6 +975,8 @@ public final class Rating implements Serializable {
         }
         double sum = 0;
         for (int j = 0; j < members.size(); j++) {
+            // an absent optional member is no part of the row's team
+            if (team.get(j) == null) continue;
             final Member m = members.get(j);
             final Player p = state == null ? null : state.players.get(team.get(j));
             switch (func) {
