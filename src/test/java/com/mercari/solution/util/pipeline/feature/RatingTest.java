@@ -1485,6 +1485,9 @@ public class RatingTest {
         final FeaturePlan plan = compileTeam(op);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         Assertions.assertTrue(hasCode(plan, "sequence.rating.shared"), plan::describe);
+        // the info says the member is filtered with the ratings, and what its declared tau 0 means
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.rating.shared")
+                && m.message().contains("not fitted to them") && m.message().contains("burden: tau 0 - never drifts")), plan::describe);
         final OutputColumn burden = plan.getColumn("skill_all_duo_burden_mu");
         Assertions.assertNotNull(burden, plan::describe);
         Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5;burden||0.0|0.5|0.0|weight=start_price", burden.getCoordinates().get("teamMembers"));
@@ -1494,6 +1497,9 @@ public class RatingTest {
         final FeaturePlan defaulted = compileTeam(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden, weight: start_price, sigma: 0.5}"));
         Assertions.assertFalse(defaulted.getDiagnostics().hasErrors(), defaulted::describe);
         Assertions.assertEquals(0d, Rating.of(defaulted.getColumn("skill_all_duo_burden_mu").getCoordinates()).members().get(1).mu());
+        // ... while its drift is the op's (a player's), which the info names
+        Assertions.assertTrue(defaulted.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.rating.shared")
+                && m.message().contains("burden: tau not declared - the op's")), defaulted::describe);
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: burden}"), "a shared member needs a weight");
         cases.put(DUO.replace("{entity: agent, mu: 0, sigma: 4}", "{name: agent, weight: start_price}"), "an entity's name");
