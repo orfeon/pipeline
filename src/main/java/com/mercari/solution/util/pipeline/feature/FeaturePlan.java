@@ -448,22 +448,8 @@ public class FeaturePlan implements Serializable {
             final Set<String> input = getWaveInputFields(w);
             for (final Stage s : waves.get(w)) {
                 final List<String> evaluated = isFoldTarget(s) ? getFoldColumns(s, w) : getBranchColumns(s, w);
-                final Set<String> missing = new LinkedHashSet<>();
-                for (final String k : s.keys) if (columnsByName().containsKey(k) && !input.contains(k)) missing.add(k);
-                final List<OutputColumn> cols = new ArrayList<>();
-                for (final String name : evaluated) {
-                    final OutputColumn c = columnsByName().get(name);
-                    if (c == null) continue;
-                    cols.add(c);
-                    for (final String in : c.inputs) if (columnsByName().containsKey(in)) missing.add(in);
-                    for (final String in : c.pastInputs) if (columnsByName().containsKey(in)) missing.add(in);
-                }
-                for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(cols, columnsByName())) {
-                    for (final String k : spec.keys()) if (columnsByName().containsKey(k)) missing.add(k);
-                    if (spec.field() != null && columnsByName().containsKey(spec.field())) missing.add(spec.field());
-                    if (spec.offsetColumn() != null && columnsByName().containsKey(spec.offsetColumn())) missing.add(spec.offsetColumn());
-                    if (spec.foldKeys() != null) for (final String k : spec.foldKeys()) if (columnsByName().containsKey(k)) missing.add(k);
-                }
+                // the coordinate mentions readsOf adds for liveness are conservative (any token spelling a column): no gap
+                final Set<String> missing = readsOf(s.keys, evaluated, false);
                 missing.removeIf(name -> input.contains(name) || (evaluated.contains(name) && !s.keys.contains(name)));
                 if (!missing.isEmpty()) {
                     gaps.add("feature stage scheduling: stage #" + s.index + " (wave " + (w + 1) + ") reads " + missing
@@ -482,6 +468,11 @@ public class FeaturePlan implements Serializable {
 
     /** Computed columns read from the input rows when {@code names} are evaluated under {@code keys}. */
     private Set<String> readsOf(final List<String> keys, final Collection<String> names) {
+        return readsOf(keys, names, true);
+    }
+
+    /** {@link #readsOf(List, Collection)}; {@code mentions} = also the columns a coordinate names ({@link #mentioned}). */
+    private Set<String> readsOf(final List<String> keys, final Collection<String> names, final boolean mentions) {
         final Set<String> reads = new LinkedHashSet<>();
         for (final String k : keys) if (columnsByName().containsKey(k)) reads.add(k);
         final List<OutputColumn> cols = new ArrayList<>();
@@ -492,7 +483,7 @@ public class FeaturePlan implements Serializable {
         for (final OutputColumn c : cols) {
             for (final String in : c.inputs) if (columnsByName().containsKey(in)) reads.add(in);
             for (final String in : c.pastInputs) if (columnsByName().containsKey(in)) reads.add(in);
-            for (final Map.Entry<String, String> e : c.coordinates.entrySet()) mentioned(e.getKey(), e.getValue(), reads);
+            if (mentions) for (final Map.Entry<String, String> e : c.coordinates.entrySet()) mentioned(e.getKey(), e.getValue(), reads);
         }
         // the variance-components estimate of the stage reads the levels' keys / target / offset / fold keys
         for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(cols, columnsByName())) {
