@@ -1825,7 +1825,8 @@ public final class FeaturePlanCompiler {
                 memberNames.add(name);
                 memberWeights.add(weight);
                 if (member == null) {
-                    final String per = tauPerMillis > 0 ? " per " + op.tauPer : " per contest";
+                    // without tauPer a shared member drifts in every contest of the pool, not in one entity's few
+                    final String per = tauPerMillis > 0 ? " per " + op.tauPer : " per contest (every contest of the pool)";
                     sharedDrifts.add(name + ": " + (m.tau == null ? "tau not declared - the op's " + tau + per + ", a player's drift"
                             : m.tau == 0d ? "tau 0 - never drifts, so it keeps what it took in while the entities warmed up"
                             : "tau " + m.tau + per));

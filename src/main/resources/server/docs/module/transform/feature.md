@@ -720,7 +720,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     weights, cross terms included, so two members on correlated weights share an effect instead of each taking it
     whole. Contests read
     strengths only relative to each other, so a shared member learns only from contests whose rows **differ** in
-    its weight: a weight equal on every row of a contest leaves it at its prior, mean and `sigma` alike. Its prior
+    its weight: a weight equal on every row of a contest teaches it nothing — its mean stays, and its `sigma` only
+    takes the drift of that contest (none under `tau: 0`). Its prior
     `mu` defaults to 0 (no effect — not the op's `mu`, which is a player's level); its prior
     `sigma` is how large you expect the effect to be (in the rating's units per unit of weight). Its `tau` defaults
     to the op's — a player's drift, rarely the right size for a coefficient: declare it (below). A missing weight is
@@ -742,7 +743,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     - **`tau: 0` freezes the warm-up.** A coefficient that never drifts weighs the warm-up contests like every later
       one for good. Give it a small `tau` — under the op's `tauPer`, a drift per period: `tau: 0.01` with `tauPer:
       P30D` lets it wander about `0.01 · sqrt(12)` ≈ 0.035 a year — so it follows what the contests say now and
-      forgets the warm-up; or read it only after the pool has warmed up (*Warm-up* above).
+      forgets the warm-up; or read it only after the pool has warmed up (*Warm-up* above). Without `tauPer` the
+      drift is per contest, and a shared member takes part in **every** contest of the pool (those that teach it
+      nothing included), not in one entity's few: `tau: 0.01` over 2,500 contests adds `0.01 · sqrt(2500)` = 0.5,
+      a whole prior `sigma` — size a per-contest `tau` by the number of contests of the pool, or use `tauPer`.
 
     So a shared member is for **removing** a condition from the ratings: the entities are rated net of what the
     condition explains in each contest, and the coefficient's readout is the filter's working value, not the

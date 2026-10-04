@@ -413,7 +413,8 @@ not alter values).
   member `{name: <x>Effect, weight: <column>, mu: 0, sigma: <effect size>, tau: <small>}` — no entity; it learns only
   from contests whose rows differ in the weight. It is filtered along with the ratings (no covariance with them): a
   weight that goes with strength takes in strength while the entities warm up, and its `sigma` is not the uncertainty
-  of the estimate. Give it a small `tau` (per `tauPer`) rather than 0, which freezes the warm-up, and use it to
+  of the estimate. Give it a small `tau` (per `tauPer`; without `tauPer` it drifts in every contest of the pool, so
+  size it by their number) rather than 0, which freezes the warm-up, and use it to
   remove the condition, not to measure it — for the effect itself, fit it outside and pass coefficient × condition
   as the `offset`.
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself

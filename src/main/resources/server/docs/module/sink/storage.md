@@ -118,11 +118,11 @@ When `suffix` contains FreeMarker template expressions, the following variables 
 
 ### One directory per run
 
-The sink writes new files and never deletes old ones. A re-run into the same `output` replaces the files whose names
-it writes again, but when the number of shards changes (auto-sharding, a different input size) the earlier run's
-other shards stay next to the new ones, and a reader over the prefix (`gs://…/part*`, an external table, a load job)
-reads both runs. Two runs writing the same prefix at once mix their shards the same way. Give each run a directory of
-its own with a run id evaluated once when the config is loaded:
+The sink writes new files and never deletes old ones. A re-run into the same `output` replaces only the files whose
+names it writes again, and the default file name carries the shard count (`part-00000-of-00005`): when the number of
+shards changes (auto-sharding, a different input size) no name matches, every shard of the earlier run stays next to
+the new ones, and a reader over the prefix (`gs://…/part*`, an external table, a load job) reads both runs in full. Two runs writing the same prefix at once mix their shards the same way. Give each run a
+directory of its own with a run id evaluated once when the config is loaded:
 
 ```yaml
 system:
