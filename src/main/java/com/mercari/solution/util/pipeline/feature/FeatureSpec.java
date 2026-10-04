@@ -173,6 +173,12 @@ public class FeatureSpec implements Serializable {
          */
         public String tauBy;
         /**
+         * rating: the units of {@link #offset} — {@code rating} (default: the rating's own, added to the strength) or
+         * {@code logit} (log-odds, e.g. a benchmark's {@code ln p}: scaled by each comparison's {@code c}; bradleyTerry /
+         * plackettLuce only).
+         */
+        public String offsetUnits;
+        /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is
          * the sum of its members', a contest's change is shared among them by their part of the team's variance).
          */
@@ -1389,6 +1395,7 @@ public class FeatureSpec implements Serializable {
         op.pairs = Json.string(o, "pairs");
         op.depthScale = doubleOf(o, "depthScale", diagnostics, loc);
         op.tauBy = Json.string(o, "tauBy");
+        op.offsetUnits = Json.string(o, "offsetUnits");
         if (o.has("with") && !o.get("with").isJsonNull()) {
             for (final JsonElement m : arrayOf(o.get("with"))) {
                 final TeamMember member = new TeamMember();

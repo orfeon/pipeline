@@ -542,6 +542,8 @@ public final class FeaturePlanCompiler {
             refs.addAll(op.regressors);
             // the uncertainty column of a ratingProb: it may come from a block declared after this one
             if (op.sigmaField != null) refs.add(op.sigmaField);
+            // ... and the offset of a ratingProb / softmax (the benchmark it is read against)
+            if (def.scope == Scope.context && List.of("ratingProb", "softmax").contains(op.type) && op.offset != null) refs.add(op.offset);
             // a rating's per-row inputs: the known shift of a row's performance and the rated player's drift
             if (def.scope == Scope.sequence && op.offset != null) refs.add(op.offset);
             if (op.tauBy != null) refs.add(op.tauBy);
@@ -1217,19 +1219,23 @@ public final class FeaturePlanCompiler {
                 if (def.excludeSelf) {
                     diagnostics.warning("context.ratingProb.excludeSelf", loc, "excludeSelf has no effect on ratingProb (the row is part of its own contest)");
                 }
+                // a benchmark the probability is read against, as softmax reads it: p_i = w_i exp(mu_i / c) / sum, w = the offset
+                final String offsetScale = contextOffsetScale(op, loc);
+                if (offsetScale == null) return null;
+                if (op.offset != null) {
+                    final Ref ref = contextOffset(op, loc);
+                    if (ref == null) return null;
+                    coordinates.put("offset", ref.canonical());
+                    coordinates.put("offsetScale", offsetScale);
+                    inputs.add(ref.canonical());
+                    validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
+                    if (!"log".equals(offsetScale)) warnLogitOffset(op, ref, loc);
+                }
             }
             case "softmax" -> {
                 if (op.offset != null) {
-                    final String offsetColumn = baselineColumns.containsKey(op.offset) ? baselineColumns.get(op.offset) : op.offset;
-                    final Ref ref = resolve(offsetColumn);
-                    if (ref == null) {
-                        diagnostics.error("context.softmax.offset", loc, "softmax offset must reference baselines[].name or a numeric column: " + op.offset);
-                        return null;
-                    }
-                    if (!OperatorCatalog.isNumeric(ref.type())) {
-                        diagnostics.error("context.softmax.offset", loc, "softmax offset '" + op.offset + "' is not numeric");
-                        return null;
-                    }
+                    final Ref ref = contextOffset(op, loc);
+                    if (ref == null) return null;
                     coordinates.put("offset", ref.canonical());
                     inputs.add(ref.canonical());
                     validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
@@ -1238,11 +1244,8 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.softmax.temperature", loc, "temperature must be > 0: " + op.temperature);
                     return null;
                 }
-                final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
-                if (!List.of("probability", "log").contains(offsetScale)) {
-                    diagnostics.error("context.softmax.offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);
-                    return null;
-                }
+                final String offsetScale = contextOffsetScale(op, loc);
+                if (offsetScale == null) return null;
                 final String scoreNull = op.scoreNull == null ? "zero" : op.scoreNull;
                 if (!List.of("zero", "null").contains(scoreNull)) {
                     diagnostics.error("context.softmax.scoreNull", loc, "scoreNull must be zero | null: " + scoreNull);
@@ -1279,6 +1282,67 @@ public final class FeaturePlanCompiler {
             default -> { }
         }
         return new ContextOpParams(coordinates, inputs, validFor, against, top);
+    }
+
+    /**
+     * The offset column of a {@code softmax} / {@code ratingProb} (a baseline name or a numeric column; code
+     * {@code context.<op>.offset}), or null after reporting it.
+     */
+    private Ref contextOffset(final Op op, final String loc) {
+        final Ref ref = resolve(baselineColumns.getOrDefault(op.offset, op.offset));
+        if (ref == null) {
+            diagnostics.error("context." + op.type + ".offset", loc, op.type + " offset must reference baselines[].name or a numeric column: " + op.offset);
+            return null;
+        }
+        if (!OperatorCatalog.isNumeric(ref.type())) {
+            diagnostics.error("context." + op.type + ".offset", loc, op.type + " offset '" + op.offset + "' is not numeric");
+            return null;
+        }
+        return ref;
+    }
+
+    /**
+     * Warns (code {@code context.ratingProb.offsetScale}) when a {@code ratingProb} reads in probability space the
+     * column a rating takes as a log-odds offset ({@code offsetUnits: logit}): every {@code ln p} is negative, so the
+     * probability would be null on every row.
+     */
+    private void warnLogitOffset(final Op op, final Ref offset, final String loc) {
+        for (final FeatureDef def : spec.features) {
+            if (def.scope != Scope.sequence) continue;
+            for (final Op rating : def.ops) {
+                if (!"rating".equals(rating.type) || !"logit".equals(rating.offsetUnits) || rating.offset == null) continue;
+                final Ref ref = resolve(baselineColumns.getOrDefault(rating.offset, rating.offset));
+                if (ref == null || !ref.canonical().equals(offset.canonical())) continue;
+                diagnostics.warning("context.ratingProb.offsetScale", loc, "ratingProb reads offset '" + op.offset + "' in probability space, but the rating of block '"
+                        + def.name + "' reads the same column as a log-odds (offsetUnits: logit): declare offsetScale: log, or every row with a negative ln p reads null");
+                return;
+            }
+        }
+    }
+
+    /** The scale a {@code softmax} / {@code ratingProb} offset is read in ({@code probability} by default, or {@code log}), or null after reporting it. */
+    private String contextOffsetScale(final Op op, final String loc) {
+        if (op.offsetUnits != null) {
+            diagnostics.error("context." + op.type + ".offsetScale", loc, "offsetUnits is a parameter of the rating op: a " + op.type
+                    + " offset is read in probability space - declare offsetScale: log for a log-odds column (ln p of a benchmark)");
+            return null;
+        }
+        // a scale without an offset reads nothing: a ratingProb would emit the unbenchmarked probability (an error, like
+        // a rating's offsetUnits without an offset); a softmax has long accepted it, so it only warns
+        if (op.offsetScale != null && op.offset == null) {
+            final String message = "offsetScale is the scale of the offset: declare the offset with it (without one the " + op.type + " is read against no benchmark)";
+            if ("ratingProb".equals(op.type)) {
+                diagnostics.error("context.ratingProb.offsetScale", loc, message);
+                return null;
+            }
+            diagnostics.warning("context." + op.type + ".offsetScale", loc, message);
+        }
+        final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
+        if (!List.of("probability", "log").contains(offsetScale)) {
+            diagnostics.error("context." + op.type + ".offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);
+            return null;
+        }
+        return offsetScale;
     }
 
     /** One column of a context op: the ops that fan out produce several per field (a listed value, a place). */
@@ -1735,10 +1799,26 @@ public final class FeaturePlanCompiler {
         }
         if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
         // per-row inputs: a numeric column (or a baseline) each; tauBy drifts an uncertainty elo does not keep
-        final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, in the rating's units", loc);
+        final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, "
+                + ("logit".equals(op.offsetUnits) ? "as a log-odds" : "in the rating's units"), loc);
         final Ref tauRef = elo ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
         if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian");
         if (op.offset != null && offsetRef == null || op.tauBy != null && tauRef == null) valid = false;
+        // the offset's units: the rating's (added to the strength) or log-odds, which only a method with a comparison
+        // scale can convert (gaussian reads margins, elo keeps no uncertainty)
+        final boolean offsetLogit = "logit".equals(op.offsetUnits);
+        if (op.offsetUnits != null && !List.of("rating", "logit").contains(op.offsetUnits)) {
+            diagnostics.error("sequence.rating.offset", loc, "offsetUnits must be rating (the rating's own units, the default) | logit (log-odds, e.g. ln p of a benchmark): "
+                    + op.offsetUnits);
+            valid = false;
+        } else if (op.offsetUnits != null && op.offset == null) {
+            diagnostics.error("sequence.rating.offset", loc, "offsetUnits is the units of the offset: declare the offset with it");
+            valid = false;
+        } else if (offsetLogit && method != Rating.Method.bradleyTerry && method != Rating.Method.plackettLuce) {
+            diagnostics.error("sequence.rating.offset", loc, "offsetUnits logit scales the offset by a contest's comparison scale c: a bradleyTerry / plackettLuce parameter, "
+                    + methodName + (method == Rating.Method.gaussian ? " reads the outcome as a margin - give the offset in the outcome's units" : " keeps no uncertainty to scale by"));
+            valid = false;
+        }
         if (!valid) return;
         // a margin model has no scale of its own: sigma (how far strengths spread) and beta (the noise of one outcome) are
         // in the outcome's units and must be declared - the defaults derive from the prior mu (a rating's level)
@@ -1778,6 +1858,7 @@ public final class FeaturePlanCompiler {
             if (op.depthScale != null && op.depthScale != 1d) shared.put("depthScale", Double.toString(op.depthScale));
         }
         if (offsetRef != null) shared.put("offsetField", offsetRef.canonical());
+        if (offsetRef != null && offsetLogit) shared.put("offsetUnits", "logit");
         shared.put("context", contest.name());
         // the state snapshot (RatingSnapshot): the block's own fit.artifact - the top-level one is not inherited, a
         // snapshot is an explicit choice of the block (a spec whose encodings persist artifacts would otherwise start

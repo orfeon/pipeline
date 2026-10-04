@@ -1835,6 +1835,79 @@ public class RatingTest {
     }
 
     /**
+     * {@code offsetUnits: logit}: the offset is a log-odds, read at each comparison's scale. {@code plackettLuce} has one
+     * scale per contest, so it is the rating-units offset {@code c · o} (with a depth too); {@code bradleyTerry} adds it to
+     * every pair's log-odds at the pair's own {@code c} — a settled and a fresh player by hand, and the shared members'
+     * step reads the same pairs. {@code gaussian} / {@code elo} take none, nor does a rating without an offset.
+     */
+    @Test
+    public void testLogitOffset() {
+        final Rating fresh = rating(Rating.Method.plackettLuce, false, 0d);
+        final double sigma = (Double) fresh.read(null, "a", "sigma"), beta = sigma / 2, beta2 = beta * beta;
+        for (final Rating plain : List.of(fresh, fresh.withDepth(2, 1.5))) {
+            final Rating logit = plain.withRowInputs("x", null).withOffsetUnits(true), units = plain.withRowInputs("u", null);
+            final double c = Math.sqrt(3 * (sigma * sigma + beta2));
+            final Rating.State byLogit = new Rating.State(), byUnits = new Rating.State();
+            logit.fold(byLogit, List.of(row(1L, "c1", "a", 2, "x", 0.7), row(1L, "c1", "b", 1, "x", 0d), row(1L, "c1", "d", 0, "x", -0.4)));
+            units.fold(byUnits, List.of(row(1L, "c1", "a", 2, "u", c * 0.7), row(1L, "c1", "b", 1, "u", 0d), row(1L, "c1", "d", 0, "u", c * -0.4)));
+            for (final String player : List.of("a", "b", "d")) {
+                Assertions.assertEquals(byUnits.players.get(key(player)).mu, byLogit.players.get(key(player)).mu, 1e-12, player);
+                Assertions.assertEquals(byUnits.players.get(key(player)).sigma, byLogit.players.get(key(player)).sigma, 1e-12, player);
+            }
+        }
+
+        // bradleyTerry: a settled player (27, sigma 3) beats a fresh one; p = σ((m_a − m_b) / c + o_a − o_b) at the pair's c
+        final Rating bt = rating(Rating.Method.bradleyTerry, false, 0d).withRowInputs("x", null).withOffsetUnits(true);
+        final Rating.State state = new Rating.State();
+        final Rating.Player settled = new Rating.Player();
+        settled.mu = 27;
+        settled.sigma = 3;
+        state.players.put(key("a"), settled);
+        bt.fold(state, List.of(row(1L, "c1", "a", 2, "x", 0.5), row(1L, "c1", "b", 1, "x", -0.3)));
+        final double c = Math.sqrt(9 + sigma * sigma + 2 * beta2), p = 1d / (1d + Math.exp((25 - 27) / c + (-0.3 - 0.5)));
+        Assertions.assertEquals(27 + 9 / c * (1 - p), state.players.get(key("a")).mu, 1e-12);
+        Assertions.assertEquals(25 - sigma * sigma / c * (1 - p), state.players.get(key("b")).mu, 1e-12);
+        // the expected winner moves less than it would by the strengths alone
+        final Rating.State bare = new Rating.State();
+        final Rating.Player settledAgain = new Rating.Player();
+        settledAgain.mu = 27;
+        settledAgain.sigma = 3;
+        bare.players.put(key("a"), settledAgain);
+        rating(Rating.Method.bradleyTerry, false, 0d).fold(bare, List.of(row(1L, "c1", "a", 2), row(1L, "c1", "b", 1)));
+        Assertions.assertTrue(state.players.get(key("a")).mu < bare.players.get(key("a")).mu);
+
+        // a shared member of a fresh field (every pair at one c): the log-odds offset is the rating-units offset c · o, the
+        // teams' updates and the shared member's step alike
+        final Rating.Member burden = new Rating.Member("burden", List.of(), 0d, 1d, 0d, false, "w");
+        final Rating sharedPlain = Rating.of(Rating.Method.bradleyTerry, false, null, null, null, 0d, null, null, null, Rating.Pairs.mean,
+                List.of("seller_id"), List.of("c"), "y");
+        final Rating sharedLogit = sharedPlain.withRowInputs("o", null).withOffsetUnits(true).withTeam("seller", List.of(burden));
+        final Rating sharedUnits = sharedPlain.withRowInputs("u", null).withTeam("seller", List.of(burden));
+        final double pair = Math.sqrt(2 * sigma * sigma + 2 * beta2);
+        final Rating.State logitState = new Rating.State(), unitState = new Rating.State();
+        final double[][] sellers = {{3, 2, 0.4}, {1, -1, -0.2}, {2, 0.5, 0.1}};
+        final List<SequenceEvaluator.Past> logitRows = new ArrayList<>(), unitRows = new ArrayList<>();
+        for (int s = 0; s < sellers.length; s++) {
+            logitRows.add(row(1L, "c1", "x", sellers[s][0], "seller_id", "s" + s, "w", sellers[s][1], "o", sellers[s][2]));
+            unitRows.add(row(1L, "c1", "x", sellers[s][0], "seller_id", "s" + s, "w", sellers[s][1], "u", pair * sellers[s][2]));
+        }
+        sharedLogit.fold(logitState, logitRows);
+        sharedUnits.fold(unitState, unitRows);
+        Assertions.assertEquals(unitState.players.keySet(), logitState.players.keySet());
+        for (final String player : unitState.players.keySet()) {
+            Assertions.assertEquals(unitState.players.get(player).mu, logitState.players.get(player).mu, 1e-12, player);
+            Assertions.assertEquals(unitState.players.get(player).sigma, logitState.players.get(player).sigma, 1e-12, player);
+        }
+        Assertions.assertNotEquals(0d, logitState.players.get(sharedLogit.memberKey(Map.of(), 1)).mu, "the shared member learned from the weights");
+
+        // only the methods with a comparison scale, and only with an offset
+        for (final Rating.Method method : List.of(Rating.Method.gaussian, Rating.Method.elo)) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> rating(method, false, 0d).withRowInputs("x", null).withOffsetUnits(true), method.name());
+        }
+        Assertions.assertThrows(IllegalArgumentException.class, () -> fresh.withOffsetUnits(true));
+    }
+
+    /**
      * {@code tauBy}: the rated player's drift read from the row, in place of {@code tau}; a row without a valid value
      * drifts by {@code tau}; the other members of a team keep their own; under {@code tauPer} a read drifts up to the row
      * at the row's own value.
@@ -2114,6 +2187,11 @@ public class RatingTest {
         cases.put("      - {type: rating, field: final_price, context: session, tauBy: category}", "sequence.rating.tauBy");
         cases.put("      - {type: rating, field: final_price, context: session, offset: nowhere}", "reference.unresolved");
         cases.put("      - {type: rating, field: final_price, context: session, method: elo, tauBy: start_price}", "sequence.rating.parameter");
+        // the offset's units: rating | logit, logit with an offset and a comparison scale (not gaussian / elo)
+        cases.put("      - {type: rating, field: final_price, context: session, offset: start_price, offsetUnits: odds}", "sequence.rating.offset");
+        cases.put("      - {type: rating, field: final_price, context: session, offsetUnits: logit}", "sequence.rating.offset");
+        cases.put("      - {type: rating, field: final_price, context: session, method: gaussian, sigma: 40, beta: 20, offset: start_price, offsetUnits: logit}", "sequence.rating.offset");
+        cases.put("      - {type: rating, field: final_price, context: session, method: elo, offset: start_price, offsetUnits: logit}", "sequence.rating.offset");
         // two ops of one block on the same segment with different parameters: they would share one running state
         cases.put("      - {type: rating, field: final_price, context: session, funcs: [mu]}\n"
                 + "      - {type: rating, field: final_price, context: session, method: elo, funcs: [count]}", "sequence.rating.as");
@@ -2121,6 +2199,14 @@ public class RatingTest {
             final FeaturePlan plan = compile(SPEC.replace(op, e.getKey()));
             Assertions.assertTrue(hasCode(plan, e.getValue()), () -> e.getKey() + "\n" + plan.describe());
         }
+        // a log-odds offset is a coordinate of the op (it changes the running state); the rating's own units write none
+        final FeaturePlan logit = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, method: bradleyTerry, offset: start_price, offsetUnits: logit, as: lo}"));
+        Assertions.assertFalse(logit.getDiagnostics().hasErrors(), logit::describe);
+        Assertions.assertEquals("logit", logit.getColumn("skill_all_lo_mu").getCoordinates().get("offsetUnits"));
+        Assertions.assertDoesNotThrow(() -> Rating.of(logit.getColumn("skill_all_lo_mu").getCoordinates()));
+        final FeaturePlan units = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, offset: start_price, offsetUnits: rating, as: ru}"));
+        Assertions.assertFalse(units.getDiagnostics().hasErrors(), units::describe);
+        Assertions.assertNull(units.getColumn("skill_all_ru_mu").getCoordinates().get("offsetUnits"));
         // top and depthScale are independent: both invalid, both reported in one run
         final FeaturePlan depths = compile(SPEC.replace(op, "      - {type: rating, field: final_price, context: session, top: 0, depthScale: 0.5}"));
         Assertions.assertEquals(2, depths.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.parameter")).count(), depths::describe);
@@ -2155,7 +2241,8 @@ public class RatingTest {
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 1, tauPer: PT6H, as: mean}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, top: 2, depthScale: 1.5, as: deep}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, offset: start_price, tauBy: start_price, tau: 1, tauPer: P1D, as: rowwise}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, offset: start_price, tauBy: start_price, tau: 1, tauPer: P1D, as: rowwise}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, offset: start_price, offsetUnits: logit, as: lo}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -2172,7 +2259,8 @@ public class RatingTest {
         Assertions.assertTrue(rowwise.getPastInputs().contains("start_price"), rowwise.getPastInputs().toString());
         Assertions.assertTrue(plan.getColumn("skill_all_rowwise_mu").getInputs().contains("start_price"), "under tauPer every column of the op reads tauBy from the row");
         Assertions.assertNull(plan.getColumn("skill_all_pl_mu").getCoordinates().get("offsetField"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 14);
+        Assertions.assertEquals("logit", plan.getColumn("skill_all_lo_mu").getCoordinates().get("offsetUnits"));
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 16);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {
