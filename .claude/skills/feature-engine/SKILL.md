@@ -386,6 +386,14 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    (`assertParallelMatchesLinear`). A DAG-level rule such as "row columns are transparent" must be
    matched by the engine recomputing them on the branch input (`Wave{n}_Rows`); the linear chain
    carries values that branches never see — that was the 43-column null bug (83f25296).
+   A row column is evaluated on the input of the wave that FIRST READS it (`FeaturePlan.preludes` /
+   `firstReadWaves`), never held back to its host's wave: the host is its lowest-index reader, and a
+   higher-index reader can be in an earlier wave (null statistics, silently, for a month of consumer runs).
+   Not earlier than its first reader either — it would ride the shuffles of waves that do not read it, and a
+   variance-components row column pulled into the next wave's prelude un-folds the merge (`getFoldTarget`).
+   `FeaturePlan.getWaveReadGaps` (branch reads
+   that are neither on the wave input nor evaluated by the branch) must stay empty — `engineConstraints` fails
+   the assembly otherwise; a new wiring rule that changes what a branch evaluates must keep it true.
 4. **Scheduling rules** (`StageScheduler`): a keyed column goes to the earliest same-kind /
    same-key slot after its dependencies; inputs read *inside* the DoFn (row, history) may share the
    stage, inputs read *before* it (stage keys, fit stats, Vc fields) need an earlier stage

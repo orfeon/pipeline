@@ -1239,6 +1239,26 @@ public class FeatureTransformTest {
     }
 
     @Test
+    public void testParallelWavesRowColumnHostedInLaterWave() throws java.io.IOException {
+        // the seller stage hosts the row column `gain` (its lowest-index reader) and also aggregates `resid`, a row
+        // column over a context output - so the seller stage is wave 2, while the category stage, which reads `gain`
+        // too, stays in wave 1: `gain` must be evaluated on the wave 1 input, not only on the input of its host's wave
+        // (the category statistics came out null in the wave engine, silently)
+        final String config = PARALLEL_CONFIG
+                .replace("            - {type: aggregate, field: won, funcs: [mean]}\n",
+                        "            - {type: aggregate, field: won, funcs: [mean]}\n"
+                                + "            - {type: aggregate, field: gain, funcs: [mean]}\n"
+                                + "            - {type: aggregate, field: resid, funcs: [mean]}\n")
+                .replace("            - {field: won, stats: [mean]}\n",
+                        "            - {field: won, stats: [mean]}\n            - {field: gain, stats: [mean]}\n")
+                .replace("        - name: won\n",
+                        "        - {name: gain, scope: row, expr: \"final_price - start_price\"}\n"
+                                + "        - {name: resid, scope: row, expr: \"gain - relative_start_price_shareOfTotal\"}\n"
+                                + "        - name: won\n");
+        assertParallelMatchesLinear(config, 6, List.of("Wave1_Merge"), List.of());
+    }
+
+    @Test
     public void testParallelWavesFoldWithVarianceComponents() throws java.io.IOException {
         // the category encoding is shrunk with variance-components weights: its compose column (read by the output
         // only) lands in the last stage, the histRel context stage, whose lambda estimate is then taken over the

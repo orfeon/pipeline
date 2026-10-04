@@ -360,15 +360,20 @@ public class FeaturePlan implements Serializable {
     /**
      * The row columns evaluated on the wave inputs, per engine wave: index {@code w} = on the input of wave
      * {@code w} before its fan-out, index {@code waves} = after the last wave, before the finalize. A row column
-     * hosted by a stage of wave {@code w} is evaluated on the wave input when that input carries its inputs (and the
-     * fields of its variance-components estimate, if any) — a branch would only recompute it —; a deferred column
-     * on the first wave input that does. Expansion order (dependencies first): a prelude column is an input of the
-     * next. Computed for every wave at once, because each wave's input includes the earlier preludes.
+     * is evaluated on the input of the wave that first reads it ({@link #firstReadWaves}) — its host's wave, unless
+     * a reader sits in an earlier one: a branch evaluates only its own stage's columns — or on the first later wave
+     * input, up to its host's, that carries its inputs (and the fields of its variance-components estimate, if
+     * any); one that no such wave input can evaluate stays in its stage's branch. It is not evaluated before its
+     * first reader, so it rides no shuffle it has no reader behind. A deferred column is evaluated on the first
+     * wave input that carries its inputs, whatever the wave. Expansion order (dependencies first): a prelude column
+     * is an input of the next. Computed for every wave at once, because each wave's input includes the earlier
+     * preludes.
      */
     private List<List<OutputColumn>> preludes() {
         if (preludes == null) {
             final int n = getEngineWaves().size();
             final Map<String, Integer> waveOf = engineWaveOfColumn();
+            final Map<String, Integer> firstRead = firstReadWaves();
             final List<List<OutputColumn>> all = new ArrayList<>();
             final Set<String> available = new HashSet<>(inputFields.keySet());
             final Set<String> evaluated = new HashSet<>();
@@ -380,7 +385,10 @@ public class FeaturePlan implements Serializable {
                 for (final OutputColumn c : columns) {
                     if (!FeaturePlanCompiler.isRowColumn(c) || evaluated.contains(c.canonicalName)) continue;
                     final Integer at = waveOf.get(c.canonicalName);
-                    if (at == null || (!c.deferred && at != w)) continue;
+                    // a hosted column waits for its first reader's wave, not for its host's: the host is its
+                    // lowest-INDEX reader, and a reader with a higher index can be in an earlier wave (the host waits
+                    // for another dependency)
+                    if (at == null || (!c.deferred && (at < w || w < firstRead.getOrDefault(c.canonicalName, at)))) continue;
                     if (available.containsAll(c.inputs) && vcFieldsAvailable(List.of(c), available)) {
                         prelude.add(c);
                         available.add(c.canonicalName);
@@ -392,6 +400,47 @@ public class FeaturePlan implements Serializable {
             preludes = all;
         }
         return preludes;
+    }
+
+    /**
+     * The engine wave (0-based) that first reads each hosted row column, deferred ones aside: the earliest wave of a
+     * stage whose keys, keyed columns or variance-components estimate read it — its host's wave at the latest — and,
+     * through a row column reading it, that column's own first read.
+     */
+    private Map<String, Integer> firstReadWaves() {
+        final Map<String, Integer> first = new HashMap<>();
+        final Map<String, Integer> waveOf = engineWaveOfColumn();
+        for (final OutputColumn c : columns) {
+            final Integer at = waveOf.get(c.canonicalName);
+            if (at != null && FeaturePlanCompiler.isRowColumn(c) && !c.deferred) first.put(c.canonicalName, at);
+        }
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int w = 0; w < waves.size(); w++) {
+            for (final Stage s : waves.get(w)) {
+                final List<String> keyed = new ArrayList<>();
+                for (final String name : s.columnNames) {
+                    final OutputColumn c = columnsByName().get(name);
+                    if (c != null && !FeaturePlanCompiler.isRowColumn(c)) keyed.add(name);
+                }
+                for (final String read : readsOf(s.keys, keyed, false)) {
+                    if (first.containsKey(read) && first.get(read) > w) first.put(read, w);
+                }
+            }
+        }
+        // a row column is on the wave input its first reader needs, and so is every row column it reads
+        for (boolean changed = true; changed; ) {
+            changed = false;
+            for (final String name : new ArrayList<>(first.keySet())) {
+                final int w = first.get(name);
+                for (final String read : readsOf(List.of(), List.of(name), false)) {
+                    if (first.containsKey(read) && first.get(read) > w) {
+                        first.put(read, w);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        return first;
     }
 
     /**
@@ -430,6 +479,32 @@ public class FeaturePlan implements Serializable {
         return fields;
     }
 
+    /**
+     * What the wave engine would read as null: for every stage, the computed columns its branch reads (its keys, its
+     * columns' self and past inputs, the fields of its variance-components estimate) that are neither on its wave
+     * input nor evaluated by the branch itself. Empty for a consistent plan — the engine refuses any other
+     * ({@code FeatureStages.engineConstraints}), because a branch reading a column nobody evaluated for it yields
+     * null statistics without any failure.
+     */
+    public List<String> getWaveReadGaps() {
+        final List<String> gaps = new ArrayList<>();
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int w = 0; w < waves.size(); w++) {
+            final Set<String> input = getWaveInputFields(w);
+            for (final Stage s : waves.get(w)) {
+                final List<String> evaluated = isFoldTarget(s) ? getFoldColumns(s, w) : getBranchColumns(s, w);
+                // the coordinate mentions readsOf adds for liveness are conservative (any token spelling a column): no gap
+                final Set<String> missing = readsOf(s.keys, evaluated, false);
+                missing.removeIf(name -> input.contains(name) || (evaluated.contains(name) && !s.keys.contains(name)));
+                if (!missing.isEmpty()) {
+                    gaps.add("feature stage scheduling: stage #" + s.index + " (wave " + (w + 1) + ") reads " + missing
+                            + ", which no earlier wave and no row evaluation on its wave input provides; set engine.parallelWaves: false to run the linear chain");
+                }
+            }
+        }
+        return gaps;
+    }
+
     // ---- liveness (engine doc §9.4.7) ----------------------------------------------------------------------
     // What a keyed stage's GroupByKey must carry. The engine projects the rows it groups to these sets (input fields
     // always ride; only computed columns are dropped), so the report's carry counts are what the shuffles move.
@@ -438,6 +513,11 @@ public class FeaturePlan implements Serializable {
 
     /** Computed columns read from the input rows when {@code names} are evaluated under {@code keys}. */
     private Set<String> readsOf(final List<String> keys, final Collection<String> names) {
+        return readsOf(keys, names, true);
+    }
+
+    /** {@link #readsOf(List, Collection)}; {@code mentions} = also the columns a coordinate names ({@link #mentioned}). */
+    private Set<String> readsOf(final List<String> keys, final Collection<String> names, final boolean mentions) {
         final Set<String> reads = new LinkedHashSet<>();
         for (final String k : keys) if (columnsByName().containsKey(k)) reads.add(k);
         final List<OutputColumn> cols = new ArrayList<>();
@@ -448,7 +528,7 @@ public class FeaturePlan implements Serializable {
         for (final OutputColumn c : cols) {
             for (final String in : c.inputs) if (columnsByName().containsKey(in)) reads.add(in);
             for (final String in : c.pastInputs) if (columnsByName().containsKey(in)) reads.add(in);
-            for (final Map.Entry<String, String> e : c.coordinates.entrySet()) mentioned(e.getKey(), e.getValue(), reads);
+            if (mentions) for (final Map.Entry<String, String> e : c.coordinates.entrySet()) mentioned(e.getKey(), e.getValue(), reads);
         }
         // the variance-components estimate of the stage reads the levels' keys / target / offset / fold keys
         for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(cols, columnsByName())) {
