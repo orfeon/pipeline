@@ -1176,9 +1176,11 @@ public class FeaturePlanCompilerTest {
                 .replace("      - {type: aggregate, field: sold, funcs: [count, mean]}\n",
                         "      - {type: aggregate, field: sold, funcs: [count, mean]}\n"
                                 + "      - {type: aggregate, field: gain, funcs: [mean]}\n"
+                                + "      - {type: aggregate, field: margin, funcs: [mean]}\n"
                                 + "      - {type: aggregate, field: resid, funcs: [mean]}\n")
                 .replace("output:\n", """
                           - {name: gain, scope: row, expr: "final_price - start_price"}
+                          - {name: margin, scope: row, expr: "final_price / start_price"}
                           - {name: resid, scope: row, expr: "gain - relative_start_price_zscore"}
                           - name: cat_recent
                             scope: sequence
@@ -1199,6 +1201,10 @@ public class FeaturePlanCompilerTest {
         // evaluated once: the host's branch does not recompute it, and it rides to wave 2 with the rows
         Assertions.assertFalse(plan.getBranchColumns(host, 1).contains("gain"), plan::describe);
         Assertions.assertTrue(plan.getLiveAfterWave(0).contains("gain"), plan::describe);
+        // `margin` is read by the host stage alone: it waits for the host's wave although the wave 1 input could
+        // evaluate it, so it rides no shuffle of wave 1
+        Assertions.assertFalse(plan.getWaveInputFields(0).contains("margin"), plan::describe);
+        Assertions.assertTrue(plan.getPreludeColumns(1).stream().map(OutputColumn::getCanonicalName).toList().contains("margin"), plan::describe);
         Assertions.assertEquals(List.of(), plan.getWaveReadGaps(), plan::describe);
     }
 

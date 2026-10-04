@@ -646,7 +646,8 @@ public final class FeatureStages {
     public static List<String> engineConstraints(final FeaturePlan plan, final boolean streaming) {
         final List<String> errors = new ArrayList<>();
         // a branch of the wave engine reading a column nobody evaluated for it would emit null statistics, silently
-        if (!streaming && plan.branchesWaves()) errors.addAll(plan.getWaveReadGaps());
+        // (a plan with compile errors has no geometry worth checking: its own diagnostics are the report)
+        if (!streaming && plan.branchesWaves() && !plan.getDiagnostics().hasErrors()) errors.addAll(plan.getWaveReadGaps());
         final boolean keyed = plan.getStages().stream().anyMatch(FeaturePlan.Stage::isReplay);
         if (streaming && keyed) {
             errors.add("sequence / population features are supported in batch only (time-sorted keyed state)");
