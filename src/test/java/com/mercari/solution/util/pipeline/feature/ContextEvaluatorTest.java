@@ -68,6 +68,67 @@ public class ContextEvaluatorTest {
         }
     }
 
+    private static OutputColumn ratingProb(final String name, final String offsetScale) {
+        final OutputColumn c = new OutputColumn();
+        c.canonicalName = name;
+        c.scope = FeatureSpec.Scope.context;
+        c.operator = "ratingProb";
+        c.coordinates.put("field", "mu");
+        c.coordinates.put("sigma", "sigma");
+        c.coordinates.put("beta", "4");
+        c.coordinates.put("offset", "w");
+        c.coordinates.put("offsetScale", offsetScale);
+        return c;
+    }
+
+    /**
+     * ratingProb with an offset: the benchmark weighs every row's strength, p_i = w_i exp(mu_i / c) / Σ w_j exp(mu_j / c) —
+     * a row without a valid offset is out of the contest (its uncertainty too), an offset of 0 reads 0 and stays in it;
+     * offsetScale log reads ln w.
+     */
+    @Test
+    public void testRatingProbOffset() {
+        final OutputColumn c = ratingProb("p", "probability");
+        final java.util.List<java.util.Map<String, Object>> rows = new java.util.ArrayList<>();
+        final double[][] values = {{30, 3, 0.5}, {25, 8, 0.3}, {20, 1, 0.2}, {27, 2, Double.NaN}, {22, 2, 0}};
+        for (final double[] v : values) {
+            final java.util.Map<String, Object> row = row(v[0], v[1]);
+            row.put("w", Double.isNaN(v[2]) ? null : v[2]);
+            rows.add(row);
+        }
+        new ContextEvaluator(java.util.List.of(c)).evaluateColumn(c, rows);
+        // c² over the rows taking part: the null offset is out, the zero one is in
+        final double scale = Math.sqrt((9 + 16) + (64 + 16) + (1 + 16) + (4 + 16));
+        final double sum = 0.5 * Math.exp(30 / scale) + 0.3 * Math.exp(25 / scale) + 0.2 * Math.exp(20 / scale);
+        Assertions.assertEquals(0.5 * Math.exp(30 / scale) / sum, (Double) rows.get(0).get("p"), 1e-12);
+        Assertions.assertEquals(0.3 * Math.exp(25 / scale) / sum, (Double) rows.get(1).get("p"), 1e-12);
+        Assertions.assertEquals(0.2 * Math.exp(20 / scale) / sum, (Double) rows.get(2).get("p"), 1e-12);
+        Assertions.assertNull(rows.get(3).get("p"), "no offset: out of the contest");
+        Assertions.assertEquals(0d, (Double) rows.get(4).get("p"), 0d, "an offset of 0 reads 0");
+        // the log scale reads ln w: the same probabilities from log offsets
+        final OutputColumn log = ratingProb("q", "log");
+        final java.util.List<java.util.Map<String, Object>> logRows = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            final java.util.Map<String, Object> row = new java.util.HashMap<>(rows.get(i));
+            row.put("w", Math.log((Double) rows.get(i).get("w")));
+            logRows.add(row);
+        }
+        final java.util.List<java.util.Map<String, Object>> probabilityRows = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) probabilityRows.add(new java.util.HashMap<>(rows.get(i)));
+        new ContextEvaluator(java.util.List.of(log)).evaluateColumn(log, logRows);
+        new ContextEvaluator(java.util.List.of(c)).evaluateColumn(c, probabilityRows);
+        for (int i = 0; i < 3; i++) Assertions.assertEquals((Double) probabilityRows.get(i).get("p"), (Double) logRows.get(i).get("q"), 1e-12, "row " + i);
+        // equal strengths read the benchmark back
+        final java.util.List<java.util.Map<String, Object>> equal = new java.util.ArrayList<>();
+        for (final double w : new double[] {0.6, 0.4}) {
+            final java.util.Map<String, Object> row = row(25d, 2d);
+            row.put("w", w);
+            equal.add(row);
+        }
+        new ContextEvaluator(java.util.List.of(c)).evaluateColumn(c, equal);
+        Assertions.assertEquals(0.6, (Double) equal.get(0).get("p"), 1e-12);
+    }
+
     @Test
     public void testValueKeyNormalisesIntegralNumbers() {
         Assertions.assertEquals("1", ContextEvaluator.valueKey(1));

@@ -131,8 +131,12 @@ public class ContextEvaluator implements Serializable {
 
     private record Softmax(String offset, double temperature, boolean logScale, boolean scoreNullIsNull) {}
 
-    /** {@code sigma} the column of the row's uncertainty (null = none), {@code beta} the rating's performance noise. */
-    private record RatingProb(String sigma, double beta) {}
+    /**
+     * {@code sigma} the column of the row's uncertainty (null = none), {@code beta} the rating's performance noise,
+     * {@code offset} the column of a benchmark the probability is read against (null = none; {@code logScale}: read as
+     * a log-probability).
+     */
+    private record RatingProb(String sigma, double beta, String offset, boolean logScale) {}
 
     private record Residualize(String[] against) {}
 
@@ -164,7 +168,8 @@ public class ContextEvaluator implements Serializable {
         return switch (c.operator) {
             case "softmax" -> plan.with(new Softmax(at.get("offset"), Double.parseDouble(at.getOrDefault("temperature", "1")),
                     "log".equals(at.get("offsetScale")), "null".equals(at.get("scoreNull"))));
-            case "ratingProb" -> plan.with(new RatingProb(at.get("sigma"), Double.parseDouble(at.get("beta"))));
+            case "ratingProb" -> plan.with(new RatingProb(at.get("sigma"), Double.parseDouble(at.get("beta")), at.get("offset"),
+                    "log".equals(at.get("offsetScale"))));
             case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
             case "harville" -> {
                 final String discount = at.get("discount");
@@ -270,14 +275,18 @@ public class ContextEvaluator implements Serializable {
      * over the rows taking part (a softmax whose temperature is the contest's own scale, so the same gap in
      * {@code mu} means less in a large or uncertain field). A row without a finite {@code mu} (or {@code sigma}, when
      * a column is named) is null and out of the contest; without a {@code sigma} column the uncertainty is 0. A
-     * contest of one row reads 1. Strengths are shifted by the group maximum for stability, and both sums are taken
+     * contest of one row reads 1. With an {@code offset} (a benchmark, read in probability space like a softmax's:
+     * {@code offsetScale: log} takes exp first) {@code p_i = w_i exp(mu_i / c) / Σ_j w_j exp(mu_j / c)} — the
+     * {@code plackettLuce} first choice of a rating whose offset is {@code ln w} in log-odds units: a row without a
+     * finite, non-negative offset is null and out of the contest (its uncertainty too), an offset of 0 reads 0 and
+     * stays in it. Strengths are shifted by the group maximum for stability, and both sums are taken
      * in the order of their terms (like {@link GroupOps}), so the result does not depend on how the group arrives.
      */
     static void ratingProb(final String name, final String field, final RatingProb plan, final List<Map<String, Object>> rows) {
         final int n = rows.size();
         final double[] mus = new double[n];
         final boolean[] active = new boolean[n];
-        final double[] variances = new double[n];
+        final double[] variances = new double[n], weights = new double[n];
         final double beta2 = plan.beta() * plan.beta();
         int m = 0;
         double max = Double.NEGATIVE_INFINITY;
@@ -291,14 +300,25 @@ public class ContextEvaluator implements Serializable {
                 if (s == null || !Double.isFinite(s) || s < 0) continue;
                 sigma = s;
             }
+            double w = 1d;
+            if (plan.offset() != null) {
+                final Double o = FeatureValues.toDouble(row.get(plan.offset()));
+                if (o == null) continue;
+                w = plan.logScale() ? Math.exp(o) : o;
+                if (!Double.isFinite(w) || w < 0) continue;
+            }
             mus[i] = mu;
+            weights[i] = w;
             active[i] = true;
             variances[m++] = sigma * sigma + beta2;
-            max = Math.max(max, mu);
+            // the shift only keeps exp in range: a row of weight 0 reads 0 whatever its strength
+            if (w > 0) max = Math.max(max, mu);
         }
         final double c = Math.sqrt(sortedSum(variances, m));
         final double[] strengths = new double[n], terms = new double[m];
-        for (int i = 0, k = 0; i < n; i++) if (active[i]) terms[k++] = strengths[i] = Math.exp((mus[i] - max) / c);
+        for (int i = 0, k = 0; i < n; i++) {
+            if (active[i]) terms[k++] = strengths[i] = weights[i] == 0d ? 0d : weights[i] * Math.exp((mus[i] - max) / c);
+        }
         final double denominator = sortedSum(terms, m);
         for (int i = 0; i < n; i++) {
             rows.get(i).put(name, !active[i] || !(denominator > 0) ? null : strengths[i] / denominator);

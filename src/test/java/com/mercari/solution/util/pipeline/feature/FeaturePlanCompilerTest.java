@@ -3732,6 +3732,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("field: strength_all_final_price_rating_mu, sigma: strength_all_final_price_rating_sigma,",
                 "fields: [strength_all_final_price_rating_mu, price_per_unit],"))), "context.ratingProb.sigma"), "without a sigma several fields are fine");
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 0"))), "context.ratingProb.beta"));
+        // an offset: a benchmark read like a softmax's (a numeric column or a baseline, probability | log); none writes no scale
+        Assertions.assertNull(p.getCoordinates().get("offsetScale"));
+        final FeaturePlan offset = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetScale: log")));
+        Assertions.assertFalse(offset.getDiagnostics().hasErrors(), offset::describe);
+        final OutputColumn benchmarked = column(offset, "contest_pWin_ratingProb");
+        Assertions.assertEquals("price_per_unit", benchmarked.getCoordinates().get("offset"));
+        Assertions.assertEquals("log", benchmarked.getCoordinates().get("offsetScale"));
+        Assertions.assertTrue(benchmarked.getInputs().contains("price_per_unit"), benchmarked::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: category"))), "context.ratingProb.offset"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetScale: odds"))), "context.ratingProb.offsetScale"));
         // nullPolicy indicator: a row out of the contest is flagged like a softmax row
         final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
         Assertions.assertNotNull(indicator.getColumn("contest_pWin_ratingProb_isnull"), indicator::describe);

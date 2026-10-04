@@ -493,19 +493,29 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     `mu + offset` of the row and rates only what is left, so a condition whose effect is known (a handicap, a
     fixed coefficient times a covariate, computed by a row op) is not absorbed into the ratings. The offset is
     never rated: `mu` stays the entity's own strength, and a model adds the row's offset back
-    (`ratingProb` over a row `expr` `mu + offset`). A row without a finite offset joins no contest (like one without
-    an outcome) — give it a default in the row op if it should still count. All methods.
+    (`ratingProb` over a row `expr` `mu + offset`, or its `offset:` for a log-odds one, below). A row without a
+    finite offset joins no contest (like one without an outcome) — give it a default in the row op if it should
+    still count. All methods.
+  - **`offsetUnits: logit`** (`bradleyTerry` / `plackettLuce`; default `rating`) reads the offset as a **log-odds**
+    instead — a probability benchmark (a market, an earlier model) as `ln p`, computed by a row op. Each comparison
+    then adds it at its own scale: `bradleyTerry` reads a pair as `σ((m_i − m_q) / c + o_i − o_q)` with the pair's
+    `c = sqrt(sigma_i² + sigma_q² + 2 beta²)` (wide while either side is little known), `plackettLuce` the first
+    choice as `exp((m_i − best) / c + o_i)` with the contest's `c = sqrt(Σ (sigma² + beta²))`, which grows with the
+    field — the rating-units offset `c · o`, so a deeper choice under `depthScale` reads `o / depthScale^(q − 1)`. A
+    rating-units offset would need that `c` multiplied in by hand, a constant that is right for one field size and
+    one state of knowledge only. With `plackettLuce` and `ln p` of a win probability, the first choice is the
+    benchmark times the strengths — what `ratingProb` with the same benchmark as its `offset` reads back.
+    `gaussian` reads margins (give its offset in the outcome's units) and `elo` keeps no uncertainty to scale by.
 
-    The offset's scale is yours to get right, and a wrong one does not stay in the offset. A probability benchmark
-    (a market, an earlier model) is a log-odds, while the offset is in rating units: `ln p` has to be multiplied by
-    the contest's scale (`bradleyTerry`: `c = sqrt(sigma_i² + sigma_q² + 2 beta²)` of a pair; `plackettLuce`:
-    `sqrt(Σ (sigma² + beta²))` over the contest, which grows with the field), and a benchmark of one kind of outcome
-    (who wins) is not on the scale of another (the order of every pair). Where the offset is a strong predictor,
-    the mismatch is absorbed by the entities whose appearance goes with the offset — those usually favoured by it
-    rate down when it is too large, up when it is too small — so `mu` becomes partly a function of the offset's level
-    instead of a strength net of it. Check it on the output: within a contest, `mu` should be about uncorrelated
-    with the offset; a clearly negative (or positive) rank correlation says the scale is off, and a comparison of a
-    few multipliers says which way.
+    The offset's scale is yours to get right, and a wrong one does not stay in the offset. `offsetUnits: logit` takes
+    the contest's scale off your hands, not the kind of outcome: a benchmark of one outcome (who wins) is not on the
+    scale of another (the order of every pair — `bradleyTerry`, or the deeper choices of `plackettLuce`), so even a
+    log-odds offset may need a multiplier there. Where the offset is a strong predictor, the mismatch is absorbed by
+    the entities whose appearance goes with the offset — those usually favoured by it rate down when it is too
+    large, up when it is too small — so `mu` becomes partly a function of the offset's level instead of a strength
+    net of it. Check it on the output: within a contest, `mu` should be about uncorrelated with the offset; a clearly
+    negative (or positive) rank correlation says the scale is off, and a comparison of a few multipliers says which
+    way.
   - **`tauBy: <column>`** — the rated entity's drift read from the row, in place of `tau` (per contest, or per
     `tauPer` of absence): an entity whose strength is still changing (early in its career) reopens more
     uncertainty before each contest than a settled one. A row whose value is missing, negative or not finite
@@ -1580,6 +1590,8 @@ feature for a model whose initial score is the market's log share):
 | `field` | the strength: a rating's `mu` (a player's, or a team's `team_mu`) — any numeric column |
 | `sigma` | the column of each row's uncertainty (the matching `sigma` readout); optional — without it every row's uncertainty is 0 and `c² = n · beta²`. It belongs to one strength: an op that names a `sigma` takes one `field` (an op over several fields would read every field's contest with the same uncertainty — declare one op per field) |
 | `beta` | required, > 0: the performance noise of the rating the field comes from (its `beta`, by default half the prior's `sigma`: `25 / 6` for the default prior) |
+| `offset` | optional: a benchmark the probability is read against — a `baselines[].name` or a numeric column, read **in probability space** like a `softmax` offset: `p_i = w_i · exp(mu_i / c) / Σ_j w_j · exp(mu_j / c)`. A row without a finite, non-negative offset reads null and leaves the contest (its uncertainty too); an offset of 0 reads 0 and stays in it |
+| `offsetScale` | `probability` (default) \| `log`: the offset is `ln w` (`exp` is taken first) |
 
 `c` is the contest's own scale — `sqrt(Σ (sigma² + beta²))` over the rows taking part — so it is a
 `softmax` whose temperature the group decides: the same gap in `mu` is worth less in a large or an
@@ -1590,6 +1602,34 @@ adds `<name>_isnull`); a contest of one row reads 1. `excludeSelf` has no effect
 its availability from the field and the `sigma` column, so a probability over a rating is as available
 as the rating. `bradleyTerry` ratings have no closed-form win probability over a field of more than
 two; the Plackett–Luce read is the sensible one for them too (both share `mu` and `sigma`).
+
+**Against a benchmark (`offset`).** A rating updated with a log-odds offset (`offsetUnits: logit`, the
+benchmark's `ln p`) rates only what the benchmark does not already say; its probability is the benchmark
+times the strengths, which `offset:` reads with the same column — `offset: market_p`, or `offset: market_logp,
+offsetScale: log`. The column then carries the benchmark's availability and `validFor` too (a price expires).
+`ln(p_rating / p_market)` of that column is the rating's **excess over the benchmark**, free of the benchmark's
+level: a row expression, or the input of a model whose initial score is the market's log share.
+
+```yaml
+- name: market
+  scope: row
+  expr: "ln(market_share)"                    # the benchmark as a log-odds, known at predictAt
+- name: strength
+  scope: sequence
+  entity: seller
+  ops:
+    - {type: rating, field: final_price, context: session, order: descending, as: net,
+       offset: market, offsetUnits: logit}     # the strength the market does not price
+- name: contest
+  scope: context
+  context: session
+  ops:
+    - {type: ratingProb, field: strength_all_net_mu, sigma: strength_all_net_sigma, beta: 4.1667,
+       offset: market, offsetScale: log, as: pNet}
+- name: excess
+  scope: row
+  expr: "ln(contest_pNet_ratingProb / market_share)"
+```
 
 ### Group solvers (context ops `residualize`, `harville`)
 
