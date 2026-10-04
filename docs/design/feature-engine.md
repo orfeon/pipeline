@@ -374,7 +374,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   own updates normalise each side apart (`mean`), so `Σ a_i g_i` does not vanish along a constant weight where the
   sides' opponent counts differ; the difference form does. Both are zero for a constant weight. A row's team `sigma`
   includes `a² V` of each shared member, which is common to the contest's rows (it cancels between them). `RatingTest.testSharedMemberGaussianIsExact`
-  checks the joint update against the dense posterior of the whole linear model. The members' levels
+  checks the joint update against the dense posterior of the whole linear model. Exact within a contest, a shared
+  member is still FILTERED across contests: no covariance is kept between it and the entities (keeping it would touch
+  every entity correlated with the coefficient per contest, O(N), and then correlate the entities among themselves),
+  so a weight that goes with strength takes in strength while the entities are near their prior and its variance is
+  the filter's given the ratings, not the estimate's spread. Declined on that ground: the cross-covariance version
+  and a block-wise refit of the coefficient (circular with the ratings it would be fitted against); the module doc
+  steers users to a small `tau` and to `offset` for an effect estimated elsewhere. The members' levels
   are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
   sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no

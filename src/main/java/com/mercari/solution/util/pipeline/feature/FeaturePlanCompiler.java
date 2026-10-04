@@ -1803,6 +1803,8 @@ public final class FeaturePlanCompiler {
         final List<EntityDef> teamEntities = new ArrayList<>();
         // per member: its name (pool, column segment) and its weight column (null: 1)
         final List<String> memberNames = new ArrayList<>(), memberWeights = new ArrayList<>();
+        // per shared member: how it drifts (the info says what a drift of 0 or the op's player drift means for a coefficient)
+        final List<String> sharedDrifts = new ArrayList<>();
         if (!op.with.isEmpty()) {
             final double tau = op.tau != null ? op.tau : Rating.defaultTau(sigma);
             final List<Rating.Member> members = new ArrayList<>();
@@ -1822,6 +1824,13 @@ public final class FeaturePlanCompiler {
                 teamEntities.add(member);
                 memberNames.add(name);
                 memberWeights.add(weight);
+                if (member == null) {
+                    // without tauPer a shared member drifts in every contest of the pool, not in one entity's few
+                    final String per = tauPerMillis > 0 ? " per " + op.tauPer : " per contest (every contest of the pool)";
+                    sharedDrifts.add(name + ": " + (m.tau == null ? "tau not declared - the op's " + tau + per + ", a player's drift"
+                            : m.tau == 0d ? "tau 0 - never drifts, so it keeps what it took in while the entities warmed up"
+                            : "tau " + m.tau + per));
+                }
             }
             shared.put("teamPool", entity.name());
             shared.put("teamMembers", Rating.encodeMembers(members));
@@ -1913,7 +1922,12 @@ public final class FeaturePlanCompiler {
                         + " with its weight (a coefficient learned from the contests). A contest reads strengths only relative to each other, so a shared member"
                         + " learns only from contests whose rows differ in its weight: one equal on every row of a contest leaves it at its prior."
                         + " gaussian conditions on the shared members exactly (jointly with the contest's common shift); plackettLuce / bradleyTerry take one"
-                        + " joint Laplace step for them (the contest's gradient and Fisher information along their weights, cross terms included)");
+                        + " joint Laplace step for them (the contest's gradient and Fisher information along their weights, cross terms included)."
+                        + " A shared member is filtered along with the ratings, not fitted to them: each contest updates it given the entities' ratings"
+                        + " of that moment, with no covariance kept between it and them, so a weight that goes with strength takes in strength while the"
+                        + " entities are still near their prior, and its sigma is the filter's (given those ratings), not the spread of the estimate."
+                        + " It removes a condition from the ratings; it does not measure the condition's effect. A small tau (with tauPer: per period)"
+                        + " lets it follow and forget the warm-up - " + String.join("; ", sharedDrifts));
             }
             diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
                     + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"

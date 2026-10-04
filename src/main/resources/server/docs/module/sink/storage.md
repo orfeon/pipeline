@@ -116,6 +116,29 @@ When `suffix` contains FreeMarker template expressions, the following variables 
 | shardIndex        | Integer | Current shard index.                               |
 | suggestedSuffix   | String  | Compression-suggested suffix.                      |
 
+### One directory per run
+
+The sink writes new files and never deletes old ones. A re-run into the same `output` replaces only the files whose
+names it writes again, and the default file name carries the shard count (`part-00000-of-00005`): when the number of
+shards changes (auto-sharding, a different input size) no name matches, every shard of the earlier run stays next to
+the new ones, and a reader over the prefix (`gs://…/part*`, an external table, a load job) reads both runs in full. Two runs writing the same prefix at once mix their shards the same way. Give each run a
+directory of its own with a run id evaluated once when the config is loaded:
+
+```yaml
+system:
+  args:
+    runId: "${utils.datetime.currentDateTime('UTC', 0, 'yyyyMMdd-HHmmss')}"   # or pass args.runId at launch
+sinks:
+  - name: export
+    module: storage
+    inputs: [features]
+    parameters:
+      output: "gs://my-bucket/features/${args.runId}/part"
+      format: parquet
+```
+
+The reader then points at one run's directory (or the newest one).
+
 ## Output schema
 
 After writing, the module outputs one record per written file (its result, emitted after the write completes):

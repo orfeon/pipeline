@@ -395,19 +395,28 @@ not alter values).
   themselves — and `depthScale: g` (≥ 1) reads each deeper place as noisier (it counts less between entries of
   similar strength; a lopsided deep place can count more, being less predictable). Do not emulate `top` by clamping the
   outcome to `k + 1`: that is a tie, which still moves and narrows the entries behind. Compare a few depths with
-  the evaluation / screen transforms rather than guessing one.
+  the evaluation / screen transforms rather than guessing one; neither is a default regulariser — cut the depth only
+  where the lower places are really noise (decided early, many entries not finishing).
 - **`rating` with known conditions** (a handicap, a covariate whose effect you already estimated): `offset:` a row
   column in the rating's units — the contest expects `mu + offset` and rates only the rest, so the condition is not
-  absorbed into the entities' ratings; add it back in the model. Entities whose strength is still changing:
+  absorbed into the entities' ratings; add it back in the model. A log-probability benchmark (a market) must be
+  scaled into rating units first (× the contest's `c`), and a wrong scale is absorbed by the entities that go with
+  the offset: check that `mu` is about uncorrelated with the offset within a contest. Entities whose strength is still changing:
   `tauBy:` a pre-event row column giving the drift per contest (or per `tauPer`) in place of `tau`. How erratic an
   entity is has no op: the module doc's *Inconsistency* recipe reads it as the spread of its contest-net surprises.
 - **`rating` whose strength depends on a condition** (price level, region, item condition): add weighted components of
   the entity itself, `with: [{entity: <block entity>, name: <x>Slope, weight: <standardised condition column>,
   mu: 0, sigma: <expected slope size>}]` — the contests estimate each entity's slope; read `team: [mu]` for the
   strength at this row's condition. The weight must be pre-event, and an entity learns its slope only across
-  contests at different values of it. One coefficient for everyone instead (a condition's effect learned rather than
-  fixed in `offset`): a shared member `{name: <x>Effect, weight: <column>, mu: 0, sigma: <effect size>, tau: 0}` —
-  no entity; it learns only from contests whose rows differ in the weight.
+  contests at different values of it; a slope whose `sigma` has barely narrowed from its prior has learned nothing —
+  do not read its `mu` alone. One coefficient for everyone instead (a condition kept out of the ratings): a shared
+  member `{name: <x>Effect, weight: <column>, mu: 0, sigma: <effect size>, tau: <small>}` — no entity; it learns only
+  from contests whose rows differ in the weight. It is filtered along with the ratings (no covariance with them): a
+  weight that goes with strength takes in strength while the entities warm up, and its `sigma` is not the uncertainty
+  of the estimate. Give it a small `tau` (per `tauPer`; without `tauPer` it drifts in every contest of the pool, so
+  size it by their number) rather than 0, which freezes the warm-up, and use it to
+  remove the condition, not to measure it — for the effect itself, fit it outside and pass coefficient × condition
+  as the `offset`.
 - **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
   it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
   team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`

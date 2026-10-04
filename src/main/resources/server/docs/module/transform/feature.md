@@ -483,6 +483,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     `ratingProb` reads is the same.
   - Together: `top` is the hard cut, `depthScale` the soft decay above it. Two ops over the same outcome with
     different depths need their own `as`.
+  - Neither is a default regulariser. Cutting the depth throws away the order behind the leaders, which in many
+    fields still tells the stronger from the weaker; read less of it only where the lower places really are noise
+    (a contest decided early, entries that stop competing or do not finish, a censored order). Compare the plain
+    update with a few depths (the evaluation / screen transforms) rather than assuming the shallower one is safer.
 - **Per-row inputs (`offset`, `tauBy`).** Two things a contest may know about a row beyond who it is:
   - **`offset: <column or baselines[].name>`** — a known shift of the row's performance, in the rating's units and
     signed like a strength (positive = expected to do better, whatever the `order`). The contest expects
@@ -491,6 +495,17 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     never rated: `mu` stays the entity's own strength, and a model adds the row's offset back
     (`ratingProb` over a row `expr` `mu + offset`). A row without a finite offset joins no contest (like one without
     an outcome) — give it a default in the row op if it should still count. All methods.
+
+    The offset's scale is yours to get right, and a wrong one does not stay in the offset. A probability benchmark
+    (a market, an earlier model) is a log-odds, while the offset is in rating units: `ln p` has to be multiplied by
+    the contest's scale (`bradleyTerry`: `c = sqrt(sigma_i² + sigma_q² + 2 beta²)` of a pair; `plackettLuce`:
+    `sqrt(Σ (sigma² + beta²))` over the contest, which grows with the field), and a benchmark of one kind of outcome
+    (who wins) is not on the scale of another (the order of every pair). Where the offset is a strong predictor,
+    the mismatch is absorbed by the entities whose appearance goes with the offset — those usually favoured by it
+    rate down when it is too large, up when it is too small — so `mu` becomes partly a function of the offset's level
+    instead of a strength net of it. Check it on the output: within a contest, `mu` should be about uncorrelated
+    with the offset; a clearly negative (or positive) rank correlation says the scale is off, and a comparison of a
+    few multipliers says which way.
   - **`tauBy: <column>`** — the rated entity's drift read from the row, in place of `tau` (per contest, or per
     `tauPer` of absence): an entity whose strength is still changing (early in its career) reopens more
     uncertainty before each contest than a settled one. A row whose value is missing, negative or not finite
@@ -683,14 +698,19 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     The weight is read from the row by the team readouts too (the strength *this* row's contest will see), so it
     must be known at the row's `computeAt`. Within one contest a slope and the level it belongs to move together
     (each takes its share of the row's change); they are told apart across the entity's contests at different
-    values of the weight — an entity always seen at one value never learns its slope beyond the prior.
+    values of the weight — an entity always seen at one value never learns its slope beyond the prior. The slope's
+    `sigma` says how far that went: a slope whose `sigma` has barely narrowed from its prior has learned nothing
+    yet, and its `mu` is noise around the prior — read it (or let a model read it) only together with that `sigma`,
+    or not at all where most entities stay near the prior (an entity seldom seen under different values of the
+    weight, or a condition that another component already captures).
   - **Shared members (learned coefficients).** A member with a `name` and a `weight` but **no `entity`** is one
-    rating for the whole pool, entering every row with the row's weight — the coefficient of a condition, learned
-    from the contests instead of fixed in an `offset`:
+    rating for the whole pool, entering every row with the row's weight — a coefficient of a condition, learned
+    from the contests alongside the ratings instead of fixed in an `offset`, so that the condition is kept out of
+    the entities' ratings:
 
     ```yaml
     with:
-      - {name: priceEffect, weight: start_price_z, mu: 0, sigma: 0.5, tau: 0}   # skill_all_<as>_priceEffect_mu: the pool's coefficient
+      - {name: priceEffect, weight: start_price_z, mu: 0, sigma: 0.5, tau: 0.01}   # skill_all_<as>_priceEffect_mu
     ```
 
     It is one coefficient, not a member of every row's team: every row of a contest carries it, so the rows are
@@ -700,19 +720,44 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     weights, cross terms included, so two members on correlated weights share an effect instead of each taking it
     whole. Contests read
     strengths only relative to each other, so a shared member learns only from contests whose rows **differ** in
-    its weight: a weight equal on every row of a contest leaves it at its prior, mean and `sigma` alike. Its prior
+    its weight: a weight equal on every row of a contest teaches it nothing — its mean stays, and its `sigma` only
+    takes the drift of that contest (none under `tau: 0`). Its prior
     `mu` defaults to 0 (no effect — not the op's `mu`, which is a player's level); its prior
-    `sigma` is how large you expect the effect to be (in the rating's units per unit of weight); a `tau` of 0 keeps it
-    a constant of the pool, a small one lets it drift. A missing weight is a missing member (the row out, or absent
-    with `optional: true`). Its readouts are the same on every row; `z` is null (a pool of one). A row's
-    `team: [sigma]` includes `weight² · sigma²` of each shared member — the uncertainty of that row's strength —, but
-    that part is common to every row of the contest and cancels between them: summing the rows' `team_sigma²` (as a
-    `ratingProb` over them does) overstates the uncertainty of their comparison.
+    `sigma` is how large you expect the effect to be (in the rating's units per unit of weight). Its `tau` defaults
+    to the op's — a player's drift, rarely the right size for a coefficient: declare it (below). A missing weight is
+    a missing member (the row out, or absent with `optional: true`). Its readouts are the same on every row; `z` is
+    null (a pool of one). A row's `team: [sigma]` includes `weight² · sigma²` of each shared member — the uncertainty
+    of that row's strength —, but that part is common to every row of the contest and cancels between them: summing
+    the rows' `team_sigma²` (as a `ratingProb` over them does) overstates the uncertainty of their comparison.
+
+    **It is filtered with the ratings, not fitted to them.** Every contest updates the coefficient given the
+    entities' ratings of that moment, and no covariance is kept between the coefficient and the entities. Early in a
+    replay the entities are still near their prior, so a weight that goes with strength (a handicap assigned by
+    ability, a condition the stronger entities meet more often) takes in the strength the ratings do not hold yet;
+    once the ratings have learned it, the coefficient keeps being pulled back, slowly, because its `sigma` has
+    narrowed by then. Two consequences:
+    - **Its `sigma` is not the uncertainty of the estimate.** It is the filter's, given the ratings as they stood,
+      and narrows with every contest whatever the coefficient still has to unlearn: over a long replay the mean can
+      keep moving by many times its `sigma`, and replays over different spans (a short input that starts every entity
+      from its prior, a long one) can give coefficients of different size or even sign.
+    - **`tau: 0` freezes the warm-up.** A coefficient that never drifts weighs the warm-up contests like every later
+      one for good. Give it a small `tau` — under the op's `tauPer`, a drift per period: `tau: 0.01` with `tauPer:
+      P30D` lets it wander about `0.01 · sqrt(12)` ≈ 0.035 a year — so it follows what the contests say now and
+      forgets the warm-up; or read it only after the pool has warmed up (*Warm-up* above). Without `tauPer` the
+      drift is per contest, and a shared member takes part in **every** contest of the pool (those that teach it
+      nothing included), not in one entity's few: `tau: 0.01` over 2,500 contests adds `0.01 · sqrt(2500)` = 0.5,
+      a whole prior `sigma` — size a per-contest `tau` by the number of contests of the pool, or use `tauPer`.
+
+    So a shared member is for **removing** a condition from the ratings: the entities are rated net of what the
+    condition explains in each contest, and the coefficient's readout is the filter's working value, not the
+    condition's effect. To estimate the effect itself, fit it outside the rating (or let the downstream model read
+    the condition next to the ratings) and, where the ratings should be net of it, pass the fixed coefficient times
+    the condition as the `offset`.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or a member
   name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
   shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.shared` (info: what a shared member
-  learns from), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
+  learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
