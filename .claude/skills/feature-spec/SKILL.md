@@ -399,9 +399,12 @@ not alter values).
   where the lower places are really noise (decided early, many entries not finishing).
 - **`rating` with known conditions** (a handicap, a covariate whose effect you already estimated): `offset:` a row
   column in the rating's units — the contest expects `mu + offset` and rates only the rest, so the condition is not
-  absorbed into the entities' ratings; add it back in the model. A log-probability benchmark (a market) must be
-  scaled into rating units first (× the contest's `c`), and a wrong scale is absorbed by the entities that go with
-  the offset: check that `mu` is about uncorrelated with the offset within a contest. Entities whose strength is still changing:
+  absorbed into the entities' ratings; add it back in the model. A probability benchmark (a market): give its
+  `ln p` with `offsetUnits: logit` (`bradleyTerry` / `plackettLuce`) — each comparison adds it at its own scale `c`
+  — and read the result with `ratingProb` `offset:` the same benchmark (`offsetScale: log` for `ln p`);
+  `ln(p_rating / p_market)` is then the excess over the benchmark. A win benchmark is still not on the scale of
+  pairwise orders, and a wrong scale is absorbed by the entities that go with the offset: check that `mu` is about
+  uncorrelated with the offset within a contest. Entities whose strength is still changing:
   `tauBy:` a pre-event row column giving the drift per contest (or per `tauPer`) in place of `tau`. How erratic an
   entity is has no op: the module doc's *Inconsistency* recipe reads it as the spread of its contest-net surprises.
 - **`rating` whose strength depends on a condition** (price level, region, item condition): add weighted components of

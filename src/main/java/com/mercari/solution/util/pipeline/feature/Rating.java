@@ -281,12 +281,18 @@ public final class Rating implements Serializable {
     private final double depthScale;
     /** The fields of a row giving its known performance shift and the rated player's drift (null: none). See {@link #withRowInputs}. */
     private final String offsetField, tauField;
+    /**
+     * Whether the offset is in log-odds units rather than the rating's ({@code bradleyTerry} / {@code plackettLuce}):
+     * it enters each comparison at the contest's scale. See {@link #withOffsetUnits}.
+     */
+    private final boolean offsetLogit;
     /** Whether any member counts with a weight read from the row ({@link Member#weightField}); derived from {@code members}. */
     private final boolean weighted;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
                    final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
-                   final boolean countTeams, final int top, final double depthScale, final String offsetField, final String tauField) {
+                   final boolean countTeams, final int top, final double depthScale, final String offsetField, final String tauField,
+                   final boolean offsetLogit) {
         this.members = members;
         this.weighted = members.stream().anyMatch(m -> m.weightField() != null);
         this.countTeams = countTeams;
@@ -294,6 +300,7 @@ public final class Rating implements Serializable {
         this.depthScale = depthScale;
         this.offsetField = offsetField;
         this.tauField = tauField;
+        this.offsetLogit = offsetLogit;
         this.tauPerMillis = tauPerMillis;
         this.pairs = pairs;
         this.method = method;
@@ -352,7 +359,7 @@ public final class Rating implements Serializable {
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
                 tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
-                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false, 0, 1d, null, null);
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false, 0, 1d, null, null, false);
     }
 
     /**
@@ -366,7 +373,8 @@ public final class Rating implements Serializable {
         final String top = coordinates.get("top"), depthScale = coordinates.get("depthScale");
         final Rating players = playersOf(coordinates)
                 .withDepth(top == null ? 0 : Integer.parseInt(top), depthScale == null ? 1d : Double.parseDouble(depthScale))
-                .withRowInputs(coordinates.get("offsetField"), coordinates.get("tauField"));
+                .withRowInputs(coordinates.get("offsetField"), coordinates.get("tauField"))
+                .withOffsetUnits("logit".equals(coordinates.get("offsetUnits")));
         final String members = coordinates.get("teamMembers");
         return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members),
                 "true".equals(coordinates.get("teamCounts")));
@@ -472,7 +480,7 @@ public final class Rating implements Serializable {
             }
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team), countTeams, top, depthScale,
-                offsetField, tauField);
+                offsetField, tauField, offsetLogit);
     }
 
     /**
@@ -486,7 +494,7 @@ public final class Rating implements Serializable {
             throw new IllegalArgumentException("top / depthScale read the depth of a ranking: a plackettLuce parameter, not " + method);
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
-                offsetField, tauField);
+                offsetField, tauField, offsetLogit);
     }
 
     /**
@@ -505,7 +513,25 @@ public final class Rating implements Serializable {
             throw new IllegalArgumentException("elo keeps no uncertainty to drift: tauBy is a parameter of bradleyTerry / plackettLuce / gaussian");
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
-                offsetField, tauField);
+                offsetField, tauField, offsetLogit);
+    }
+
+    /**
+     * This rating reading its offset in log-odds units ({@code logit}) rather than the rating's: a probability
+     * benchmark's {@code ln p} as it is. The offset then enters each comparison at the comparison's own scale —
+     * {@code bradleyTerry}: {@code p = σ((m_i − m_q) / c + o_i − o_q)} with the pair's {@code c}; {@code plackettLuce}:
+     * the strength {@code exp((m_i − best) / c + o_i)} of the first choice, i.e. a shift of {@code c · o_i} in the
+     * rating's units at the contest's {@code c}, which a deeper choice at {@code c · depthScale^(q − 1)} reads as
+     * {@code o_i / depthScale^(q − 1)}. {@code gaussian} reads margins and {@code elo} has no uncertainty to scale by:
+     * neither takes it.
+     */
+    public Rating withOffsetUnits(final boolean logit) {
+        if (logit && method != Method.bradleyTerry && method != Method.plackettLuce) {
+            throw new IllegalArgumentException("offsetUnits logit scales the offset by a contest's comparison scale: a bradleyTerry / plackettLuce parameter, not " + method);
+        }
+        if (logit && offsetField == null) throw new IllegalArgumentException("offsetUnits logit without an offset");
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
+                offsetField, tauField, logit);
     }
 
     /**
@@ -729,8 +755,21 @@ public final class Rating implements Serializable {
                 // not added to each row's as if the rows' shares of it were independent
                 if (j == 0 || !members.get(j).shared()) v[i] = j == 0 ? variances[i * k + j] : v[i] + a * a * variances[i * k + j];
             }
-            // a known shift of the row's performance: the contest expects it, and rates only what is left
-            if (entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
+            // a known shift of the row's performance: the contest expects it, and rates only what is left (a log-odds
+            // offset enters at the comparisons' scale, below)
+            if (!offsetLogit && entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
+        }
+        // a log-odds offset: bradleyTerry adds it to each pair's log-odds (the pair's own c); plackettLuce has one scale per
+        // contest, so the offset is the shift c · o of the strength — at the c plackettLuce reads (contestScale2)
+        double[] logits = null;
+        if (offsetLogit) {
+            if (method == Method.plackettLuce) {
+                final double c = Math.sqrt(contestScale2(v));
+                for (int i = 0; i < n; i++) if (entries.get(i).offset() != 0d) m[i] += c * entries.get(i).offset();
+            } else {
+                logits = new double[n];
+                for (int i = 0; i < n; i++) logits[i] = entries.get(i).offset();
+            }
         }
         // the shared members of this contest: their weight per entry (0 where absent) and their pre-contest rating
         final List<Integer> sharedIndex = new ArrayList<>();
@@ -766,7 +805,7 @@ public final class Rating implements Serializable {
         final double[] sharedChange = new double[sharedCount], sharedPosterior = sharedVariance.clone();
         switch (method) {
             case elo -> elo(entries, ids, m, dMu);
-            case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
+            case bradleyTerry -> bradleyTerry(entries, ids, m, v, logits, dMu, deltas);
             case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
             case gaussian -> {
                 if (sharedCount == 0) gaussian(entries, m, v, dMu, deltas);
@@ -785,7 +824,7 @@ public final class Rating implements Serializable {
                 for (int c = 0; c < sharedCount; c++) for (int i = 0; i < n; i++) gradient[c] += sharedWeights[c][i] * dMu[i] / v[i];
                 plackettLuceInformation(entries, m, v, sharedWeights, precision);
             } else {
-                bradleyTerryShared(entries, ids, m, v, sharedWeights, gradient, precision);
+                bradleyTerryShared(entries, ids, m, v, logits, sharedWeights, gradient, precision);
             }
             for (int c = 0; c < sharedCount; c++) precision[c][c] += 1d / sharedVariance[c];
             final double[][] covariance = invert(precision);
@@ -909,7 +948,9 @@ public final class Rating implements Serializable {
         return other == self || other == neighbours[0] || other == neighbours[1];
     }
 
-    private void bradleyTerry(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
+    /** {@code logits}: each entry's log-odds offset ({@code offsetUnits: logit}), added to every pair's log-odds; null = none. */
+    private void bradleyTerry(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] logits,
+                              final double[] dMu, final double[] deltas) {
         final int n = entries.size();
         final double[] adjacent = new double[2];
         for (int i = 0; i < n; i++) {
@@ -921,7 +962,7 @@ public final class Rating implements Serializable {
                 if (!paired(entries, ids, i, q, adjacent)) continue;
                 final Entry other = entries.get(q);
                 final double c = Math.sqrt(v[i] + v[q] + 2 * beta * beta);
-                final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
+                final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c + logitGap(logits, q, i)));
                 omega += v[i] / c * (score(self, other) - p);
                 delta += Math.sqrt(v[i]) / c * (v[i] / (c * c)) * p * (1 - p);
                 opponents++;
@@ -933,6 +974,11 @@ public final class Rating implements Serializable {
             dMu[i] = omega;
             deltas[i] = delta;
         }
+    }
+
+    /** {@code o_q − o_i} of two entries' log-odds offsets (0 without them): what the offsets add to q's log-odds of beating i. */
+    private static double logitGap(final double[] logits, final int q, final int i) {
+        return logits == null ? 0d : logits[q] - logits[i];
     }
 
     /**
@@ -1062,12 +1108,9 @@ public final class Rating implements Serializable {
      */
     private void plackettLuceInformation(final List<Entry> entries, final double[] m, final double[] v, final double[][] a, final double[][] into) {
         final int n = entries.size(), p = a.length;
-        double c2 = 0, best = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < n; i++) {
-            c2 += v[i] + beta * beta;
-            best = Math.max(best, m[i]);
-        }
-        final double c = Math.sqrt(c2);
+        final double c2 = contestScale2(v), c = Math.sqrt(c2);
+        double best = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) best = Math.max(best, m[i]);
         final double[] e = new double[n];
         for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
         final double[] first = new double[p];
@@ -1112,8 +1155,8 @@ public final class Rating implements Serializable {
      * {@code mean}): the teams' own updates normalise each side apart, so a sum of their gradients {@code Σ a_i g_i}
      * would not vanish along a weight equal on every row where the sides' opponent counts differ, and this does.
      */
-    private void bradleyTerryShared(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[][] a,
-                                    final double[] gradient, final double[][] into) {
+    private void bradleyTerryShared(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] logits,
+                                    final double[][] a, final double[] gradient, final double[][] into) {
         final int n = entries.size(), p = a.length;
         final double[] adjacent = new double[2], norm = new double[n];
         final boolean[][] read = new boolean[n][n];
@@ -1133,7 +1176,7 @@ public final class Rating implements Serializable {
                 // a pair read from side i weighs norm_i / 2: from both sides, the mean of the two
                 if (!read[i][q]) continue;
                 final double weight = norm[i] / 2, c2 = v[i] + v[q] + 2 * beta * beta, c = Math.sqrt(c2);
-                final double prob = 1d / (1d + Math.exp((m[q] - m[i]) / c)), residual = score(entries.get(i), entries.get(q)) - prob;
+                final double prob = 1d / (1d + Math.exp((m[q] - m[i]) / c + logitGap(logits, q, i))), residual = score(entries.get(i), entries.get(q)) - prob;
                 for (int k = 0; k < p; k++) difference[k] = a[k][i] - a[k][q];
                 for (int k = 0; k < p; k++) {
                     // side i's view of the pair: θ moves s_i − s_q by (a_i − a_q) · θ
@@ -1165,12 +1208,9 @@ public final class Rating implements Serializable {
      */
     private void plackettLuce(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
-        double c2 = 0, best = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < n; i++) {
-            c2 += v[i] + beta * beta;
-            best = Math.max(best, m[i]);
-        }
-        final double c = Math.sqrt(c2);
+        final double c2 = contestScale2(v), c = Math.sqrt(c2);
+        double best = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) best = Math.max(best, m[i]);
         // exp((mu − max) / c): the ratios below are shift-invariant, the shift keeps exp in range
         final double[] e = new double[n];
         for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
@@ -1207,6 +1247,16 @@ public final class Rating implements Serializable {
             dMu[i] = v[i] / c * omega;
             deltas[i] = Math.sqrt(v[i]) / c * (v[i] / c2) * delta;
         }
+    }
+
+    /**
+     * {@code c²} of a {@code plackettLuce} contest: {@code Σ (v_i + beta²)} over its entries. One sum for the update, the
+     * shared members' information and the shift of a log-odds offset, which must read the same scale to the bit.
+     */
+    private double contestScale2(final double[] v) {
+        double c2 = 0;
+        for (final double variance : v) c2 += variance + beta * beta;
+        return c2;
     }
 
     /** {@code exp((mu_s − max) / (c · ratio))}: entry s's strength in a choice made at {@code ratio} times the contest's scale. */

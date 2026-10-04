@@ -317,7 +317,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   1.0 and reproduce the plain update bit for bit. Two per-row inputs (`Rating.withRowInputs`; coordinates
   `offsetField` / `tauField`, past inputs of every readout column): the offset is added to the entry's summed
   strength before the method runs — the contest expects `m_i + offset_i`, the offset itself is no member and is never
-  rated — and a row without a finite offset joins no contest; `tauBy` replaces the rated player's (member 0's) `tau`
+  rated — and a row without a finite offset joins no contest. `offsetUnits: logit` (`Rating.withOffsetUnits`,
+  coordinate `offsetUnits`; `bradleyTerry` / `plackettLuce` only) reads it as a log-odds: `bradleyTerry` adds
+  `o_q − o_i` to each pair's exponent at the pair's own `c` (`logitGap`, also inside `bradleyTerryShared`),
+  `plackettLuce` shifts `m_i` by `c · o_i` with `c` summed exactly as `plackettLuce` sums it (one scale per contest,
+  so the update and `plackettLuceInformation` read the same shifted strengths, and a deeper choice reads
+  `o / depthScale^(q − 1)`); `ratingProb`'s `offset` is its read-back (`w · exp(mu / c)`, probability space like
+  softmax). `tauBy` replaces the rated player's (member 0's) `tau`
   in `drifted` for that entry — once per player and contest, at the largest valid value among the player's rows (its
   drift is its state: every row of it enters the contest with one prior variance) — the other members keep theirs. Under `tauPer` a read drifts up to the row at the
   row's own value (`Rating.rowTau(row)` → `read(..., rowTau)` / `readTeam(..., rowTau)`), so the field is also a self
