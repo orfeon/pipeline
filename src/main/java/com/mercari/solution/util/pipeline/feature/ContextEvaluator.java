@@ -277,8 +277,9 @@ public class ContextEvaluator implements Serializable {
      * contest of one row reads 1. With an {@code offset} (a benchmark, read in probability space like a softmax's:
      * {@code offsetScale: log} takes exp first) {@code p_i = w_i exp(mu_i / c) / Σ_j w_j exp(mu_j / c)} — the
      * {@code plackettLuce} first choice of a rating whose offset is {@code ln w} in log-odds units: a row without a
-     * finite, non-negative offset is null and out of the contest (its uncertainty too), an offset of 0 reads 0 and
-     * stays in it. Strengths are shifted by the group maximum for stability, and both sums are taken
+     * finite, non-negative offset is null and out of the contest (its uncertainty too); an offset of 0 reads 0 and
+     * adds no uncertainty to the scale either — the rating's offset {@code ln 0} is not finite, so its contest never
+     * held the row. Strengths are shifted by the group maximum for stability, and both sums are taken
      * in the order of their terms (like {@link GroupOps}), so the result does not depend on how the group arrives.
      */
     static void ratingProb(final String name, final String field, final RatingProb plan, final List<Map<String, Object>> rows) {
@@ -287,7 +288,7 @@ public class ContextEvaluator implements Serializable {
         final boolean[] active = new boolean[n];
         final double[] variances = new double[n], weights = new double[n];
         final double beta2 = plan.beta() * plan.beta();
-        int m = 0;
+        int m = 0, scaled = 0;
         double max = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
@@ -304,11 +305,15 @@ public class ContextEvaluator implements Serializable {
             mus[i] = mu;
             weights[i] = w;
             active[i] = true;
-            variances[m++] = sigma * sigma + beta2;
-            // the shift only keeps exp in range: a row of weight 0 reads 0 whatever its strength
-            if (w > 0) max = Math.max(max, mu);
+            m++;
+            // a row of weight 0 reads 0 whatever its strength: it is in neither the scale nor the shift (which only
+            // keeps exp in range)
+            if (w > 0) {
+                variances[scaled++] = sigma * sigma + beta2;
+                max = Math.max(max, mu);
+            }
         }
-        final double c = Math.sqrt(sortedSum(variances, m));
+        final double c = Math.sqrt(sortedSum(variances, scaled));
         final double[] strengths = new double[n], terms = new double[m];
         for (int i = 0, k = 0; i < n; i++) {
             if (active[i]) terms[k++] = strengths[i] = weights[i] == 0d ? 0d : weights[i] * Math.exp((mus[i] - max) / c);

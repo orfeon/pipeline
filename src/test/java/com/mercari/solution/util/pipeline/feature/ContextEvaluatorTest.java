@@ -83,8 +83,8 @@ public class ContextEvaluatorTest {
 
     /**
      * ratingProb with an offset: the benchmark weighs every row's strength, p_i = w_i exp(mu_i / c) / Σ w_j exp(mu_j / c) —
-     * a row without a valid offset is out of the contest (its uncertainty too), an offset of 0 reads 0 and stays in it;
-     * offsetScale log reads ln w.
+     * a row without a valid offset is out of the contest (its uncertainty too), an offset of 0 reads 0 and adds no
+     * uncertainty to the scale either (the rating's ln 0 offset keeps the row out of its contest); offsetScale log reads ln w.
      */
     @Test
     public void testRatingProbOffset() {
@@ -97,8 +97,8 @@ public class ContextEvaluatorTest {
             rows.add(row);
         }
         new ContextEvaluator(java.util.List.of(c)).evaluateColumn(c, rows);
-        // c² over the rows taking part: the null offset is out, the zero one is in
-        final double scale = Math.sqrt((9 + 16) + (64 + 16) + (1 + 16) + (4 + 16));
+        // c² over the rows the rating's contest holds: the null offset is out, and so is the zero one (ln 0)
+        final double scale = Math.sqrt((9 + 16) + (64 + 16) + (1 + 16));
         final double sum = 0.5 * Math.exp(30 / scale) + 0.3 * Math.exp(25 / scale) + 0.2 * Math.exp(20 / scale);
         Assertions.assertEquals(0.5 * Math.exp(30 / scale) / sum, (Double) rows.get(0).get("p"), 1e-12);
         Assertions.assertEquals(0.3 * Math.exp(25 / scale) / sum, (Double) rows.get(1).get("p"), 1e-12);

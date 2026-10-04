@@ -1590,8 +1590,8 @@ feature for a model whose initial score is the market's log share):
 | `field` | the strength: a rating's `mu` (a player's, or a team's `team_mu`) — any numeric column |
 | `sigma` | the column of each row's uncertainty (the matching `sigma` readout); optional — without it every row's uncertainty is 0 and `c² = n · beta²`. It belongs to one strength: an op that names a `sigma` takes one `field` (an op over several fields would read every field's contest with the same uncertainty — declare one op per field) |
 | `beta` | required, > 0: the performance noise of the rating the field comes from (its `beta`, by default half the prior's `sigma`: `25 / 6` for the default prior) |
-| `offset` | optional: a benchmark the probability is read against — a `baselines[].name` or a numeric column, read **in probability space** like a `softmax` offset: `p_i = w_i · exp(mu_i / c) / Σ_j w_j · exp(mu_j / c)`. A row without a finite, non-negative offset reads null and leaves the contest (its uncertainty too); an offset of 0 reads 0 and stays in it |
-| `offsetScale` | `probability` (default) \| `log`: the offset is `ln w` (`exp` is taken first) |
+| `offset` | optional: a benchmark the probability is read against — a `baselines[].name` or a numeric column, read **in probability space** like a `softmax` offset: `p_i = w_i · exp(mu_i / c) / Σ_j w_j · exp(mu_j / c)`. A row without a finite, non-negative offset reads null and leaves the contest (its uncertainty too); an offset of 0 reads 0 and adds no uncertainty to `c` either — the rating's `ln 0` offset keeps that row out of its contest, so the two scales agree |
+| `offsetScale` | `probability` (default) \| `log`: the offset is `ln w` (`exp` is taken first). The column a rating reads with `offsetUnits: logit` needs `log` here (a warning says so; `offsetUnits` itself is the rating op's parameter and an error on this op) |
 
 `c` is the contest's own scale — `sqrt(Σ (sigma² + beta²))` over the rows taking part — so it is a
 `softmax` whose temperature the group decides: the same gap in `mu` is worth less in a large or an

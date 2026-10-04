@@ -542,8 +542,8 @@ public final class FeaturePlanCompiler {
             refs.addAll(op.regressors);
             // the uncertainty column of a ratingProb: it may come from a block declared after this one
             if (op.sigmaField != null) refs.add(op.sigmaField);
-            // ... and its offset (the benchmark it is read against)
-            if (def.scope == Scope.context && "ratingProb".equals(op.type) && op.offset != null) refs.add(op.offset);
+            // ... and the offset of a ratingProb / softmax (the benchmark it is read against)
+            if (def.scope == Scope.context && List.of("ratingProb", "softmax").contains(op.type) && op.offset != null) refs.add(op.offset);
             // a rating's per-row inputs: the known shift of a row's performance and the rated player's drift
             if (def.scope == Scope.sequence && op.offset != null) refs.add(op.offset);
             if (op.tauBy != null) refs.add(op.tauBy);
@@ -1229,6 +1229,7 @@ public final class FeaturePlanCompiler {
                     coordinates.put("offsetScale", offsetScale);
                     inputs.add(ref.canonical());
                     validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
+                    if (!"log".equals(offsetScale)) warnLogitOffset(op, ref, loc);
                 }
             }
             case "softmax" -> {
@@ -1300,8 +1301,32 @@ public final class FeaturePlanCompiler {
         return ref;
     }
 
+    /**
+     * Warns (code {@code context.ratingProb.offsetScale}) when a {@code ratingProb} reads in probability space the
+     * column a rating takes as a log-odds offset ({@code offsetUnits: logit}): every {@code ln p} is negative, so the
+     * probability would be null on every row.
+     */
+    private void warnLogitOffset(final Op op, final Ref offset, final String loc) {
+        for (final FeatureDef def : spec.features) {
+            if (def.scope != Scope.sequence) continue;
+            for (final Op rating : def.ops) {
+                if (!"rating".equals(rating.type) || !"logit".equals(rating.offsetUnits) || rating.offset == null) continue;
+                final Ref ref = resolve(baselineColumns.getOrDefault(rating.offset, rating.offset));
+                if (ref == null || !ref.canonical().equals(offset.canonical())) continue;
+                diagnostics.warning("context.ratingProb.offsetScale", loc, "ratingProb reads offset '" + op.offset + "' in probability space, but the rating of block '"
+                        + def.name + "' reads the same column as a log-odds (offsetUnits: logit): declare offsetScale: log, or every row with a negative ln p reads null");
+                return;
+            }
+        }
+    }
+
     /** The scale a {@code softmax} / {@code ratingProb} offset is read in ({@code probability} by default, or {@code log}), or null after reporting it. */
     private String contextOffsetScale(final Op op, final String loc) {
+        if (op.offsetUnits != null) {
+            diagnostics.error("context." + op.type + ".offsetScale", loc, "offsetUnits is a parameter of the rating op: a " + op.type
+                    + " offset is read in probability space - declare offsetScale: log for a log-odds column (ln p of a benchmark)");
+            return null;
+        }
         final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
         if (!List.of("probability", "log").contains(offsetScale)) {
             diagnostics.error("context." + op.type + ".offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);
@@ -1764,7 +1789,8 @@ public final class FeaturePlanCompiler {
         }
         if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
         // per-row inputs: a numeric column (or a baseline) each; tauBy drifts an uncertainty elo does not keep
-        final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, in the rating's units", loc);
+        final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, "
+                + ("logit".equals(op.offsetUnits) ? "as a log-odds" : "in the rating's units"), loc);
         final Ref tauRef = elo ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
         if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian");
         if (op.offset != null && offsetRef == null || op.tauBy != null && tauRef == null) valid = false;

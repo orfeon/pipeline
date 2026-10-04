@@ -3742,6 +3742,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(benchmarked.getInputs().contains("price_per_unit"), benchmarked::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: category"))), "context.ratingProb.offset"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetScale: odds"))), "context.ratingProb.offsetScale"));
+        // offsetUnits belongs to the rating op: on a ratingProb it is an error pointing at offsetScale, never ignored
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetUnits: logit"))), "context.ratingProb.offsetScale"));
+        // the column a rating reads as a log-odds, read back in probability space: a warning (ln p < 0 reads null), none with offsetScale log
+        final String logitRating = RATING_PROB_BLOCK.replace("funcs: [mu, sigma]}", "funcs: [mu, sigma], offset: price_per_unit, offsetUnits: logit}");
+        final FeaturePlan mismatched = compile(SOURCES, withBlocks(logitRating.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit")));
+        Assertions.assertFalse(mismatched.getDiagnostics().hasErrors(), mismatched::describe);
+        Assertions.assertTrue(hasCode(mismatched, "context.ratingProb.offsetScale"), mismatched::describe);
+        final FeaturePlan matched = compile(SOURCES, withBlocks(logitRating.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetScale: log")));
+        Assertions.assertFalse(matched.getDiagnostics().hasErrors(), matched::describe);
+        Assertions.assertFalse(hasCode(matched, "context.ratingProb.offsetScale"), matched::describe);
         // nullPolicy indicator: a row out of the contest is flagged like a softmax row
         final FeaturePlan indicator = compile(SOURCES, withBlocks(RATING_PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
         Assertions.assertNotNull(indicator.getColumn("contest_pWin_ratingProb_isnull"), indicator::describe);
@@ -3759,7 +3769,13 @@ public class FeaturePlanCompilerTest {
 
     @Test
     public void testSoftmaxDiagnosticsAndIndicators() {
-        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: nope"))), "context.softmax.offset"));
+        // an unknown offset is an unresolved reference of the block, like a ratingProb's: the block waits for it
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: nope"))), "reference.unresolved"));
+        final FeaturePlan forward = compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: strength_all_final_price_rating_sigma")
+                + RATING_PROB_BLOCK.substring(0, RATING_PROB_BLOCK.indexOf("  - name: contest"))));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertEquals("strength_all_final_price_rating_sigma", column(forward, "prob_pWin_softmax").getCoordinates().get("offset"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "offsetUnits: logit"))), "context.softmax.offsetScale"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: category"))), "context.softmax.offset"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 0"))), "context.softmax.temperature"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "offsetScale: exp"))), "context.softmax.offsetScale"));
