@@ -244,9 +244,8 @@ public class ContextEvaluator implements Serializable {
         double max = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
-            Double w = offset == null ? Double.valueOf(1d) : FeatureValues.toDouble(row.get(offset));
-            if (w != null && offset != null && plan.logScale()) w = Math.exp(w); // no offset: w = 1 whatever the scale
-            if (w == null || Double.isNaN(w) || Double.isInfinite(w) || w < 0) continue;
+            final double w = offsetWeight(row, offset, plan.logScale());
+            if (Double.isNaN(w)) continue;
             Double f = FeatureValues.toDouble(row.get(field));
             if (f == null || Double.isNaN(f)) {
                 if (plan.scoreNullIsNull()) continue;
@@ -300,13 +299,8 @@ public class ContextEvaluator implements Serializable {
                 if (s == null || !Double.isFinite(s) || s < 0) continue;
                 sigma = s;
             }
-            double w = 1d;
-            if (plan.offset() != null) {
-                final Double o = FeatureValues.toDouble(row.get(plan.offset()));
-                if (o == null) continue;
-                w = plan.logScale() ? Math.exp(o) : o;
-                if (!Double.isFinite(w) || w < 0) continue;
-            }
+            final double w = offsetWeight(row, plan.offset(), plan.logScale());
+            if (Double.isNaN(w)) continue;
             mus[i] = mu;
             weights[i] = w;
             active[i] = true;
@@ -323,6 +317,19 @@ public class ContextEvaluator implements Serializable {
         for (int i = 0; i < n; i++) {
             rows.get(i).put(name, !active[i] || !(denominator > 0) ? null : strengths[i] / denominator);
         }
+    }
+
+    /**
+     * The weight a row's offset gives it in a {@code softmax} / {@code ratingProb}: 1 without an offset column (whatever
+     * the scale), else its value in probability space ({@code logScale}: exp first) — NaN when the row has no finite,
+     * non-negative one and leaves the group.
+     */
+    private static double offsetWeight(final Map<String, Object> row, final String offset, final boolean logScale) {
+        if (offset == null) return 1d;
+        final Double o = FeatureValues.toDouble(row.get(offset));
+        if (o == null) return Double.NaN;
+        final double w = logScale ? Math.exp(o) : o;
+        return Double.isFinite(w) && w >= 0 ? w : Double.NaN;
     }
 
     /** The sum of the first {@code m} values, taken in ascending order (the array is sorted in place). */

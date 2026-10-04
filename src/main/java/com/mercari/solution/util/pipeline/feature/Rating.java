@@ -760,13 +760,11 @@ public final class Rating implements Serializable {
             if (!offsetLogit && entries.get(i).offset() != 0d) m[i] += entries.get(i).offset();
         }
         // a log-odds offset: bradleyTerry adds it to each pair's log-odds (the pair's own c); plackettLuce has one scale per
-        // contest, so the offset is the shift c · o of the strength — computed as plackettLuce computes c, to the bit
+        // contest, so the offset is the shift c · o of the strength — at the c plackettLuce reads (contestScale2)
         double[] logits = null;
         if (offsetLogit) {
             if (method == Method.plackettLuce) {
-                double c2 = 0;
-                for (int i = 0; i < n; i++) c2 += v[i] + beta * beta;
-                final double c = Math.sqrt(c2);
+                final double c = Math.sqrt(contestScale2(v));
                 for (int i = 0; i < n; i++) if (entries.get(i).offset() != 0d) m[i] += c * entries.get(i).offset();
             } else {
                 logits = new double[n];
@@ -1110,12 +1108,9 @@ public final class Rating implements Serializable {
      */
     private void plackettLuceInformation(final List<Entry> entries, final double[] m, final double[] v, final double[][] a, final double[][] into) {
         final int n = entries.size(), p = a.length;
-        double c2 = 0, best = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < n; i++) {
-            c2 += v[i] + beta * beta;
-            best = Math.max(best, m[i]);
-        }
-        final double c = Math.sqrt(c2);
+        final double c2 = contestScale2(v), c = Math.sqrt(c2);
+        double best = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) best = Math.max(best, m[i]);
         final double[] e = new double[n];
         for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
         final double[] first = new double[p];
@@ -1213,12 +1208,9 @@ public final class Rating implements Serializable {
      */
     private void plackettLuce(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
-        double c2 = 0, best = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < n; i++) {
-            c2 += v[i] + beta * beta;
-            best = Math.max(best, m[i]);
-        }
-        final double c = Math.sqrt(c2);
+        final double c2 = contestScale2(v), c = Math.sqrt(c2);
+        double best = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) best = Math.max(best, m[i]);
         // exp((mu − max) / c): the ratios below are shift-invariant, the shift keeps exp in range
         final double[] e = new double[n];
         for (int i = 0; i < n; i++) e[i] = Math.exp((m[i] - best) / c);
@@ -1255,6 +1247,16 @@ public final class Rating implements Serializable {
             dMu[i] = v[i] / c * omega;
             deltas[i] = Math.sqrt(v[i]) / c * (v[i] / c2) * delta;
         }
+    }
+
+    /**
+     * {@code c²} of a {@code plackettLuce} contest: {@code Σ (v_i + beta²)} over its entries. One sum for the update, the
+     * shared members' information and the shift of a log-odds offset, which must read the same scale to the bit.
+     */
+    private double contestScale2(final double[] v) {
+        double c2 = 0;
+        for (final double variance : v) c2 += variance + beta * beta;
+        return c2;
     }
 
     /** {@code exp((mu_s − max) / (c · ratio))}: entry s's strength in a choice made at {@code ratio} times the contest's scale. */
