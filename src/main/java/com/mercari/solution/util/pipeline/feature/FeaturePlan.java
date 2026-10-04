@@ -360,9 +360,11 @@ public class FeaturePlan implements Serializable {
     /**
      * The row columns evaluated on the wave inputs, per engine wave: index {@code w} = on the input of wave
      * {@code w} before its fan-out, index {@code waves} = after the last wave, before the finalize. A row column
-     * hosted by a stage of wave {@code w} is evaluated on the wave input when that input carries its inputs (and the
-     * fields of its variance-components estimate, if any) — a branch would only recompute it —; a deferred column
-     * on the first wave input that does. Expansion order (dependencies first): a prelude column is an input of the
+     * is evaluated on the first wave input that carries its inputs (and the fields of its variance-components
+     * estimate, if any), up to the wave of the stage hosting it — a reader may be in an earlier wave than the host,
+     * and a branch evaluates only its own stage's columns; one that no wave input up to its host's can evaluate
+     * stays in its stage's branch —; a deferred column on the first wave input that carries its inputs, whatever
+     * the wave. Expansion order (dependencies first): a prelude column is an input of the
      * next. Computed for every wave at once, because each wave's input includes the earlier preludes.
      */
     private List<List<OutputColumn>> preludes() {
@@ -380,7 +382,9 @@ public class FeaturePlan implements Serializable {
                 for (final OutputColumn c : columns) {
                     if (!FeaturePlanCompiler.isRowColumn(c) || evaluated.contains(c.canonicalName)) continue;
                     final Integer at = waveOf.get(c.canonicalName);
-                    if (at == null || (!c.deferred && at != w)) continue;
+                    // a hosted column is not held back to its host's wave: the host is its lowest-INDEX reader, and a
+                    // reader with a higher index can be in an earlier wave (the host waits for another dependency)
+                    if (at == null || (!c.deferred && at < w)) continue;
                     if (available.containsAll(c.inputs) && vcFieldsAvailable(List.of(c), available)) {
                         prelude.add(c);
                         available.add(c.canonicalName);
@@ -428,6 +432,46 @@ public class FeaturePlan implements Serializable {
         final Set<String> fields = availableBefore(w);
         for (final OutputColumn c : getPreludeColumns(w)) fields.add(c.getCanonicalName());
         return fields;
+    }
+
+    /**
+     * What the wave engine would read as null: for every stage, the computed columns its branch reads (its keys, its
+     * columns' self and past inputs, the fields of its variance-components estimate) that are neither on its wave
+     * input nor evaluated by the branch itself. Empty for a consistent plan — the engine refuses any other
+     * ({@code FeatureStages.engineConstraints}), because a branch reading a column nobody evaluated for it yields
+     * null statistics without any failure.
+     */
+    public List<String> getWaveReadGaps() {
+        final List<String> gaps = new ArrayList<>();
+        final List<List<Stage>> waves = getEngineWaves();
+        for (int w = 0; w < waves.size(); w++) {
+            final Set<String> input = getWaveInputFields(w);
+            for (final Stage s : waves.get(w)) {
+                final List<String> evaluated = isFoldTarget(s) ? getFoldColumns(s, w) : getBranchColumns(s, w);
+                final Set<String> missing = new LinkedHashSet<>();
+                for (final String k : s.keys) if (columnsByName().containsKey(k) && !input.contains(k)) missing.add(k);
+                final List<OutputColumn> cols = new ArrayList<>();
+                for (final String name : evaluated) {
+                    final OutputColumn c = columnsByName().get(name);
+                    if (c == null) continue;
+                    cols.add(c);
+                    for (final String in : c.inputs) if (columnsByName().containsKey(in)) missing.add(in);
+                    for (final String in : c.pastInputs) if (columnsByName().containsKey(in)) missing.add(in);
+                }
+                for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(cols, columnsByName())) {
+                    for (final String k : spec.keys()) if (columnsByName().containsKey(k)) missing.add(k);
+                    if (spec.field() != null && columnsByName().containsKey(spec.field())) missing.add(spec.field());
+                    if (spec.offsetColumn() != null && columnsByName().containsKey(spec.offsetColumn())) missing.add(spec.offsetColumn());
+                    if (spec.foldKeys() != null) for (final String k : spec.foldKeys()) if (columnsByName().containsKey(k)) missing.add(k);
+                }
+                missing.removeIf(name -> input.contains(name) || (evaluated.contains(name) && !s.keys.contains(name)));
+                if (!missing.isEmpty()) {
+                    gaps.add("feature stage scheduling: stage #" + s.index + " (wave " + (w + 1) + ") reads " + missing
+                            + ", which no earlier wave and no row evaluation on its wave input provides; set engine.parallelWaves: false to run the linear chain");
+                }
+            }
+        }
+        return gaps;
     }
 
     // ---- liveness (engine doc §9.4.7) ----------------------------------------------------------------------

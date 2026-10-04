@@ -1168,6 +1168,41 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testRowColumnHostedInLaterWaveIsEvaluatedForEarlierReaders() {
+        // `gain` is hosted by its lowest-index reader, the seller stage, which also aggregates a row column over a
+        // context output and is therefore wave 2; the category stage reads `gain` in wave 1. The row column must be
+        // on the wave 1 input - evaluated by that wave's prelude, not held back to its host's wave
+        final FeaturePlan plan = compile(SOURCES, SPEC
+                .replace("      - {type: aggregate, field: sold, funcs: [count, mean]}\n",
+                        "      - {type: aggregate, field: sold, funcs: [count, mean]}\n"
+                                + "      - {type: aggregate, field: gain, funcs: [mean]}\n"
+                                + "      - {type: aggregate, field: resid, funcs: [mean]}\n")
+                .replace("output:\n", """
+                          - {name: gain, scope: row, expr: "final_price - start_price"}
+                          - {name: resid, scope: row, expr: "gain - relative_start_price_zscore"}
+                          - name: cat_recent
+                            scope: sequence
+                            entity: cat
+                            windows:
+                              - {maxEvents: 5}
+                            ops:
+                              - {type: aggregate, field: gain, funcs: [mean]}
+                        output:
+                        """));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final FeaturePlan.Stage host = plan.getStages().stream().filter(s -> s.columnNames().contains("gain")).findFirst().orElseThrow();
+        final FeaturePlan.Stage reader = plan.getStages().stream().filter(s -> s.columnNames().contains("cat_recent_n5_gain_mean")).findFirst().orElseThrow();
+        Assertions.assertEquals(2, plan.getWave(host.index()), plan::describe);
+        Assertions.assertEquals(1, plan.getWave(reader.index()), plan::describe);
+        Assertions.assertTrue(plan.getPreludeColumns(0).stream().map(OutputColumn::getCanonicalName).toList().contains("gain"), plan::describe);
+        Assertions.assertTrue(plan.getWaveInputFields(0).contains("gain"), plan::describe);
+        // evaluated once: the host's branch does not recompute it, and it rides to wave 2 with the rows
+        Assertions.assertFalse(plan.getBranchColumns(host, 1).contains("gain"), plan::describe);
+        Assertions.assertTrue(plan.getLiveAfterWave(0).contains("gain"), plan::describe);
+        Assertions.assertEquals(List.of(), plan.getWaveReadGaps(), plan::describe);
+    }
+
+    @Test
     public void testStageDependenciesAndWaves() {
         // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
         // sequence block), the global level, the context stage and the category stage form ONE wave. The category

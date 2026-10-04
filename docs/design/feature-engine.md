@@ -998,7 +998,13 @@ input ─┬─ Stage1 (entity A)      ─┐   ┌─ Stage5 (entity C)    ─�
   evaluated on the base by `applyRows`. This was the bug found by the first production run: the linear
   chain carries a row column placed in one branch's stage, but the other branches read the wave input and
   saw null (43 of 107 columns). A DAG rule "row columns are transparent" must be matched by the engine
-  actually recomputing them. Row columns reading keyed columns that a consumer in the stage needs stay in
+  actually recomputing them. A row column is evaluated on the **first** wave input that carries its inputs,
+  not on the input of its host's wave: the host is its lowest-*index* reader, and a reader with a higher
+  index can sit in an earlier wave (the host waits for another dependency — a seller stage that also
+  aggregates a row column over a context output is wave 2, the category stage reading the same row column
+  stays in wave 1). Holding the column back to the host's wave left those earlier readers with null
+  statistics, silently; `FeaturePlan.getWaveReadGaps` now lists every branch read that is neither on the
+  wave input nor evaluated by the branch, and `engineConstraints` fails the assembly on any. Row columns reading keyed columns that a consumer in the stage needs stay in
   their stage and travel in partial rows; those nobody reads (compose rows, isnull flags, residuals) are
   *deferred* and evaluated on the first wave input that carries their inputs, `Final_Rows` after the last
   wave (§9.4.7). Variance-components lambdas of prelude columns are wired as a side input.
