@@ -3742,6 +3742,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(benchmarked.getInputs().contains("price_per_unit"), benchmarked::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: category"))), "context.ratingProb.offset"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetScale: odds"))), "context.ratingProb.offsetScale"));
+        // a scale without an offset would emit the unbenchmarked probability unnoticed: an error
+        final FeaturePlan scaleOnly = compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offsetScale: log")));
+        Assertions.assertTrue(scaleOnly.getDiagnostics().hasErrors() && hasCode(scaleOnly, "context.ratingProb.offsetScale"), scaleOnly::describe);
         // offsetUnits belongs to the rating op: on a ratingProb it is an error pointing at offsetScale, never ignored
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(RATING_PROB_BLOCK.replace("beta: 4.2", "beta: 4.2, offset: price_per_unit, offsetUnits: logit"))), "context.ratingProb.offsetScale"));
         // the column a rating reads as a log-odds, read back in probability space: a warning (ln p < 0 reads null), none with offsetScale log
@@ -3776,6 +3779,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
         Assertions.assertEquals("strength_all_final_price_rating_sigma", column(forward, "prob_pWin_softmax").getCoordinates().get("offset"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "offsetUnits: logit"))), "context.softmax.offsetScale"));
+        // a scale without an offset: a softmax still compiles (the scale reads nothing), with a warning
+        final FeaturePlan scaleOnly = compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market, temperature: 1.3", "offsetScale: log")));
+        Assertions.assertFalse(scaleOnly.getDiagnostics().hasErrors(), scaleOnly::describe);
+        Assertions.assertTrue(hasCode(scaleOnly, "context.softmax.offsetScale"), scaleOnly::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: category"))), "context.softmax.offset"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 0"))), "context.softmax.temperature"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "offsetScale: exp"))), "context.softmax.offsetScale"));

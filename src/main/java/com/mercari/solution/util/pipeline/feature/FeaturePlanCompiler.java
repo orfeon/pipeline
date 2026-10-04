@@ -1327,6 +1327,16 @@ public final class FeaturePlanCompiler {
                     + " offset is read in probability space - declare offsetScale: log for a log-odds column (ln p of a benchmark)");
             return null;
         }
+        // a scale without an offset reads nothing: a ratingProb would emit the unbenchmarked probability (an error, like
+        // a rating's offsetUnits without an offset); a softmax has long accepted it, so it only warns
+        if (op.offsetScale != null && op.offset == null) {
+            final String message = "offsetScale is the scale of the offset: declare the offset with it (without one the " + op.type + " is read against no benchmark)";
+            if ("ratingProb".equals(op.type)) {
+                diagnostics.error("context.ratingProb.offsetScale", loc, message);
+                return null;
+            }
+            diagnostics.warning("context." + op.type + ".offsetScale", loc, message);
+        }
         final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
         if (!List.of("probability", "log").contains(offsetScale)) {
             diagnostics.error("context." + op.type + ".offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);

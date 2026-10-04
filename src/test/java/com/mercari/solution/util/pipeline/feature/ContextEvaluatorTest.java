@@ -118,6 +118,20 @@ public class ContextEvaluatorTest {
         new ContextEvaluator(java.util.List.of(log)).evaluateColumn(log, logRows);
         new ContextEvaluator(java.util.List.of(c)).evaluateColumn(c, probabilityRows);
         for (int i = 0; i < 3; i++) Assertions.assertEquals((Double) probabilityRows.get(i).get("p"), (Double) logRows.get(i).get("q"), 1e-12, "row " + i);
+        // a finite log offset whose exp underflows reads 0 but stays in the scale (the rating's contest held the row);
+        // ln 0 itself does not
+        for (final double tiny : new double[] {-800d, Double.NEGATIVE_INFINITY}) {
+            final java.util.List<java.util.Map<String, Object>> underflow = new java.util.ArrayList<>();
+            for (int i = 0; i < 3; i++) underflow.add(new java.util.HashMap<>(logRows.get(i)));
+            final java.util.Map<String, Object> held = row(22d, 2d);
+            held.put("w", tiny);
+            underflow.add(held);
+            new ContextEvaluator(java.util.List.of(log)).evaluateColumn(log, underflow);
+            final double heldScale = Math.sqrt(scale * scale + (Double.isFinite(tiny) ? 4 + 16 : 0));
+            final double heldSum = 0.5 * Math.exp(30 / heldScale) + 0.3 * Math.exp(25 / heldScale) + 0.2 * Math.exp(20 / heldScale);
+            Assertions.assertEquals(0.5 * Math.exp(30 / heldScale) / heldSum, (Double) underflow.get(0).get("q"), 1e-12, "offset " + tiny);
+            Assertions.assertEquals(0d, (Double) underflow.get(3).get("q"), 0d, "offset " + tiny);
+        }
         // equal strengths read the benchmark back
         final java.util.List<java.util.Map<String, Object>> equal = new java.util.ArrayList<>();
         for (final double w : new double[] {0.6, 0.4}) {

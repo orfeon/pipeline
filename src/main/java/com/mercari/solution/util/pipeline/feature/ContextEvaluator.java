@@ -307,10 +307,11 @@ public class ContextEvaluator implements Serializable {
             active[i] = true;
             m++;
             // a row of weight 0 reads 0 whatever its strength: it is in neither the scale nor the shift (which only
-            // keeps exp in range)
-            if (w > 0) {
+            // keeps exp in range) - unless the 0 is exp underflowing on a finite log offset (ln w < -745), which the
+            // rating's contest did hold: its uncertainty stays in the scale
+            if (w > 0) max = Math.max(max, mu);
+            if (w > 0 || plan.logScale() && Double.isFinite(FeatureValues.toDouble(row.get(plan.offset())))) {
                 variances[scaled++] = sigma * sigma + beta2;
-                max = Math.max(max, mu);
             }
         }
         final double c = Math.sqrt(sortedSum(variances, scaled));

@@ -1607,6 +1607,10 @@ two; the Plackett–Luce read is the sensible one for them too (both share `mu` 
 benchmark's `ln p`) rates only what the benchmark does not already say; its probability is the benchmark
 times the strengths, which `offset:` reads with the same column — `offset: market_p`, or `offset: market_logp,
 offsetScale: log`. The column then carries the benchmark's availability and `validFor` too (a price expires).
+The two scales differ by the drift: the update's `c` adds each row's per-contest `tau²` (or its `tauBy`), which the
+`sigma` readout carries only under `tauPer`. With a `tau` that is not small beside `sigma` and `beta`, pass the
+drifted uncertainty as `sigma:` instead — a row `expr` `sqrt(sigma² + tau²)` — or the read-back is slightly sharper
+than the contest the rating was updated with. `offsetScale` without an `offset` is an error (a `softmax` warns).
 `ln(p_rating / p_market)` of that column is the rating's **excess over the benchmark**, free of the benchmark's
 level: a row expression, or the input of a model whose initial score is the market's log share.
 
