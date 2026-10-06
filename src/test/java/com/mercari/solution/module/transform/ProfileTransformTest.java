@@ -526,7 +526,8 @@ public class ProfileTransformTest {
                       "parameters": {
                         "output": "%s",
                         "values": "hide",
-                        "segments": ["category"],
+                        "segments": ["category", "qty"],
+                        "drift": { "axis": "segments:category" },
                         "bins": { "count": 5, "edges": { "price": [300, 1500] } }
                       }
                     }
@@ -574,7 +575,33 @@ public class ProfileTransformTest {
         });
 
         PAssert.that(outputs.get("profile").getCollection()).satisfies(records -> {
-            Assertions.assertNull(byField(records).get("status").getAsString("top"));
+            final Map<String, MElement> fields = byField(records);
+            Assertions.assertNull(fields.get("status").getAsString("top"));
+            // the drift columns name the group as the groups output does: masked
+            final MElement status = fields.get("status");
+            Assertions.assertEquals("tvd", status.getAsString("driftKind"));
+            Assertions.assertTrue(status.getAsString("driftVs").startsWith("group #"), status.getAsString("driftVs"));
+            Assertions.assertTrue(status.getAsDouble("drift") > 0.2);
+            // the axis field differs from the rest of its own groups by construction: no drift columns
+            final MElement category = fields.get("category");
+            Assertions.assertNull(category.getAsDouble("drift"));
+            Assertions.assertNull(category.getAsString("driftVs"));
+            Assertions.assertNull(category.getAsDouble("nullShift"));
+            // a segment axis that is not the drift axis feeds nothing into these columns
+            Assertions.assertNotNull(fields.get("qty").getAsDouble("drift"));
+            return null;
+        });
+
+        PAssert.that(outputs.get("profile.groups").getCollection()).satisfies(records -> {
+            int qtyGroups = 0;
+            for(final MElement record : records) {
+                // numeric segment values are raw values too
+                Assertions.assertTrue(record.getAsString("group").startsWith("group #"), record.getAsString("group"));
+                if("segments:qty".equals(record.getAsString("axis")) && "price".equals(record.getAsString("field"))) {
+                    qtyGroups++;
+                }
+            }
+            Assertions.assertEquals(3, qtyGroups);
             return null;
         });
 
@@ -586,6 +613,16 @@ public class ProfileTransformTest {
         final JsonObject embedded = extractJsonBlock(html, "profile-payload");
         Assertions.assertEquals("hide", embedded.get("values").getAsString());
         Assertions.assertFalse(embedded.has("sample"));
+        for(final JsonElement element : embedded.getAsJsonArray("fields")) {
+            final JsonObject field = element.getAsJsonObject();
+            // the exact value table of a discrete numeric field is a list of raw values
+            if(field.has("numeric")) {
+                Assertions.assertFalse(field.getAsJsonObject("numeric").has("values"), field.get("path").getAsString());
+            }
+            if(field.has("drift") && !field.getAsJsonObject("drift").get("vs").isJsonNull()) {
+                Assertions.assertTrue(field.getAsJsonObject("drift").get("vs").getAsString().startsWith("group #"));
+            }
+        }
     }
 
     /** No parameters at all: one record per field, no second pass, no file. */
@@ -630,7 +667,10 @@ public class ProfileTransformTest {
 
     @Test
     public void testRejectedParameters() {
-        final Map<String, String> cases = Map.of(
+        final Map<String, String> cases = new HashMap<>(Map.of(
+                "\"segments\": [\"category\", { \"field\": \"category\", \"topK\": 3 }]", "lists the field more than once",
+                "\"segments\": [{ \"field\": \"category\", \"topK\": 0 }]", "topK must be positive"));
+        cases.putAll(Map.of(
                 "\"previous\": { \"report\": \"x.html\" }", "parameters.previous is not implemented yet",
                 "\"expectations\": []", "parameters.expectations is not implemented yet",
                 "\"compareWith\": \"x.html\"", "removed profile sink",
@@ -640,7 +680,7 @@ public class ProfileTransformTest {
                 "\"bins\": { \"edges\": { \"price\": [3, 1] } }", "strictly increasing",
                 "\"bins\": { \"edges\": { \"category\": [1] } }", "must be numeric",
                 "\"drift\": { \"axis\": \"segments:category\" }", "parameters.drift.axis must be one of the declared axes",
-                "\"segmentz\": [\"category\"]", "unknown parameter: parameters.segmentz");
+                "\"segmentz\": [\"category\"]", "unknown parameter: parameters.segmentz"));
         for(final Map.Entry<String, String> entry : cases.entrySet()) {
             final String configJson = """
                     {

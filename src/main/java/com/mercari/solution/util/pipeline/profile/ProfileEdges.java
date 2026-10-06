@@ -51,6 +51,28 @@ public class ProfileEdges implements Serializable {
         this.categories = categories;
         this.pairFields = pairFields;
         this.pairSplits = pairSplits;
+        this.categoryIndex = indexCategories(categories);
+    }
+
+    /** Rebuilt on arrival rather than on first use: the edges are a side input every worker thread reads. */
+    private void readObject(final java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        this.categoryIndex = indexCategories(categories);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Integer>[] indexCategories(final String[][] categories) {
+        final Map<String, Integer>[] indices = new Map[categories.length];
+        for(int field = 0; field < categories.length; field++) {
+            if(categories[field] != null) {
+                final Map<String, Integer> index = new HashMap<>();
+                for(int i = 0; i < categories[field].length; i++) {
+                    index.put(categories[field][i], i);
+                }
+                indices[field] = index;
+            }
+        }
+        return indices;
     }
 
     /**
@@ -183,8 +205,8 @@ public class ProfileEdges implements Serializable {
     }
 
     /** Number of cells of a field: 0 when it has none. */
-    public int cellCount(final ProfileSpec.FieldSpec fieldSpec, final int field) {
-        return switch (fieldSpec.profileType) {
+    public int cellCount(final ProfileSpec.ProfileType profileType, final int field) {
+        return switch (profileType) {
             case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> splits[field] == null ? 0 : splits[field].length + 1;
             case STRING -> categories[field] == null ? 0 : categories[field].length + 1;
             case BOOL -> 2;
@@ -208,7 +230,7 @@ public class ProfileEdges implements Serializable {
                 if(categories[field] == null || !(value instanceof String s)) {
                     return NO_CELL;
                 }
-                final Integer index = categoryIndex(field).get(s);
+                final Integer index = categoryIndex[field].get(s);
                 return index == null ? categories[field].length : index;
             }
             case BOOL -> {
@@ -253,21 +275,5 @@ public class ProfileEdges implements Serializable {
     static int locate(final double[] splits, final double v) {
         final int index = Arrays.binarySearch(splits, v);
         return index >= 0 ? index : -index - 1;
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Integer> categoryIndex(final int field) {
-        if(categoryIndex == null) {
-            categoryIndex = new Map[categories.length];
-        }
-        Map<String, Integer> index = categoryIndex[field];
-        if(index == null) {
-            index = new HashMap<>();
-            for(int i = 0; i < categories[field].length; i++) {
-                index.put(categories[field][i], i);
-            }
-            categoryIndex[field] = index;
-        }
-        return index;
     }
 }

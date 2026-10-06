@@ -365,7 +365,8 @@ axis when `mode: compare` declares one, otherwise none: with only `segments` or 
 output has no drift columns and the per-group values are read from `groups`. A segment or a time bucket
 differing from the rest is usually what the axis was declared to show, not a finding about the field, so it
 is not promoted to the field record unless asked for. `drift.exclude` removes fields that differ by
-construction (the time field the inputs were split on).
+construction (the time field the inputs were split on); the field of the drift axis itself is always left
+out for the same reason.
 
 `noiseKs` = 1.36·√(1/n₁ + 1/n₂) and `noisePsi` = (bins − 1)(1/n₁ + 1/n₂) are the sizes the statistic reaches
 between two random samples of one distribution. They are reference columns and take part in no ranking: when
@@ -634,8 +635,10 @@ resolution. The record outputs never degrade.
 ## 11. Raw values
 
 `values: hide` applies to every output and file: `values.value`, categorical `bins.value` and
-segment group labels become ranks (`#1`, `group #1`), `fields.top` is null, and the `sample` output and the value-bearing sketch
-binaries are not produced. Time bucket labels and input names are not values. The report and the outputs
+segment group labels (in `groups`, `bins` and `fields.driftVs` alike) become ranks (`#1`, `group #1`),
+`fields.top` is null, the report carries no value table of a discrete numeric field, and the `sample` output
+and the value-bearing sketch binaries are not produced. Statistics — minima, maxima, quantiles, histograms —
+are not values and are kept. Time bucket labels and input names are not values. The report and the outputs
 are otherwise as sensitive as the source data.
 
 ## 12. Constraints and diagnostics

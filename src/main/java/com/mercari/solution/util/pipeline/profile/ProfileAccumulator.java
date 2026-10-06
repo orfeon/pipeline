@@ -470,7 +470,7 @@ public class ProfileAccumulator implements Serializable {
                         countValue(v);
                         kll.update(v);
                         cpcLive.update(v);
-                        updateTheta(canonicalNumeric(v));
+                        updateTheta(ProfileReport.canonicalNumber(v));
                         return v;
                     }
                     case STRING -> {
@@ -518,7 +518,7 @@ public class ProfileAccumulator implements Serializable {
                         count += 1;
                         updateMoments(ms);
                         kll.update(ms);
-                        updateTheta(canonicalNumeric(ms));
+                        updateTheta(ProfileReport.canonicalNumber(ms));
                         return null;
                     }
                     case ARRAY_LENGTH -> {
@@ -543,13 +543,6 @@ public class ProfileAccumulator implements Serializable {
 
         private static Integer arrayLength(final Object value) {
             return ProfileSpec.arrayLength(value);
-        }
-
-        private static String canonicalNumeric(final double v) {
-            if(v == Math.rint(v) && Double.isFinite(v) && Math.abs(v) < 1e15) {
-                return String.valueOf((long) v);
-            }
-            return String.valueOf(v);
         }
 
         private void updateMoments(final double v) {

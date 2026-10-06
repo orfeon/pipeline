@@ -2,7 +2,6 @@ package com.mercari.solution.module.transform;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.IllegalModuleException;
@@ -293,9 +292,18 @@ public class ProfileTransform extends Transform {
                         axis.field = o.get("field").getAsString();
                         if(o.has("topK")) {
                             axis.topK = o.get("topK").getAsInt();
+                            if(axis.topK < 1) {
+                                errorMessages.add("parameters.segments topK must be positive: " + entry);
+                                continue;
+                            }
                         }
                     } else {
                         errorMessages.add("parameters.segments entry must be a field name or {field, topK}: " + entry);
+                        continue;
+                    }
+                    // two axes of one field share their group keys: every row would be counted twice in each group
+                    if(axes.stream().anyMatch(other -> other.id().equals(axis.id()))) {
+                        errorMessages.add("parameters.segments lists the field more than once: " + axis.field);
                         continue;
                     }
                     axes.add(axis);

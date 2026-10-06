@@ -278,7 +278,7 @@ public class ProfileReportTest {
         }
         final ProfileCells merged = ProfileCells.of(fields).merge(left).merge(right);
         for(int f = 0; f < fields; f++) {
-            final int size = passes.edges.cellCount(passes.spec.getFields().get(f), f);
+            final int size = passes.edges.cellCount(passes.spec.getFields().get(f).profileType, f);
             Assertions.assertArrayEquals(whole.cells(f, size), merged.cells(f, size));
             Assertions.assertEquals(whole.count(f), merged.count(f));
             Assertions.assertEquals(whole.nulls(f), merged.nulls(f));

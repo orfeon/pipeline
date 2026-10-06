@@ -107,7 +107,8 @@ public class ProfileReport {
     public static class FieldResult {
         public int index;
         public String path;
-        public String type;
+        public ProfileSpec.ProfileType profileType;
+        public String type;             // the profile type as the records and the report name it
         public String sourceType;
         public boolean isKey;
         public long rows;
@@ -517,6 +518,7 @@ public class ProfileReport {
         final FieldResult r = new FieldResult();
         r.index = index;
         r.path = fieldSpec.path;
+        r.profileType = fieldSpec.profileType;
         r.type = fieldSpec.profileType.name().toLowerCase(Locale.ROOT);
         if(ProfileSpec.ProfileType.ARRAY_LENGTH.equals(fieldSpec.profileType)) {
             r.type = "array";
@@ -740,8 +742,7 @@ public class ProfileReport {
             final ProfileEdges edges,
             final Config config) {
 
-        final ProfileSpec.FieldSpec fieldSpec = fieldSpecOf(r);
-        final int size = edges.cellCount(fieldSpec, r.index);
+        final int size = edges.cellCount(r.profileType, r.index);
         if(size == 0) {
             return;
         }
@@ -789,17 +790,6 @@ public class ProfileReport {
             r.binLabels = r.cellLabels;
             r.bins = r.cells;
         }
-    }
-
-    private static ProfileSpec.FieldSpec fieldSpecOf(final FieldResult r) {
-        final ProfileSpec.ProfileType type = switch (r.type) {
-            case "string" -> ProfileSpec.ProfileType.STRING;
-            case "bool" -> ProfileSpec.ProfileType.BOOL;
-            case "timestamp" -> ProfileSpec.ProfileType.TIMESTAMP;
-            case "array" -> ProfileSpec.ProfileType.ARRAY_LENGTH;
-            default -> ProfileSpec.ProfileType.NUMERIC;
-        };
-        return new ProfileSpec.FieldSpec(r.path, type, r.sourceType, null);
     }
 
     /** A group's counts of one field over the field's bins. */
@@ -1115,10 +1105,12 @@ public class ProfileReport {
                 continue;
             }
             for(final FieldResult field : result.fields) {
-                if(config.driftExclude.contains(field.path)) {
+                // the axis field differs from the rows outside its own group by construction
+                if(config.driftExclude.contains(field.path) || field.path.equals(driftAxis.field)) {
                     continue;
                 }
-                for(final GroupResult group : axis.groups) {
+                for(int g = 0; g < axis.groups.size(); g++) {
+                    final GroupResult group = axis.groups.get(g);
                     final GroupField gf = group.fields[field.index];
                     if(gf == null || group.baseline) {
                         continue;
@@ -1127,7 +1119,8 @@ public class ProfileReport {
                     if(drift != null && (field.drift == null || drift > field.drift)) {
                         field.drift = drift;
                         field.driftKind = field.numericLike() ? "ks" : "tvd";
-                        field.driftVs = group.value;
+                        // the label the groups output carries: a raw segment value is not written with values: hide
+                        field.driftVs = groupLabel(driftAxis, group.value, g, config.showValues);
                     }
                     if(gf.nullShift != null && (field.nullShift == null || Math.abs(gf.nullShift) > Math.abs(field.nullShift))) {
                         field.nullShift = gf.nullShift;

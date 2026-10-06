@@ -317,8 +317,9 @@ public class ProfileRenderer {
                         numeric.add("histogram", buildHistogram(kll, field.min, field.max, detail.histogramBins, field.count));
                         numeric.add("cdf", buildCdf(kll, field.min, field.max, detail.histogramBins));
                     }
-                    if("exact".equals(r.valuesKind)) {
+                    if("exact".equals(r.valuesKind) && config.showValues) {
                         // a discrete numeric field: its values are readable as a table, not as histogram bars
+                        // (left out with values: hide, as the values output writes them as ranks)
                         numeric.add("values", valuesJson(r, true, VALUES_IN_PAYLOAD));
                         numeric.addProperty("valuesTotal", r.values.size());
                     }

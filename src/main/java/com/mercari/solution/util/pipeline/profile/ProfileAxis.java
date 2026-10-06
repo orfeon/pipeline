@@ -79,7 +79,7 @@ public class ProfileAxis implements Serializable {
                 }
                 final Double numeric = raw instanceof Number ? ProfileSpec.toDouble(raw) : null;
                 if(numeric != null && symbols == null) {
-                    yield canonicalNumeric(numeric);
+                    yield ProfileReport.canonicalNumber(numeric);
                 }
                 final String s = ProfileSpec.toStringValue(raw, symbols);
                 yield s == null ? NULL_GROUP : (s.length() > 128 ? s.substring(0, 128) : s);
@@ -89,13 +89,6 @@ public class ProfileAxis implements Serializable {
                 yield ms == null ? null : truncateLabel(ms.longValue(), granularity);
             }
         };
-    }
-
-    private static String canonicalNumeric(final double v) {
-        if(v == Math.rint(v) && Double.isFinite(v) && Math.abs(v) < 1e15) {
-            return String.valueOf((long) v);
-        }
-        return String.valueOf(v);
     }
 
     /** UTC bucket label, e.g. month → {@code 2025-01}, week → the Monday date, hour → {@code 2025-01-15T03}. */
