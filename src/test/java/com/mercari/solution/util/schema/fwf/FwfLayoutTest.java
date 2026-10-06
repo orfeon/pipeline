@@ -146,6 +146,23 @@ public class FwfLayoutTest {
         assertError("""
                 { "fields": [ { "name": "a", "type": "date", "len": 8, "pattern": "yyyyMMdd", "zone": "Asia/Tokyo" } ] }
                 """, "zone is only allowed on timestamp");
+        // without pattern the value is ISO-8601 (an offset-less value is UTC): the zone would be ignored
+        assertError("""
+                { "fields": [ { "name": "a", "type": "timestamp", "len": 19, "zone": "Asia/Tokyo" } ] }
+                """, "zone requires pattern");
+        // non-primitive attribute values and broken documents are layout errors too
+        assertError("""
+                { "fields": [ { "name": "a", "type": { "x": 1 }, "len": 2 } ] }
+                """, "fields[0](a).type must be a primitive value");
+        assertError("""
+                { "fields": [ { "name": "a", "type": "date", "len": 8, "pattern": null } ] }
+                """, "fields[0](a).pattern must be a primitive value");
+        assertError("""
+                { "fields": [ { "name": "a", "len": 8, "nullIf": [ "x", { "y": 1 } ] } ] }
+                """, "nullIf must be a string or an array of strings");
+        assertError("""
+                { "fields": [ { "name": "a", "len": 2 }
+                """, "not valid JSON / YAML");
         assertError("""
                 { "recordLen": 3, "fields": [ { "name": "a", "len": 2 } ] }
                 """, "layout.recordLen is not supported");
@@ -179,6 +196,9 @@ public class FwfLayoutTest {
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
                 () -> FwfOptions.of(Map.of("charsett", "x", "unit", "word")));
         Assertions.assertTrue(e.getMessage().contains("charsett is not supported"), e.getMessage());
+        // the supported keys are listed in the documented order, the same on every run
+        Assertions.assertTrue(e.getMessage().contains(
+                "supported keys: [charset, unit, trim, emptyAsNull, onLengthMismatch, onParseError]"), e.getMessage());
         Assertions.assertTrue(e.getMessage().contains("unit must be byte or char"), e.getMessage());
         Assertions.assertThrows(IllegalArgumentException.class, () -> FwfOptions.of(Map.of("charset", "no-such-charset")));
     }

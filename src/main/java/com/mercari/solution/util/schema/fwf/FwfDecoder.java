@@ -4,10 +4,15 @@ import com.mercari.solution.module.Schema;
 
 import java.io.Serializable;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -27,6 +32,10 @@ import java.util.Map;
  *
  * Half-width spaces and the ideographic space (U+3000) are stripped. Values of repeated fields keep
  * their positions: an empty element stays null in the list instead of being dropped.
+ *
+ * <p>Bytes that the charset can not decode (malformed, or without a mapping such as a NEC special
+ * character under strict Shift_JIS) are never replaced with U+FFFD: with {@code unit: byte} they are
+ * a parse error of that field (onParseError), with {@code unit: char} the record fails as a whole.
  */
 public class FwfDecoder implements Serializable {
 
@@ -63,19 +72,40 @@ public class FwfDecoder implements Serializable {
 
     public Map<String, Object> decode(final byte[] buffer, final int offset, final int length) {
         final Source source = switch (options.getUnit()) {
-            case byte_ -> new ByteSource(buffer, offset, length, charset());
-            case char_ -> new CharSource(new String(buffer, offset, length, charset()), charset());
+            case byte_ -> new ByteSource(buffer, offset, length, strictDecoder());
+            case char_ -> {
+                // positions count characters, so the record has to be decoded as a whole
+                try {
+                    yield new CharSource(strictDecoder().decode(ByteBuffer.wrap(buffer, offset, length)).toString(), charset());
+                } catch (final CharacterCodingException e) {
+                    throw new FwfException("record can not be decoded with charset " + options.getCharsetName()
+                            + " (malformed or unmappable bytes)");
+                }
+            }
         };
         return decode(source);
     }
 
     /**
      * Decodes a record held as text. With {@code unit: byte} the text is encoded back with the
-     * charset before cutting (lossless when it was decoded from the same charset).
+     * charset before cutting (lossless when it was decoded from the same charset); a character the
+     * charset can not encode fails the record instead of being replaced with {@code ?}.
      */
     public Map<String, Object> decode(final String record) {
         return switch (options.getUnit()) {
-            case byte_ -> decode(record.getBytes(charset()));
+            case byte_ -> {
+                final ByteBuffer encoded;
+                try {
+                    encoded = charset().newEncoder()
+                            .onMalformedInput(CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(CodingErrorAction.REPORT)
+                            .encode(CharBuffer.wrap(record));
+                } catch (final CharacterCodingException e) {
+                    throw new FwfException("record can not be encoded with charset " + options.getCharsetName()
+                            + " (it has characters outside the charset)");
+                }
+                yield decode(encoded.array(), encoded.arrayOffset() + encoded.position(), encoded.remaining());
+            }
             case char_ -> decode(new CharSource(record, charset()));
         };
     }
@@ -87,25 +117,23 @@ public class FwfDecoder implements Serializable {
             throw new FwfException(String.format("record length %d does not match the layout recordLength %d",
                     source.length(), recordLength));
         }
-        return decodeFields(layout.getFields(), source, 0, null);
+        return decodeFields(layout.getFields(), source, 0);
     }
 
     private Map<String, Object> decodeFields(
             final List<FwfLayout.Field> fields,
             final Source source,
-            final int base,
-            final String parentPath) {
+            final int base) {
 
         final Map<String, Object> values = new HashMap<>(Math.max(16, fields.size() * 2));
         for(final FwfLayout.Field field : fields) {
-            final String path = parentPath == null ? field.getName() : parentPath + "." + field.getName();
             final int start = base + field.getStart();
             if(field.getRepeat() == null) {
-                values.put(field.getName(), decodeElement(field, source, start, path));
+                values.put(field.getName(), decodeElement(field, source, start, -1));
             } else {
                 final List<Object> list = new ArrayList<>(field.getRepeat());
                 for(int i = 0; i < field.getRepeat(); i++) {
-                    list.add(decodeElement(field, source, start + i * field.unit(), path + "[" + i + "]"));
+                    list.add(decodeElement(field, source, start + i * field.unit(), i));
                 }
                 values.put(field.getName(), list);
             }
@@ -113,14 +141,23 @@ public class FwfDecoder implements Serializable {
         return values;
     }
 
+    /**
+     * @param index position in a repeated field; -1 when the field is not repeated. Together with
+     *              the field it names the failing value ({@link #path}); the path of a nested value
+     *              is completed by the enclosing groups only when a record fails.
+     */
     private Object decodeElement(
             final FwfLayout.Field field,
             final Source source,
             final int start,
-            final String path) {
+            final int index) {
 
         if(field.isGroup()) {
-            return decodeFields(field.getChildren(), source, start, path);
+            try {
+                return decodeFields(field.getChildren(), source, start);
+            } catch (final FwfException e) {
+                throw e.within(path(field, index));
+            }
         }
 
         Object value = null;
@@ -130,20 +167,33 @@ public class FwfDecoder implements Serializable {
             if(field.getType() == Schema.Type.bytes) {
                 value = ByteBuffer.wrap(source.bytes(start, field.getLen()));
             } else {
-                raw = source.text(start, field.getLen());
-                value = convert(field, raw, path);
+                try {
+                    raw = source.text(start, field.getLen());
+                    value = convert(field, raw, index);
+                } catch (final CharacterCodingException e) {
+                    // bytes outside the charset are a parse error of this field, not a silent U+FFFD
+                    if(options.getOnParseError() == FwfOptions.OnParseError.fail) {
+                        throw new FwfException(path(field, index),
+                                "0x" + HexFormat.of().formatHex(source.bytes(start, field.getLen())),
+                                "can not decode with charset " + options.getCharsetName() + " (malformed or unmappable bytes)", e);
+                    }
+                }
             }
         }
         if(value == null && field.getDefaultValue() != null) {
             value = field.getDefaultValue();
         }
         if(value == null && field.isRequired()) {
-            throw new FwfException(path, raw, "required field is null", null);
+            throw new FwfException(path(field, index), raw, "required field is null", null);
         }
         return value;
     }
 
-    private Object convert(final FwfLayout.Field field, final String raw, final String path) {
+    private static String path(final FwfLayout.Field field, final int index) {
+        return index < 0 ? field.getName() : field.getName() + "[" + index + "]";
+    }
+
+    private Object convert(final FwfLayout.Field field, final String raw, final int index) {
         final String stripped = strip(raw, FwfOptions.Trim.both);
         if(field.getNullIf() != null && field.getNullIf().contains(stripped)) {
             return null;
@@ -169,7 +219,7 @@ public class FwfDecoder implements Serializable {
             if(options.getOnParseError() == FwfOptions.OnParseError.nullify) {
                 return null;
             }
-            throw new FwfException(path, raw, "can not convert to " + field.getType() + ": " + e.getMessage(), e);
+            throw new FwfException(path(field, index), raw, "can not convert to " + field.getType() + ": " + e.getMessage(), e);
         }
     }
 
@@ -178,6 +228,13 @@ public class FwfDecoder implements Serializable {
             charset = options.getCharset();
         }
         return charset;
+    }
+
+    // one decoder per record: a CharsetDecoder is not thread-safe and this decoder may be shared
+    private CharsetDecoder strictDecoder() {
+        return charset().newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
     }
 
     /** Strips half-width spaces and the ideographic space (U+3000) from the given side(s). */
@@ -206,15 +263,15 @@ public class FwfDecoder implements Serializable {
 
     private interface Source {
         int length();
-        String text(int start, int len);
+        String text(int start, int len) throws CharacterCodingException;
         byte[] bytes(int start, int len);
     }
 
-    private record ByteSource(byte[] buffer, int offset, int length, Charset charset) implements Source {
+    private record ByteSource(byte[] buffer, int offset, int length, CharsetDecoder decoder) implements Source {
 
         @Override
-        public String text(final int start, final int len) {
-            return new String(buffer, offset + start, len, charset);
+        public String text(final int start, final int len) throws CharacterCodingException {
+            return decoder.decode(ByteBuffer.wrap(buffer, offset + start, len)).toString();
         }
 
         @Override

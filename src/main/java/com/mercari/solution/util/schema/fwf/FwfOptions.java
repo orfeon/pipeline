@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Conversion options of the fixed-width format, declared as {@code schema.encoding} keys next to
@@ -21,7 +20,9 @@ public class FwfOptions implements Serializable {
     public enum OnLengthMismatch { fail, pad }
     public enum OnParseError { fail, nullify }
 
-    private static final Set<String> KEYS = Set.of(
+    // a List, not Set.of: the keys are printed in error messages, and the iteration order of Set.of
+    // changes from one JVM run to the next
+    private static final List<String> KEYS = List.of(
             "charset", "unit", "trim", "emptyAsNull", "onLengthMismatch", "onParseError");
 
     private String charset = StandardCharsets.UTF_8.name();

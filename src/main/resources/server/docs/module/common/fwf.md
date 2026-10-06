@@ -53,12 +53,12 @@ schema:
 | parameter        | optional | type    | description |
 |------------------|----------|---------|-------------|
 | format           | required | Enum    | `fwf`. |
-| charset          | optional | String  | Charset of the record bytes. Default `UTF-8`. For Shift_JIS data use **`windows-31j`**: strict `Shift_JIS` has no mapping for NEC special characters (e.g. ㈱) and IBM extensions that appear in real data. |
+| charset          | optional | String  | Charset of the record bytes. Default `UTF-8`. For Shift_JIS data use **`windows-31j`**: strict `Shift_JIS` has no mapping for NEC special characters (e.g. ㈱) and IBM extensions that appear in real data. Bytes the charset can not decode are never replaced with U+FFFD: they are a parse error (see `onParseError`). |
 | unit             | optional | Enum    | Unit of `pos` / `len`. `byte` (default): positions in the encoded bytes — each range is cut from the bytes first and decoded on its own, so multi-byte characters never shift the following fields. `char`: positions in decoded characters (code points), for layouts defined by character count. |
 | trim             | optional | Enum    | Trimming of `string` / `json` values: `both` (default), `left`, `right`, `none`. Half-width spaces and the ideographic space (U+3000) are trimmed. |
 | emptyAsNull      | optional | Boolean | A `string` / `json` value that is empty after trimming becomes null. Default `true`. Other types always become null when blank. |
 | onLengthMismatch | optional | Enum    | When the record length differs from the layout `recordLength`: `fail` (default) — the record is a failure; `pad` — ranges beyond the record end are null and extra bytes are ignored (e.g. reading older, shorter records with the latest layout). |
-| onParseError     | optional | Enum    | When a value can not be converted to its type: `fail` (default) — the record is a failure; `null` — only that field becomes null. |
+| onParseError     | optional | Enum    | When a value can not be converted to its type: `fail` (default) — the record is a failure; `null` — only that field becomes null. Bytes that the charset can not decode count as a parse error of the field they are in; with `unit: char` (and for an input held as text that the charset can not encode) the whole record is a failure regardless of this option. |
 
 ## Layout document
 
@@ -89,11 +89,11 @@ and conversion attributes. Unknown keys are errors.
 | size         | group      | Length of one group element. Omitted: the extent of its children. |
 | scale        | decimal, float32, float64 | Implied decimal places: applied only when the value has **no** decimal point (`0012` with `scale: 1` → `1.2`). A value with a decimal point (` 12.3`) is read as is. |
 | pattern      | date, time, timestamp | Java `DateTimeFormatter` pattern (e.g. `yyyyMMdd`, `HHmm`). Omitted: ISO-8601. |
-| zone         | timestamp  | Time zone for a pattern without an offset (e.g. `Asia/Tokyo`). Default `UTC`. |
+| zone         | timestamp  | Time zone for a `pattern` without an offset (e.g. `Asia/Tokyo`). Default `UTC`. Requires `pattern`: an ISO-8601 value without an offset is always UTC. |
 | radix        | int16, int32, int64 | Radix of the digits (e.g. `16`). Default `10`. |
-| nullIf       | leaf except bytes | Raw value(s) (compared after trimming both sides) that become null, e.g. `["00000000", "----"]`. |
+| nullIf       | leaf except bytes | Raw value(s) (compared after trimming both sides) that become null, e.g. `["00000000", "----"]`. In YAML, quote values that look like numbers: an unquoted `00000000` is read as the number `0` and never matches. |
 | trim         | string, json | Overrides `encoding.trim` for this field. |
-| defaultValue | leaf except bytes | Value used when the result is null (blank, `nullIf`, beyond the record end, or `onParseError: null`). E.g. `0` for fields where blank means zero. |
+| defaultValue | leaf except bytes | Value used when the result is null (blank, `nullIf`, beyond the record end, or `onParseError: null`). E.g. `0` for fields where blank means zero. Written like a raw value of the field, so `pattern`, `radix` and the implied `scale` apply to it (with `scale: 1`, `5` means `0.5`; write `5.0` for five). |
 
 Ranges may overlap (a composite key can be read both whole and as its parts) and gaps are skipped,
 so reserved areas and the line separator need not be declared.

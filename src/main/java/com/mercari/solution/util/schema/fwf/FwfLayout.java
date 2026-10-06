@@ -1,15 +1,17 @@
 package com.mercari.solution.util.schema.fwf;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.domain.file.YamlUtil;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
+import java.text.ParsePosition;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -42,8 +44,10 @@ import java.util.*;
  */
 public class FwfLayout implements Serializable {
 
-    private static final Set<String> LAYOUT_KEYS = Set.of("recordLength", "fields", "description");
-    private static final Set<String> FIELD_KEYS = Set.of(
+    // Lists, not Set.of: the keys are printed in error messages, and the iteration order of Set.of
+    // changes from one JVM run to the next
+    private static final List<String> LAYOUT_KEYS = List.of("recordLength", "fields", "description");
+    private static final List<String> FIELD_KEYS = List.of(
             "name", "type", "mode", "description", "options",
             "pos", "len", "repeat", "size", "fields",
             "scale", "pattern", "zone", "radix", "nullIf", "trim", "defaultValue");
@@ -109,10 +113,13 @@ public class FwfLayout implements Serializable {
         }
         final String trimmed = text.trim();
         final JsonElement element;
-        if(trimmed.startsWith("{") || trimmed.startsWith("[")) {
-            element = new Gson().fromJson(trimmed, JsonElement.class);
-        } else {
-            element = YamlUtil.toJson(trimmed);
+        try {
+            element = trimmed.startsWith("{") || trimmed.startsWith("[")
+                    ? JsonUtil.fromJson(trimmed)
+                    : YamlUtil.toJson(trimmed);
+        } catch (final RuntimeException e) {
+            // JsonSyntaxException / the YAML parser's exceptions: report them like the other layout errors
+            throw new IllegalArgumentException("Illegal fwf layout: the document is not valid JSON / YAML: " + e.getMessage(), e);
         }
         return parse(element);
     }
@@ -223,8 +230,12 @@ public class FwfLayout implements Serializable {
 
         final boolean group = object.has("fields");
         if(object.has("type")) {
+            final String type = text(object, "type", fieldPath, errors);
+            if(type == null) {
+                return null;
+            }
             try {
-                field.type = Schema.Type.of(object.get("type").getAsString());
+                field.type = Schema.Type.of(type);
             } catch (final IllegalArgumentException e) {
                 errors.add(fieldPath + ".type: " + e.getMessage());
                 return null;
@@ -234,12 +245,14 @@ public class FwfLayout implements Serializable {
         }
 
         if(object.has("mode")) {
-            final String mode = object.get("mode").getAsString().trim().toLowerCase(Locale.ROOT);
-            switch (mode) {
-                case "nullable" -> field.required = false;
-                case "required" -> field.required = true;
-                case "repeated" -> errors.add(fieldPath + ".mode: repeated is implied by 'repeat'; use repeat instead");
-                default -> errors.add(fieldPath + ".mode must be nullable or required. but: " + mode);
+            final String mode = text(object, "mode", fieldPath, errors);
+            if(mode != null) {
+                switch (mode.trim().toLowerCase(Locale.ROOT)) {
+                    case "nullable" -> field.required = false;
+                    case "required" -> field.required = true;
+                    case "repeated" -> errors.add(fieldPath + ".mode: repeated is implied by 'repeat'; use repeat instead");
+                    default -> errors.add(fieldPath + ".mode must be nullable or required. but: " + mode);
+                }
             }
         }
         if(object.has("description") && object.get("description").isJsonPrimitive()) {
@@ -342,11 +355,13 @@ public class FwfLayout implements Serializable {
         if(object.has("pattern")) {
             switch (field.type) {
                 case date, time, timestamp -> {
-                    field.pattern = object.get("pattern").getAsString();
-                    try {
-                        DateTimeFormatter.ofPattern(field.pattern, Locale.ROOT);
-                    } catch (final IllegalArgumentException e) {
-                        errors.add(fieldPath + ".pattern: " + field.pattern + " is illegal: " + e.getMessage());
+                    field.pattern = text(object, "pattern", fieldPath, errors);
+                    if(field.pattern != null) {
+                        try {
+                            DateTimeFormatter.ofPattern(field.pattern, Locale.ROOT);
+                        } catch (final IllegalArgumentException e) {
+                            errors.add(fieldPath + ".pattern: " + field.pattern + " is illegal: " + e.getMessage());
+                        }
                     }
                 }
                 default -> errors.add(fieldPath + ".pattern is only allowed on date, time, timestamp. but type is " + field.type);
@@ -355,12 +370,18 @@ public class FwfLayout implements Serializable {
         if(object.has("zone")) {
             if(field.type != Schema.Type.timestamp) {
                 errors.add(fieldPath + ".zone is only allowed on timestamp. but type is " + field.type);
+            } else if(!object.has("pattern")) {
+                // without pattern the value is read as ISO-8601, where a value without an offset is UTC:
+                // the zone would be silently ignored
+                errors.add(fieldPath + ".zone requires pattern (it is the zone of a pattern without an offset)");
             } else {
-                field.zone = object.get("zone").getAsString();
-                try {
-                    ZoneId.of(field.zone);
-                } catch (final Exception e) {
-                    errors.add(fieldPath + ".zone: " + field.zone + " is illegal: " + e.getMessage());
+                field.zone = text(object, "zone", fieldPath, errors);
+                if(field.zone != null) {
+                    try {
+                        ZoneId.of(field.zone);
+                    } catch (final Exception e) {
+                        errors.add(fieldPath + ".zone: " + field.zone + " is illegal: " + e.getMessage());
+                    }
                 }
             }
         }
@@ -382,23 +403,26 @@ public class FwfLayout implements Serializable {
                 errors.add(fieldPath + ".nullIf is not allowed on bytes");
             } else {
                 final JsonElement nullIf = object.get("nullIf");
+                final Iterable<JsonElement> values = nullIf.isJsonArray() ? nullIf.getAsJsonArray() : List.of(nullIf);
                 field.nullIf = new ArrayList<>();
-                if(nullIf.isJsonArray()) {
-                    for(final JsonElement e : nullIf.getAsJsonArray()) {
+                for(final JsonElement e : values) {
+                    if(e.isJsonPrimitive()) {
                         field.nullIf.add(FwfDecoder.strip(e.getAsString(), FwfOptions.Trim.both));
+                    } else {
+                        errors.add(fieldPath + ".nullIf must be a string or an array of strings. but: " + nullIf);
+                        break;
                     }
-                } else if(nullIf.isJsonPrimitive()) {
-                    field.nullIf.add(FwfDecoder.strip(nullIf.getAsString(), FwfOptions.Trim.both));
-                } else {
-                    errors.add(fieldPath + ".nullIf must be a string or an array of strings");
                 }
             }
         }
         if(object.has("trim")) {
-            try {
-                field.trim = FwfOptions.Trim.valueOf(object.get("trim").getAsString().trim().toLowerCase(Locale.ROOT));
-            } catch (final IllegalArgumentException e) {
-                errors.add(fieldPath + ".trim must be one of both, left, right, none");
+            final String trim = text(object, "trim", fieldPath, errors);
+            if(trim != null) {
+                try {
+                    field.trim = FwfOptions.Trim.valueOf(trim.trim().toLowerCase(Locale.ROOT));
+                } catch (final IllegalArgumentException e) {
+                    errors.add(fieldPath + ".trim must be one of both, left, right, none");
+                }
             }
         }
         if(object.has("defaultValue")) {
@@ -416,6 +440,17 @@ public class FwfLayout implements Serializable {
                 }
             }
         }
+    }
+
+    // The text of a primitive attribute. An object, an array or null (e.g. a YAML key left empty) is
+    // reported as a layout error instead of failing in JsonElement.getAsString().
+    private static String text(final JsonObject object, final String key, final String fieldPath, final List<String> errors) {
+        final JsonElement element = object.get(key);
+        if(!element.isJsonPrimitive()) {
+            errors.add(fieldPath + "." + key + " must be a primitive value. but: " + element);
+            return null;
+        }
+        return element.getAsString();
     }
 
     private static Integer positiveInt(final JsonElement element, final String path, final List<String> errors) {
@@ -478,6 +513,7 @@ public class FwfLayout implements Serializable {
         private Object defaultValue;
 
         private transient DateTimeFormatter formatter;
+        private transient ZoneId zoneId;
 
         public String getName() {
             return name;
@@ -584,7 +620,7 @@ public class FwfLayout implements Serializable {
                 case decimal -> decimal(text);
                 case date -> pattern == null
                         ? DateTimeUtil.toEpochDay(text)
-                        : Long.valueOf(LocalDate.parse(text, formatter()).toEpochDay()).intValue();
+                        : Long.valueOf(existing(text, LocalDate.parse(text, formatter())).toEpochDay()).intValue();
                 case time -> pattern == null
                         ? DateTimeUtil.toMicroOfDay(text)
                         : LocalTime.parse(text, formatter()).getLong(ChronoField.MICRO_OF_DAY);
@@ -606,6 +642,7 @@ public class FwfLayout implements Serializable {
         private Long timestamp(final String text) {
             final TemporalAccessor parsed = formatter().parseBest(text,
                     ZonedDateTime::from, OffsetDateTime::from, LocalDateTime::from, LocalDate::from);
+            existing(text, LocalDate.from(parsed));
             final Instant instant = switch (parsed) {
                 case ZonedDateTime z -> z.toInstant();
                 case OffsetDateTime o -> o.toInstant();
@@ -616,8 +653,28 @@ public class FwfLayout implements Serializable {
             return DateTimeUtil.toEpochMicroSecond(instant);
         }
 
+        // DateTimeFormatter's default resolver (SMART) moves a day-of-month beyond the month end to the
+        // last day of the month (20240231 -> 2024-02-29) instead of failing. Only a date resolved to
+        // the last day of a month shorter than 31 days can come from such a value, so only those are
+        // parsed once more, unresolved, to compare with the day as written.
+        private LocalDate existing(final String text, final LocalDate date) {
+            final int length = date.lengthOfMonth();
+            if(length < 31 && date.getDayOfMonth() == length) {
+                final TemporalAccessor written = formatter().parseUnresolved(text, new ParsePosition(0));
+                if(written != null && written.isSupported(ChronoField.DAY_OF_MONTH)
+                        && written.getLong(ChronoField.DAY_OF_MONTH) > length) {
+                    throw new DateTimeException("day " + written.getLong(ChronoField.DAY_OF_MONTH)
+                            + " does not exist in " + date.getYear() + "-" + date.getMonthValue());
+                }
+            }
+            return date;
+        }
+
         private ZoneId zoneId() {
-            return zone == null ? ZoneId.of("UTC") : ZoneId.of(zone);
+            if(zoneId == null) {
+                zoneId = zone == null ? ZoneId.of("UTC") : ZoneId.of(zone);
+            }
+            return zoneId;
         }
 
         private DateTimeFormatter formatter() {

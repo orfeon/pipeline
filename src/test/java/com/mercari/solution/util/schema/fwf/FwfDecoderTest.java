@@ -136,12 +136,42 @@ public class FwfDecoderTest {
     }
 
     @Test
-    public void testStrictShiftJisLosesNecSpecialCharacter() {
-        // why the docs require windows-31j: strict Shift_JIS has no mapping for ㈱ (0x878A)
-        final Map<String, Object> values = decoder(Map.of("charset", "Shift_JIS")).decode(record());
-        Assertions.assertNotEquals("㈱テスト商店", values.get("name"));
-        // positions are bytes, so the following fields are unaffected
+    public void testStrictShiftJisRejectsNecSpecialCharacter() {
+        // why the docs require windows-31j: strict Shift_JIS has no mapping for ㈱ (0x878A).
+        // The bytes are a parse error of that field, never a silent U+FFFD
+        final FwfException e = Assertions.assertThrows(FwfException.class,
+                () -> decoder(Map.of("charset", "Shift_JIS")).decode(record()));
+        Assertions.assertEquals("name", e.getField());
+        Assertions.assertTrue(e.getValue().startsWith("0x878a"), e.getValue());
+        Assertions.assertTrue(e.getMessage().contains("can not decode with charset Shift_JIS"), e.getMessage());
+
+        // onParseError: null -> only that field is null; positions are bytes, so the rest is unaffected
+        final Map<String, Object> values = decoder(Map.of("charset", "Shift_JIS", "onParseError", "null")).decode(record());
+        Assertions.assertNull(values.get("name"));
         Assertions.assertEquals(new BigDecimal("12.3"), values.get("amount"));
+        Assertions.assertEquals("ｶﾅ", values.get("tail"));
+    }
+
+    @Test
+    public void testUndecodableRecordInCharUnit() {
+        final FwfLayout layout = FwfLayout.parse("""
+                { "fields": [ { "name": "a", "type": "string", "len": 2 } ] }
+                """);
+        final FwfDecoder decoder = FwfDecoder.of(layout, FwfOptions.of(Map.of("unit", "char", "onParseError", "null")));
+        // 0xFF is never valid UTF-8: with unit char the record can not be cut at all
+        final FwfException e = Assertions.assertThrows(FwfException.class, () -> decoder.decode(new byte[] { 'a', (byte) 0xFF }));
+        Assertions.assertNull(e.getField());
+        Assertions.assertTrue(e.getMessage().contains("can not be decoded with charset UTF-8"), e.getMessage());
+    }
+
+    @Test
+    public void testUnencodableTextInByteUnit() {
+        final FwfLayout layout = FwfLayout.parse("""
+                { "fields": [ { "name": "a", "type": "string", "len": 2 } ] }
+                """);
+        final FwfDecoder decoder = FwfDecoder.of(layout, FwfOptions.of(Map.of("charset", "US-ASCII")));
+        final FwfException e = Assertions.assertThrows(FwfException.class, () -> decoder.decode("あい"));
+        Assertions.assertTrue(e.getMessage().contains("can not be encoded with charset US-ASCII"), e.getMessage());
     }
 
     @Test
@@ -198,6 +228,51 @@ public class FwfDecoderTest {
         final FwfException e = Assertions.assertThrows(FwfException.class,
                 () -> FwfDecoder.of(layout, null).decode("A101B1x2".getBytes(StandardCharsets.UTF_8)));
         Assertions.assertEquals("items[1].qty", e.getField());
+        Assertions.assertEquals("x2", e.getValue());
+        Assertions.assertEquals("fwf field items[1].qty: can not convert to int32: For input string: \"x2\" (value: 'x2')", e.getMessage());
+        Assertions.assertInstanceOf(NumberFormatException.class, e.getCause());
+
+        // every enclosing group and array index is part of the path
+        final FwfLayout nested = FwfLayout.parse("""
+                { "fields": [ { "name": "a", "fields": [
+                    { "name": "b", "repeat": 2, "fields": [
+                        { "name": "c", "type": "int32", "len": 1, "repeat": 2 },
+                        { "name": "d", "type": "int32", "len": 1, "mode": "required" } ] } ] } ] }
+                """);
+        final FwfException leaf = Assertions.assertThrows(FwfException.class,
+                () -> FwfDecoder.of(nested, null).decode("1231x5".getBytes(StandardCharsets.UTF_8)));
+        Assertions.assertEquals("a.b[1].c[1]", leaf.getField());
+        final FwfException required = Assertions.assertThrows(FwfException.class,
+                () -> FwfDecoder.of(nested, null).decode("12312 ".getBytes(StandardCharsets.UTF_8)));
+        Assertions.assertEquals("a.b[1].d", required.getField());
+        Assertions.assertTrue(required.getMessage().contains("required field is null"), required.getMessage());
+    }
+
+    @Test
+    public void testNonExistentDayOfMonth() {
+        // the JDK's default resolver would move 02-31 to the last day of February instead of failing
+        final FwfLayout layout = FwfLayout.parse("""
+                { "fields": [
+                    { "name": "d",  "type": "date",      "len": 8,  "pattern": "yyyyMMdd" },
+                    { "name": "at", "type": "timestamp", "len": 12, "pattern": "yyyyMMddHHmm" } ] }
+                """);
+        final FwfDecoder decoder = FwfDecoder.of(layout, null);
+
+        // valid month ends, and 24:00 as the start of the next day (which resolves to a month end)
+        final Map<String, Object> valid = decoder.decode("20240229" + "202402282400");
+        Assertions.assertEquals((int) LocalDate.of(2024, 2, 29).toEpochDay(), valid.get("d"));
+        Assertions.assertEquals(LocalDate.of(2024, 2, 29).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli() * 1000L, valid.get("at"));
+        Assertions.assertEquals((int) LocalDate.of(2023, 4, 30).toEpochDay(), decoder.decode("20230430" + "202304302359").get("d"));
+
+        final FwfException date = Assertions.assertThrows(FwfException.class,
+                () -> decoder.decode("20240231" + "202401010000"));
+        Assertions.assertEquals("d", date.getField());
+        final FwfException timestamp = Assertions.assertThrows(FwfException.class,
+                () -> decoder.decode("20240101" + "202304311200"));
+        Assertions.assertEquals("at", timestamp.getField());
+
+        final FwfDecoder nullify = FwfDecoder.of(layout, FwfOptions.of(Map.of("onParseError", "null")));
+        Assertions.assertNull(nullify.decode("20230229" + "202401010000").get("d"));
     }
 
     @Test

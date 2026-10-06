@@ -109,6 +109,84 @@ public class SchemaFwfTest {
                 """.formatted(LAYOUT));
         Assertions.assertEquals(List.of("code"), projected.getFields().stream().map(Schema.Field::getName).toList());
         Assertions.assertEquals(4, projected.getFwfLayout().getFields().size());
+
+        // a duplicated name is reported as such (not as an index error against the deduplicated projection)
+        assertParseError("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "code", "type": "string" }, { "name": "code", "type": "string" } ]
+                }
+                """.formatted(LAYOUT), "duplicated field name: code");
+
+        // a field can not be made required by the declaration: the layout decides
+        assertParseError("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "code", "type": "string", "mode": "required" } ]
+                }
+                """.formatted(LAYOUT), "schema.fields[0] code is declared required, but the fwf layout field is nullable");
+
+        // the element type of an array and the fields of a record are compared too
+        assertParseError("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "marks", "type": "string", "mode": "repeated" } ]
+                }
+                """.formatted(LAYOUT), "schema.fields[0] marks[] type string is incompatible with the fwf layout type int32");
+        assertParseError("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "item", "type": "record", "fields": [ { "name": "qty", "type": "string" } ] } ]
+                }
+                """.formatted(LAYOUT), "schema.fields[0] item.qty type string is incompatible with the fwf layout type int32");
+        assertParseError("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "item", "type": "record", "fields": [ { "name": "other", "type": "string" } ] } ]
+                }
+                """.formatted(LAYOUT), "schema.fields[0] item.other is not in the fwf layout");
+
+        final Schema nested = Schema.parse("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [
+                    { "name": "marks", "type": "int32", "mode": "repeated" },
+                    { "name": "item", "type": "record", "fields": [ { "name": "qty", "type": "int32" } ] } ]
+                }
+                """.formatted(LAYOUT));
+        Assertions.assertEquals(List.of("marks", "item"), nested.getFields().stream().map(Schema.Field::getName).toList());
+    }
+
+    @Test
+    public void testDerivedSchemaIsNotAProjection() {
+        // only the fields declared in the config are validated against the layout: a schema derived
+        // from an fwf schema (a transform output, additional fields of a source) may add fields
+        final Schema schema = Schema.parse("""
+                { "encoding": { "format": "fwf" }, "reference": { "inline": %s } }
+                """.formatted(LAYOUT));
+        final Schema derived = Schema.builder(schema)
+                .withField("resource", Schema.FieldType.STRING)
+                .build();
+        Assertions.assertEquals(List.of("code", "amount", "marks", "item", "resource"),
+                derived.getFields().stream().map(Schema.Field::getName).toList());
+        Assertions.assertEquals(14, derived.getFwfLayout().getRecordLength());
+        Assertions.assertEquals(5, derived.copy().getFields().size());
+    }
+
+    @Test
+    public void testFwfOptionsOfAnotherFormat() {
+        // the option keys of another format are not parsed as fwf options
+        final Schema schema = Schema.parse("""
+                { "encoding": { "format": "avro", "codec": "snappy" }, "fields": [ { "name": "a", "type": "string" } ] }
+                """);
+        Assertions.assertNull(schema.getFwfLayout());
+        Assertions.assertEquals("UTF-8", schema.getFwfOptions().getCharsetName());
     }
 
     @Test

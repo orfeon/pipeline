@@ -159,14 +159,22 @@ public class Schema implements Serializable {
         return fwf;
     }
 
-    /** The fwf layout document; null unless {@code encoding.format: fwf} was declared. */
+    /**
+     * The fwf layout document; null unless {@code encoding.format: fwf} was declared. This is the
+     * whole layout: when {@code fields} declare a projection, the caller narrows it with
+     * {@link FwfLayout#project} before building a decoder.
+     */
     public FwfLayout getFwfLayout() {
         return fwf == null ? null : fwf.getLayout();
     }
 
-    /** The fwf conversion options from {@code encoding} (defaults when not declared). */
+    /** The fwf conversion options from {@code encoding} (defaults unless {@code encoding.format: fwf} was declared). */
     public FwfOptions getFwfOptions() {
-        return FwfOptions.of(encoding == null ? null : encoding.getOptions());
+        if(encoding == null || encoding.getFormat() != Encoding.Format.fwf) {
+            // the option keys of another format are not fwf options
+            return FwfOptions.defaults();
+        }
+        return FwfOptions.of(encoding.getOptions());
     }
 
     /**
@@ -436,7 +444,60 @@ public class Schema implements Serializable {
             throw new IllegalArgumentException(String.join(", ", errorMessages));
         }
 
+        if(builder.fwf != null && !builder.fields.isEmpty()) {
+            validateFwfProjection(builder.fwf.getLayout(), builder.fields);
+        }
+
         return builder.build();
+    }
+
+    // Declared fields project the fwf layout (schema-redesign.md P3): unknown or duplicated names and
+    // incompatible types are assembly-time errors. Checked here, where the config declares the
+    // fields, and not in Builder.build(): a schema derived with Schema.builder(schema) keeps the
+    // layout holder while it adds, drops or renames fields.
+    private static void validateFwfProjection(final FwfLayout layout, final List<Field> declared) {
+        final List<String> names = new ArrayList<>();
+        for(final Field field : declared) {
+            if(names.contains(field.getName())) {
+                throw new IllegalArgumentException("schema.fields has a duplicated field name: " + field.getName());
+            }
+            names.add(field.getName());
+        }
+        // unknown names are rejected by project(); without duplicates it keeps the declared order
+        final List<Field> layoutFields = layout.project(names).toSchemaFields();
+        for(int i = 0; i < declared.size(); i++) {
+            validateFwfType("schema.fields[" + i + "] " + declared.get(i).getName(),
+                    declared.get(i).getFieldType(), layoutFields.get(i).getFieldType());
+        }
+    }
+
+    // The declared type must not contradict the layout: the same type, the same array element type
+    // and, for a record, every declared child present in the layout record with a compatible type.
+    private static void validateFwfType(final String path, final FieldType declared, final FieldType actual) {
+        if(declared.getType() != actual.getType()) {
+            throw new IllegalArgumentException(path + " type " + declared.getType()
+                    + " is incompatible with the fwf layout type " + actual.getType());
+        }
+        // the decoder enforces only what the layout declares: a field can not be made required here
+        if(Boolean.FALSE.equals(declared.getNullable()) && !Boolean.FALSE.equals(actual.getNullable())) {
+            throw new IllegalArgumentException(path + " is declared required, but the fwf layout field is nullable"
+                    + " (declare mode: required in the layout)");
+        }
+        switch (declared.getType()) {
+            case array -> validateFwfType(path + "[]", declared.getArrayValueType(), actual.getArrayValueType());
+            case element -> {
+                final List<Field> layoutChildren = actual.getElementSchema().getFields();
+                for(final Field child : declared.getElementSchema().getFields()) {
+                    final Field layoutChild = getField(layoutChildren, child.getName());
+                    if(layoutChild == null) {
+                        throw new IllegalArgumentException(path + "." + child.getName() + " is not in the fwf layout. available fields: "
+                                + layoutChildren.stream().map(Field::getName).toList());
+                    }
+                    validateFwfType(path + "." + child.getName(), child.getFieldType(), layoutChild.getFieldType());
+                }
+            }
+            default -> {}
+        }
     }
 
     // Parses the new-format keys (schema-redesign.md §2) into the same internals as the old
@@ -1633,20 +1694,10 @@ public class Schema implements Serializable {
                 schema.protobuf = protobuf;
                 schema.row = row;
                 if(fwf != null) {
-                    // declared fields project the layout (schema-redesign.md P3): unknown names and
-                    // incompatible types are assembly-time errors
+                    // load the layout at build time (like avro / protobuf). The fields are not checked
+                    // against it here: Schema.parse validates a declared projection, and a derived
+                    // schema (Schema.builder(schema)) is free to change its fields.
                     fwf.setup();
-                    final List<Field> layoutFields = fwf.layout
-                            .project(fields.stream().map(Field::getName).toList())
-                            .toSchemaFields();
-                    for(int i = 0; i < fields.size(); i++) {
-                        final Type declared = fields.get(i).getFieldType().getType();
-                        final Type actual = layoutFields.get(i).getFieldType().getType();
-                        if(declared != actual) {
-                            throw new IllegalArgumentException("schema.fields[" + i + "] " + fields.get(i).getName()
-                                    + " type " + declared + " is incompatible with the fwf layout type " + actual);
-                        }
-                    }
                 }
             }
             schema.fwf = fwf;
