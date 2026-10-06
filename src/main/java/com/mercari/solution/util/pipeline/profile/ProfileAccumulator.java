@@ -21,8 +21,9 @@ import java.io.Serializable;
 import java.util.List;
 
 /**
- * Mergeable profile state for one dataset: per-field sketch sets, the numeric co-moment
- * (correlation) matrix and a VarOpt row sample.
+ * Mergeable profile state of the first pass (profile-engine.md §3): per-field counters, moments,
+ * sketch sets and the bounded exact value table, the numeric co-moment (correlation) matrix and a
+ * VarOpt row sample.
  *
  * <p>Sketches are not {@link Serializable}; this class implements custom serialization on top of
  * their compact binary representations, so the whole accumulator can be carried by Beam's
@@ -68,10 +69,8 @@ public class ProfileAccumulator implements Serializable {
         acc.spec = spec;
         final List<ProfileSpec.FieldSpec> fieldSpecs = spec.getFields();
         acc.fields = new FieldAccumulator[fieldSpecs.size()];
-        final ProfileSpec.TargetSpec target = spec.getTarget();
         for(int i = 0; i < fieldSpecs.size(); i++) {
-            final boolean withTarget = target != null && target.fieldStats && target.fieldIndex != i;
-            acc.fields[i] = FieldAccumulator.of(fieldSpecs.get(i), spec.getSketchParameters(), withTarget);
+            acc.fields[i] = FieldAccumulator.of(fieldSpecs.get(i), spec.getSketchParameters());
         }
         acc.numericCount = spec.getNumericFieldIndices().size();
         final int pairs = acc.numericCount * (acc.numericCount - 1) / 2;
@@ -140,11 +139,10 @@ public class ProfileAccumulator implements Serializable {
         rowCount += 1;
         final List<ProfileSpec.FieldSpec> fieldSpecs = spec.getFields();
 
-        // the row's target class, decided before the field loop so every field can split on it
-        Boolean targetClass = null;
+        // the class totals of the declared target (the per-field split by class is the counting pass's)
         final ProfileSpec.TargetSpec target = spec.getTarget();
         if(target != null) {
-            targetClass = target.fieldIndex < values.length ? target.classOf(values[target.fieldIndex]) : null;
+            final Boolean targetClass = target.fieldIndex < values.length ? target.classOf(values[target.fieldIndex]) : null;
             if(targetClass == null) {
                 targetNullRows += 1;
             } else if(targetClass) {
@@ -158,7 +156,7 @@ public class ProfileAccumulator implements Serializable {
         int numericIndex = 0;
         for(int i = 0; i < fields.length; i++) {
             final ProfileSpec.FieldSpec fieldSpec = fieldSpecs.get(i);
-            final Double numericValue = fields[i].add(fieldSpec, values[i], targetClass);
+            final Double numericValue = fields[i].add(fieldSpec, values[i]);
             if(ProfileSpec.ProfileType.NUMERIC.equals(fieldSpec.profileType)) {
                 if(numericValues != null) {
                     numericValues[numericIndex] = numericValue;
@@ -371,6 +369,20 @@ public class ProfileAccumulator implements Serializable {
         public long infCount;
         public long trueCount;
         public long falseCount;
+        public long blankCount;     // strings of whitespace only (full-width included), the empty string excluded
+        public long nullLikeCount;  // null sentinels: see ProfileReport#isNullLike
+
+        // compensated (Kahan) sum of the numeric observations: exact enough to reconcile two inputs
+        public double sum;
+        private double sumCompensation;
+
+        // exact value table (profile-dsl.md §5.4): value → count, null once it was dropped for good
+        // (more distinct values than the limit, or a string longer than the limit)
+        private java.util.HashMap<String, Long> stringValues;
+        private java.util.HashMap<Double, Long> numericValues;
+        private boolean valuesDropped;
+        private int valueTableLimit = 1_000;
+        private int valueMaxLength = 256;
 
         public double min = Double.POSITIVE_INFINITY;
         public double max = Double.NEGATIVE_INFINITY;
@@ -388,33 +400,30 @@ public class ProfileAccumulator implements Serializable {
         private transient UpdateSketch thetaLive;
         private transient CompactSketch thetaMerged;
 
-        private TargetStats target;     // per-class split of this field (null without a declared target)
-
         private FieldAccumulator() {
         }
 
         static FieldAccumulator of(final ProfileSpec.FieldSpec fieldSpec, final ProfileSpec.SketchParameters params) {
-            return of(fieldSpec, params, false);
-        }
-
-        static FieldAccumulator of(
-                final ProfileSpec.FieldSpec fieldSpec,
-                final ProfileSpec.SketchParameters params,
-                final boolean withTarget) {
-
             final FieldAccumulator acc = new FieldAccumulator();
             acc.cpcLgK = params.cpcLgK;
             acc.thetaLgK = params.thetaLgK;
-            if(withTarget) {
-                acc.target = TargetStats.of(fieldSpec, params);
-            }
+            acc.valueTableLimit = params.valueTableLimit;
+            acc.valueMaxLength = params.valueMaxLength;
             switch (fieldSpec.profileType) {
-                case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
+                case NUMERIC, ARRAY_LENGTH -> {
+                    acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
+                    acc.numericValues = new java.util.HashMap<>();
+                }
+                case TIMESTAMP -> {
+                    acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
+                    acc.valuesDropped = true;
+                }
                 case STRING -> {
                     acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
                     acc.frequentItems = new ItemsSketch<>(params.fiMaxMapSize);
+                    acc.stringValues = new java.util.HashMap<>();
                 }
-                case BOOL -> { }
+                case BOOL -> acc.valuesDropped = true;
             }
             switch (fieldSpec.profileType) {
                 case NUMERIC, STRING -> acc.cpcLive = new CpcSketch(params.cpcLgK);
@@ -428,20 +437,8 @@ public class ProfileAccumulator implements Serializable {
 
         /** Adds one raw value; returns the numeric interpretation for correlation (NUMERIC only). */
         Double add(final ProfileSpec.FieldSpec fieldSpec, final Object value) {
-            return add(fieldSpec, value, null);
-        }
-
-        /**
-         * Adds one raw value, also to the class split when {@code targetClass} (the row's target
-         * class) is known; returns the numeric interpretation for correlation (NUMERIC only).
-         */
-        Double add(final ProfileSpec.FieldSpec fieldSpec, final Object value, final Boolean targetClass) {
-            final TargetStats split = targetClass == null ? null : target;
             if(value == null) {
                 nullCount += 1;
-                if(split != null) {
-                    split.addNull(targetClass);
-                }
                 return null;
             }
             if(value == ProfileRow.Marker.ERROR) {
@@ -469,12 +466,11 @@ public class ProfileAccumulator implements Serializable {
                             zeroCount += 1;
                         }
                         updateMoments(v);
+                        addToSum(v);
+                        countValue(v);
                         kll.update(v);
                         cpcLive.update(v);
                         updateTheta(canonicalNumeric(v));
-                        if(split != null) {
-                            split.addNumeric(v, targetClass);
-                        }
                         return v;
                     }
                     case STRING -> {
@@ -486,14 +482,17 @@ public class ProfileAccumulator implements Serializable {
                         count += 1;
                         if(s.isEmpty()) {
                             emptyCount += 1;
+                        } else if(s.isBlank()) {
+                            blankCount += 1;
                         }
+                        if(ProfileReport.isNullLike(s)) {
+                            nullLikeCount += 1;
+                        }
+                        countValue(s);
                         kll.update(s.length());
                         cpcLive.update(s);
                         frequentItems.update(s);
                         updateTheta(s);
-                        if(split != null) {
-                            split.addString(s, targetClass);
-                        }
                         return null;
                     }
                     case BOOL -> {
@@ -508,9 +507,6 @@ public class ProfileAccumulator implements Serializable {
                         } else {
                             falseCount += 1;
                         }
-                        if(split != null) {
-                            split.addBool(b, targetClass);
-                        }
                         return null;
                     }
                     case TIMESTAMP -> {
@@ -523,9 +519,6 @@ public class ProfileAccumulator implements Serializable {
                         updateMoments(ms);
                         kll.update(ms);
                         updateTheta(canonicalNumeric(ms));
-                        if(split != null) {
-                            split.addNumeric(ms, targetClass);
-                        }
                         return null;
                     }
                     case ARRAY_LENGTH -> {
@@ -536,10 +529,9 @@ public class ProfileAccumulator implements Serializable {
                         }
                         count += 1;
                         updateMoments(length);
+                        addToSum(length);
+                        countValue((double) length);
                         kll.update(length);
-                        if(split != null) {
-                            split.addNumeric(length, targetClass);
-                        }
                         return null;
                     }
                 }
@@ -582,6 +574,54 @@ public class ProfileAccumulator implements Serializable {
             return count - 1 < 0 ? 0 : count - 1;
         }
 
+        private void addToSum(final double v) {
+            final double y = v - sumCompensation;
+            final double t = sum + y;
+            sumCompensation = (t - sum) - y;
+            sum = t;
+        }
+
+        private void countValue(final double v) {
+            if(valuesDropped) {
+                return;
+            }
+            numericValues.merge(v == 0d ? 0d : v, 1L, Long::sum);   // -0.0 and 0.0 are one value
+            if(numericValues.size() > valueTableLimit) {
+                dropValues();
+            }
+        }
+
+        private void countValue(final String s) {
+            if(valuesDropped) {
+                return;
+            }
+            // a table that shortened its keys would merge distinct values and still call itself exact
+            if(s.length() > valueMaxLength) {
+                dropValues();
+                return;
+            }
+            stringValues.merge(s, 1L, Long::sum);
+            if(stringValues.size() > valueTableLimit) {
+                dropValues();
+            }
+        }
+
+        private void dropValues() {
+            valuesDropped = true;
+            stringValues = null;
+            numericValues = null;
+        }
+
+        /** The exact value → count table of a string field, or null when the field has none. */
+        public java.util.Map<String, Long> getStringValues() {
+            return valuesDropped ? null : stringValues;
+        }
+
+        /** The exact value → count table of a numeric / array-length field, or null when the field has none. */
+        public java.util.Map<Double, Long> getNumericValues() {
+            return valuesDropped ? null : numericValues;
+        }
+
         private void updateTheta(final String canonical) {
             if(thetaLive != null) {
                 thetaLive.update(canonical);
@@ -615,6 +655,28 @@ public class ProfileAccumulator implements Serializable {
             infCount += other.infCount;
             trueCount += other.trueCount;
             falseCount += other.falseCount;
+            blankCount += other.blankCount;
+            nullLikeCount += other.nullLikeCount;
+            addToSum(other.sum);
+            if(!valuesDropped) {
+                if(other.valuesDropped) {
+                    dropValues();
+                } else if(stringValues != null) {
+                    for(final java.util.Map.Entry<String, Long> entry : other.stringValues.entrySet()) {
+                        stringValues.merge(entry.getKey(), entry.getValue(), Long::sum);
+                    }
+                    if(stringValues.size() > valueTableLimit) {
+                        dropValues();
+                    }
+                } else if(numericValues != null) {
+                    for(final java.util.Map.Entry<Double, Long> entry : other.numericValues.entrySet()) {
+                        numericValues.merge(entry.getKey(), entry.getValue(), Long::sum);
+                    }
+                    if(numericValues.size() > valueTableLimit) {
+                        dropValues();
+                    }
+                }
+            }
             min = Math.min(min, other.min);
             max = Math.max(max, other.max);
 
@@ -642,21 +704,10 @@ public class ProfileAccumulator implements Serializable {
                         ? UpdateSketch.builder().setNominalEntries(1 << params.thetaLgK).build()
                         : null;
             }
-
-            if(target != null && other.target != null) {
-                target.merge(other.target);
-            } else if(target == null) {
-                target = other.target;
-            }
         }
 
         public KllDoublesSketch getKll() {
             return kll;
-        }
-
-        /** The per-class split of this field, or null when no target is declared (or this is the target). */
-        public TargetStats getTarget() {
-            return target;
         }
 
         public ItemsSketch<String> getFrequentItems() {
@@ -729,206 +780,6 @@ public class ProfileAccumulator implements Serializable {
             if(thetaBytes != null) {
                 thetaMerged = CompactSketch.heapify(Memory.wrap(thetaBytes));
                 thetaLive = UpdateSketch.builder().setNominalEntries(1 << thetaLgK).build();
-            }
-        }
-    }
-
-    /** Streaming mean/variance of one class (Welford, mergeable). */
-    public static class Moments implements Serializable {
-
-        public long n;
-        public double mean;
-        public double m2;
-
-        void add(final double v) {
-            n += 1;
-            final double delta = v - mean;
-            mean += delta / n;
-            m2 += delta * (v - mean);
-        }
-
-        void merge(final Moments other) {
-            if(other.n == 0) {
-                return;
-            }
-            if(n == 0) {
-                n = other.n;
-                mean = other.mean;
-                m2 = other.m2;
-                return;
-            }
-            final double total = n + other.n;
-            final double delta = other.mean - mean;
-            m2 += other.m2 + delta * delta * n * other.n / total;
-            mean += delta * other.n / total;
-            n = (long) total;
-        }
-    }
-
-    /**
-     * One field's observations split by the target class: the same sketch kind as the field's
-     * main one (KLL for numeric-like, Frequent Items for strings) per class, plus class counts.
-     * Positive-vs-negative distributions over shared edges/labels give the per-bin target rate and
-     * the information value (PSI between the two class distributions).
-     */
-    public static class TargetStats implements Serializable {
-
-        private static final ArrayOfStringsSerDe SERDE = new ArrayOfStringsSerDe();
-
-        public long positiveCount;      // non-null observations on positive rows
-        public long negativeCount;
-        public long nullPositive;       // null observations on positive rows
-        public long nullNegative;
-        public long truePositive;       // BOOL: true observations on positive rows
-        public long trueNegative;
-
-        public Moments positive = new Moments();   // numeric-like values per class
-        public Moments negative = new Moments();
-
-        private transient KllDoublesSketch kllPositive;
-        private transient KllDoublesSketch kllNegative;
-        private transient ItemsSketch<String> fiPositive;
-        private transient ItemsSketch<String> fiNegative;
-
-        private TargetStats() {
-        }
-
-        static TargetStats of(final ProfileSpec.FieldSpec fieldSpec, final ProfileSpec.SketchParameters params) {
-            final TargetStats stats = new TargetStats();
-            switch (fieldSpec.profileType) {
-                case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                    stats.kllPositive = KllDoublesSketch.newHeapInstance(params.kllK);
-                    stats.kllNegative = KllDoublesSketch.newHeapInstance(params.kllK);
-                }
-                case STRING -> {
-                    stats.fiPositive = new ItemsSketch<>(params.fiMaxMapSize);
-                    stats.fiNegative = new ItemsSketch<>(params.fiMaxMapSize);
-                }
-                case BOOL -> { }
-            }
-            return stats;
-        }
-
-        void addNull(final boolean positiveClass) {
-            if(positiveClass) {
-                nullPositive += 1;
-            } else {
-                nullNegative += 1;
-            }
-        }
-
-        void addNumeric(final double v, final boolean positiveClass) {
-            if(positiveClass) {
-                positiveCount += 1;
-                positive.add(v);
-                kllPositive.update(v);
-            } else {
-                negativeCount += 1;
-                negative.add(v);
-                kllNegative.update(v);
-            }
-        }
-
-        void addString(final String s, final boolean positiveClass) {
-            if(positiveClass) {
-                positiveCount += 1;
-                fiPositive.update(s);
-            } else {
-                negativeCount += 1;
-                fiNegative.update(s);
-            }
-        }
-
-        void addBool(final boolean b, final boolean positiveClass) {
-            if(positiveClass) {
-                positiveCount += 1;
-                if(b) {
-                    truePositive += 1;
-                }
-            } else {
-                negativeCount += 1;
-                if(b) {
-                    trueNegative += 1;
-                }
-            }
-        }
-
-        void merge(final TargetStats other) {
-            positiveCount += other.positiveCount;
-            negativeCount += other.negativeCount;
-            nullPositive += other.nullPositive;
-            nullNegative += other.nullNegative;
-            truePositive += other.truePositive;
-            trueNegative += other.trueNegative;
-            positive.merge(other.positive);
-            negative.merge(other.negative);
-            kllPositive = mergeKll(kllPositive, other.kllPositive);
-            kllNegative = mergeKll(kllNegative, other.kllNegative);
-            fiPositive = mergeFi(fiPositive, other.fiPositive);
-            fiNegative = mergeFi(fiNegative, other.fiNegative);
-        }
-
-        private static KllDoublesSketch mergeKll(final KllDoublesSketch a, final KllDoublesSketch b) {
-            if(a == null) {
-                return b;
-            }
-            if(b != null) {
-                a.merge(b);
-            }
-            return a;
-        }
-
-        private static ItemsSketch<String> mergeFi(final ItemsSketch<String> a, final ItemsSketch<String> b) {
-            if(a == null) {
-                return b;
-            }
-            if(b != null) {
-                a.merge(b);
-            }
-            return a;
-        }
-
-        public KllDoublesSketch getKllPositive() {
-            return kllPositive;
-        }
-
-        public KllDoublesSketch getKllNegative() {
-            return kllNegative;
-        }
-
-        public ItemsSketch<String> getFiPositive() {
-            return fiPositive;
-        }
-
-        public ItemsSketch<String> getFiNegative() {
-            return fiNegative;
-        }
-
-        private void writeObject(final ObjectOutputStream out) throws IOException {
-            out.defaultWriteObject();
-            writeBytes(out, kllPositive == null ? null : kllPositive.toByteArray());
-            writeBytes(out, kllNegative == null ? null : kllNegative.toByteArray());
-            writeBytes(out, fiPositive == null ? null : fiPositive.toByteArray(SERDE));
-            writeBytes(out, fiNegative == null ? null : fiNegative.toByteArray(SERDE));
-        }
-
-        private void readObject(final ObjectInputStream in) throws IOException, ClassNotFoundException {
-            in.defaultReadObject();
-            final byte[] kllPositiveBytes = readBytes(in);
-            if(kllPositiveBytes != null) {
-                kllPositive = KllDoublesSketch.heapify(Memory.wrap(kllPositiveBytes));
-            }
-            final byte[] kllNegativeBytes = readBytes(in);
-            if(kllNegativeBytes != null) {
-                kllNegative = KllDoublesSketch.heapify(Memory.wrap(kllNegativeBytes));
-            }
-            final byte[] fiPositiveBytes = readBytes(in);
-            if(fiPositiveBytes != null) {
-                fiPositive = ItemsSketch.getInstance(Memory.wrap(fiPositiveBytes), SERDE);
-            }
-            final byte[] fiNegativeBytes = readBytes(in);
-            if(fiNegativeBytes != null) {
-                fiNegative = ItemsSketch.getInstance(Memory.wrap(fiNegativeBytes), SERDE);
             }
         }
     }

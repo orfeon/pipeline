@@ -12,8 +12,8 @@ import java.util.Set;
 
 /**
  * One comparison axis of the profile (declared {@code segments} field or the {@code time} field).
- * A row is assigned to at most one group per axis; per-group sub-profiles are computed with the
- * same CombineFn as the global profile, keyed by {@link #groupKey}.
+ * A row is assigned to at most one group per axis; the counting pass counts each group's rows
+ * under {@link #groupKey}.
  */
 public class ProfileAxis implements Serializable {
 
@@ -41,6 +41,11 @@ public class ProfileAxis implements Serializable {
 
     public String id() {
         return kind.name() + ":" + field;
+    }
+
+    /** The axis as the records name it: {@code segments:<field>}, {@code time:<field>} or {@code inputs}. */
+    public String label() {
+        return Kind.inputs.equals(kind) ? kind.name() : id();
     }
 
     public String groupKey(final String group) {

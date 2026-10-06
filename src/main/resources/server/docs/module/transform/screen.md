@@ -10,7 +10,7 @@ timestamp: 2026-09-04T00:00:00Z
 
 Transform module that **ranks candidate feature columns before training**, conditioned on an existing
 baseline prediction. It answers one question per column: *does this column explain what the baseline
-misses?* — without training a model. It is the supervised counterpart of the `profile` sink (unsupervised
+misses?* — without training a model. It is the supervised counterpart of the `profile` transform (unsupervised
 column statistics) and the natural downstream of the [`feature`](feature.md) transform: feature
 (generation) → screen (ranking and cut-off before training) → training job.
 

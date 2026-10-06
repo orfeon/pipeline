@@ -1,11 +1,14 @@
 # Profile Transform Engine (Design Document)
 
-Status: **Proposal** — the Beam execution of the contract in [profile-dsl.md](profile-dsl.md): one sketch
-pass for the whole-dataset profile and the edges, one counting pass for every group and class, one shuffle
-per `unique` key, one render step. Nothing here is built; §9 lists what has to be measured or decided before
-the design is accepted. The starting point is the code of the existing sink (`util/pipeline/profile/`,
-`module/sink/ProfileSink.java`): most of `util/pipeline/profile/` is kept and reshaped, the sink module
-itself is deleted (dsl §2 — no alias, no compatibility).
+Status: **Stage 1 implemented** — the Beam execution of the contract in [profile-dsl.md](profile-dsl.md):
+one sketch pass for the whole-dataset profile and the edges, one counting pass for every group and class,
+one finalize step. Built: §1–§4, §6 and §8 as far as dsl stage 1 goes (code in `util/pipeline/profile/` and
+`module/transform/ProfileTransform.java`; tests `ProfileReportTest` (pure) and `ProfileTransformTest` (e2e)).
+Not built: row rules (§3.1), freshness and missing buckets (§3.2), the `unique` key shuffle and the key
+sketches per input (§5), `previous`, and `bins.mode: sketch`. §9 lists what is still to be measured or
+decided — the cost of the second pass on a wide input above all, which has not been run on Dataflow. The
+sink module (`module/sink/ProfileSink.java`) is deleted; most of `util/pipeline/profile/` was kept and
+reshaped (dsl §2 — no alias, no compatibility).
 
 ## 1. Layout: pure computation and Beam wiring
 
@@ -51,8 +54,12 @@ input ─ Union ─ (Unnest) ─ Extract ─┬─ Combine.globally(ProfileAccum
   `unnest`). A parent whose array is empty or null emits nothing and increments one of two counters that
   reach the `summary` (`parentsEmpty`, `parentsNull`); `parents` is their sum plus the parents that emitted.
 - **Pass 1** is the sink's global combine with fan-out.
-- **Pass 2** is one `Combine.perKey` over the same `ProfileRow` collection, keyed by axis group
-  (`KeyByAxisDoFn` — a row is emitted once per axis), with `ProfileEdges` as a side input. The whole
+- **Pass 2** is a `Locate` ParDo followed by one `Combine.perKey`. `Locate` reads `ProfileEdges` as a side
+  input, finds each row's cells once, and emits the located row under every group it is counted in (the
+  whole dataset, its target class, its group on each axis when that group was kept). The combine itself is
+  a plain `CombineFn` with no side input, so the runner can lift it ahead of the shuffle: what is shuffled
+  is one accumulator per group and bundle, not the rows. Because the located row does not say how many
+  cells its fields have, a group's arrays grow to the largest cell index seen and are padded when read. The whole
   dataset and the two target classes are groups of their own axes, so there is one code path for every bin
   count. The runner consumes the extracted rows twice; pass 2 waits on the edges side input, which is what
   makes it a second pass.
@@ -83,8 +90,8 @@ Unchanged from the sink, with these differences:
 - **No per-class sketches.** The target split of every field is pass 2's `target` axis.
 - **Edges.** Per numeric-like field, the quantiles at 1/100 … 99/100 of the pass 1 KLL sketch, deduplicated
   (ties collapse cells), and next to them the declared `bins.edges` of the fields that have them. Per
-  categorical field, the value table, or the top
-  values of the frequent-items result plus `(other)`. Per declared pair, the same quantiles of the two
+  categorical field, the most frequent 50 values (of the value table, or of the frequent-items result) plus
+  `(other)`. Per declared pair, the same quantiles of the two
   fields' sketches merged.
 - **`sum`** is accumulated on its own as a compensated (Kahan) sum rather than derived as mean × count, so
   that a reconciliation of two inputs does not inherit the rounding of the running mean.

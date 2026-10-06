@@ -46,8 +46,8 @@ Try to find and arrange a configuration file that is similar to the data process
     * [Decrypt secret data](spanner-to-decrypt-to-avro.json)
     * [SetOperation: Replace Spanner Table](setoperation-replace-spanner.json)
   * Data Observation
-    * [Profile: BigQuery dataset to HTML report (keys / target / segments / time / compare)](bigquery-to-profile.yaml)
-    * [Profile: two years of BigQuery data as comparison groups, with sketch binaries](bigquery-to-profile-compare.yaml)
+    * [Profile: BigQuery dataset to per-field records and an HTML report (keys / target / segments / time / compare)](bigquery-to-profile.yaml)
+    * [Profile: two years of BigQuery data as comparison groups, drift statistics appended to a table](bigquery-to-profile-compare.yaml)
     * [Profile: nested STRUCT columns as dot paths, raw values hidden](bigquery-to-profile-nested.yaml)
     * [Evaluation: a candidate model against the current one on time splits, with calibration tables](storage-to-evaluation-to-bigquery.yaml)
   * Data Flow Control

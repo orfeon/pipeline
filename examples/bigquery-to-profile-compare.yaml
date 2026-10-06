@@ -1,11 +1,16 @@
 # Profile: compare two years of the same dataset.
-# Both inputs are scanned now and become comparison groups (mode: compare): the report gets
-# per-input sub-profiles, compare-bar chips and PSI/KS drift metrics against the baseline.
-# The object form of `output` also writes the mergeable sketch binaries as a separate JSON;
-# its CPC / Theta / frequent-items sketches are readable by BigQuery `bqutil.datasketches`
-# UDFs (the KLL quantile sketches are the doubles variant, which those UDFs do not read).
-# Same column list and filter as examples/bigquery-to-profile.yaml, so that report can serve
-# as a `compareWith` target — see the commented parameter at the end.
+# Both inputs are scanned and become the groups of the `inputs` axis (mode: compare). Each field
+# of trips2022 is compared with the baseline trips2021 from exact counts over the same cells:
+#   ks / tvd   how far apart the non-null values are distributed (numeric / categorical)
+#   psi        the same over 10 equal-frequency bins
+#   nullShift  the null rate of the input minus the baseline's — reported apart, because a field
+#              whose values did not move and whose null rate did has a KS near 0
+#   noiseKs / noisePsi  the sizes the statistics reach between two random samples of one
+#              distribution at these row counts
+#   sum, count exact, for reconciling the two inputs
+# `tripsCompare.groups` holds one record per input × field; the default output carries the
+# largest drift per field. `drift.exclude` keeps the fields that differ by construction (the
+# year the inputs were split on) out of that ranking.
 sources:
   - name: trips2021
     module: bigquery
@@ -32,23 +37,31 @@ sources:
         TABLESAMPLE SYSTEM (1 PERCENT)
         WHERE pickup_datetime >= '2022-01-01' AND pickup_datetime < '2023-01-01'
 
-sinks:
+transforms:
   - name: tripsCompare
     module: profile
     inputs: [trips2021, trips2022]
     parameters:
       output:
         report: gs://mybucket/reports/taxi/trips-2021-vs-2022.html
-        sketches: gs://mybucket/reports/taxi/trips-2021-vs-2022.sketches.json
+        payload: gs://mybucket/reports/taxi/trips-2021-vs-2022.json
+      run:
+        dataset: taxi_trips
+        partition: 2021-vs-2022
       mode: compare
       baseline: trips2021
+      drift:
+        exclude: [pickup_datetime, dropoff_datetime]
       keys: [pickup_location_id]
       compare:
         - [fare_amount, total_amount]
       report:
         title: NYC yellow taxi trips, 2021 vs 2022
-      # compareWith aligns the WHOLE profile of this run (the union of both inputs) with a
-      # report written earlier by this module, field by field, without re-scanning that data.
-      # It must exist before the run (checked at pipeline construction). To try it, run
-      # examples/bigquery-to-profile.yaml first and uncomment:
-      # compareWith: gs://mybucket/reports/taxi/trips-2022.html
+
+sinks:
+  - name: tripsCompareGroups
+    module: bigquery
+    inputs: [tripsCompare.groups]
+    parameters:
+      table: myproject.quality.profile_groups
+      writeDisposition: WRITE_APPEND

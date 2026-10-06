@@ -69,10 +69,10 @@ Four module kinds are auto-discovered by scanning their packages (Guava `ClassPa
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
 
 **Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
-`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature` `screen` `evaluation` `process`.
+`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature` `screen` `evaluation` `process` `profile`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`postgres` `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2` `profile`.
+`postgres` `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
 
 **Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai` `storage` `tasks` `http` `dataflow` `build`.
 The fourth module kind, declared in the `actions` config section (`ActionConfig`: `module` = service
@@ -247,7 +247,7 @@ self-contained (parameters, examples) — the agent reads one file per module.
   [feature-dsl.md](docs/design/feature-dsl.md), [feature-engine.md](docs/design/feature-engine.md),
   [screen-dsl.md](docs/design/screen-dsl.md) / [screen-engine.md](docs/design/screen-engine.md) (the `screen` transform),
   [evaluation-dsl.md](docs/design/evaluation-dsl.md) / [evaluation-engine.md](docs/design/evaluation-engine.md) (the `evaluation` transform),
-  [profile-dsl.md](docs/design/profile-dsl.md) / [profile-engine.md](docs/design/profile-engine.md) (proposal: the `profile` transform replacing the `profile` sink).
+  [profile-dsl.md](docs/design/profile-dsl.md) / [profile-engine.md](docs/design/profile-engine.md) (the `profile` transform — stage 1 implemented, in `util/pipeline/profile/`).
   New design documents go here, not in `docs/developer/`.
 - `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).

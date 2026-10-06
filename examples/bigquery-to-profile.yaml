@@ -1,17 +1,19 @@
-# Profile: observe a BigQuery dataset and write one self-contained HTML report.
-# Reads the public NYC yellow taxi trips (2022) — set `output` to your bucket and it runs.
+# Profile: observe a BigQuery dataset — one record per field appended to a table, and one
+# self-contained HTML report.
+# Reads the public NYC yellow taxi trips (2022) — set `output` and the sink table to yours and it runs.
 # TABLESAMPLE keeps the scan small; the half-open date filter drops the few stray rows the
 # table holds outside 2022 (they would otherwise add empty years to the time axis).
-# The sink profiles every column in one pass with DataSketches (quantiles/histograms,
-# distinct counts, top-K values, correlations, row samples). Each declared parameter adds
-# a report section:
-#   keys     → key diagnostics (distinct with bounds, keyness, containment between keys)
-#   target   → every field related to a binary outcome (fields ranked by information value,
-#              positive rate per bin/category, positive-vs-negative overlays). `tipped` is derived
-#              in the query; payment_type will show up as a leak (cash tips are not recorded).
-#   segments → per-group sub-profiles + a compare bar that overlays group distributions
-#   time     → time-evolution view (per-bucket sub-profiles)
-#   compare  → declared numeric pairs with overlaid distributions, Q-Q plot and PSI/KS
+# The transform profiles every column (null rate, distinct count, quantiles, moments, frequent
+# values, notable codes) and each declared parameter adds an output and a report section:
+#   keys     → `tripsProfile.keys`: distinct count with bounds, keyness, null keys
+#   target   → `tripsProfile.target`: every field related to a binary outcome (KS / TVD, information
+#              value, positive rate per bin in `tripsProfile.bins`). `tipped` is derived in the query;
+#              payment_type separates the classes almost completely (cash tips are not recorded) —
+#              the transform reports the number and leaves the reading to you.
+#   segments → `tripsProfile.groups`: each group against the rest (KS / TVD, PSI, null-rate shift)
+#   time     → the same per time bucket
+#   compare  → `tripsProfile.pairs`: declared numeric pairs (KS, PSI) with a Q-Q plot in the report
+# Statistics that compare groups come from exact counts of a second pass over fixed edges.
 sources:
   - name: trips
     module: bigquery
@@ -27,12 +29,15 @@ sources:
         TABLESAMPLE SYSTEM (1 PERCENT)
         WHERE pickup_datetime >= '2022-01-01' AND pickup_datetime < '2023-01-01'
 
-sinks:
+transforms:
   - name: tripsProfile
     module: profile
     inputs: [trips]
     parameters:
       output: gs://mybucket/reports/taxi/trips-2022.html
+      run:
+        dataset: taxi_trips
+        partition: "2022"
       keys: [pickup_location_id, dropoff_location_id]
       target: tipped
       segments:
@@ -44,3 +49,12 @@ sinks:
         - [fare_amount, total_amount]
       report:
         title: NYC yellow taxi trips 2022
+
+sinks:
+  # the default output: one record per field, appended — a history of the dataset across runs
+  - name: tripsProfileFields
+    module: bigquery
+    inputs: [tripsProfile]
+    parameters:
+      table: myproject.quality.profile_fields
+      writeDisposition: WRITE_APPEND

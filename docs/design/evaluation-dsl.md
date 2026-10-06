@@ -18,7 +18,7 @@ grouped data on Beam. The model itself is never read: the predictions may come f
 human or the system being replaced, and the computation is the same.
 
 It closes the learner-free trio: feature (generation) → screen (ranking before training) → evaluation
-(verification after training), the supervised counterpart of the `profile` sink's data-quality report. Its
+(verification after training), the supervised counterpart of the `profile` transform's data-quality report. Its
 motivation is one measurement: on a problem with a strong baseline (a market, an incumbent system), the
 model that wins on logloss / accuracy is the one that imitates the baseline, and only the excess log score
 tells whether it adds anything. The transform makes that discipline a configuration rule: selection happens

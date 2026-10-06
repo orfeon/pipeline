@@ -139,7 +139,6 @@ noscript th, noscript td { border: 1px solid var(--line); padding: 4px 8px; font
 
 <script type="application/json" id="profile-payload">__PROFILE_PAYLOAD__</script>
 <script type="application/json" id="profile-manifest">__PROFILE_MANIFEST__</script>
-<script type="application/json" id="profile-sketches">__PROFILE_SKETCHES__</script>
 
 <script>
 "use strict";
@@ -147,10 +146,15 @@ const P = JSON.parse(document.getElementById("profile-payload").textContent);
 const M = JSON.parse(document.getElementById("profile-manifest").textContent);
 const HAS_ECHARTS = typeof echarts !== "undefined";
 const HIDE = P.values === "hide";
+// severity order (the order of the overview list)
 const NOTABLE_LABELS = {
-  all_null: "all values are null", high_null: "high null rate", constant: "single constant value",
-  dominant_value: "one value dominates", unique_like: "distinct ≈ rows", skewed: "extreme skew"
+  all_null: "all values are null", null_like_only: "every value is a null sentinel ('null', blank, …)",
+  constant: "single constant value", high_null: "high null rate",
+  null_like_value: "a null sentinel ('null', blank, …) among the frequent values",
+  dominant_value: "one value dominates", skewed: "extreme skew", unique_like: "distinct ≈ rows"
 };
+const NOTABLE_ORDER = Object.keys(NOTABLE_LABELS);
+const fmtStat = v => v == null ? "-" : v.toFixed(4);
 const fmtInt = n => n == null ? "-" : Number(n).toLocaleString("en-US", {maximumFractionDigits: 0});
 const fmtNum = n => n == null || !isFinite(n) ? "-" : Math.abs(n) >= 1e6 || (Math.abs(n) < 1e-3 && n !== 0)
   ? Number(n).toExponential(3) : Number(n).toLocaleString("en-US", {maximumFractionDigits: 4});
@@ -326,61 +330,59 @@ function share(count, total) { return total > 0 ? 100 * count / total : 0; }
 const fmtDelta = d => d == null ? "-" : (d >= 0 ? "+" : "") + (100 * d).toFixed(1) + " pt";
 // the whole dataset as the fixed grey reference behind every overlay, so a group's deviation is visible at a glance
 const REF_COLOR = "#9ca3af";
-function refSeriesLine(data) {
-  return {name: "all", type: "line", step: "middle", showSymbol: false, silent: true, z: 1,
-    lineStyle: {color: REF_COLOR, width: 1, type: "dashed"}, itemStyle: {color: REF_COLOR}, data};
-}
 function refSeriesBar(data) {
   return {name: "all", type: "bar", silent: true, z: 1, itemStyle: {color: "#c6cdd8"}, data};
 }
-/** The global histogram re-binned onto the shared overlay edges (bin midpoints), as % of the field's non-null rows. */
-function globalOverlayShares(f) {
-  const edges = f.overlay.edges;
-  const h = f.numeric ? f.numeric.histogram : f.timestamp ? f.timestamp.histogram : null;
-  if (!h || edges.length < 2) return null;
-  const bins = new Array(edges.length - 1).fill(0);
-  for (let i = 0; i < h.counts.length; i++) {
-    const mid = (h.edges[i] + (h.edges[i + 1] != null ? h.edges[i + 1] : h.edges[i])) / 2;
-    let b = 0;
-    while (b + 2 < edges.length && mid >= edges[b + 1]) b++;
-    bins[b] += h.counts[i];
+/**
+ * Counts over unequal-width cells as a step density on the value axis: [edge, share per unit of value].
+ * A cell of zero width (a tie that collapsed two edges) is drawn with the width of the narrowest cell.
+ */
+function densitySeries(edges, counts) {
+  const total = counts.reduce((a, b) => a + b, 0);
+  if (!total) return [];
+  let minWidth = Infinity;
+  for (let i = 0; i + 1 < edges.length; i++) { const w = edges[i + 1] - edges[i]; if (w > 0 && w < minWidth) minWidth = w; }
+  if (!isFinite(minWidth)) minWidth = 1;
+  const data = [];
+  for (let i = 0; i < counts.length; i++) {
+    const w = Math.max(edges[i + 1] - edges[i], minWidth);
+    data.push([edges[i], counts[i] / total / w]);
   }
-  return bins.map(c => +share(c, f.count).toFixed(3));
+  data.push([edges[edges.length - 1], data.length ? data[data.length - 1][1] : 0]);
+  return data;
 }
 function overlayHistOption(f, sel) {
   const edges = f.overlay.edges;
   const isTime = !!f.timestamp;
-  const labels = [];
-  for (let i = 0; i + 1 < edges.length; i++) {
-    const mid = (edges[i] + edges[i + 1]) / 2;
-    labels.push(isTime ? new Date(mid).toISOString().slice(0, 10) : fmtNum(edges[i]) + " – " + fmtNum(edges[i + 1]));
-  }
+  const fmtX = v => isTime ? new Date(v).toISOString().slice(0, 10) : fmtNum(v);
   const series = [];
-  const ref = globalOverlayShares(f);
-  if (ref) series.push(refSeriesLine(ref));
+  if (f.overlay.all) {
+    series.push({name: "all", type: "line", step: "end", showSymbol: false, silent: true, z: 1,
+      lineStyle: {color: REF_COLOR, width: 1, type: "dashed"}, itemStyle: {color: REF_COLOR},
+      data: densitySeries(edges, f.overlay.all)});
+  }
   for (const [gi, g] of sel.groups) {
     const gf = g.fields[f.path];
     if (!gf || !gf.hist) continue;
-    series.push({name: String(g.value), type: "line", step: "middle", showSymbol: false,
+    series.push({name: String(g.value), type: "line", step: "end", showSymbol: false,
       lineStyle: {color: groupColor(gi), width: 1.5}, itemStyle: {color: groupColor(gi)},
-      data: gf.hist.map(c => +share(c, gf.count).toFixed(3))});
+      data: densitySeries(edges, gf.hist)});
   }
   return {
     grid: {left: 40, right: 8, top: 8, bottom: 20},
     tooltip: {trigger: "axis", confine: true,
-      formatter: ps => labels[ps[0].dataIndex] + ps.map(p0 => "<br>" + esc(p0.seriesName) + ": " + p0.value + "%").join("")},
-    xAxis: Object.assign({type: "category", data: labels.map((_, i) => i)}, AXIS, {axisLabel: {show: false}}),
-    yAxis: Object.assign({type: "value", axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+      formatter: ps => "from " + fmtX(ps[0].data[0]) + ps.map(p0 => "<br>" + esc(p0.seriesName) + ": density " + fmtNum(p0.data[1])).join("")},
+    xAxis: Object.assign({type: "value", min: edges[0], max: edges[edges.length - 1]}, AXIS,
+      {axisLabel: {fontSize: 10, formatter: fmtX}}),
+    yAxis: Object.assign({type: "value"}, AXIS, {axisLabel: {show: false}}),
     series: series
   };
 }
 function overlayTopKOption(f, sel) {
   const labels = f.overlay.labels;
   const series = [];
-  // the overlay labels are the first entries of the field's own top-K, in the same order
-  const topK = f.string && f.string.topK;
-  if (topK && topK.length >= labels.length) {
-    series.push(refSeriesBar(labels.map((_, i) => +share(topK[i].count, f.count).toFixed(3))));
+  if (f.overlay.all) {
+    series.push(refSeriesBar(f.overlay.all.map(c => +share(c, f.count).toFixed(3))));
   }
   for (const [gi, g] of sel.groups) {
     const gf = g.fields[f.path];
@@ -465,7 +467,7 @@ if (P.target) TABS.push(["target", "Target"]);
 if (AXES.some(a => a.kind === "segments")) TABS.push(["segments", "Segments"]);
 if (AXES.some(a => a.kind === "time")) TABS.push(["time", "Time"]);
 if (P.keys) TABS.push(["keys", "Keys"]);
-if (AXES.some(a => a.kind === "inputs") || P.compareWith) TABS.push(["compare", "Compare"]);
+if (AXES.some(a => a.kind === "inputs")) TABS.push(["compare", "Compare"]);
 TABS.push(["suggestions", "Next steps"], ["appendix", "Appendix"]);
 
 function currentHash() {
@@ -573,7 +575,12 @@ const QUICK_SELECT = 5;
 
   const notables = [];
   P.fields.forEach(f => (f.notable || []).forEach(n => notables.push([f.path, n])));
+  notables.sort((a, b) => NOTABLE_ORDER.indexOf(a[1]) - NOTABLE_ORDER.indexOf(b[1]));
   s.append(el('<h2 class="sec">Notable observations</h2>'));
+  const counted = NOTABLE_ORDER.filter(n => P.notableCounts && P.notableCounts[n] > 0);
+  if (counted.length) {
+    s.append(el('<p class="samples">' + counted.map(n => '<span class="badge warn">' + esc(n) + "</span> " + P.notableCounts[n]).join(" · ") + "</p>"));
+  }
   if (!notables.length) {
     s.append(el('<p class="samples">nothing notable — no high-null, constant, dominant or near-unique fields detected.</p>'));
   } else {
@@ -596,10 +603,14 @@ function statStrip(f) {
     + " <span title=\"95% bounds\">[" + fmtInt(f.distinct.lower) + ", " + fmtInt(f.distinct.upper) + "]</span>");
   if (f.numeric && f.numeric.mean != null) parts.push("mean " + fmtNum(f.numeric.mean));
   if (f.errorCount > 0) parts.push('<span class="badge warn">errors ' + fmtInt(f.errorCount) + "</span>");
-  if (f.drift) parts.push('<span class="badge' + (f.drift.psi > 0.2 ? " warn" : "") + '" title="PSI vs baseline">PSI '
-    + f.drift.psi.toFixed(3) + " vs " + esc(f.drift.vs) + "</span>");
-  if (f.target && f.target.iv != null) parts.push('<span class="badge' + (f.target.iv > 0.5 ? " warn" : "")
-    + '" title="information value vs target (' + esc(P.target.field) + ')">IV ' + f.target.iv.toFixed(3) + "</span>");
+  if (f.string && f.string.nullLikeCount > 0) parts.push('<span class="badge warn" title="rows whose value is a null sentinel (\'null\', blank, …); null rate if they were counted as null: '
+    + fmtPct(f.string.nullLikeRate) + '">null-like ' + fmtInt(f.string.nullLikeCount) + "</span>");
+  if (f.drift && f.drift.value != null) parts.push('<span class="badge" title="largest ' + (f.drift.kind === "ks" ? "KS" : "total variation distance")
+    + ' against the reference of the drift axis">' + (f.drift.kind === "ks" ? "KS " : "TVD ") + f.drift.value.toFixed(3) + " vs " + esc(f.drift.vs) + "</span>");
+  if (f.drift && f.drift.nullShift != null && Math.abs(f.drift.nullShift) >= 0.005) parts.push('<span class="badge" title="largest null-rate difference against the reference of the drift axis">null '
+    + fmtDelta(f.drift.nullShift) + "</span>");
+  if (f.target && f.target.association != null) parts.push('<span class="badge" title="separation of the two classes of '
+    + esc(P.target.field) + '">' + (f.target.kind === "ks" ? "KS " : "TVD ") + f.target.association.toFixed(3) + " vs target</span>");
   return parts.map(p => "<span>" + p + "</span>").join("");
 }
 function mainChart(f, container, tall) {
@@ -611,7 +622,7 @@ function mainChart(f, container, tall) {
     if (overlayFn) { lazyChart(container, overlayFn); return; }
   }
   if (f.numeric && f.numeric.histogram) lazyChart(container, () => histOption(f.numeric.histogram, false));
-  else if (f.string && f.string.topK && f.string.topK.length) lazyChart(container, () => topKOption(f.string.topK, f.count, P.topKShow));
+  else if (f.string && f.string.topK && f.string.topK.length && f.string.topKKind !== "candidates") lazyChart(container, () => topKOption(f.string.topK, f.count, P.topKShow));
   else if (f.bool) lazyChart(container, () => boolOption(f.bool));
   else if (f.timestamp && f.timestamp.histogram) lazyChart(container, () => timeHistOption(f.timestamp.histogram));
   else if (f.string && f.count > 0) container.innerHTML = highCardinalityNote(f);
@@ -646,9 +657,14 @@ function sortedFields() {
   const fields = P.fields.filter(fieldMatches);
   const desc = key => fields.sort((a, b) => key(b) - key(a));
   if (fieldState.sort === "null") desc(f => f.nullRate);
-  else if (fieldState.sort === "notable") desc(f => (f.notable || []).length);
-  else if (fieldState.sort === "iv") desc(f => f.target && f.target.iv != null ? f.target.iv : -1);
-  else if (fieldState.sort === "drift") desc(f => f.drift ? f.drift.psi : -1);
+  else if (fieldState.sort === "notable") desc(f => {
+    // the most severe code first, then the number of codes
+    const worst = (f.notable || []).reduce((m, n) => Math.min(m, NOTABLE_ORDER.indexOf(n)), NOTABLE_ORDER.length);
+    return (NOTABLE_ORDER.length - worst) * 100 + (f.notable || []).length;
+  });
+  else if (fieldState.sort === "iv") desc(f => f.target && f.target.association != null ? f.target.association : -1);
+  else if (fieldState.sort === "drift") desc(f => f.drift && f.drift.value != null ? f.drift.value : -1);
+  else if (fieldState.sort === "nullshift") desc(f => f.drift && f.drift.nullShift != null ? Math.abs(f.drift.nullShift) : -1);
   return fields;
 }
 function renderFieldList() {
@@ -677,8 +693,8 @@ function renderFieldList() {
   const toolbar = el('<div class="toolbar"><input type="search" placeholder="search fields…">'
     + '<select><option value="schema">schema order</option><option value="null">null rate</option>'
     + '<option value="notable">notable first</option>'
-    + (P.target ? '<option value="iv">association with ' + esc(P.target.field) + " (IV)</option>" : "")
-    + (P.fields.some(f => f.drift) ? '<option value="drift">drift vs baseline (PSI)</option>' : "")
+    + (P.target ? '<option value="iv">association with ' + esc(P.target.field) + "</option>" : "")
+    + (P.fields.some(f => f.drift) ? '<option value="drift">drift (KS / TVD)</option><option value="nullshift">null-rate shift</option>' : "")
     + '</select><div class="chipbar"></div></div>');
   const chipbar = toolbar.querySelector(".chipbar");
   const types = [...new Set(P.fields.map(f => f.type))];
@@ -767,21 +783,38 @@ function openDetail(path) {
     d.append(el('<table class="data"><thead><tr>' + Object.keys(q).map(k => "<th>" + k + "</th>").join("")
       + "</tr></thead><tbody><tr>" + Object.values(q).map(v => "<td>" + fmtNum(v) + "</td>").join("") + "</tr></tbody></table>"));
     d.append(el('<p class="samples">min ' + fmtNum(f.numeric.min) + " / max " + fmtNum(f.numeric.max)
+      + " / sum " + fmtNum(f.numeric.sum)
       + " / stddev " + fmtNum(f.numeric.stddev) + " / skewness " + fmtNum(f.numeric.skewness)
       + " / zero " + fmtInt(f.numeric.zeroCount) + " / NaN " + fmtInt(f.numeric.nanCount) + "</p>"));
+  }
+  if (f.numeric && f.numeric.values && f.numeric.values.length) {
+    // a discrete numeric field: the exact frequency of every value, which a histogram bar hides
+    d.append(el('<h2 class="sec">Values (exact counts, ' + fmtInt(f.numeric.valuesTotal) + " distinct"
+      + (f.numeric.valuesTotal > f.numeric.values.length ? ", most frequent " + f.numeric.values.length : "") + ")</h2>"));
+    const table = el('<table class="data"><thead><tr><th>value</th><th>count</th><th>share</th></tr></thead><tbody></tbody></table>');
+    const tbody = table.querySelector("tbody");
+    f.numeric.values.forEach(r => tbody.append(el("<tr><td>" + esc(String(r.value)) + "</td><td>" + fmtInt(r.count)
+      + "</td><td>" + fmtPct(f.count > 0 ? r.count / f.count : null) + "</td></tr>")));
+    d.append(makeSortable(table));
   }
   if (f.string) {
     if (f.string.length) {
       d.append(el('<p class="samples">length: min ' + fmtNum(f.string.length.min) + " / p50 " + fmtNum(f.string.length.p50)
         + " / p95 " + fmtNum(f.string.length.p95) + " / max " + fmtNum(f.string.length.max)
-        + " — empty " + fmtInt(f.emptyCount != null ? f.emptyCount : (f.string.emptyCount || 0)) + "</p>"));
+        + " — empty " + fmtInt(f.string.emptyCount || 0) + " / blank " + fmtInt(f.string.blankCount || 0)
+        + " / null-like " + fmtInt(f.string.nullLikeCount || 0)
+        + (f.string.nullLikeCount > 0 ? " (null rate if counted as null: " + fmtPct(f.string.nullLikeRate) + ")" : "") + "</p>"));
     }
     if (f.string.topK && f.string.topK.length && !HIDE) {
-      d.append(el('<h2 class="sec">Top values (estimated counts ±' + fmtInt(f.string.maximumError) + ")</h2>"));
+      const kind = f.string.topKKind;
+      d.append(el('<h2 class="sec">' + (kind === "exact" ? "Values (exact counts, " + fmtInt(f.string.valuesTotal) + " distinct)"
+        : kind === "candidates" ? "Most frequent candidates (no value is frequent enough to be certain of; counts within the bounds, ±" + fmtInt(f.string.maximumError) + ")"
+        : "Top values (estimated counts ±" + fmtInt(f.string.maximumError) + ")") + "</h2>"));
       const table = el('<table class="data"><thead><tr><th>#</th><th>value</th><th>count</th><th>bounds</th></tr></thead><tbody></tbody></table>');
       const tbody = table.querySelector("tbody");
       f.string.topK.forEach((r, i) => tbody.append(el("<tr><td>" + (i + 1) + "</td><td>" + esc(r.value == null ? "#" + (i + 1) : r.value)
-        + "</td><td>" + fmtInt(r.count) + "</td><td>[" + fmtInt(r.lower) + ", " + fmtInt(r.upper) + "]</td></tr>")));
+        + (r.nullLike ? ' <span class="badge warn">null-like</span>' : "")
+        + "</td><td>" + fmtInt(r.count) + "</td><td>" + (kind === "exact" ? "exact" : "[" + fmtInt(r.lower) + ", " + fmtInt(r.upper) + "]") + "</td></tr>")));
       d.append(table);
     }
   }
@@ -808,8 +841,9 @@ function openDetail(path) {
       s.append(card);
       continue;
     }
-    card.append(el('<div class="strip"><span title="population stability index between the two distributions (0 = identical; > 0.2 = significant difference)">PSI ' + pair.psi.toFixed(4)
-      + '</span><span title="largest gap between the two cumulative distributions, 0 … 1">KS ' + pair.ks.toFixed(4)
+    card.append(el('<div class="strip"><span title="largest gap between the two cumulative distributions, 0 … 1 (exact counts over the pooled cells)">KS ' + fmtStat(pair.ks)
+      + '</span><span title="population stability index over the pooled equal-frequency bins (0 = identical)">PSI ' + fmtStat(pair.psi)
+      + '</span><span title="the sizes KS / PSI reach between two random samples of one distribution at these row counts">noise KS ' + fmtStat(pair.noiseKs) + " / PSI " + fmtStat(pair.noisePsi)
       + '</span><span title="non-null rows of each field">n ' + fmtInt(pair.countA) + " / " + fmtInt(pair.countB) + "</span></div>"));
     const hist = el('<div class="chart"></div>');
     card.append(hist);
@@ -832,7 +866,7 @@ function openDetail(path) {
     });
     const qq = el('<div class="chart"></div>');
     card.append(qq);
-    lazyChart(qq, () => {
+    if (pair.qq) lazyChart(qq, () => {
       const lo = Math.min(pair.qq[0][0], pair.qq[0][1]);
       const last = pair.qq[pair.qq.length - 1];
       const hi = Math.max(last[0], last[1]);
@@ -863,18 +897,24 @@ function openDetail(path) {
   }
   s.append(el('<h2 class="sec">Numeric correlation (Pearson)</h2>'));
   const pairPanel = el('<div class="pair-panel" id="pairPanel"><p class="samples">click a cell to inspect the pair.</p></div>');
-  if (c.fields.length > 100) {
-    const pairs = [];
-    for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
-      const v = c.matrix[i][j];
-      if (v != null) pairs.push([Math.abs(v), i, j, v]);
+  const corrOf = (i, j) => c.matrix ? c.matrix[i][j] : (c.top.find(p => (p[0] === i && p[1] === j) || (p[0] === j && p[1] === i)) || [])[2];
+  const countOf = (i, j) => c.matrix ? c.counts[i][j] : (c.top.find(p => (p[0] === i && p[1] === j) || (p[0] === j && p[1] === i)) || [])[3];
+  if (!c.matrix || c.fields.length > 100) {
+    let pairs = [];
+    if (c.matrix) {
+      for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
+        const v = c.matrix[i][j];
+        if (v != null) pairs.push([Math.abs(v), i, j, v]);
+      }
+      pairs.sort((a, b) => b[0] - a[0]);
+    } else {
+      pairs = c.top.map(p => [Math.abs(p[2]), p[0], p[1], p[2]]);
     }
-    pairs.sort((a, b) => b[0] - a[0]);
     const table = el('<table class="data"><thead><tr><th>field A</th><th>field B</th><th title="Pearson correlation over rows where both fields are non-null: -1 … 1">corr</th><th title="rows with both fields non-null">n</th></tr></thead><tbody></tbody></table>');
     const tbody = table.querySelector("tbody");
     for (const [, i, j, v] of pairs.slice(0, 100)) {
       const tr = el('<tr class="clickable"><td>' + esc(c.fields[i]) + "</td><td>" + esc(c.fields[j]) + "</td><td>"
-        + v.toFixed(3) + "</td><td>" + fmtInt(c.counts[i][j]) + "</td></tr>");
+        + v.toFixed(3) + "</td><td>" + fmtInt(countOf(i, j)) + "</td></tr>");
       tr.onclick = () => showPair(i, j);
       tbody.append(tr);
     }
@@ -910,9 +950,13 @@ function openDetail(path) {
   s.append(pairPanel);
   // open the strongest pair right away instead of an empty panel
   let best = null;
-  for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
-    const v = c.matrix[i][j];
-    if (v != null && (best == null || Math.abs(v) > Math.abs(c.matrix[best[0]][best[1]]))) best = [i, j];
+  if (c.matrix) {
+    for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
+      const v = c.matrix[i][j];
+      if (v != null && (best == null || Math.abs(v) > Math.abs(c.matrix[best[0]][best[1]]))) best = [i, j];
+    }
+  } else if (c.top.length) {
+    best = [c.top[0][0], c.top[0][1]];
   }
   if (best) showPair(best[0], best[1]);
 
@@ -920,9 +964,9 @@ function openDetail(path) {
     const panel = document.getElementById("pairPanel");
     disposeCharts(panel);
     const a = c.fields[i], b = c.fields[j];
-    const v = c.matrix[i][j];
+    const v = corrOf(i, j);
     panel.append(el("<h2 class='sec'>" + esc(a) + " × " + esc(b) + "</h2>"));
-    panel.append(el('<p class="samples">corr ' + (v == null ? "-" : v.toFixed(4)) + " / n " + fmtInt(c.counts[i][j]) + "</p>"));
+    panel.append(el('<p class="samples">corr ' + (v == null ? "-" : v.toFixed(4)) + " / n " + fmtInt(countOf(i, j)) + "</p>"));
     if (P.sample && !HIDE) {
       const ia = P.sample.fields.indexOf(a), ib = P.sample.fields.indexOf(b);
       if (ia >= 0 && ib >= 0) {
@@ -942,6 +986,45 @@ function openDetail(path) {
     }
   }
 })();
+
+// ---- drift of group fields against their reference (the baseline input, or the rows outside the group) ----
+function driftRows(axis) {
+  const rows = [];
+  for (const g of axis.groups) {
+    if (axis.baseline != null && g.value === axis.baseline) continue;
+    for (const [path, gf] of Object.entries(g.fields)) {
+      if (path === axis.field) continue;   // the axis field differs from the rest by construction
+      const d = gf.ks != null ? gf.ks : gf.tvd;
+      if (d == null && gf.nullShift == null) continue;
+      rows.push({path, vs: g.value, kind: gf.ks != null ? "KS" : gf.tvd != null ? "TVD" : "", drift: d, psi: gf.psi,
+        nullShift: gf.nullShift, noiseKs: gf.noiseKs, noisePsi: gf.noisePsi});
+    }
+  }
+  return rows;
+}
+function driftTable(s, axis, ai, title, limit) {
+  const rows = driftRows(axis);
+  if (!rows.length) return;
+  rows.sort((a, b) => (b.drift != null ? b.drift : -1) - (a.drift != null ? a.drift : -1));
+  const shown = limit ? rows.slice(0, limit) : rows;
+  s.append(el('<h2 class="sec">' + esc(title) + (shown.length < rows.length ? " (top " + shown.length + " of " + rows.length + ")" : "") + "</h2>"));
+  const table = el('<table class="data"><thead><tr><th>field</th><th>group</th>'
+    + '<th title="KS (largest gap between the two cumulative distributions) for numeric fields, total variation distance for categories: 0 … 1, from exact counts">KS / TVD</th>'
+    + '<th title="the size KS reaches between two random samples of one distribution at these row counts — a value below it is not a difference when the two sides are samples">noise</th>'
+    + '<th title="population stability index over the bins (0 = identical)">PSI</th>'
+    + '<th title="the expected PSI between two random samples of one distribution at these row counts">noise</th>'
+    + '<th title="null rate of the group minus the null rate of its reference">null shift</th></tr></thead><tbody></tbody></table>');
+  const tbody = table.querySelector("tbody");
+  for (const r of shown) {
+    const tr = el('<tr class="clickable"><td>' + esc(r.path) + "</td><td>" + esc(String(r.vs)) + '</td><td data-sort="' + (r.drift != null ? r.drift : "") + '">'
+      + (r.drift != null ? r.kind + " " + r.drift.toFixed(4) : "-") + "</td><td>" + (r.kind === "KS" ? fmtStat(r.noiseKs) : "-")
+      + "</td><td>" + fmtStat(r.psi) + "</td><td>" + fmtStat(r.noisePsi)
+      + '</td><td data-sort="' + (r.nullShift != null ? Math.abs(r.nullShift) : "") + '">' + fmtDelta(r.nullShift) + "</td></tr>");
+    tr.onclick = () => { selectGroups(ai, [r.vs]); openDetail(r.path); };
+    tbody.append(tr);
+  }
+  s.append(makeSortable(table));
+}
 
 // ---- segments / time tabs ----
 (function renderAxisTabs() {
@@ -1006,6 +1089,7 @@ function openDetail(path) {
     s.append(makeSortable(table));
     s.append(el('<p class="samples">null rate: nulls over the profiled fields of the group (the axis field itself is left out) · vs all groups: difference to the '
       + (axis.truncatedGroups > 0 ? "kept " : "") + "groups combined" + (combinedRate == null ? "" : " (" + fmtPct(combinedRate) + ")") + ".</p>"));
+    driftTable(s, axis, ai, "Largest differences from the rest of the data", 50);
   });
 })();
 
@@ -1024,7 +1108,7 @@ function targetRateOption(f, baseRate) {
   const labels = targetBinLabels(f);
   const total = f.positive.map((p, i) => p + f.negative[i]);
   const all = total.reduce((a, b) => a + b, 0);
-  // a rate over a handful of rows is noise (and the sketch counts are estimates): leave those bins blank
+  // a rate over a handful of rows is noise: leave those bins blank
   const minRows = Math.max(5, Math.ceil(all / 1000));
   const rates = total.map((t, i) => t >= minRows ? +(100 * f.positive[i] / t).toFixed(2) : null);
   const shares = total.map(t => +share(t, all).toFixed(3));
@@ -1067,22 +1151,23 @@ function targetRateOption(f, baseRate) {
   s.append(grid);
   if (t.warning) s.append(el('<div class="banner">' + esc(t.warning) + "</div>"));
   s.append(el('<p class="samples">Select the target chips in the compare bar to overlay positive vs negative distributions on every field card. '
-    + "IV (information value) ranks how differently the two classes are distributed over a field: "
-    + "&lt; 0.02 none · 0.02–0.1 weak · 0.1–0.3 medium · 0.3–0.5 strong · &gt; 0.5 suspiciously strong (check for leakage). "
-    + "For numeric fields IV is computed over bins holding at least 5% of the rows (sparse tail bins merged) with smoothing, so it is stable against sketch error; "
-    + "the chart below still shows the fine bins. Estimates come from the per-class sketches and carry the same error bounds as the field statistics.</p>"));
+    + "Every statistic here is computed from exact counts of the two classes over the same bins. "
+    + "KS (numeric fields) and the total variation distance (categories) say how far apart the two classes are distributed over a field, 0 … 1. "
+    + "IV (information value) is reported next to them over " + (P.bins || 10) + " equal-frequency bins (or the declared edges), smoothed. "
+    + "A strong association is a number, not a verdict: whether it is expected depends on what the field is.</p>"));
 
-  const ranked = (t.fields || []).slice().sort((a, b) => (b.iv != null ? b.iv : -1) - (a.iv != null ? a.iv : -1));
+  const assoc = f => f.ks != null ? f.ks : f.tvd != null ? f.tvd : -1;
+  const ranked = (t.fields || []).slice().sort((a, b) => assoc(b) - assoc(a));
   s.append(el('<h2 class="sec">Fields ranked by association with ' + esc(t.field) + "</h2>"));
-  const table = el('<table class="data"><thead><tr><th>field</th><th>type</th><th>IV</th><th title="KS for binned values, total variation distance for categories">KS / TVD</th><th>point-biserial r</th>'
+  const table = el('<table class="data"><thead><tr><th>field</th><th>type</th><th title="KS for numeric fields, total variation distance for categories">KS / TVD</th><th title="information value over the bins, smoothed">IV</th><th>point-biserial r</th>'
     + "<th>positive rate when null</th><th>n</th></tr></thead><tbody></tbody></table>");
   const tbody = table.querySelector("tbody");
   const panel = el('<div class="pair-panel" id="targetPanel"><p class="samples">click a field to see its positive rate per bin / category.</p></div>');
   for (const f of ranked) {
-    const ivCell = f.iv == null ? "-" : (f.leak ? '<span class="badge warn" title="possible leakage">' + f.iv.toFixed(3) + "</span>" : f.iv.toFixed(3));
+    const ivCell = f.iv == null ? "-" : f.iv.toFixed(3);
     const nullCell = f.nulls ? fmtPct(f.nulls.rate) + ' <span class="n" style="color:var(--muted)">(' + fmtInt(f.nulls.rows) + " nulls)</span>" : "-";
-    const tr = el('<tr class="' + (f.positive ? "clickable" : "") + '"><td>' + esc(f.path) + "</td><td>" + esc(f.type) + "</td><td>" + ivCell
-      + "</td><td>" + (f.ks != null ? f.ks.toFixed(3) : f.tvd != null ? f.tvd.toFixed(3) : "-") + "</td><td>" + (f.pointBiserial != null ? f.pointBiserial.toFixed(3) : "-")
+    const tr = el('<tr class="' + (f.positive ? "clickable" : "") + '"><td>' + esc(f.path) + "</td><td>" + esc(f.type)
+      + "</td><td>" + (f.ks != null ? f.ks.toFixed(3) : f.tvd != null ? f.tvd.toFixed(3) : "-") + "</td><td>" + ivCell + "</td><td>" + (f.pointBiserial != null ? f.pointBiserial.toFixed(3) : "-")
       + "</td><td>" + nullCell + "</td><td>" + fmtInt(f.count) + "</td></tr>");
     if (f.positive) tr.onclick = () => showTargetField(f);
     tbody.append(tr);
@@ -1099,14 +1184,16 @@ function targetRateOption(f, baseRate) {
     const chart = el('<div class="chart tall"></div>');
     panel.append(chart);
     lazyChart(chart, () => targetRateOption(f, t.rate));
-    panel.append(el('<p class="samples">bars: share of rows per ' + (f.labels ? "category (global top values + other)" : "bin")
+    panel.append(el('<p class="samples">bars: share of rows per ' + (f.labels ? "category (the most frequent values + other)"
+      : f.edgesKind === "declared" ? "declared bin" : "equal-frequency bin")
       + " · line: positive rate within it (blank where a bin holds fewer than " + fmtInt(Math.max(5, Math.ceil((f.count || 0) / 1000)))
       + " rows) · dashed: overall positive rate.</p>"));
     const link = el('<p class="samples"><a href="javascript:void(0)">open field detail</a></p>');
     link.querySelector("a").onclick = () => openDetail(f.path);
     panel.append(link);
   }
-  if (ranked.length && ranked[0].positive) showTargetField(ranked[0]);
+  const firstShown = ranked.find(f => f.positive);
+  if (firstShown) showTargetField(firstShown);
 
   // target rate per comparison group (segments / time / inputs)
   const withRates = AXES.filter(a => a.kind !== "target" && a.groups.some(g => g.targetRate != null));
@@ -1135,57 +1222,15 @@ function targetRateOption(f, baseRate) {
   const s = document.getElementById("tab-keys");
   s.append(el('<h2 class="sec">Declared keys</h2>'));
   const table = el('<table class="data"><thead><tr><th>field</th><th title="Theta sketch estimate of the number of distinct values">distinct (Theta)</th><th>95% bounds</th>'
-    + '<th title="distinct / rows: 100% means every row has its own value (a unique key), lower means repeated values">keyness (distinct / rows)</th></tr></thead><tbody></tbody></table>');
+    + '<th title="distinct / rows with a key, capped at 100%: 100% means every keyed row has its own value, lower means repeated values">keyness (distinct / rows)</th>'
+    + '<th title="rows whose key is null">null keys</th></tr></thead><tbody></tbody></table>');
   const tbody = table.querySelector("tbody");
   for (const k of P.keys.fields) {
     tbody.append(el("<tr><td>" + esc(k.path) + "</td><td>" + fmtInt(k.distinct) + "</td><td>["
-      + fmtInt(k.distinctLower) + ", " + fmtInt(k.distinctUpper) + "]</td><td>" + fmtPct(k.keyness) + "</td></tr>"));
+      + fmtInt(k.distinctLower) + ", " + fmtInt(k.distinctUpper) + "]</td><td>" + fmtPct(k.keyness) + "</td><td>" + fmtInt(k.nullKeys) + "</td></tr>"));
   }
   s.append(makeSortable(table));
-  s.append(el('<p class="samples">keyness ≈ 100%: every row carries a distinct value (candidate unique key) · clearly below 100%: values repeat (a foreign key or a grouping attribute). Distinct counts are Theta-sketch estimates; the bounds are 95% confidence.</p>'));
-  if (P.keys.venn) renderVenn(s, P.keys.venn);
-  if (P.keys.fields.length > 1) {
-    s.append(el('<h2 class="sec">Containment (row = A, col = B: |A∩B| / |A|)</h2>'));
-    s.append(el('<p class="samples">share of A\'s distinct values that also occur in B: 100% means every A value exists in B (A ⊆ B, e.g. a foreign key fully covered by its reference), near 0% means the two key sets are disjoint.</p>'));
-    const m = el('<table class="data"><thead><tr><th></th>' + P.keys.fields.map(k => "<th>" + esc(k.path) + "</th>").join("")
-      + "</tr></thead><tbody></tbody></table>");
-    const tbody2 = m.querySelector("tbody");
-    // matrix = table of contents, cell click = pair detail (same grammar as the correlation heatmap)
-    P.keys.fields.forEach((k, i) => {
-      const tr = el("<tr><th>" + esc(k.path) + "</th></tr>");
-      P.keys.containment[i].forEach((v, j) => {
-        const td = el("<td>" + (v == null ? "-" : fmtPct(v)) + "</td>");
-        if (i !== j && v != null) { td.classList.add("clickable"); td.onclick = () => showKeyPair(i, j); }
-        tr.append(td);
-      });
-      tbody2.append(tr);
-    });
-    s.append(m);
-    const panel = el('<div class="pair-panel" id="keyPairPanel"></div>');
-    s.append(panel);
-    const first = P.keys.fields.findIndex((k, i) => P.keys.containment[i].some((v, j) => i !== j && v != null));
-    if (first >= 0) showKeyPair(first, P.keys.containment[first].findIndex((v, j) => first !== j && v != null));
-
-    function showKeyPair(i, j) {
-      disposeCharts(panel);
-      const a = P.keys.fields[i], b = P.keys.fields[j];
-      const inter = a.distinct != null && P.keys.containment[i][j] != null ? P.keys.containment[i][j] * a.distinct : null;
-      panel.append(el('<h2 class="sec">' + esc(a.path) + " × " + esc(b.path) + "</h2>"));
-      const parts = ["|" + esc(a.path) + "| ≈ " + fmtInt(a.distinct), "|" + esc(b.path) + "| ≈ " + fmtInt(b.distinct)];
-      if (inter != null) {
-        parts.push("|∩| ≈ " + fmtInt(inter));
-        parts.push(esc(a.path) + " ⊆ " + esc(b.path) + ": " + fmtPct(P.keys.containment[i][j]));
-        parts.push(esc(b.path) + " ⊆ " + esc(a.path) + ": " + fmtPct(P.keys.containment[j][i]));
-        const union = a.distinct + b.distinct - inter;
-        parts.push("Jaccard " + (union > 0 ? fmtPct(inter / union) : "-"));
-      }
-      panel.append(el('<p class="samples">' + parts.join(" · ") + "</p>"));
-      if (inter != null && a.distinct > 0 && b.distinct > 0) {
-        renderVenn(panel, {labels: [a.path, b.path], sizes: [a.distinct, b.distinct], pairs: [{a: 0, b: 1, size: inter}]},
-          "Overlap of " + a.path + " and " + b.path);
-      }
-    }
-  }
+  s.append(el('<p class="samples">keyness ≈ 100%: every row carries a distinct value (candidate unique key) · clearly below 100%: values repeat (a foreign key or a grouping attribute). Distinct counts are Theta-sketch estimates with 95% bounds: an estimate cannot tell a handful of duplicated rows from none.</p>'));
 })();
 
 // ---- compare tab (inputs comparison + past report) ----
@@ -1211,165 +1256,21 @@ function targetRateOption(f, baseRate) {
     });
     s.append(makeSortable(inputsTable));
 
-    // per-field drift vs baseline, worst first
-    const drifts = [];
-    for (const g of axis.groups) {
-      if (g.value === axis.baseline) continue;
-      for (const [path, gf] of Object.entries(g.fields)) {
-        if (gf.psi != null) drifts.push({path, vs: g.value, psi: gf.psi, ks: gf.ks});
-      }
-    }
-    drifts.sort((a, b) => b.psi - a.psi);
-    if (drifts.length) {
-      s.append(el('<h2 class="sec">Field drift vs baseline (PSI)</h2>'));
-      const table = el('<table class="data"><thead><tr><th>field</th><th>vs</th>'
-        + '<th title="population stability index between the input and the baseline distribution (0 = identical)">PSI</th>'
-        + '<th title="largest gap between the two cumulative distributions, 0 … 1 (binned values only)">KS</th></tr></thead><tbody></tbody></table>');
-      const tbody2 = table.querySelector("tbody");
-      for (const d of drifts) {
-        const tr = el('<tr class="clickable"><td>' + esc(d.path) + "</td><td>" + esc(d.vs) + "</td><td>"
-          + (d.psi > 0.2 ? '<span class="badge warn">' + d.psi.toFixed(4) + "</span>" : d.psi.toFixed(4))
-          + "</td><td>" + (d.ks != null ? d.ks.toFixed(4) : "-") + "</td></tr>");
-        tr.onclick = () => openDetail(d.path);
-        tbody2.append(tr);
-      }
-      s.append(makeSortable(table));
-      s.append(el('<p class="samples">PSI &lt; 0.1: stable · 0.1–0.2: moderate shift · &gt; 0.2: significant shift. Select input chips in the compare bar to see the distributions overlaid.</p>'));
-    }
-  }
-
-  const cw = P.compareWith;
-  if (cw) {
-    s.append(el('<h2 class="sec">vs past report</h2>'));
-    s.append(el('<p class="samples">' + esc(cw.source) + (cw.generatedAtOld ? " · generated " + esc(cw.generatedAtOld) : "")
-      + " · rows " + fmtInt(cw.rowsOld) + " → " + fmtInt(cw.rowsNew) + "</p>"));
-    (cw.warnings || []).forEach(w => s.append(el('<div class="banner">' + esc(w) + "</div>")));
-
-    const rows = (cw.fields || []).slice().sort((a, b) => (b.psi || 0) - (a.psi || 0));
-    const table = el('<table class="data"><thead><tr><th>field</th><th title="common: present in both reports · added / removed / type_changed: schema differences">status</th>'
-      + '<th title="population stability index between the past and the current distribution (0 = identical)">PSI</th>'
-      + '<th title="largest gap between the past and current cumulative distributions, 0 … 1">KS</th>'
-      + '<th title="median, past → current">p50</th><th title="past → current">null rate</th><th title="estimated distinct count, past → current">distinct</th></tr></thead><tbody></tbody></table>');
-    const tbody = table.querySelector("tbody");
-    const panel = el('<div class="pair-panel" id="cwPanel"></div>');
-    const showCdf = f => {
-      disposeCharts(panel);
-      panel.append(el('<h2 class="sec">' + esc(f.path) + " : CDF old vs new</h2>"));
-      const chart = el('<div class="chart tall"></div>');
-      panel.append(chart);
-      lazyChart(chart, () => ({
-        grid: {left: 45, right: 12, top: 24, bottom: 20},
-        legend: {top: 0, textStyle: {fontSize: 10}},
-        tooltip: {trigger: "axis", confine: true},
-        xAxis: Object.assign({type: "value", min: f.cdf.edges[0], max: f.cdf.edges[f.cdf.edges.length - 1]}, AXIS),
-        yAxis: Object.assign({type: "value", min: 0, max: 1}, AXIS),
-        series: [
-          {name: "old", type: "line", showSymbol: false, lineStyle: {color: REF_COLOR},
-            data: f.cdf.oldRanks.map((r, i) => [f.cdf.edges[i], r])},
-          {name: "new", type: "line", showSymbol: false, lineStyle: {color: PALETTE[0]},
-            data: f.cdf.newRanks.map((r, i) => [f.cdf.edges[i], r])}
-        ]
-      }));
-    };
-    for (const f of rows) {
-      const statusBadge = f.status === "common" ? "" :
-        ' <span class="badge warn">' + esc(f.status) + (f.typeOld ? " (was " + esc(f.typeOld) + ")" : "") + "</span>";
-      const tr = el("<tr" + (f.cdf ? ' class="clickable"' : "") + "><td>" + esc(f.path) + statusBadge + "</td><td>" + esc(f.type || "") + "</td><td>"
-        + (f.psi != null ? (f.psi > 0.2 ? '<span class="badge warn">' + f.psi.toFixed(4) + "</span>" : f.psi.toFixed(4)) : "-")
-        + "</td><td>" + (f.ks != null ? f.ks.toFixed(4) : "-")
-        + '</td><td data-sort="' + (f.p50New != null ? f.p50New : "") + '">' + (f.p50Old != null ? fmtNum(f.p50Old) + " → " + fmtNum(f.p50New) : "-")
-        + '</td><td data-sort="' + (f.nullRateNew != null ? f.nullRateNew : "") + '">' + (f.nullRateOld != null ? fmtPct(f.nullRateOld) + " → " + fmtPct(f.nullRateNew) : "-")
-        + '</td><td data-sort="' + (f.distinctNew != null ? f.distinctNew : "") + '">' + (f.distinctOld != null || f.distinctNew != null
-          ? fmtInt(f.distinctOld) + " → " + fmtInt(f.distinctNew) : "-") + "</td></tr>");
-      if (f.cdf) tr.onclick = () => showCdf(f);
-      tbody.append(tr);
-      if (f.keyOverlap) {
-        const ko = f.keyOverlap;
-        tbody.append(el('<tr data-sub="1"><td colspan="7" class="samples">key overlap (Theta): |old| ' + fmtInt(ko.distinctOld)
-          + " · |new| " + fmtInt(ko.distinctNew)
-          + (ko.intersection != null ? " · |old ∩ new| " + fmtInt(ko.intersection)
-            + " · retained " + fmtPct(ko.retainedShare) + " · new keys " + fmtPct(ko.newShare) : "") + "</td></tr>"));
-      }
-    }
-    s.append(makeSortable(table));
-    s.append(el('<p class="samples">PSI &lt; 0.1: stable · 0.1–0.2: moderate shift · &gt; 0.2: significant shift. Click a row with a stored CDF to overlay the past and current distributions.</p>'));
-    s.append(panel);
-    // the field that moved most is the one to look at first
-    const first = rows.find(f => f.cdf);
-    if (first) showCdf(first);
-  }
-
-  if (inputsAxisIndex < 0 && !cw) {
+    driftTable(s, axis, inputsAxisIndex, "Field drift vs baseline", 0);
+    s.append(el('<p class="samples">KS / TVD and PSI are computed from exact counts of each input over the same cells. '
+      + "The noise columns are the sizes the statistics reach between two random samples of one distribution at these row counts. "
+      + "A null shift is reported apart: a field whose values are unchanged and whose null rate moved has a KS near 0. "
+      + "Click a row to overlay the input on the field.</p>"));
+  } else {
     s.append(el('<p class="samples">no comparison configured.</p>'));
   }
 })();
-
-// ---- proportional venn (2-3 key sets, self-drawn SVG) ----
-function lensArea(r1, r2, d) {
-  if (d >= r1 + r2) return 0;
-  if (d <= Math.abs(r1 - r2)) { const r = Math.min(r1, r2); return Math.PI * r * r; }
-  const a1 = r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1));
-  const a2 = r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2));
-  const a3 = 0.5 * Math.sqrt(Math.max(0, (-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)));
-  return a1 + a2 - a3;
-}
-function vennDistance(r1, r2, targetArea) {
-  let lo = Math.abs(r1 - r2), hi = r1 + r2;
-  if (targetArea >= lensArea(r1, r2, lo)) return lo;
-  if (targetArea <= 0) return hi;
-  for (let i = 0; i < 48; i++) {
-    const mid = (lo + hi) / 2;
-    if (lensArea(r1, r2, mid) > targetArea) lo = mid; else hi = mid;
-  }
-  return (lo + hi) / 2;
-}
-function renderVenn(s, venn, title) {
-  s.append(el('<h2 class="sec">' + esc(title || "Key overlap (proportional venn, Theta estimates)") + "</h2>"));
-  const n = venn.sizes.length;
-  const radii = venn.sizes.map(v => Math.sqrt(Math.max(v, 1) / Math.PI));
-  const inter = {};
-  for (const p of venn.pairs) inter[p.a + "-" + p.b] = p.size;
-  const centers = [[0, 0]];
-  const d01 = vennDistance(radii[0], radii[1], inter["0-1"] || 0);
-  centers.push([d01, 0]);
-  if (n === 3) {
-    const d02 = vennDistance(radii[0], radii[2], inter["0-2"] || 0);
-    const d12 = vennDistance(radii[1], radii[2], inter["1-2"] || 0);
-    const x = d01 > 0 ? (d02 * d02 - d12 * d12 + d01 * d01) / (2 * d01) : 0;
-    const y = Math.sqrt(Math.max(0, d02 * d02 - x * x));
-    centers.push([x, y]);
-  }
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  centers.forEach(([x, y], i) => {
-    minX = Math.min(minX, x - radii[i]); maxX = Math.max(maxX, x + radii[i]);
-    minY = Math.min(minY, y - radii[i]); maxY = Math.max(maxY, y + radii[i]);
-  });
-  const W = 420, H = 280, pad = 12;
-  const scale = Math.min((W - 2 * pad) / (maxX - minX), (H - 2 * pad) / (maxY - minY));
-  const sx = x => pad + (x - minX) * scale + (W - 2 * pad - (maxX - minX) * scale) / 2;
-  const sy = y => pad + (y - minY) * scale + (H - 2 * pad - (maxY - minY) * scale) / 2;
-  let svg = '<svg viewBox="0 0 ' + W + " " + H + '" style="max-width:460px;width:100%">';
-  centers.forEach(([x, y], i) => {
-    svg += '<circle cx="' + sx(x).toFixed(1) + '" cy="' + sy(y).toFixed(1) + '" r="' + (radii[i] * scale).toFixed(1)
-      + '" fill="' + groupColor(i) + '" fill-opacity="0.40" stroke="' + groupColor(i) + '" stroke-width="1.5"/>';
-  });
-  centers.forEach(([x, y], i) => {
-    svg += '<text x="' + sx(x).toFixed(1) + '" y="' + (sy(y) - radii[i] * scale - 4).toFixed(1)
-      + '" text-anchor="middle" font-size="11" fill="currentColor">' + esc(venn.labels[i]) + " (" + fmtInt(venn.sizes[i]) + ")</text>";
-  });
-  svg += "</svg>";
-  s.append(el('<div>' + svg + "</div>"));
-  const captions = venn.pairs.map(p =>
-    esc(venn.labels[p.a]) + " ∩ " + esc(venn.labels[p.b]) + " ≈ " + fmtInt(p.size));
-  if (venn.triple != null) captions.push("all three ≈ " + fmtInt(venn.triple));
-  s.append(el('<p class="samples">' + captions.join(" · ") + "</p>"));
-}
 
 // ---- suggestions ----
 (function renderSuggestions() {
   const s = document.getElementById("tab-suggestions");
   s.append(el('<h2 class="sec">Analyses this report could add</h2>'));
-  s.append(el('<p class="samples">These were inferred from the data but not executed — declaring meaning is left to you. Add one line to the sink parameters and re-run.</p>'));
+  s.append(el('<p class="samples">These were inferred from the data but not executed — declaring meaning is left to you. Add one line to the transform parameters and re-run.</p>'));
   if (!P.suggestions || !P.suggestions.length) {
     s.append(el('<p class="samples">no suggestions for this dataset.</p>'));
     return;
@@ -1394,6 +1295,9 @@ function renderVenn(s, venn, title) {
     + "<tr><td>KLL k</td><td>" + sp.kllK + "</td><td>normalized rank error ≈ " + (sp.kllK >= 800 ? "0.6%" : sp.kllK >= 200 ? "1.3%" : "2.6%") + "</td></tr>"
     + "<tr><td>CPC lgK</td><td>" + sp.cpcLgK + "</td><td>distinct-count RSE ≈ " + (100 * 0.588 / Math.sqrt(2 ** sp.cpcLgK)).toFixed(2) + "%</td></tr>"
     + "<tr><td>Frequent Items map</td><td>" + sp.fiMaxMapSize + "</td><td>no false negatives above error bound</td></tr>"
+    + "<tr><td>exact value table</td><td>" + sp.valueTableLimit + "</td><td>fields with at most this many distinct values are counted exactly</td></tr>"
+    + "<tr><td>counting pass</td><td>" + (M.counting && M.counting.pass ? M.counting.cells + " cells / " + M.counting.bins + " bins" : "not run")
+    + "</td><td>group, class and pair statistics from exact counts over fixed edges</td></tr>"
     + "<tr><td>Theta lgK</td><td>" + sp.thetaLgK + "</td><td>set-operation estimates with 95% bounds</td></tr>"
     + "<tr><td>sample k (VarOpt)</td><td>" + sp.sampleK + "</td><td>weighted uniform row sample</td></tr>"
     + "</tbody></table>"));
@@ -1408,11 +1312,6 @@ function renderVenn(s, venn, title) {
   }
   s.append(el('<h2 class="sec">Manifest</h2>'));
   s.append(el("<pre>" + esc(JSON.stringify(M, null, 2)) + "</pre>"));
-  const sketchesText = document.getElementById("profile-sketches").textContent;
-  const hasSketches = sketchesText && sketchesText.trim() !== "{}";
-  s.append(el('<p class="samples">embedded sketch binaries: ' + (hasSketches
-    ? "yes (" + Math.round(sketchesText.length / 1024) + " KB base64; mergeable with future reports; CPC/Theta/frequent-items readable by BigQuery bqutil.datasketches)"
-    : "not embedded") + "</p>"));
 })();
 
 // ---- initial state from URL hash ----

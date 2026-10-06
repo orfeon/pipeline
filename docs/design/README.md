@@ -30,11 +30,11 @@ user-facing documentation lives in `src/main/resources/server/docs/` and is bund
 * [Feature Transform Engine](feature-engine.md) — how that DSL runs on Beam: the pure compile layer,
   stage scheduling, per-scope evaluators, static fits and artifacts, the spill sorter, the parallel wave
   DAG, runner findings, and the implementation status / deferred items.
-* [Profile Transform DSL](profile-dsl.md) — (proposal) the `profile` transform that replaces the `profile`
-  sink: record outputs per field / group / bin with run identity, exact bin counts behind every comparison
+* [Profile Transform DSL](profile-dsl.md) — the `profile` transform that replaced the `profile` sink
+  (stage 1 implemented): record outputs per field / group / bin with run identity, exact bin counts behind every comparison
   statistic, changes against a previous run, declared expectations, keys, the optional HTML report, the
   stages and what is out of scope.
-* [Profile Transform Engine](profile-engine.md) — (proposal) how that contract runs on Beam: the sketch
+* [Profile Transform Engine](profile-engine.md) — how that contract runs on Beam (stage 1 implemented): the sketch
   pass and the counting pass, keys, finalize and files, the measurement behind counting bins instead of
   querying sketches, tests, and what has to be measured or decided before acceptance.
 
