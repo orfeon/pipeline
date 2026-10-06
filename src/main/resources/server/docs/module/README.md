@@ -41,6 +41,7 @@ This page lists the modules registered in the current codebase.
 | [beamsql](transform/beamsql.md)         | Process and combine input data using SQL queries based on Apache Beam SQL (Calcite)                                     |
 | [feature](transform/feature.md)         | Generate ML features declaratively (row / context / sequence / population scopes) with built-in leakage checking        |
 | [evaluation](transform/evaluation.md)   | Verify predictions after training: excess log score over a baseline with bootstrap CIs, slices and calibration tables |
+| [profile](transform/profile.md)         | Observe a dataset: per-field statistics, group / time / input comparison from exact bin counts, values, bins, target association as records, plus an optional HTML report |
 | [process](transform/process.md)         | Process mining over an event log: directly-follows graph, variants, per-case records, handovers and Declare conformance |
 | [query](transform/query.md)             | Run a Calcite SQL query over each input element inside a DoFn (no shuffle), with lookup joins to external sources       |
 | [partition](transform/partition.md)     | Split input data into multiple named outputs based on filter conditions                                                 |

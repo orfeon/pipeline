@@ -4,8 +4,8 @@
 # paths up to depth 3 — each leaf gets its own card and can be declared as a key, segment
 # or comparison field (here `device.deviceCategory` and `geoNetwork.country` are segments);
 # a struct nested deeper is skipped and listed in the report appendix.
-# `values: hide` keeps raw values (top-K labels, sample rows, value-bearing sketches) out of
-# the report — the setting for reports shared more widely than the data itself.
+# `values: hide` keeps raw values (value labels, segment names, sample rows) out of the report
+# and of every record output — the setting for results shared more widely than the data itself.
 # Set `output` to your bucket and it runs.
 sources:
   - name: sessions
@@ -18,7 +18,7 @@ sources:
         FROM `bigquery-public-data.google_analytics_sample.ga_sessions_*`
         WHERE _TABLE_SUFFIX BETWEEN '20170701' AND '20170731'
 
-sinks:
+transforms:
   - name: sessionsProfile
     module: profile
     inputs: [sessions]

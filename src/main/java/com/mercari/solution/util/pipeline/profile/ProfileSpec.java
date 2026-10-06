@@ -83,6 +83,8 @@ public class ProfileSpec implements Serializable {
         public int thetaLgK;
         public int sampleK;
         public int topKKeep;
+        public int valueTableLimit;     // max distinct values of an exact value table (profile-dsl.md §5.4)
+        public int valueMaxLength;      // a longer string value drops the field's exact table
 
         public static SketchParameters of(final String accuracy) {
             final SketchParameters p = new SketchParameters();
@@ -91,21 +93,25 @@ public class ProfileSpec implements Serializable {
                     p.kllK = 100;
                     p.cpcLgK = 10;
                     p.thetaLgK = 10;
+                    p.fiMaxMapSize = 512;
                 }
                 case "high" -> {
                     p.kllK = 800;
                     p.cpcLgK = 14;
                     p.thetaLgK = 14;
+                    p.fiMaxMapSize = 4096;
                 }
                 default -> {
                     p.kllK = 200;
                     p.cpcLgK = 12;
                     p.thetaLgK = 12;
+                    p.fiMaxMapSize = 1024;
                 }
             }
-            p.fiMaxMapSize = 512;
             p.sampleK = 10_000;
             p.topKKeep = 50;
+            p.valueTableLimit = 1_000;
+            p.valueMaxLength = 256;
             return p;
         }
     }
@@ -113,15 +119,14 @@ public class ProfileSpec implements Serializable {
     /**
      * The declared binary target: a profiled field whose value equals {@link #positive} marks a
      * positive row, any other non-null value a negative row; null/error target rows are excluded
-     * from the target analysis. {@link #fieldStats} enables the per-field class sketches (the
-     * global profile); group sub-profiles only count the class totals.
+     * from the target analysis. The first pass counts the class totals; the per-field split by
+     * class is the counting pass's {@code target} axis (profile-engine.md §4).
      */
     public static class TargetSpec implements Serializable {
         public String path;
         public int fieldIndex;
         public ProfileType profileType;
         public Object positive;          // Boolean / Double / String, matching the profile type
-        public boolean fieldStats = true;
 
         /** Display form of the positive value ({@code 1} rather than {@code 1.0} for numbers). */
         public String positiveLabel() {
@@ -153,7 +158,6 @@ public class ProfileSpec implements Serializable {
             copy.fieldIndex = fieldIndex;
             copy.profileType = profileType;
             copy.positive = positive;
-            copy.fieldStats = fieldStats;
             return copy;
         }
     }
@@ -310,27 +314,6 @@ public class ProfileSpec implements Serializable {
         }
         return new ProfileSpec(
                 fields, skipped, SketchParameters.of(accuracy), sampleEnabled, correlationEnabled);
-    }
-
-    /**
-     * The spec for per-group sub-profiles: the same fields in the same order (so a
-     * {@link ProfileRow} extracted with this spec feeds both), without key sketches, row sample,
-     * correlations and per-field target sketches (the target class totals are still counted, for
-     * the per-group target rate).
-     */
-    public ProfileSpec groupSpec() {
-        final List<FieldSpec> groupFields = new ArrayList<>();
-        for(final FieldSpec field : fields) {
-            final FieldSpec copy = field.copy();
-            copy.isKey = false;
-            groupFields.add(copy);
-        }
-        final ProfileSpec group = new ProfileSpec(groupFields, skipped, sketchParameters, false, false);
-        if(target != null) {
-            group.target = target.copy();
-            group.target.fieldStats = false;
-        }
-        return group;
     }
 
     private static void collect(

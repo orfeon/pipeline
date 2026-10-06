@@ -15,7 +15,7 @@ misses?* — without training a model, so the answer costs one pass over the dat
 candidates.
 
 It sits between feature generation and the training job: feature (generation) → screen (ranking and cut-off)
-→ training. It is the supervised counterpart of the `profile` sink (unsupervised column statistics). In the
+→ training. It is the supervised counterpart of the `profile` transform (unsupervised column statistics). In the
 taxonomy of feature selection it is a *filter* method: learner-free, one bounded Combine per statistic, the
 pass count independent of the data. Wrapper methods (recursive elimination, forward selection), embedded
 importances (tree gain, L1 paths), SHAP / permutation importance and causal selection are out of scope: they

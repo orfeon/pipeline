@@ -1,245 +1,141 @@
 package com.mercari.solution.util.pipeline.profile;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.datasketches.cpc.CpcSketch;
-import org.apache.datasketches.frequencies.ErrorType;
-import org.apache.datasketches.frequencies.ItemsSketch;
 import org.apache.datasketches.kll.KllDoublesSketch;
 import org.apache.datasketches.quantilescommon.QuantileSearchCriteria;
 import org.apache.datasketches.sampling.VarOptItemsSamples;
 import org.apache.datasketches.sampling.VarOptItemsSketch;
-import org.apache.datasketches.theta.CompactSketch;
-import org.apache.datasketches.theta.Intersection;
-import org.apache.datasketches.theta.SetOperation;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Renders a {@link ProfileAccumulator} into the single-file HTML report.
- *
- * <p>The report embeds three versioned JSON blocks ({@code profile-payload} for the view,
- * {@code profile-manifest} for run metadata, {@code profile-sketches} for the base64 sketch
- * binaries) into the bundled template. When the embedded total exceeds the size limit the
- * renderer degrades in a fixed order (sketches → sample rows → histogram resolution) and
- * records what was dropped in the manifest.
+ * Renders a {@link ProfileReport.Result} into the report's payload and manifest JSON and the
+ * single-file HTML report (profile-dsl.md §10). Every statistic comes from the model; the renderer
+ * only adds what is drawn and not recorded — the whole-dataset histogram and CDF, the correlation
+ * matrix, the sample rows, the suggestions. When the payload exceeds the size limit it sheds, in a
+ * fixed order, sample rows → the correlation matrix (down to its strongest pairs) → histogram
+ * resolution → comparison groups → comparison resolution, and records each step.
  */
 public class ProfileRenderer {
 
-    public static final int PAYLOAD_FORMAT_VERSION = 1;
-
     private static final String TEMPLATE_RESOURCE = "/profile/report_template.html";
-    private static final Gson GSON = new Gson();
     private static final Pattern KEY_NAME = Pattern.compile(".*(_|^)(id|key|code|uuid)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern TARGET_NAME = Pattern.compile("^(is_.*|has_.*|.*_flag|flag|label|target)$", Pattern.CASE_INSENSITIVE);
 
-    private static final double[] QUANTILE_RANKS = { 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99 };
-    private static final String[] QUANTILE_NAMES = { "p1", "p5", "p25", "p50", "p75", "p95", "p99" };
+    private static final String[] PAYLOAD_QUANTILE_NAMES = { "p1", "p5", "p25", "p50", "p75", "p95", "p99" };
+    private static final int VALUES_IN_PAYLOAD = 50;
+    private static final int CORRELATION_TOP_PAIRS = 500;
 
-    public static class Config implements Serializable {
-        public String title;
-        public boolean showValues = true;
-        public String jobName;
-        public String moduleName;
-        public List<String> inputNames;
-        public String expandedParametersJson;   // JSON text (JsonObject is not Serializable)
-        public long embedLimitBytes = 25_000_000L;
-        public int histogramBins = 256;
-        public int timestampBins = 64;
-        public int overlayBins = 64;            // per-group histogram resolution (shared edges)
-        public int overlayTopK = 10;            // per-group string comparison labels
-        public int timeGroupLimit = 60;         // max time buckets kept in the report
-        public int topKShow = 20;
-        public int sampleRowsInPayload = 1_000;
-        public boolean embedSketches = true;
-        public String sketchesOutput;
-        public List<ProfileAxis> axes = List.of();
-        public List<String[]> comparePairs = List.of();   // declared numeric field pairs
-        public String compareWithSource;                  // uri of the past report (loaded at runtime)
-        public boolean comparisonDistributions = true;    // false: groups / classes keep totals only (size degradation)
-
-        /** Whether the payload carries per-group / per-class comparison data at all. */
-        boolean hasComparisons(final ProfileSpec spec) {
-            return !axes.isEmpty() || (spec.getTarget() != null && spec.getTarget().fieldStats);
-        }
-
-        /** A copy with a coarser comparison resolution, for the size-degradation steps. */
-        Config withComparisonResolution(final int bins, final int topK, final boolean distributions) {
-            final Config copy = new Config();
-            copy.title = title;
-            copy.showValues = showValues;
-            copy.jobName = jobName;
-            copy.moduleName = moduleName;
-            copy.inputNames = inputNames;
-            copy.expandedParametersJson = expandedParametersJson;
-            copy.embedLimitBytes = embedLimitBytes;
-            copy.histogramBins = histogramBins;
-            copy.timestampBins = timestampBins;
-            copy.overlayBins = bins;
-            copy.overlayTopK = topK;
-            copy.timeGroupLimit = timeGroupLimit;
-            copy.topKShow = topKShow;
-            copy.sampleRowsInPayload = sampleRowsInPayload;
-            copy.embedSketches = embedSketches;
-            copy.sketchesOutput = sketchesOutput;
-            copy.axes = axes;
-            copy.comparePairs = comparePairs;
-            copy.compareWithSource = compareWithSource;
-            copy.comparisonDistributions = distributions;
-            return copy;
+    private static final double[] QQ_RANKS;
+    static {
+        QQ_RANKS = new double[49];
+        for(int i = 0; i < QQ_RANKS.length; i++) {
+            QQ_RANKS[i] = 0.02 * (i + 1);
         }
     }
 
-    /** The embedded blocks of a past report loaded for {@code compareWith}. */
-    public static class PastReport implements Serializable {
-        public String source;
-        public String payloadJson;
-        public String manifestJson;
-        public String sketchesJson;
-
-        /** Extracts the three embedded JSON blocks out of a past report's HTML text. */
-        public static PastReport parse(final String source, final String html) {
-            final PastReport past = new PastReport();
-            past.source = source;
-            past.payloadJson = extractBlock(html, "profile-payload");
-            past.manifestJson = extractBlock(html, "profile-manifest");
-            past.sketchesJson = extractBlock(html, "profile-sketches");
-            if(past.payloadJson == null) {
-                throw new IllegalArgumentException("compareWith target has no profile-payload block: " + source);
-            }
-            return past;
-        }
-
-        private static String extractBlock(final String html, final String id) {
-            final String marker = "<script type=\"application/json\" id=\"" + id + "\">";
-            final int start = html.indexOf(marker);
-            if(start < 0) {
-                return null;
-            }
-            final int end = html.indexOf("</script>", start);
-            return end < 0 ? null : html.substring(start + marker.length(), end);
-        }
-    }
-
-    public static class Result {
+    public static class Rendered {
         public String html;
         public String payloadJson;
         public String manifestJson;
-        public String sketchesJson;   // null when not embedded
         public List<String> degradations = new ArrayList<>();
     }
 
-    public static Result render(final ProfileAccumulator accumulator, final Config config) {
-        return render(accumulator, java.util.Map.of(), null, config);
-    }
-
-    public static Result render(
-            final ProfileAccumulator accumulator,
-            final java.util.Map<String, ProfileAccumulator> subProfiles,
-            final Config config) {
-        return render(accumulator, subProfiles, null, config);
-    }
-
-    public static Result render(
-            final ProfileAccumulator accumulator,
-            final java.util.Map<String, ProfileAccumulator> subProfiles,
-            final PastReport past,
-            final Config config) {
-        return render(accumulator, subProfiles, past, config, null);
-    }
-
-    /**
-     * @param groupTotals total distinct groups per axis id (from the pipeline, when the groups were
-     *                    bounded before the shuffle); null derives the count from {@code subProfiles}
-     */
-    public static Result render(
-            final ProfileAccumulator accumulator,
-            final java.util.Map<String, ProfileAccumulator> subProfiles,
-            final PastReport past,
-            final Config config,
-            final java.util.Map<String, Long> groupTotals) {
-
-        final Result result = new Result();
-        int bins = config.histogramBins;
-        int sampleRows = config.sampleRowsInPayload;
+    /** How much of the drawn data one payload build carries: the steps of the size ladder. */
+    private static class Detail {
+        int sampleRows;
+        int histogramBins;
+        boolean correlationMatrix = true;
         int groupLimit = Integer.MAX_VALUE;
-        boolean embedSketches = config.embedSketches;
-        Config step = config;
+        boolean overlayCells = true;        // false: group distributions over the bins instead of the cells
+        boolean overlayDistributions = true;
+    }
 
-        String payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-        String sketches = embedSketches ? buildSketches(accumulator, config).toString() : null;
+    public static Rendered render(
+            final ProfileReport.Result result,
+            final ProfileAccumulator accumulator,
+            final ProfileReport.Config config) {
 
-        // degradation order (§6.2): sketches → sample rows → histogram resolution → top groups only
-        // → coarser comparison distributions → comparison totals only; every step is recorded
-        final boolean withComparisons = config.hasComparisons(accumulator.getSpec());
-        if(sketches != null && tooLarge(payload, sketches, config.embedLimitBytes)) {
-            sketches = null;
-            result.degradations.add("sketch binaries not embedded (size limit exceeded)");
+        final Rendered rendered = new Rendered();
+        final Detail detail = new Detail();
+        detail.sampleRows = config.sampleRowsInPayload;
+        detail.histogramBins = config.histogramBins;
+
+        final long limit = config.embedLimitBytes;
+        String payload = buildPayload(result, accumulator, config, detail).toString();
+        if(payload.length() > limit && detail.sampleRows > 100) {
+            detail.sampleRows = 100;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("sample rows in the report reduced to 100 (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && sampleRows > 100) {
-            sampleRows = 100;
-            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-            result.degradations.add("sample rows in payload reduced to 100 (size limit exceeded)");
+        if(payload.length() > limit && accumulator.getSpec().isCorrelationEnabled()) {
+            detail.correlationMatrix = false;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("correlation matrix reduced to its " + CORRELATION_TOP_PAIRS + " strongest pairs (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && bins > 64) {
-            bins = 64;
-            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-            result.degradations.add("histogram resolution reduced to 64 bins (size limit exceeded)");
+        if(payload.length() > limit && detail.histogramBins > 64) {
+            detail.histogramBins = 64;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("histogram resolution reduced to 64 bins (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons && !config.axes.isEmpty()) {
-            groupLimit = 5;
-            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-            result.degradations.add("comparison groups limited to the top 5 per axis (size limit exceeded)");
+        final boolean withComparisons = !result.axes.isEmpty() || (result.target != null && result.target.positiveGroup != null);
+        if(payload.length() > limit && !result.axes.isEmpty()) {
+            detail.groupLimit = 5;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("comparison groups in the report limited to 5 per axis (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons
-                && (config.overlayBins > 16 || config.overlayTopK > 5)) {
-            step = config.withComparisonResolution(Math.min(16, config.overlayBins), Math.min(5, config.overlayTopK), true);
-            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-            result.degradations.add("comparison resolution reduced to " + step.overlayBins + " bins / top " + step.overlayTopK
-                    + " labels per group (size limit exceeded)");
+        if(payload.length() > limit && withComparisons) {
+            detail.overlayCells = false;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("comparison distributions in the report reduced to the bins (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons) {
-            step = step.withComparisonResolution(step.overlayBins, step.overlayTopK, false);
-            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
-            result.degradations.add("comparison distributions dropped, group totals and target statistics kept (size limit exceeded)");
+        if(payload.length() > limit && withComparisons) {
+            detail.overlayDistributions = false;
+            payload = buildPayload(result, accumulator, config, detail).toString();
+            rendered.degradations.add("comparison distributions dropped from the report, statistics kept (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes)) {
-            result.degradations.add("embedded payload still exceeds the size limit by "
-                    + (payload.length() - config.embedLimitBytes) + " bytes after every reduction");
+        if(payload.length() > limit) {
+            rendered.degradations.add("report payload still exceeds the size limit by "
+                    + (payload.length() - limit) + " bytes after every reduction");
         }
 
-        final String manifest = buildManifest(accumulator, config, result.degradations).toString();
-
-        final String template = loadTemplate();
-        result.html = template
+        final String manifest = buildManifest(result, accumulator, config, rendered.degradations).toString();
+        rendered.html = loadTemplate()
                 .replace("__PROFILE_TITLE__", escapeHtml(config.title))
-                .replace("__PROFILE_STATIC__", buildStaticTable(accumulator))
+                .replace("__PROFILE_STATIC__", buildStaticTable(result))
                 .replace("__PROFILE_PAYLOAD__", embedJson(payload))
-                .replace("__PROFILE_MANIFEST__", embedJson(manifest))
-                .replace("__PROFILE_SKETCHES__", sketches == null ? "{}" : embedJson(sketches));
-        result.payloadJson = payload;
-        result.manifestJson = manifest;
-        result.sketchesJson = sketches;
-        return result;
+                .replace("__PROFILE_MANIFEST__", embedJson(manifest));
+        rendered.payloadJson = payload;
+        rendered.manifestJson = manifest;
+        return rendered;
+    }
+
+    /** The payload and the manifest as one JSON document ({@code output.payload}, profile-dsl.md §10.2). */
+    public static String payloadFile(final Rendered rendered) {
+        final JsonObject file = new JsonObject();
+        file.addProperty("formatVersion", ProfileReport.FORMAT_VERSION);
+        file.add("payload", JsonParser.parseString(rendered.payloadJson));
+        file.add("manifest", JsonParser.parseString(rendered.manifestJson));
+        return file.toString();
     }
 
     /**
      * Makes JSON text safe to splice into a {@code <script type="application/json">} block: a data
      * value containing {@code </script>} (or {@code <!--}) would otherwise terminate the block early
      * and hand the rest of the value to the HTML parser. {@code <} only ever occurs inside JSON
-     * strings, and {@code <} is the same string to JSON.parse, so the payload is unchanged.
+     * strings, and the escaped form is the same string to JSON.parse, so the payload is unchanged.
      */
     static String embedJson(final String json) {
         return json.replace("<", "\\u003c");
@@ -268,35 +164,10 @@ public class ProfileRenderer {
         return n == edges.length ? edges : java.util.Arrays.copyOf(edges, n);
     }
 
-    /** The interior points of {@code edges}: the split points for PMF/CDF queries over those bins. */
-    static double[] interiorPoints(final double[] edges) {
+    private static double[] interiorPoints(final double[] edges) {
         final double[] points = new double[Math.max(0, edges.length - 2)];
         System.arraycopy(edges, 1, points, 0, points.length);
         return points;
-    }
-
-    /** Bin shares of {@code kll} over {@code edges} (edges.length - 1 values); a single bin needs no query. */
-    static double[] pmfOverEdges(final KllDoublesSketch kll, final double[] edges) {
-        if(edges.length < 3) {
-            return new double[] { 1d };
-        }
-        return kll.getPMF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE);
-    }
-
-    /** Cumulative ranks of {@code kll} at each interior edge plus 1.0 at the last (edges.length - 1 values). */
-    static double[] cdfOverEdges(final KllDoublesSketch kll, final double[] edges) {
-        if(edges.length < 3) {
-            return new double[] { 1d };
-        }
-        return kll.getCDF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE);
-    }
-
-    private static boolean tooLarge(final String payload, final String sketches, final long limit) {
-        long size = payload.length();
-        if(sketches != null) {
-            size += sketches.length();
-        }
-        return size > limit;
     }
 
     private static String loadTemplate() {
@@ -313,61 +184,48 @@ public class ProfileRenderer {
     // ---- payload ----
 
     private static JsonObject buildPayload(
+            final ProfileReport.Result result,
             final ProfileAccumulator accumulator,
-            final java.util.Map<String, ProfileAccumulator> subProfiles,
-            final PastReport past,
-            final Config config,
-            final int bins,
-            final int sampleRows,
-            final int groupLimit,
-            final java.util.Map<String, Long> groupTotals) {
+            final ProfileReport.Config config,
+            final Detail detail) {
 
         final ProfileSpec spec = accumulator.getSpec();
-        final ProfileSpec.SketchParameters params = spec.getSketchParameters();
-
         final JsonObject payload = new JsonObject();
-        payload.addProperty("formatVersion", PAYLOAD_FORMAT_VERSION);
+        payload.addProperty("formatVersion", ProfileReport.FORMAT_VERSION);
         payload.addProperty("title", config.title);
         payload.addProperty("values", config.showValues ? "show" : "hide");
-        payload.addProperty("rows", accumulator.getRowCount());
-        payload.addProperty("errorRows", accumulator.getErrorCount());
+        payload.addProperty("rows", result.rows);
+        payload.addProperty("errorRows", result.errorRows);
         payload.addProperty("topKShow", config.topKShow);
+        payload.addProperty("bins", config.binsCount);
 
-        final boolean withTarget = spec.getTarget() != null && spec.getTarget().fieldStats;
-        final boolean withOverlay = config.hasComparisons(spec);
+        final JsonObject notableCounts = new JsonObject();
+        for(final Map.Entry<String, Long> entry : result.notableCounts().entrySet()) {
+            notableCounts.addProperty(entry.getKey(), entry.getValue());
+        }
+        payload.add("notableCounts", notableCounts);
+
         final JsonArray fields = new JsonArray();
-        for(int i = 0; i < accumulator.getFieldCount(); i++) {
-            final JsonObject field = buildField(spec.getFields().get(i), accumulator.getField(i), accumulator, params, config, bins);
-            if(withOverlay && config.comparisonDistributions) {
-                final JsonObject overlay = buildOverlayMeta(spec.getFields().get(i), accumulator.getField(i), config);
-                if(overlay != null) {
-                    field.add("overlay", overlay);
-                }
-            }
-            fields.add(field);
+        for(final ProfileReport.FieldResult field : result.fields) {
+            fields.add(buildField(field, accumulator.getField(field.index), config, detail));
         }
         payload.add("fields", fields);
 
-        // the target's per-class distributions are computed once, as a comparison axis; the target
-        // block derives its per-bin rates and separation statistics from those entries
-        final JsonObject targetAxis = withTarget ? buildTargetAxis(accumulator, spec, config) : null;
-        if(withTarget) {
-            payload.add("target", buildTarget(accumulator, spec, config, fields, targetAxis));
+        if(result.target != null) {
+            payload.add("target", buildTarget(result, config, detail));
         }
-        if(withOverlay) {
-            final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals, targetAxis);
-            annotateBaselineDrift(comparisons, fields, config);
-            if(!config.comparisonDistributions) {
-                // size degradation: the drift metrics above were computed from the full entries, now shed the arrays
-                stripDistributions(comparisons);
-            }
+        final JsonArray comparisons = new JsonArray();
+        for(final ProfileReport.AxisResult axis : result.axes) {
+            comparisons.add(buildAxis(axis, result, config, detail));
+        }
+        if(result.target != null && result.target.positiveGroup != null) {
+            comparisons.add(buildTargetAxis(result, config, detail));
+        }
+        if(!comparisons.isEmpty()) {
             payload.add("comparisons", comparisons);
         }
-        if(!config.comparePairs.isEmpty()) {
-            payload.add("fieldPairs", buildFieldPairs(accumulator, spec, config));
-        }
-        if(past != null) {
-            payload.add("compareWith", buildCompareWith(accumulator, past, spec, config));
+        if(!result.pairs.isEmpty()) {
+            payload.add("fieldPairs", buildPairs(result, accumulator));
         }
 
         final JsonArray skipped = new JsonArray();
@@ -381,13 +239,26 @@ public class ProfileRenderer {
         payload.add("skippedFields", skipped);
 
         if(spec.isCorrelationEnabled()) {
-            payload.add("correlations", buildCorrelations(accumulator, spec));
+            payload.add("correlations", buildCorrelations(accumulator, spec, detail.correlationMatrix));
         }
-        if(!spec.getKeyFieldIndices().isEmpty()) {
-            payload.add("keys", buildKeys(accumulator, spec, params));
+        if(!result.keys.isEmpty()) {
+            final JsonObject keys = new JsonObject();
+            final JsonArray keyFields = new JsonArray();
+            for(final ProfileReport.KeyResult key : result.keys) {
+                final JsonObject o = new JsonObject();
+                o.addProperty("path", key.key);
+                o.addProperty("distinct", key.distinct);
+                o.addProperty("distinctLower", key.distinctLower);
+                o.addProperty("distinctUpper", key.distinctUpper);
+                o.addProperty("keyness", key.keyness);
+                o.addProperty("nullKeys", key.nullKeys);
+                keyFields.add(o);
+            }
+            keys.add("fields", keyFields);
+            payload.add("keys", keys);
         }
         if(config.showValues && spec.isSampleEnabled()) {
-            final JsonObject sample = buildSample(accumulator, spec, sampleRows);
+            final JsonObject sample = buildSample(accumulator, spec, detail.sampleRows);
             if(sample != null) {
                 payload.add("sample", sample);
             }
@@ -397,85 +268,99 @@ public class ProfileRenderer {
     }
 
     private static JsonObject buildField(
-            final ProfileSpec.FieldSpec fieldSpec,
+            final ProfileReport.FieldResult r,
             final ProfileAccumulator.FieldAccumulator field,
-            final ProfileAccumulator accumulator,
-            final ProfileSpec.SketchParameters params,
-            final Config config,
-            final int bins) {
+            final ProfileReport.Config config,
+            final Detail detail) {
 
         final JsonObject o = new JsonObject();
-        o.addProperty("path", fieldSpec.path);
-        o.addProperty("type", fieldSpec.profileType.name().toLowerCase());
-        o.addProperty("sourceType", fieldSpec.sourceType);
-        o.addProperty("isKey", fieldSpec.isKey);
-        o.addProperty("count", field.count);
-        o.addProperty("nullCount", field.nullCount);
-        o.addProperty("errorCount", field.errorCount);
-        final long total = field.count + field.nullCount + field.errorCount + field.nanCount + field.infCount;
-        final double nullRate = total == 0 ? 0d : (double) field.nullCount / total;
-        o.addProperty("nullRate", nullRate);
-
-        Double distinctEstimate = null;
-        final CpcSketch cpc = field.cpcResult(params);
-        if(cpc != null && field.count > 0) {
+        o.addProperty("path", r.path);
+        o.addProperty("type", r.type);
+        o.addProperty("sourceType", r.sourceType);
+        o.addProperty("isKey", r.isKey);
+        o.addProperty("count", r.count);
+        o.addProperty("nullCount", r.nulls);
+        o.addProperty("errorCount", r.errors);
+        o.addProperty("nullRate", r.nullRate);
+        if(r.distinct != null) {
             final JsonObject distinct = new JsonObject();
-            distinctEstimate = cpc.getEstimate();
-            distinct.addProperty("estimate", distinctEstimate);
-            distinct.addProperty("lower", cpc.getLowerBound(2));
-            distinct.addProperty("upper", cpc.getUpperBound(2));
+            distinct.addProperty("estimate", r.distinct);
+            distinct.addProperty("lower", r.distinctLower);
+            distinct.addProperty("upper", r.distinctUpper);
+            distinct.addProperty("exact", r.distinctExact);
             o.add("distinct", distinct);
         }
 
-        Double top1Ratio = null;
-        switch (fieldSpec.profileType) {
-            case NUMERIC, ARRAY_LENGTH -> o.add("numeric", buildNumeric(field, bins));
-            case STRING -> {
+        switch (r.type) {
+            case "numeric", "array" -> {
+                final JsonObject numeric = new JsonObject();
+                numeric.addProperty("zeroCount", r.zeros);
+                numeric.addProperty("nanCount", r.nans);
+                numeric.addProperty("infCount", r.infs);
+                if(r.count > 0) {
+                    numeric.addProperty("min", r.min);
+                    numeric.addProperty("max", r.max);
+                    numeric.addProperty("sum", r.sum);
+                    numeric.addProperty("mean", r.mean);
+                    numeric.addProperty("stddev", r.stddev);
+                    numeric.addProperty("skewness", r.skewness);
+                    if(r.quantiles != null) {
+                        final JsonObject quantiles = new JsonObject();
+                        for(int q = 0; q < PAYLOAD_QUANTILE_NAMES.length; q++) {
+                            quantiles.addProperty(PAYLOAD_QUANTILE_NAMES[q], r.quantiles[q]);
+                        }
+                        numeric.add("quantiles", quantiles);
+                        numeric.addProperty("rankError", r.rankError);
+                    }
+                    final KllDoublesSketch kll = field.getKll();
+                    if(kll != null && !kll.isEmpty()) {
+                        numeric.add("histogram", buildHistogram(kll, field.min, field.max, detail.histogramBins, field.count));
+                        numeric.add("cdf", buildCdf(kll, field.min, field.max, detail.histogramBins));
+                    }
+                    if("exact".equals(r.valuesKind) && config.showValues) {
+                        // a discrete numeric field: its values are readable as a table, not as histogram bars
+                        // (left out with values: hide, as the values output writes them as ranks)
+                        numeric.add("values", valuesJson(r, true, VALUES_IN_PAYLOAD));
+                        numeric.addProperty("valuesTotal", r.values.size());
+                    }
+                }
+                o.add("numeric", numeric);
+            }
+            case "string" -> {
                 final JsonObject string = new JsonObject();
-                string.addProperty("emptyCount", field.emptyCount);
-                final KllDoublesSketch lengthKll = field.getKll();
-                if(lengthKll != null && !lengthKll.isEmpty()) {
+                string.addProperty("emptyCount", r.empties);
+                string.addProperty("blankCount", r.blanks);
+                string.addProperty("nullLikeCount", r.nullLike);
+                string.addProperty("nullLikeRate", r.nullLikeRate);
+                if(r.lengthMin != null) {
                     final JsonObject length = new JsonObject();
-                    length.addProperty("min", lengthKll.getMinItem());
-                    length.addProperty("max", lengthKll.getMaxItem());
-                    length.addProperty("p50", lengthKll.getQuantile(0.5, QuantileSearchCriteria.INCLUSIVE));
-                    length.addProperty("p95", lengthKll.getQuantile(0.95, QuantileSearchCriteria.INCLUSIVE));
+                    length.addProperty("min", r.lengthMin);
+                    length.addProperty("max", r.lengthMax);
+                    length.addProperty("p50", r.lengthP50);
+                    length.addProperty("p95", r.lengthP95);
                     string.add("length", length);
                 }
-                final ItemsSketch<String> fi = field.getFrequentItems();
-                if(fi != null && field.count > 0) {
-                    final ItemsSketch.Row<String>[] rows = fi.getFrequentItems(ErrorType.NO_FALSE_POSITIVES);
-                    final JsonArray topK = new JsonArray();
-                    for(int r = 0; r < rows.length && r < params.topKKeep; r++) {
-                        final JsonObject item = new JsonObject();
-                        if(config.showValues) {
-                            final String value = rows[r].getItem();
-                            item.addProperty("value", value.length() > 256 ? value.substring(0, 256) : value);
-                        }
-                        item.addProperty("count", rows[r].getEstimate());
-                        item.addProperty("lower", rows[r].getLowerBound());
-                        item.addProperty("upper", rows[r].getUpperBound());
-                        topK.add(item);
-                        if(r == 0) {
-                            top1Ratio = (double) rows[r].getEstimate() / field.count;
-                        }
+                if(r.count > 0) {
+                    string.add("topK", valuesJson(r, config.showValues, VALUES_IN_PAYLOAD));
+                    string.addProperty("topKKind", r.valuesKind);
+                    string.addProperty("valuesTotal", r.values.size());
+                    if(r.valuesMaximumError != null) {
+                        string.addProperty("maximumError", r.valuesMaximumError);
                     }
-                    string.add("topK", topK);
-                    string.addProperty("maximumError", fi.getMaximumError());
                 }
                 o.add("string", string);
             }
-            case BOOL -> {
+            case "bool" -> {
                 final JsonObject bool = new JsonObject();
-                bool.addProperty("trueCount", field.trueCount);
-                bool.addProperty("falseCount", field.falseCount);
+                bool.addProperty("trueCount", r.trues);
+                bool.addProperty("falseCount", r.falses);
                 o.add("bool", bool);
             }
-            case TIMESTAMP -> {
+            default -> {
                 final JsonObject ts = new JsonObject();
-                if(field.count > 0) {
-                    ts.addProperty("min", Instant.ofEpochMilli((long) field.min).toString());
-                    ts.addProperty("max", Instant.ofEpochMilli((long) field.max).toString());
+                if(r.count > 0) {
+                    ts.addProperty("min", Instant.ofEpochMilli(r.min.longValue()).toString());
+                    ts.addProperty("max", Instant.ofEpochMilli(r.max.longValue()).toString());
                     final KllDoublesSketch kll = field.getKll();
                     if(kll != null && !kll.isEmpty()) {
                         ts.add("histogram", buildHistogram(kll, field.min, field.max, config.timestampBins, field.count));
@@ -485,41 +370,77 @@ public class ProfileRenderer {
             }
         }
 
-        o.add("notable", buildNotable(fieldSpec, field, accumulator, distinctEstimate, top1Ratio, nullRate));
+        final JsonArray notable = new JsonArray();
+        r.notable.forEach(notable::add);
+        o.add("notable", notable);
+
+        if(r.cells != null && detail.overlayDistributions) {
+            final JsonObject overlay = new JsonObject();
+            if(r.numericLike()) {
+                overlay.add("edges", toJsonArray(detail.overlayCells ? r.cellEdges : finiteBinEdges(r)));
+                overlay.add("all", toJsonArray(detail.overlayCells ? r.cells : r.bins));
+            } else if("string".equals(r.type)) {
+                // the "(other)" cell is kept out of the overlay: it would dwarf the named values
+                final JsonArray labels = new JsonArray();
+                final JsonArray counts = new JsonArray();
+                for(int c = 0; c < r.cellLabels.length - 1; c++) {
+                    labels.add(ProfileReport.binLabel(r, c, config.showValues));
+                    counts.add(r.cells[c]);
+                }
+                overlay.add("labels", labels);
+                overlay.add("all", counts);
+            }
+            if(!overlay.keySet().isEmpty()) {
+                o.add("overlay", overlay);
+            }
+        }
+        if(r.association != null) {
+            final JsonObject target = new JsonObject();
+            target.addProperty("association", r.association);
+            target.addProperty("kind", r.associationKind);
+            o.add("target", target);
+        }
+        if(r.drift != null || r.nullShift != null) {
+            final JsonObject drift = new JsonObject();
+            drift.addProperty("value", r.drift);
+            drift.addProperty("kind", r.driftKind);
+            drift.addProperty("vs", r.driftVs);
+            drift.addProperty("nullShift", r.nullShift);
+            o.add("drift", drift);
+        }
         return o;
     }
 
-    private static JsonObject buildNumeric(final ProfileAccumulator.FieldAccumulator field, final int bins) {
-        final JsonObject numeric = new JsonObject();
-        numeric.addProperty("zeroCount", field.zeroCount);
-        numeric.addProperty("nanCount", field.nanCount);
-        numeric.addProperty("infCount", field.infCount);
-        if(field.count == 0) {
-            return numeric;
-        }
-        numeric.addProperty("min", field.min);
-        numeric.addProperty("max", field.max);
-        numeric.addProperty("mean", field.mean);
-        final double n = field.count;
-        if(n > 1) {
-            final double variance = field.m2 / (n - 1);
-            numeric.addProperty("stddev", Math.sqrt(variance));
-            if(field.m2 > 0) {
-                numeric.addProperty("skewness", Math.sqrt(n) * field.m3 / Math.pow(field.m2, 1.5));
+    private static JsonArray valuesJson(final ProfileReport.FieldResult r, final boolean showValues, final int limit) {
+        final JsonArray values = new JsonArray();
+        for(int i = 0; i < r.values.size() && i < limit; i++) {
+            final ProfileReport.ValueRow row = r.values.get(i);
+            final JsonObject item = new JsonObject();
+            if(showValues) {
+                item.addProperty("value", ProfileReport.shorten(row.value));
             }
-        }
-        final KllDoublesSketch kll = field.getKll();
-        if(kll != null && !kll.isEmpty()) {
-            final JsonObject quantiles = new JsonObject();
-            for(int i = 0; i < QUANTILE_RANKS.length; i++) {
-                quantiles.addProperty(QUANTILE_NAMES[i], kll.getQuantile(QUANTILE_RANKS[i], QuantileSearchCriteria.INCLUSIVE));
+            item.addProperty("count", row.count);
+            item.addProperty("lower", row.lower);
+            item.addProperty("upper", row.upper);
+            if(ProfileReport.isNullLike(row.value) && "string".equals(r.type)) {
+                item.addProperty("nullLike", true);
             }
-            numeric.add("quantiles", quantiles);
-            numeric.addProperty("rankError", kll.getNormalizedRankError(false));
-            numeric.add("histogram", buildHistogram(kll, field.min, field.max, bins, field.count));
-            numeric.add("cdf", buildCdf(kll, field.min, field.max, bins));
+            values.add(item);
         }
-        return numeric;
+        return values;
+    }
+
+    /** The bin edges of a numeric-like field as finite numbers: the open ends of declared edges become the observed range. */
+    private static double[] finiteBinEdges(final ProfileReport.FieldResult r) {
+        final double min = r.cellEdges[0];
+        final double max = r.cellEdges[r.cellEdges.length - 1];
+        final double[] edges = new double[r.bins.length + 1];
+        for(int b = 0; b < r.bins.length; b++) {
+            edges[b] = r.binLower[b] == null ? Math.min(min, r.binUpper[b] == null ? min : r.binUpper[b]) : r.binLower[b];
+        }
+        final Double last = r.binUpper[r.bins.length - 1];
+        edges[r.bins.length] = last == null ? Math.max(max, edges[r.bins.length - 1]) : last;
+        return edges;
     }
 
     /** Equal-width PMF histogram: {@code edges} has one more entry than {@code counts} (at most bins+1). */
@@ -532,7 +453,7 @@ public class ProfileRenderer {
         if(edges.length < 3) {
             counts.add(count);
         } else {
-            for(final double p : pmfOverEdges(kll, edges)) {
+            for(final double p : kll.getPMF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE)) {
                 counts.add(Math.round(p * count));
             }
         }
@@ -550,7 +471,6 @@ public class ProfileRenderer {
             points.add(min);
             ranks.add(1.0);
         } else {
-            // the query points include min and max themselves, so dedupe them as one edge list
             final double[] queryPoints = equalWidthEdges(min, max, bins);
             final double[] cdfValues = kll.getCDF(queryPoints, QuantileSearchCriteria.INCLUSIVE);
             for(int i = 0; i < queryPoints.length; i++) {
@@ -563,53 +483,254 @@ public class ProfileRenderer {
         return cdf;
     }
 
-    private static JsonArray buildNotable(
-            final ProfileSpec.FieldSpec fieldSpec,
-            final ProfileAccumulator.FieldAccumulator field,
-            final ProfileAccumulator accumulator,
-            final Double distinctEstimate,
-            final Double top1Ratio,
-            final double nullRate) {
+    // ---- comparisons ----
 
-        final JsonArray notable = new JsonArray();
-        if(field.count == 0 && field.nullCount > 0) {
-            notable.add("all_null");
-        } else {
-            if(nullRate > 0.5) {
-                notable.add("high_null");
-            }
-            if(field.count > 0) {
-                switch (fieldSpec.profileType) {
-                    case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                        if(field.min == field.max) {
-                            notable.add("constant");
-                        }
-                    }
-                    case STRING -> {
-                        if(distinctEstimate != null && distinctEstimate <= 1.5) {
-                            notable.add("constant");
-                        }
-                    }
-                    default -> { }
+    /** One field of one group as the report draws it: totals, the drift statistics and the aligned distribution. */
+    private static JsonObject groupFieldJson(
+            final ProfileReport.FieldResult field, final ProfileReport.GroupField g, final Detail detail) {
+
+        final JsonObject o = new JsonObject();
+        o.addProperty("count", g.count);
+        o.addProperty("nulls", g.nulls);
+        final boolean time = "timestamp".equals(field.type);
+        if(!time) {
+            o.addProperty("mean", g.mean);
+            o.addProperty("min", g.min);
+            o.addProperty("max", g.max);
+            o.addProperty("p50", g.p50);
+        }
+        o.addProperty("ks", g.ks);
+        o.addProperty("tvd", g.tvd);
+        o.addProperty("psi", g.psi);
+        o.addProperty("nullShift", g.nullShift);
+        o.addProperty("noiseKs", g.noiseKs);
+        o.addProperty("noisePsi", g.noisePsi);
+        if("bool".equals(field.type)) {
+            o.addProperty("trueCount", g.cells[0]);
+            o.addProperty("falseCount", g.cells[1]);
+        } else if(detail.overlayDistributions) {
+            if(field.numericLike()) {
+                o.add("hist", toJsonArray(detail.overlayCells ? g.cells : g.bins));
+            } else {
+                final JsonArray topK = new JsonArray();
+                for(int c = 0; c < g.cells.length - 1; c++) {
+                    topK.add(g.cells[c]);
                 }
-                if(top1Ratio != null && top1Ratio > 0.9 && distinctEstimate != null && distinctEstimate > 1.5) {
-                    notable.add("dominant_value");
-                }
-                if(distinctEstimate != null && field.count > 100 && distinctEstimate >= 0.95 * field.count) {
-                    notable.add("unique_like");
-                }
-                if(ProfileSpec.ProfileType.NUMERIC.equals(fieldSpec.profileType) && field.count > 2 && field.m2 > 0) {
-                    final double skewness = Math.sqrt(field.count) * field.m3 / Math.pow(field.m2, 1.5);
-                    if(Math.abs(skewness) > 2) {
-                        notable.add("skewed");
-                    }
-                }
+                o.add("topK", topK);
             }
         }
-        return notable;
+        return o;
     }
 
-    private static JsonObject buildCorrelations(final ProfileAccumulator accumulator, final ProfileSpec spec) {
+    private static JsonObject groupJson(
+            final ProfileReport.GroupResult group,
+            final String label,
+            final ProfileReport.Result result,
+            final Detail detail) {
+
+        final JsonObject groupJson = new JsonObject();
+        groupJson.addProperty("value", label);
+        groupJson.addProperty("rows", group.rows);
+        if(group.targetRate != null) {
+            groupJson.addProperty("targetPositive", group.targetPositive);
+            groupJson.addProperty("targetRate", group.targetRate);
+        }
+        final JsonObject fields = new JsonObject();
+        for(final ProfileReport.FieldResult field : result.fields) {
+            final ProfileReport.GroupField g = group.fields[field.index];
+            if(g != null) {
+                fields.add(field.path, groupFieldJson(field, g, detail));
+            }
+        }
+        groupJson.add("fields", fields);
+        return groupJson;
+    }
+
+    private static JsonObject buildAxis(
+            final ProfileReport.AxisResult axis,
+            final ProfileReport.Result result,
+            final ProfileReport.Config config,
+            final Detail detail) {
+
+        final JsonObject axisJson = new JsonObject();
+        axisJson.addProperty("kind", axis.axis.kind.name());
+        axisJson.addProperty("field", axis.axis.field);
+        if(ProfileAxis.Kind.time.equals(axis.axis.kind)) {
+            axisJson.addProperty("granularity", axis.axis.granularity);
+        }
+        if(ProfileAxis.Kind.inputs.equals(axis.axis.kind) && axis.axis.baseline != null) {
+            axisJson.addProperty("baseline", axis.axis.baseline);
+        }
+        // the size ladder keeps the first groups (the largest segments, every input) or the most recent buckets
+        int from = 0;
+        int to = axis.groups.size();
+        if(to > detail.groupLimit && !ProfileAxis.Kind.inputs.equals(axis.axis.kind)) {
+            if(ProfileAxis.Kind.time.equals(axis.axis.kind)) {
+                from = to - detail.groupLimit;
+            } else {
+                to = detail.groupLimit;
+            }
+        }
+        axisJson.addProperty("truncatedGroups", axis.truncatedGroups + (axis.groups.size() - (to - from)));
+        final JsonArray groups = new JsonArray();
+        for(int g = from; g < to; g++) {
+            groups.add(groupJson(axis.groups.get(g),
+                    ProfileReport.groupLabel(axis.axis, axis.groups.get(g).value, g, config.showValues), result, detail));
+        }
+        axisJson.add("groups", groups);
+        return axisJson;
+    }
+
+    /** The two target classes as a comparison axis, so the compare bar overlays them like any other groups. */
+    private static JsonObject buildTargetAxis(
+            final ProfileReport.Result result, final ProfileReport.Config config, final Detail detail) {
+
+        final JsonObject axisJson = new JsonObject();
+        axisJson.addProperty("kind", "target");
+        axisJson.addProperty("field", result.target.field);
+        axisJson.addProperty("positive", result.target.positive);
+        axisJson.addProperty("truncatedGroups", 0);
+        final JsonArray groups = new JsonArray();
+        groups.add(groupJson(result.target.positiveGroup, "positive", result, detail));
+        groups.add(groupJson(result.target.negativeGroup, "negative", result, detail));
+        axisJson.add("groups", groups);
+        return axisJson;
+    }
+
+    private static JsonObject buildTarget(
+            final ProfileReport.Result result, final ProfileReport.Config config, final Detail detail) {
+
+        final ProfileReport.TargetResult t = result.target;
+        final JsonObject target = new JsonObject();
+        target.addProperty("field", t.field);
+        target.addProperty("positive", t.positive);
+        target.addProperty("positiveRows", t.positiveRows);
+        target.addProperty("negativeRows", t.negativeRows);
+        target.addProperty("nullRows", t.nullRows);
+        target.addProperty("rate", t.rate);
+        if(t.warning != null) {
+            target.addProperty("warning", t.warning);
+        }
+        final JsonArray fields = new JsonArray();
+        for(final ProfileReport.TargetField f : t.fields) {
+            final ProfileReport.FieldResult field = result.fields.get(f.index);
+            final JsonObject o = new JsonObject();
+            o.addProperty("path", field.path);
+            o.addProperty("type", field.type);
+            o.addProperty("count", f.count);
+            if(f.nullRows > 0) {
+                final JsonObject nulls = new JsonObject();
+                nulls.addProperty("rows", f.nullRows);
+                nulls.addProperty("rate", f.rateWhenNull);
+                o.add("nulls", nulls);
+            }
+            o.addProperty("ks", f.ks);
+            o.addProperty("tvd", f.tvd);
+            o.addProperty("iv", f.iv);
+            o.addProperty("pointBiserial", f.pointBiserial);
+            if(!"timestamp".equals(field.type)) {
+                o.addProperty("meanPositive", f.meanPositive);
+                o.addProperty("meanNegative", f.meanNegative);
+            }
+            o.addProperty("edgesKind", field.edgesKind);
+            if(f.iv != null && detail.overlayDistributions) {
+                if(field.numericLike()) {
+                    o.add("edges", toJsonArray(finiteBinEdges(field)));
+                } else {
+                    final JsonArray labels = new JsonArray();
+                    for(int b = 0; b < field.binLabels.length; b++) {
+                        labels.add(ProfileReport.binLabel(field, b, config.showValues));
+                    }
+                    o.add("labels", labels);
+                }
+                o.add("positive", toJsonArray(f.positiveBins));
+                o.add("negative", toJsonArray(f.negativeBins));
+            }
+            fields.add(o);
+        }
+        target.add("fields", fields);
+        return target;
+    }
+
+    private static JsonArray buildPairs(final ProfileReport.Result result, final ProfileAccumulator accumulator) {
+        final ProfileSpec spec = accumulator.getSpec();
+        final JsonArray pairs = new JsonArray();
+        for(final ProfileReport.PairResult pair : result.pairs) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("a", pair.a);
+            o.addProperty("b", pair.b);
+            if(pair.error != null) {
+                o.addProperty("error", pair.error);
+                pairs.add(o);
+                continue;
+            }
+            o.add("edges", toJsonArray(pair.edges));
+            o.add("sharesA", sharesJson(pair.binsA));
+            o.add("sharesB", sharesJson(pair.binsB));
+            o.addProperty("countA", pair.countA);
+            o.addProperty("countB", pair.countB);
+            o.addProperty("psi", pair.psi);
+            o.addProperty("ks", pair.ks);
+            o.addProperty("noiseKs", pair.noiseKs);
+            o.addProperty("noisePsi", pair.noisePsi);
+            // the Q-Q plot is drawn from the two quantile sketches (profile-dsl.md §5.12)
+            final KllDoublesSketch kllA = sketchOf(accumulator, spec, pair.a);
+            final KllDoublesSketch kllB = sketchOf(accumulator, spec, pair.b);
+            if(kllA != null && kllB != null) {
+                final JsonArray qq = new JsonArray();
+                for(final double rank : QQ_RANKS) {
+                    final JsonArray point = new JsonArray();
+                    point.add(kllA.getQuantile(rank, QuantileSearchCriteria.INCLUSIVE));
+                    point.add(kllB.getQuantile(rank, QuantileSearchCriteria.INCLUSIVE));
+                    qq.add(point);
+                }
+                o.add("qq", qq);
+            }
+            pairs.add(o);
+        }
+        return pairs;
+    }
+
+    private static KllDoublesSketch sketchOf(final ProfileAccumulator accumulator, final ProfileSpec spec, final String path) {
+        for(int i = 0; i < spec.getFields().size(); i++) {
+            if(spec.getFields().get(i).path.equals(path)) {
+                final KllDoublesSketch kll = accumulator.getField(i).getKll();
+                return kll == null || kll.isEmpty() ? null : kll;
+            }
+        }
+        return null;
+    }
+
+    private static JsonArray sharesJson(final long[] counts) {
+        final long total = ProfileReport.total(counts);
+        final JsonArray shares = new JsonArray();
+        for(final long count : counts) {
+            shares.add(total == 0 ? 0d : (double) count / total);
+        }
+        return shares;
+    }
+
+    private static JsonArray toJsonArray(final double[] values) {
+        final JsonArray array = new JsonArray();
+        for(final double value : values) {
+            array.add(value);
+        }
+        return array;
+    }
+
+    private static JsonArray toJsonArray(final long[] values) {
+        final JsonArray array = new JsonArray();
+        for(final long value : values) {
+            array.add(value);
+        }
+        return array;
+    }
+
+    // ---- correlations / sample / suggestions ----
+
+    private static JsonObject buildCorrelations(
+            final ProfileAccumulator accumulator, final ProfileSpec spec, final boolean matrixForm) {
+
         final List<Integer> numericIndices = spec.getNumericFieldIndices();
         final JsonObject correlations = new JsonObject();
         final JsonArray fieldPaths = new JsonArray();
@@ -617,6 +738,31 @@ public class ProfileRenderer {
             fieldPaths.add(spec.getFields().get(index).path);
         }
         correlations.add("fields", fieldPaths);
+        if(!matrixForm) {
+            // the strongest pairs only: [i, j, correlation, rows]
+            final List<double[]> pairs = new ArrayList<>();
+            for(int i = 0; i < numericIndices.size(); i++) {
+                for(int j = i + 1; j < numericIndices.size(); j++) {
+                    final Double correlation = accumulator.correlation(i, j);
+                    if(correlation != null && Double.isFinite(correlation)) {
+                        final Double pairCount = accumulator.pairCount(i, j);
+                        pairs.add(new double[] { i, j, correlation, pairCount == null ? 0 : pairCount });
+                    }
+                }
+            }
+            pairs.sort((a, b) -> Double.compare(Math.abs(b[2]), Math.abs(a[2])));
+            final JsonArray top = new JsonArray();
+            for(int p = 0; p < pairs.size() && p < CORRELATION_TOP_PAIRS; p++) {
+                final JsonArray pair = new JsonArray();
+                pair.add((int) pairs.get(p)[0]);
+                pair.add((int) pairs.get(p)[1]);
+                pair.add(pairs.get(p)[2]);
+                pair.add((long) pairs.get(p)[3]);
+                top.add(pair);
+            }
+            correlations.add("top", top);
+            return correlations;
+        }
         final JsonArray matrix = new JsonArray();
         final JsonArray counts = new JsonArray();
         for(int i = 0; i < numericIndices.size(); i++) {
@@ -634,1169 +780,6 @@ public class ProfileRenderer {
         correlations.add("matrix", matrix);
         correlations.add("counts", counts);
         return correlations;
-    }
-
-    private static JsonObject buildKeys(
-            final ProfileAccumulator accumulator,
-            final ProfileSpec spec,
-            final ProfileSpec.SketchParameters params) {
-
-        final List<Integer> keyIndices = spec.getKeyFieldIndices();
-        final JsonObject keys = new JsonObject();
-        final JsonArray fields = new JsonArray();
-        final List<CompactSketch> sketches = new ArrayList<>();
-        for(final Integer index : keyIndices) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(index);
-            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(index);
-            final CompactSketch theta = field.thetaResult(params);
-            sketches.add(theta);
-            final JsonObject o = new JsonObject();
-            o.addProperty("path", fieldSpec.path);
-            if(theta != null && field.count > 0) {
-                o.addProperty("distinct", theta.getEstimate());
-                o.addProperty("distinctLower", theta.getLowerBound(2));
-                o.addProperty("distinctUpper", theta.getUpperBound(2));
-                o.addProperty("keyness", accumulator.getRowCount() == 0
-                        ? 0d : theta.getEstimate() / accumulator.getRowCount());
-            }
-            fields.add(o);
-        }
-        keys.add("fields", fields);
-
-        // pairwise intersection estimates; containment[i][j] = |Ai ∩ Aj| / |Ai|
-        final Double[][] intersections = new Double[sketches.size()][sketches.size()];
-        for(int i = 0; i < sketches.size(); i++) {
-            for(int j = i + 1; j < sketches.size(); j++) {
-                final CompactSketch a = sketches.get(i);
-                final CompactSketch b = sketches.get(j);
-                if(a == null || b == null) {
-                    continue;
-                }
-                final Intersection intersection = SetOperation.builder().buildIntersection();
-                intersection.intersect(a);
-                intersection.intersect(b);
-                intersections[i][j] = intersection.getResult().getEstimate();
-                intersections[j][i] = intersections[i][j];
-            }
-        }
-        final JsonArray containment = new JsonArray();
-        for(int i = 0; i < sketches.size(); i++) {
-            final JsonArray row = new JsonArray();
-            for(int j = 0; j < sketches.size(); j++) {
-                if(i == j) {
-                    row.add(1.0);
-                } else if(intersections[i][j] == null
-                        || sketches.get(i) == null || sketches.get(i).getEstimate() == 0d) {
-                    row.add((JsonElement) null);
-                } else {
-                    row.add(intersections[i][j] / sketches.get(i).getEstimate());
-                }
-            }
-            containment.add(row);
-        }
-        keys.add("containment", containment);
-
-        // proportional venn (2-3 sets, rendered as SVG by the client)
-        if(sketches.size() >= 2 && sketches.size() <= 3
-                && sketches.stream().allMatch(s -> s != null && s.getEstimate() > 0d)) {
-            final JsonObject venn = new JsonObject();
-            final JsonArray labels = new JsonArray();
-            final JsonArray sizes = new JsonArray();
-            for(int i = 0; i < keyIndices.size(); i++) {
-                labels.add(spec.getFields().get(keyIndices.get(i)).path);
-                sizes.add(sketches.get(i).getEstimate());
-            }
-            venn.add("labels", labels);
-            venn.add("sizes", sizes);
-            final JsonArray pairs = new JsonArray();
-            for(int i = 0; i < sketches.size(); i++) {
-                for(int j = i + 1; j < sketches.size(); j++) {
-                    final JsonObject pair = new JsonObject();
-                    pair.addProperty("a", i);
-                    pair.addProperty("b", j);
-                    pair.addProperty("size", intersections[i][j] == null ? 0d : intersections[i][j]);
-                    pairs.add(pair);
-                }
-            }
-            venn.add("pairs", pairs);
-            if(sketches.size() == 3) {
-                final Intersection triple = SetOperation.builder().buildIntersection();
-                triple.intersect(sketches.get(0));
-                triple.intersect(sketches.get(1));
-                triple.intersect(sketches.get(2));
-                venn.addProperty("triple", triple.getResult().getEstimate());
-            }
-            keys.add("venn", venn);
-        }
-        return keys;
-    }
-
-    // ---- comparisons (segments / time axes) ----
-
-    /** Shared comparison metadata per field: histogram edges (numeric-like) or top-value labels (string). */
-    private static JsonObject buildOverlayMeta(
-            final ProfileSpec.FieldSpec fieldSpec,
-            final ProfileAccumulator.FieldAccumulator field,
-            final Config config) {
-
-        switch (fieldSpec.profileType) {
-            case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                final double[] edges = overlayEdges(field, config.overlayBins);
-                if(edges == null) {
-                    return null;
-                }
-                final JsonObject overlay = new JsonObject();
-                final JsonArray edgesArray = new JsonArray();
-                for(final double edge : edges) {
-                    edgesArray.add(edge);
-                }
-                overlay.add("edges", edgesArray);
-                return overlay;
-            }
-            case STRING -> {
-                final List<String> labels = overlayLabels(field, config.overlayTopK);
-                if(labels == null || labels.isEmpty()) {
-                    return null;
-                }
-                final JsonObject overlay = new JsonObject();
-                final JsonArray labelsArray = new JsonArray();
-                for(int i = 0; i < labels.size(); i++) {
-                    labelsArray.add(config.showValues ? labels.get(i) : "#" + (i + 1));
-                }
-                overlay.add("labels", labelsArray);
-                return overlay;
-            }
-            default -> {
-                return null;
-            }
-        }
-    }
-
-    /** Equal-width bin edges over the global value range ({@code bins + 1} entries), or null when undefined. */
-    private static double[] overlayEdges(final ProfileAccumulator.FieldAccumulator field, final int bins) {
-        if(field.count == 0 || !Double.isFinite(field.min) || !Double.isFinite(field.max)) {
-            return null;
-        }
-        return equalWidthEdges(field.min, field.max, bins);
-    }
-
-    /** The global top values used as the comparison categories for string fields (actual values). */
-    private static List<String> overlayLabels(final ProfileAccumulator.FieldAccumulator field, final int k) {
-        final ItemsSketch<String> fi = field.getFrequentItems();
-        if(fi == null || field.count == 0) {
-            return null;
-        }
-        final ItemsSketch.Row<String>[] rows = fi.getFrequentItems(ErrorType.NO_FALSE_POSITIVES);
-        final List<String> labels = new ArrayList<>();
-        for(int i = 0; i < rows.length && i < k; i++) {
-            labels.add(rows[i].getItem());
-        }
-        return labels;
-    }
-
-    /**
-     * Per-axis, per-group comparison data. Group histograms/top-K counts are aligned to the shared
-     * edges/labels from {@link #buildOverlayMeta}, so the client can overlay them without rebinning.
-     */
-    private static JsonArray buildComparisons(
-            final ProfileAccumulator accumulator,
-            final java.util.Map<String, ProfileAccumulator> subProfiles,
-            final ProfileSpec spec,
-            final Config config,
-            final int groupLimit,
-            final java.util.Map<String, Long> groupTotals,
-            final JsonObject targetAxis) {
-
-        final JsonArray axes = new JsonArray();
-        for(final ProfileAxis axis : config.axes) {
-            final JsonObject axisJson = new JsonObject();
-            axisJson.addProperty("kind", axis.kind.name());
-            axisJson.addProperty("field", axis.field);
-            if(ProfileAxis.Kind.time.equals(axis.kind)) {
-                axisJson.addProperty("granularity", axis.granularity);
-            }
-            if(ProfileAxis.Kind.inputs.equals(axis.kind) && axis.baseline != null) {
-                axisJson.addProperty("baseline", axis.baseline);
-            }
-
-            // collect this axis's groups from the keyed sub-profiles
-            final List<java.util.Map.Entry<String, ProfileAccumulator>> groups = new ArrayList<>();
-            for(final java.util.Map.Entry<String, ProfileAccumulator> entry : subProfiles.entrySet()) {
-                if(axis.groupOfKey(entry.getKey()) != null) {
-                    groups.add(entry);
-                }
-            }
-            final int limit;
-            if(ProfileAxis.Kind.inputs.equals(axis.kind)) {
-                // declared input order; never truncated (input count is small by construction)
-                groups.sort(java.util.Comparator.comparingInt(entry -> {
-                    final int i = axis.inputNames.indexOf(axis.groupOfKey(entry.getKey()));
-                    return i < 0 ? Integer.MAX_VALUE : i;
-                }));
-            } else if(ProfileAxis.Kind.time.equals(axis.kind)) {
-                // chronological; keep the most recent buckets when over the limit
-                groups.sort(java.util.Map.Entry.comparingByKey());
-                limit = Math.min(config.timeGroupLimit, groupLimit);
-                if(groups.size() > limit) {
-                    groups.subList(0, groups.size() - limit).clear();
-                }
-            } else {
-                // largest groups first
-                groups.sort((a, b) -> Long.compare(b.getValue().getRowCount(), a.getValue().getRowCount()));
-                limit = Math.min(axis.topK, groupLimit);
-                if(groups.size() > limit) {
-                    groups.subList(limit, groups.size()).clear();
-                }
-            }
-            // groups bounded before the shuffle report their true total via groupTotals
-            final long totalGroups = groupTotals != null && groupTotals.containsKey(axis.id())
-                    ? groupTotals.get(axis.id())
-                    : countGroups(subProfiles, axis);
-            axisJson.addProperty("truncatedGroups", Math.max(0L, totalGroups - groups.size()));
-
-            final JsonArray groupsJson = new JsonArray();
-            for(int g = 0; g < groups.size(); g++) {
-                final String value = axis.groupOfKey(groups.get(g).getKey());
-                final ProfileAccumulator group = groups.get(g).getValue();
-                final JsonObject groupJson = new JsonObject();
-                groupJson.addProperty("value", groupLabel(axis, value, g, config.showValues));
-                groupJson.addProperty("rows", group.getRowCount());
-                if(spec.getTarget() != null && group.getTargetRate() != null) {
-                    // per-group target rate (the group spec counts the class totals)
-                    groupJson.addProperty("targetPositive", group.getTargetPositiveRows());
-                    groupJson.addProperty("targetRate", group.getTargetRate());
-                }
-                groupJson.add("fields", buildGroupFields(accumulator, group, spec, config));
-                groupsJson.add(groupJson);
-            }
-            axisJson.add("groups", groupsJson);
-            axes.add(axisJson);
-        }
-        if(targetAxis != null) {
-            axes.add(targetAxis);
-        }
-        return axes;
-    }
-
-    /**
-     * One field's distribution for a subset of its rows (a comparison group or a target class),
-     * aligned to the shared overlay edges / labels of the whole dataset so the client can overlay
-     * it without rebinning: {@code count}, {@code nulls}, then per type {@code mean} + {@code hist}
-     * (numeric-like), {@code topK} counts over the global labels (string) or
-     * {@code trueCount}/{@code falseCount} (bool). This is the single place that defines the entry.
-     */
-    private static JsonObject buildDistributionEntry(
-            final ProfileSpec.FieldSpec fieldSpec,
-            final ProfileAccumulator.FieldAccumulator globalField,
-            final long count,
-            final long nulls,
-            final Double mean,
-            final KllDoublesSketch kll,
-            final ItemsSketch<String> fi,
-            final Long trueCount,
-            final Config config) {
-
-        final JsonObject o = new JsonObject();
-        o.addProperty("count", count);
-        o.addProperty("nulls", nulls);
-        switch (fieldSpec.profileType) {
-            case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                if(count > 0 && mean != null) {
-                    o.addProperty("mean", mean);
-                }
-                final double[] edges = overlayEdges(globalField, config.overlayBins);
-                if(count > 0 && edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
-                    o.add("hist", scaledCounts(pmfOverEdges(kll, edges), count));
-                }
-            }
-            case STRING -> {
-                final List<String> labels = overlayLabels(globalField, config.overlayTopK);
-                if(labels != null && fi != null) {
-                    final JsonArray topK = new JsonArray();
-                    for(final String label : labels) {
-                        topK.add(fi.getEstimate(label));
-                    }
-                    o.add("topK", topK);
-                }
-            }
-            case BOOL -> {
-                if(trueCount != null) {
-                    o.addProperty("trueCount", trueCount);
-                    o.addProperty("falseCount", count - trueCount);
-                }
-            }
-        }
-        return o;
-    }
-
-    // ---- target (binary outcome) ----
-
-    /** Information value above which a field separates the classes suspiciously well (possible leakage). */
-    private static final double IV_LEAK_THRESHOLD = 0.5;
-
-    /**
-     * The target as a synthetic comparison axis with the two classes as groups, so the compare bar
-     * can overlay positive-vs-negative distributions on every field card with the same client
-     * code as segments. Built from the global accumulator's class split, not from sub-profiles.
-     */
-    private static JsonObject buildTargetAxis(
-            final ProfileAccumulator accumulator, final ProfileSpec spec, final Config config) {
-
-        final ProfileSpec.TargetSpec target = spec.getTarget();
-        final JsonObject axisJson = new JsonObject();
-        axisJson.addProperty("kind", "target");
-        axisJson.addProperty("field", target.path);
-        axisJson.addProperty("positive", target.positiveLabel());
-        axisJson.addProperty("truncatedGroups", 0);
-        final JsonArray groups = new JsonArray();
-        for(final boolean positiveClass : new boolean[] { true, false }) {
-            final JsonObject groupJson = new JsonObject();
-            groupJson.addProperty("value", positiveClass ? "positive" : "negative");
-            groupJson.addProperty("rows", positiveClass ? accumulator.getTargetPositiveRows() : accumulator.getTargetNegativeRows());
-            final JsonObject fields = new JsonObject();
-            for(int i = 0; i < spec.getFields().size(); i++) {
-                final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-                final ProfileAccumulator.FieldAccumulator globalField = accumulator.getField(i);
-                final ProfileAccumulator.TargetStats stats = globalField.getTarget();
-                if(stats == null) {
-                    continue;   // the target field itself
-                }
-                final ProfileAccumulator.Moments moments = positiveClass ? stats.positive : stats.negative;
-                fields.add(fieldSpec.path, buildDistributionEntry(
-                        fieldSpec,
-                        globalField,
-                        positiveClass ? stats.positiveCount : stats.negativeCount,
-                        positiveClass ? stats.nullPositive : stats.nullNegative,
-                        moments.n > 0 ? moments.mean : null,
-                        positiveClass ? stats.getKllPositive() : stats.getKllNegative(),
-                        positiveClass ? stats.getFiPositive() : stats.getFiNegative(),
-                        positiveClass ? stats.truePositive : stats.trueNegative,
-                        config));
-            }
-            groupJson.add("fields", fields);
-            groups.add(groupJson);
-        }
-        axisJson.add("groups", groups);
-        return axisJson;
-    }
-
-    /**
-     * A one-class target is almost always a wrong {@code positive} value (case, quoting, type):
-     * the per-field statistics need both classes, so say so instead of rendering an empty analysis.
-     */
-    public static String targetWarning(final ProfileAccumulator accumulator, final ProfileSpec.TargetSpec target) {
-        if(accumulator.getRowCount() == 0 || accumulator.getTargetPositiveRows() + accumulator.getTargetNegativeRows() == 0) {
-            return accumulator.getRowCount() == 0 ? null
-                    : "every row has a null or unreadable " + target.path + " value: no target analysis was possible";
-        }
-        if(accumulator.getTargetPositiveRows() == 0) {
-            return "no row matched the positive value `" + target.positiveLabel() + "` of " + target.path
-                    + " — check parameters.target.positive (case, quoting); every row was classed negative and the per-field statistics are skipped";
-        }
-        if(accumulator.getTargetNegativeRows() == 0) {
-            return "every row matched the positive value `" + target.positiveLabel() + "` of " + target.path
-                    + " — there is no negative class to compare against and the per-field statistics are skipped";
-        }
-        return null;
-    }
-
-    /** Smallest share of the rows an IV bin may hold: sparser ordered bins are merged into their neighbour. */
-    private static final double IV_MIN_BIN_SHARE = 0.05;
-
-    /**
-     * Information value (PSI between the class distributions) over the class counts. Ordered
-     * bins are merged left to right until each holds at least {@link #IV_MIN_BIN_SHARE} of the
-     * rows, and the shares are Laplace-smoothed (+0.5 per bin): the per-bin sketch counts carry
-     * rank error and vary between runs, which the raw PSI turns into large log terms in
-     * near-empty tail bins. Categories (top-K + other) are frequent by construction and stay as
-     * they are.
-     */
-    public static double informationValue(final long[] positive, final long[] negative, final boolean ordered) {
-        long total = 0;
-        for(int i = 0; i < positive.length; i++) {
-            total += positive[i] + negative[i];
-        }
-        final List<long[]> bins = new ArrayList<>();
-        if(ordered) {
-            final double minRows = Math.max(1d, total * IV_MIN_BIN_SHARE);
-            long[] current = new long[2];
-            for(int i = 0; i < positive.length; i++) {
-                current[0] += positive[i];
-                current[1] += negative[i];
-                if(current[0] + current[1] >= minRows) {
-                    bins.add(current);
-                    current = new long[2];
-                }
-            }
-            if(current[0] + current[1] > 0) {
-                if(bins.isEmpty()) {
-                    bins.add(current);
-                } else {
-                    final long[] last = bins.getLast();
-                    last[0] += current[0];
-                    last[1] += current[1];
-                }
-            }
-        } else {
-            for(int i = 0; i < positive.length; i++) {
-                bins.add(new long[] { positive[i], negative[i] });
-            }
-        }
-        long positiveTotal = 0;
-        long negativeTotal = 0;
-        for(final long[] bin : bins) {
-            positiveTotal += bin[0];
-            negativeTotal += bin[1];
-        }
-        final double k = bins.size();
-        double iv = 0d;
-        for(final long[] bin : bins) {
-            final double a = (bin[0] + 0.5) / (positiveTotal + 0.5 * k);
-            final double b = (bin[1] + 0.5) / (negativeTotal + 0.5 * k);
-            iv += (a - b) * Math.log(a / b);
-        }
-        return iv;
-    }
-
-    private static long[] toLongArray(final JsonArray array) {
-        final long[] values = new long[array.size()];
-        for(int i = 0; i < array.size(); i++) {
-            values[i] = array.get(i).getAsLong();
-        }
-        return values;
-    }
-
-    /** Removes the per-bin / per-label arrays from every group field entry, keeping counts, means and rates. */
-    private static void stripDistributions(final JsonArray comparisons) {
-        for(final JsonElement axis : comparisons) {
-            for(final JsonElement group : axis.getAsJsonObject().getAsJsonArray("groups")) {
-                for(final String path : group.getAsJsonObject().getAsJsonObject("fields").keySet()) {
-                    final JsonObject entry = group.getAsJsonObject().getAsJsonObject("fields").getAsJsonObject(path);
-                    entry.remove("hist");
-                    entry.remove("topK");
-                }
-            }
-        }
-    }
-
-    /** Top-K counts plus an "(other)" bucket holding the rest of {@code count}, so the tail is represented. */
-    private static JsonArray withOtherCount(final JsonArray topK, final long count) {
-        final JsonArray counts = new JsonArray();
-        long sum = 0;
-        for(final JsonElement c : topK) {
-            counts.add(c.getAsLong());
-            sum += c.getAsLong();
-        }
-        counts.add(Math.max(0L, count - sum));
-        return counts;
-    }
-
-    private static JsonArray scaledCounts(final double[] shares, final long count) {
-        final JsonArray counts = new JsonArray();
-        for(final double share : shares) {
-            counts.add(Math.round(share * count));
-        }
-        return counts;
-    }
-
-    /**
-     * The target block: class totals plus, per field, the positive rate over the field's bins
-     * (shared equal-width edges for numeric-like fields, global top-K labels + other for strings,
-     * true/false for bools), the information value (PSI between the positive and negative
-     * distributions), the binned KS separation, the point-biserial correlation for numeric-like
-     * fields and the positive rate among the field's null rows. The per-field IV is also
-     * annotated on the top-level field objects for the stat strips.
-     *
-     * <p>The per-class counts come from the target axis entries ({@link #buildTargetAxis}), so
-     * the sketches are queried once and the target block and the overlays cannot disagree.
-     */
-    private static JsonObject buildTarget(
-            final ProfileAccumulator accumulator,
-            final ProfileSpec spec,
-            final Config config,
-            final JsonArray fieldsJson,
-            final JsonObject targetAxis) {
-
-        final ProfileSpec.TargetSpec target = spec.getTarget();
-        final JsonArray classGroups = targetAxis.getAsJsonArray("groups");
-        final JsonObject positiveFields = classGroups.get(0).getAsJsonObject().getAsJsonObject("fields");
-        final JsonObject negativeFields = classGroups.get(1).getAsJsonObject().getAsJsonObject("fields");
-        final JsonObject result = new JsonObject();
-        result.addProperty("field", target.path);
-        result.addProperty("positive", target.positiveLabel());
-        result.addProperty("positiveRows", accumulator.getTargetPositiveRows());
-        result.addProperty("negativeRows", accumulator.getTargetNegativeRows());
-        result.addProperty("nullRows", accumulator.getTargetNullRows());
-        final Double rate = accumulator.getTargetRate();
-        if(rate != null) {
-            result.addProperty("rate", rate);
-        }
-        final String warning = targetWarning(accumulator, target);
-        if(warning != null) {
-            result.addProperty("warning", warning);
-        }
-
-        final java.util.Map<String, JsonObject> fieldMap = new java.util.HashMap<>();
-        for(final JsonElement field : fieldsJson) {
-            fieldMap.put(field.getAsJsonObject().get("path").getAsString(), field.getAsJsonObject());
-        }
-
-        final JsonArray fields = new JsonArray();
-        for(int i = 0; i < spec.getFields().size(); i++) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(i);
-            final ProfileAccumulator.TargetStats stats = field.getTarget();
-            if(stats == null) {
-                continue;
-            }
-            final JsonObject o = new JsonObject();
-            o.addProperty("path", fieldSpec.path);
-            o.addProperty("type", fieldSpec.profileType.name().toLowerCase());
-            o.addProperty("count", stats.positiveCount + stats.negativeCount);
-            final long nulls = stats.nullPositive + stats.nullNegative;
-            if(nulls > 0) {
-                final JsonObject nullRate = new JsonObject();
-                nullRate.addProperty("rows", nulls);
-                nullRate.addProperty("rate", (double) stats.nullPositive / nulls);
-                o.add("nulls", nullRate);
-            }
-
-            if(stats.positive.n > 0 && stats.negative.n > 0) {
-                // point-biserial correlation: standardized mean difference between the classes
-                final ProfileAccumulator.Moments p = stats.positive;
-                final ProfileAccumulator.Moments q = stats.negative;
-                final double n = p.n + q.n;
-                final double mean = (p.n * p.mean + q.n * q.mean) / n;
-                final double m2 = p.m2 + q.m2 + p.n * (p.mean - mean) * (p.mean - mean) + q.n * (q.mean - mean) * (q.mean - mean);
-                final double sd = Math.sqrt(m2 / n);
-                if(sd > 0 && Double.isFinite(sd)) {
-                    // class shares in double arithmetic (p.n * q.n would overflow long past ~3e9 rows each)
-                    final double r = (p.mean - q.mean) / sd * Math.sqrt((p.n / n) * (q.n / n));
-                    if(Double.isFinite(r)) {
-                        o.addProperty("pointBiserial", r);
-                    }
-                }
-                o.addProperty("meanPositive", p.mean);
-                o.addProperty("meanNegative", q.mean);
-            }
-
-            // aligned class counts per bin / category from the axis entries; the per-bin positive
-            // rate is positive / (positive + negative)
-            JsonArray positiveCounts = null;
-            JsonArray negativeCounts = null;
-            final JsonObject positive = positiveFields.getAsJsonObject(fieldSpec.path);
-            final JsonObject negative = negativeFields.getAsJsonObject(fieldSpec.path);
-            if(stats.positiveCount > 0 && stats.negativeCount > 0 && positive != null && negative != null) {
-                if(positive.has("hist") && negative.has("hist")) {
-                    o.add("edges", toJsonArray(overlayEdges(field, config.overlayBins)));
-                    positiveCounts = positive.getAsJsonArray("hist");
-                    negativeCounts = negative.getAsJsonArray("hist");
-                } else if(positive.has("topK") && negative.has("topK") && !positive.getAsJsonArray("topK").isEmpty()) {
-                    // (a field without frequent values has nothing to relate: no categories, no statistics)
-                    final List<String> labels = overlayLabels(field, config.overlayTopK);
-                    final JsonArray labelsJson = new JsonArray();
-                    for(int l = 0; l < labels.size(); l++) {
-                        labelsJson.add(config.showValues ? labels.get(l) : "#" + (l + 1));
-                    }
-                    labelsJson.add("(other)");
-                    o.add("labels", labelsJson);
-                    positiveCounts = withOtherCount(positive.getAsJsonArray("topK"), stats.positiveCount);
-                    negativeCounts = withOtherCount(negative.getAsJsonArray("topK"), stats.negativeCount);
-                } else if(positive.has("trueCount") && negative.has("trueCount")) {
-                    final JsonArray labelsJson = new JsonArray();
-                    labelsJson.add("true");
-                    labelsJson.add("false");
-                    o.add("labels", labelsJson);
-                    positiveCounts = new JsonArray();
-                    positiveCounts.add(positive.get("trueCount").getAsLong());
-                    positiveCounts.add(positive.get("falseCount").getAsLong());
-                    negativeCounts = new JsonArray();
-                    negativeCounts.add(negative.get("trueCount").getAsLong());
-                    negativeCounts.add(negative.get("falseCount").getAsLong());
-                }
-            }
-            if(positiveCounts != null) {
-                o.add("positive", positiveCounts);
-                o.add("negative", negativeCounts);
-                final double[] positiveShares = sharesOf(positiveCounts, stats.positiveCount);
-                final double[] negativeShares = sharesOf(negativeCounts, stats.negativeCount);
-                final double iv = informationValue(toLongArray(positiveCounts), toLongArray(negativeCounts), o.has("edges"));
-                o.addProperty("iv", iv);
-                if(o.has("edges")) {
-                    o.addProperty("ks", binnedKs(positiveShares, negativeShares));
-                } else {
-                    // categories have no order: total variation distance instead of KS
-                    o.addProperty("tvd", totalVariation(positiveShares, negativeShares));
-                }
-                if(iv > IV_LEAK_THRESHOLD) {
-                    o.addProperty("leak", true);
-                }
-                final JsonObject fieldJson = fieldMap.get(fieldSpec.path);
-                if(fieldJson != null) {
-                    final JsonObject annotation = new JsonObject();
-                    annotation.addProperty("iv", iv);
-                    fieldJson.add("target", annotation);
-                }
-                if(!config.comparisonDistributions) {
-                    // size degradation: keep the statistics, shed the per-bin arrays behind the chart
-                    for(final String key : List.of("positive", "negative", "edges", "labels")) {
-                        o.remove(key);
-                    }
-                }
-            }
-            fields.add(o);
-        }
-        result.add("fields", fields);
-        return result;
-    }
-
-    private static int countGroups(final java.util.Map<String, ProfileAccumulator> subProfiles, final ProfileAxis axis) {
-        int count = 0;
-        for(final String key : subProfiles.keySet()) {
-            if(axis.groupOfKey(key) != null) {
-                count += 1;
-            }
-        }
-        return count;
-    }
-
-    /** With {@code values: hide}, segment group labels are raw values and must be masked; time buckets and input names are not. */
-    private static String groupLabel(final ProfileAxis axis, final String value, final int index, final boolean showValues) {
-        if(showValues || !ProfileAxis.Kind.segments.equals(axis.kind) || ProfileAxis.NULL_GROUP.equals(value)) {
-            return value;
-        }
-        return "group #" + (index + 1);
-    }
-
-    private static JsonObject buildGroupFields(
-            final ProfileAccumulator global,
-            final ProfileAccumulator group,
-            final ProfileSpec spec,
-            final Config config) {
-
-        final JsonObject fields = new JsonObject();
-        for(int i = 0; i < spec.getFields().size(); i++) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-            final ProfileAccumulator.FieldAccumulator globalField = global.getField(i);
-            final ProfileAccumulator.FieldAccumulator groupField = group.getField(i);
-            final JsonObject o = buildDistributionEntry(
-                    fieldSpec,
-                    globalField,
-                    groupField.count,
-                    groupField.nullCount,
-                    groupField.count > 0 ? groupField.mean : null,
-                    groupField.getKll(),
-                    groupField.getFrequentItems(),
-                    groupField.trueCount,
-                    config);
-            if(ProfileSpec.ProfileType.STRING.equals(fieldSpec.profileType)) {
-                final CpcSketch cpc = groupField.cpcResult(spec.getSketchParameters());
-                if(cpc != null && groupField.count > 0) {
-                    o.addProperty("distinct", cpc.getEstimate());
-                }
-            }
-            fields.add(fieldSpec.path, o);
-        }
-        return fields;
-    }
-
-    // ---- drift metrics (baseline inputs / field pairs / past report) ----
-
-    private static final double PSI_EPSILON = 1e-6;
-
-    /** Population stability index over two aligned share distributions (smoothed). */
-    private static double psi(final double[] sharesA, final double[] sharesB) {
-        double psi = 0d;
-        for(int i = 0; i < sharesA.length; i++) {
-            final double a = Math.max(sharesA[i], PSI_EPSILON);
-            final double b = Math.max(sharesB[i], PSI_EPSILON);
-            psi += (a - b) * Math.log(a / b);
-        }
-        return psi;
-    }
-
-    private static double[] sharesOf(final JsonArray counts, final double total) {
-        final double[] shares = new double[counts.size()];
-        if(total <= 0) {
-            return shares;
-        }
-        for(int i = 0; i < counts.size(); i++) {
-            shares[i] = counts.get(i).getAsDouble() / total;
-        }
-        return shares;
-    }
-
-    /** Half the L1 distance between two aligned share distributions (total variation distance, in [0, 1]). */
-    private static double totalVariation(final double[] sharesA, final double[] sharesB) {
-        double sum = 0d;
-        for(int i = 0; i < sharesA.length; i++) {
-            sum += Math.abs(sharesA[i] - sharesB[i]);
-        }
-        return sum / 2;
-    }
-
-    /** Max |cumulative share A − cumulative share B| over aligned bins (binned KS statistic). */
-    private static double binnedKs(final double[] sharesA, final double[] sharesB) {
-        double ks = 0d;
-        double cumA = 0d;
-        double cumB = 0d;
-        for(int i = 0; i < sharesA.length; i++) {
-            cumA += sharesA[i];
-            cumB += sharesB[i];
-            ks = Math.max(ks, Math.abs(cumA - cumB));
-        }
-        return ks;
-    }
-
-    /** Linear interpolation of a stored CDF ({@code points} ascending, {@code ranks} in [0,1]). */
-    private static double interpolateCdf(final double[] points, final double[] ranks, final double x) {
-        if(points.length == 0) {
-            return 0d;
-        }
-        if(x <= points[0]) {
-            return x < points[0] ? 0d : ranks[0];
-        }
-        if(x >= points[points.length - 1]) {
-            return 1d;
-        }
-        int low = 0;
-        int high = points.length - 1;
-        while(low + 1 < high) {
-            final int mid = (low + high) >>> 1;
-            if(points[mid] <= x) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        final double span = points[high] - points[low];
-        final double t = span <= 0 ? 0d : (x - points[low]) / span;
-        return ranks[low] + t * (ranks[high] - ranks[low]);
-    }
-
-    /**
-     * PSI/KS of every non-baseline group against the baseline group, written into the group field
-     * entries; the per-field maximum PSI is also annotated on the top-level field objects
-     * ({@code drift}) for the stat strips.
-     */
-    private static void annotateBaselineDrift(final JsonArray comparisons, final JsonArray fields, final Config config) {
-        final java.util.Map<String, JsonObject> fieldMap = new java.util.HashMap<>();
-        for(final JsonElement field : fields) {
-            fieldMap.put(field.getAsJsonObject().get("path").getAsString(), field.getAsJsonObject());
-        }
-        for(final JsonElement axisElement : comparisons) {
-            final JsonObject axis = axisElement.getAsJsonObject();
-            if(!axis.has("baseline")) {
-                continue;
-            }
-            final String baseline = axis.get("baseline").getAsString();
-            JsonObject baselineFields = null;
-            for(final JsonElement group : axis.getAsJsonArray("groups")) {
-                if(baseline.equals(group.getAsJsonObject().get("value").getAsString())) {
-                    baselineFields = group.getAsJsonObject().getAsJsonObject("fields");
-                }
-            }
-            if(baselineFields == null) {
-                continue;
-            }
-            for(final JsonElement groupElement : axis.getAsJsonArray("groups")) {
-                final JsonObject group = groupElement.getAsJsonObject();
-                if(baseline.equals(group.get("value").getAsString())) {
-                    continue;
-                }
-                for(final String path : group.getAsJsonObject("fields").keySet()) {
-                    final JsonObject target = group.getAsJsonObject("fields").getAsJsonObject(path);
-                    final JsonObject base = baselineFields.getAsJsonObject(path);
-                    if(base == null) {
-                        continue;
-                    }
-                    final Double psi = groupPsi(base, target);
-                    if(psi == null) {
-                        continue;
-                    }
-                    target.addProperty("psi", psi);
-                    if(target.has("hist") && base.has("hist")) {
-                        target.addProperty("ks", binnedKs(
-                                sharesOf(base.getAsJsonArray("hist"), base.get("count").getAsDouble()),
-                                sharesOf(target.getAsJsonArray("hist"), target.get("count").getAsDouble())));
-                    }
-                    final JsonObject field = fieldMap.get(path);
-                    if(field != null) {
-                        final double previous = field.has("drift")
-                                ? field.getAsJsonObject("drift").get("psi").getAsDouble()
-                                : -1d;
-                        if(psi > previous) {
-                            final JsonObject drift = new JsonObject();
-                            drift.addProperty("psi", psi);
-                            drift.addProperty("vs", group.get("value").getAsString());
-                            field.add("drift", drift);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /** PSI between a baseline and a target group entry, from whichever aligned distribution both carry. */
-    private static Double groupPsi(final JsonObject base, final JsonObject target) {
-        if(base.has("hist") && target.has("hist")
-                && base.getAsJsonArray("hist").size() == target.getAsJsonArray("hist").size()) {
-            return psi(
-                    sharesOf(target.getAsJsonArray("hist"), target.get("count").getAsDouble()),
-                    sharesOf(base.getAsJsonArray("hist"), base.get("count").getAsDouble()));
-        }
-        if(base.has("topK") && target.has("topK")
-                && base.getAsJsonArray("topK").size() == target.getAsJsonArray("topK").size()) {
-            // top-K shares + an "other" bucket so the tail is represented
-            final double[] a = withOtherBucket(sharesOf(target.getAsJsonArray("topK"), target.get("count").getAsDouble()));
-            final double[] b = withOtherBucket(sharesOf(base.getAsJsonArray("topK"), base.get("count").getAsDouble()));
-            return psi(a, b);
-        }
-        if(base.has("trueCount") && target.has("trueCount")) {
-            final double baseTotal = base.get("trueCount").getAsDouble() + base.get("falseCount").getAsDouble();
-            final double targetTotal = target.get("trueCount").getAsDouble() + target.get("falseCount").getAsDouble();
-            if(baseTotal == 0 || targetTotal == 0) {
-                return null;
-            }
-            return psi(
-                    new double[] { target.get("trueCount").getAsDouble() / targetTotal, target.get("falseCount").getAsDouble() / targetTotal },
-                    new double[] { base.get("trueCount").getAsDouble() / baseTotal, base.get("falseCount").getAsDouble() / baseTotal });
-        }
-        return null;
-    }
-
-    private static double[] withOtherBucket(final double[] shares) {
-        final double[] out = new double[shares.length + 1];
-        double sum = 0d;
-        for(int i = 0; i < shares.length; i++) {
-            out[i] = shares[i];
-            sum += shares[i];
-        }
-        out[shares.length] = Math.max(0d, 1d - sum);
-        return out;
-    }
-
-    // ---- declared field pairs (compare) ----
-
-    private static final double[] QQ_RANKS;
-    static {
-        QQ_RANKS = new double[49];
-        for(int i = 0; i < QQ_RANKS.length; i++) {
-            QQ_RANKS[i] = 0.02 * (i + 1);
-        }
-    }
-
-    private static JsonArray buildFieldPairs(
-            final ProfileAccumulator accumulator, final ProfileSpec spec, final Config config) {
-
-        final JsonArray pairs = new JsonArray();
-        for(final String[] pair : config.comparePairs) {
-            final JsonObject o = new JsonObject();
-            o.addProperty("a", pair[0]);
-            o.addProperty("b", pair[1]);
-            final ProfileAccumulator.FieldAccumulator fieldA = fieldByPath(accumulator, spec, pair[0]);
-            final ProfileAccumulator.FieldAccumulator fieldB = fieldByPath(accumulator, spec, pair[1]);
-            if(fieldA == null || fieldB == null
-                    || fieldA.count == 0 || fieldB.count == 0
-                    || fieldA.getKll() == null || fieldA.getKll().isEmpty()
-                    || fieldB.getKll() == null || fieldB.getKll().isEmpty()) {
-                o.addProperty("error", "both fields need numeric observations to compare");
-                pairs.add(o);
-                continue;
-            }
-            final double min = Math.min(fieldA.min, fieldB.min);
-            final double max = Math.max(fieldA.max, fieldB.max);
-            final double[] edges = equalWidthEdges(min, max, config.overlayBins);
-            final double[] sharesA = pmfOverEdges(fieldA.getKll(), edges);
-            final double[] sharesB = pmfOverEdges(fieldB.getKll(), edges);
-            final double[] cdfA = cdfOverEdges(fieldA.getKll(), edges);
-            final double[] cdfB = cdfOverEdges(fieldB.getKll(), edges);
-            o.add("edges", toJsonArray(edges));
-            o.add("sharesA", toJsonArray(sharesA));
-            o.add("sharesB", toJsonArray(sharesB));
-            o.addProperty("countA", fieldA.count);
-            o.addProperty("countB", fieldB.count);
-            o.addProperty("psi", psi(sharesA, sharesB));
-            double ks = 0d;
-            for(int i = 0; i < cdfA.length; i++) {
-                ks = Math.max(ks, Math.abs(cdfA[i] - cdfB[i]));
-            }
-            o.addProperty("ks", ks);
-            final JsonArray qq = new JsonArray();
-            for(final double rank : QQ_RANKS) {
-                final JsonArray point = new JsonArray();
-                point.add(fieldA.getKll().getQuantile(rank, QuantileSearchCriteria.INCLUSIVE));
-                point.add(fieldB.getKll().getQuantile(rank, QuantileSearchCriteria.INCLUSIVE));
-                qq.add(point);
-            }
-            o.add("qq", qq);
-            pairs.add(o);
-        }
-        return pairs;
-    }
-
-    private static ProfileAccumulator.FieldAccumulator fieldByPath(
-            final ProfileAccumulator accumulator, final ProfileSpec spec, final String path) {
-        for(int i = 0; i < spec.getFields().size(); i++) {
-            if(spec.getFields().get(i).path.equals(path)) {
-                return accumulator.getField(i);
-            }
-        }
-        return null;
-    }
-
-    private static JsonArray toJsonArray(final double[] values) {
-        final JsonArray array = new JsonArray();
-        for(final double value : values) {
-            array.add(value);
-        }
-        return array;
-    }
-
-    // ---- compareWith (past report artifact) ----
-
-    /**
-     * Payload-level comparison against a past report's embedded blocks, plus Theta-sketch key
-     * overlap when both reports embed sketch binaries (§6.3: v0 payloads must stay readable).
-     */
-    private static JsonObject buildCompareWith(
-            final ProfileAccumulator accumulator,
-            final PastReport past,
-            final ProfileSpec spec,
-            final Config config) {
-
-        final JsonObject result = new JsonObject();
-        result.addProperty("source", past.source);
-        final List<String> warnings = new ArrayList<>();
-
-        final JsonObject oldPayload = JsonParser.parseString(past.payloadJson).getAsJsonObject();
-        final int oldVersion = oldPayload.has("formatVersion") ? oldPayload.get("formatVersion").getAsInt() : 0;
-        if(oldVersion > PAYLOAD_FORMAT_VERSION) {
-            warnings.add("past report has a newer payload format (v" + oldVersion + " > v" + PAYLOAD_FORMAT_VERSION + "); some comparisons may be incomplete");
-        }
-        if(past.manifestJson != null) {
-            final JsonObject oldManifest = JsonParser.parseString(past.manifestJson).getAsJsonObject();
-            if(oldManifest.has("job") && oldManifest.getAsJsonObject("job").has("generatedAt")) {
-                result.addProperty("generatedAtOld", oldManifest.getAsJsonObject("job").get("generatedAt").getAsString());
-            }
-            if(oldManifest.has("sketchParameters")) {
-                final JsonObject oldParams = oldManifest.getAsJsonObject("sketchParameters");
-                final ProfileSpec.SketchParameters params = spec.getSketchParameters();
-                if(oldParams.has("kllK") && oldParams.get("kllK").getAsInt() != params.kllK
-                        || oldParams.has("cpcLgK") && oldParams.get("cpcLgK").getAsInt() != params.cpcLgK) {
-                    warnings.add("sketch parameters differ between runs; comparison accuracy is limited by the coarser side");
-                }
-            }
-        }
-        final boolean oldHidden = oldPayload.has("values") && "hide".equals(oldPayload.get("values").getAsString());
-        result.addProperty("rowsOld", oldPayload.get("rows").getAsLong());
-        result.addProperty("rowsNew", accumulator.getRowCount());
-
-        final java.util.Map<String, JsonObject> oldFields = new java.util.LinkedHashMap<>();
-        for(final JsonElement field : oldPayload.getAsJsonArray("fields")) {
-            oldFields.put(field.getAsJsonObject().get("path").getAsString(), field.getAsJsonObject());
-        }
-        final JsonObject oldSketchFields = past.sketchesJson == null ? null
-                : JsonParser.parseString(past.sketchesJson).getAsJsonObject().has("fields")
-                        ? JsonParser.parseString(past.sketchesJson).getAsJsonObject().getAsJsonObject("fields")
-                        : null;
-
-        final JsonArray fields = new JsonArray();
-        final java.util.Set<String> seen = new java.util.HashSet<>();
-        for(int i = 0; i < spec.getFields().size(); i++) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(i);
-            seen.add(fieldSpec.path);
-            final JsonObject o = new JsonObject();
-            o.addProperty("path", fieldSpec.path);
-            o.addProperty("type", fieldSpec.profileType.name().toLowerCase());
-            final JsonObject old = oldFields.get(fieldSpec.path);
-            if(old == null) {
-                o.addProperty("status", "added");
-                fields.add(o);
-                continue;
-            }
-            if(!fieldSpec.profileType.name().toLowerCase().equals(old.get("type").getAsString())) {
-                o.addProperty("status", "type_changed");
-                o.addProperty("typeOld", old.get("type").getAsString());
-                fields.add(o);
-                continue;
-            }
-            o.addProperty("status", "common");
-            compareCommonField(o, fieldSpec, field, old, accumulator, spec, config, oldHidden);
-            if(fieldSpec.isKey && oldSketchFields != null && oldSketchFields.has(fieldSpec.path)) {
-                final JsonObject oldSketch = oldSketchFields.getAsJsonObject(fieldSpec.path);
-                if(oldSketch.has("theta")) {
-                    try {
-                        o.add("keyOverlap", compareKeySketches(field, oldSketch.get("theta").getAsString(), spec));
-                    } catch (final Throwable e) {
-                        warnings.add("failed to compare key sketches for " + fieldSpec.path + ": " + e.getMessage());
-                    }
-                }
-            }
-            fields.add(o);
-        }
-        for(final java.util.Map.Entry<String, JsonObject> entry : oldFields.entrySet()) {
-            if(!seen.contains(entry.getKey())) {
-                final JsonObject o = new JsonObject();
-                o.addProperty("path", entry.getKey());
-                o.addProperty("type", entry.getValue().get("type").getAsString());
-                o.addProperty("status", "removed");
-                fields.add(o);
-            }
-        }
-        result.add("fields", fields);
-        final JsonArray warningsArray = new JsonArray();
-        for(final String warning : warnings) {
-            warningsArray.add(warning);
-        }
-        result.add("warnings", warningsArray);
-        return result;
-    }
-
-    private static void compareCommonField(
-            final JsonObject o,
-            final ProfileSpec.FieldSpec fieldSpec,
-            final ProfileAccumulator.FieldAccumulator field,
-            final JsonObject old,
-            final ProfileAccumulator accumulator,
-            final ProfileSpec spec,
-            final Config config,
-            final boolean oldHidden) {
-
-        o.addProperty("nullRateOld", old.get("nullRate").getAsDouble());
-        final long total = field.count + field.nullCount + field.errorCount + field.nanCount + field.infCount;
-        o.addProperty("nullRateNew", total == 0 ? 0d : (double) field.nullCount / total);
-        if(old.has("distinct")) {
-            o.addProperty("distinctOld", old.getAsJsonObject("distinct").get("estimate").getAsDouble());
-        }
-        final CpcSketch cpc = field.cpcResult(spec.getSketchParameters());
-        if(cpc != null && field.count > 0) {
-            o.addProperty("distinctNew", cpc.getEstimate());
-        }
-
-        switch (fieldSpec.profileType) {
-            case NUMERIC, ARRAY_LENGTH -> {
-                final JsonObject oldNumeric = old.has("numeric") ? old.getAsJsonObject("numeric") : null;
-                final KllDoublesSketch kll = field.getKll();
-                if(oldNumeric == null || !oldNumeric.has("cdf") || kll == null || kll.isEmpty() || field.count == 0) {
-                    return;
-                }
-                final JsonObject oldCdf = oldNumeric.getAsJsonObject("cdf");
-                final double[] oldPoints = toDoubleArray(oldCdf.getAsJsonArray("points"));
-                final double[] oldRanks = toDoubleArray(oldCdf.getAsJsonArray("ranks"));
-                final double min = Math.min(field.min, oldNumeric.get("min").getAsDouble());
-                final double max = Math.max(field.max, oldNumeric.get("max").getAsDouble());
-                if(!(max > min) || oldPoints.length == 0) {
-                    return;
-                }
-                final double[] edges = equalWidthEdges(min, max, config.overlayBins);
-                final int bins = edges.length - 1;
-                final double[] newShares = pmfOverEdges(kll, edges);
-                final double[] newCdf = cdfOverEdges(kll, edges);
-                final double[] oldShares = new double[bins];
-                final double[] oldCdfAtEdges = new double[bins];
-                double previous = 0d;
-                for(int i = 0; i < bins; i++) {
-                    final double rank = interpolateCdf(oldPoints, oldRanks, edges[i + 1]);
-                    oldShares[i] = Math.max(0d, rank - previous);
-                    oldCdfAtEdges[i] = rank;
-                    previous = rank;
-                }
-                o.addProperty("psi", psi(newShares, oldShares));
-                double ks = 0d;
-                for(int i = 0; i < bins; i++) {
-                    ks = Math.max(ks, Math.abs(newCdf[i] - oldCdfAtEdges[i]));
-                }
-                o.addProperty("ks", ks);
-                if(oldNumeric.has("quantiles")) {
-                    o.addProperty("p50Old", oldNumeric.getAsJsonObject("quantiles").get("p50").getAsDouble());
-                    o.addProperty("p50New", kll.getQuantile(0.5, QuantileSearchCriteria.INCLUSIVE));
-                }
-                // both CDFs on the shared edges for the client-side overlay
-                final JsonObject cdf = new JsonObject();
-                cdf.add("edges", toJsonArray(edges));
-                cdf.add("oldRanks", toJsonArray(oldCdfAtEdges));
-                final double[] newCdfTrimmed = new double[bins];
-                System.arraycopy(newCdf, 0, newCdfTrimmed, 0, bins);
-                cdf.add("newRanks", toJsonArray(newCdfTrimmed));
-                o.add("cdf", cdf);
-            }
-            case STRING -> {
-                if(oldHidden || !config.showValues || !old.has("string")) {
-                    return;
-                }
-                final JsonObject oldString = old.getAsJsonObject("string");
-                final ItemsSketch<String> fi = field.getFrequentItems();
-                if(!oldString.has("topK") || fi == null || field.count == 0) {
-                    return;
-                }
-                // PSI over the past top-K labels' shares (+ other), estimated on both sides
-                final JsonArray oldTopK = oldString.getAsJsonArray("topK");
-                final long oldCount = old.get("count").getAsLong();
-                if(oldCount == 0 || oldTopK.isEmpty()) {
-                    return;
-                }
-                final List<Double> oldShares = new ArrayList<>();
-                final List<Double> newShares = new ArrayList<>();
-                for(final JsonElement item : oldTopK) {
-                    final JsonObject itemObject = item.getAsJsonObject();
-                    if(!itemObject.has("value")) {
-                        return;   // past report was value-masked
-                    }
-                    oldShares.add(itemObject.get("count").getAsDouble() / oldCount);
-                    newShares.add((double) fi.getEstimate(itemObject.get("value").getAsString()) / field.count);
-                }
-                final double[] a = withOtherBucket(newShares.stream().mapToDouble(Double::doubleValue).toArray());
-                final double[] b = withOtherBucket(oldShares.stream().mapToDouble(Double::doubleValue).toArray());
-                o.addProperty("psi", psi(a, b));
-            }
-            case BOOL -> {
-                if(!old.has("bool") || field.count == 0) {
-                    return;
-                }
-                final JsonObject oldBool = old.getAsJsonObject("bool");
-                final double oldTotal = oldBool.get("trueCount").getAsDouble() + oldBool.get("falseCount").getAsDouble();
-                if(oldTotal == 0) {
-                    return;
-                }
-                o.addProperty("trueShareOld", oldBool.get("trueCount").getAsDouble() / oldTotal);
-                o.addProperty("trueShareNew", (double) field.trueCount / field.count);
-            }
-        }
-    }
-
-    /** Theta set operations between the current key sketch and a past report's embedded one. */
-    private static JsonObject compareKeySketches(
-            final ProfileAccumulator.FieldAccumulator field,
-            final String oldThetaBase64,
-            final ProfileSpec spec) {
-
-        final CompactSketch oldTheta = CompactSketch.heapify(
-                org.apache.datasketches.memory.Memory.wrap(Base64.getDecoder().decode(oldThetaBase64)));
-        final CompactSketch newTheta = field.thetaResult(spec.getSketchParameters());
-        final JsonObject o = new JsonObject();
-        o.addProperty("distinctOld", oldTheta.getEstimate());
-        o.addProperty("distinctNew", newTheta == null ? 0d : newTheta.getEstimate());
-        if(newTheta == null || newTheta.getEstimate() == 0d || oldTheta.getEstimate() == 0d) {
-            return o;
-        }
-        final Intersection intersection = SetOperation.builder().buildIntersection();
-        intersection.intersect(oldTheta);
-        intersection.intersect(newTheta);
-        final double inter = intersection.getResult().getEstimate();
-        o.addProperty("intersection", inter);
-        o.addProperty("retainedShare", inter / oldTheta.getEstimate());   // |old ∩ new| / |old|
-        o.addProperty("newShare", 1d - inter / newTheta.getEstimate());   // share of new keys unseen before
-        return o;
-    }
-
-    private static double[] toDoubleArray(final JsonArray array) {
-        final double[] values = new double[array.size()];
-        for(int i = 0; i < array.size(); i++) {
-            values[i] = array.get(i).getAsDouble();
-        }
-        return values;
     }
 
     /** Gson's lenient parser accepts bare NaN/Infinity; they are not JSON and would break JSON.parse in the report. */
@@ -1847,18 +830,15 @@ public class ProfileRenderer {
         return result;
     }
 
+    /** Declarations the run could have used, inferred from names and cardinalities (profile-dsl.md §10.1). */
     private static JsonArray buildSuggestions(final ProfileAccumulator accumulator, final ProfileSpec spec) {
         final JsonArray suggestions = new JsonArray();
         final long rows = accumulator.getRowCount();
         final ProfileSpec.SketchParameters params = spec.getSketchParameters();
 
-        // keys: distinct ≈ rows and ID-like naming
         final List<String> keyCandidates = new ArrayList<>();
-        // segments: low-cardinality strings
         final List<String> segmentCandidates = new ArrayList<>();
-        // time: single timestamp field
         final List<String> timestampFields = new ArrayList<>();
-        // target: boolean or flag-like naming
         final List<String> targetCandidates = new ArrayList<>();
 
         for(int i = 0; i < accumulator.getFieldCount(); i++) {
@@ -1939,34 +919,38 @@ public class ProfileRenderer {
     // ---- manifest ----
 
     private static JsonObject buildManifest(
-            final ProfileAccumulator accumulator, final Config config, final List<String> degradations) {
+            final ProfileReport.Result result,
+            final ProfileAccumulator accumulator,
+            final ProfileReport.Config config,
+            final List<String> degradations) {
 
         final ProfileSpec spec = accumulator.getSpec();
         final ProfileSpec.SketchParameters params = spec.getSketchParameters();
 
         final JsonObject manifest = new JsonObject();
-        manifest.addProperty("formatVersion", PAYLOAD_FORMAT_VERSION);
+        manifest.addProperty("formatVersion", ProfileReport.FORMAT_VERSION);
 
         final JsonObject generator = new JsonObject();
-        generator.addProperty("name", "mercari-pipeline profile sink");
+        generator.addProperty("name", "mercari-pipeline profile transform");
         generator.addProperty("sketchLibrary", "org.apache.datasketches:datasketches-java:6.2.0");
         manifest.add("generator", generator);
 
         final JsonObject job = new JsonObject();
         job.addProperty("jobName", config.jobName);
         job.addProperty("moduleName", config.moduleName);
+        job.addProperty("runId", config.runId);
+        job.addProperty("dataset", config.dataset);
+        job.addProperty("partition", config.partition);
         final JsonArray inputs = new JsonArray();
-        if(config.inputNames != null) {
-            for(final String input : config.inputNames) {
-                inputs.add(input);
-            }
+        for(final String input : config.inputNames) {
+            inputs.add(input);
         }
         job.add("inputs", inputs);
-        job.addProperty("generatedAt", Instant.now().toString());
+        job.addProperty("generatedAt", result.generatedAt.toString());
         manifest.add("job", job);
 
-        manifest.addProperty("rows", accumulator.getRowCount());
-        manifest.addProperty("errorRows", accumulator.getErrorCount());
+        manifest.addProperty("rows", result.rows);
+        manifest.addProperty("errorRows", result.errorRows);
 
         final JsonObject sketchParameters = new JsonObject();
         sketchParameters.addProperty("kllK", params.kllK);
@@ -1975,7 +959,14 @@ public class ProfileRenderer {
         sketchParameters.addProperty("thetaLgK", params.thetaLgK);
         sketchParameters.addProperty("sampleK", params.sampleK);
         sketchParameters.addProperty("topKKeep", params.topKKeep);
+        sketchParameters.addProperty("valueTableLimit", params.valueTableLimit);
         manifest.add("sketchParameters", sketchParameters);
+
+        final JsonObject counting = new JsonObject();
+        counting.addProperty("pass", config.countingPass);
+        counting.addProperty("cells", ProfileEdges.CELLS);
+        counting.addProperty("bins", config.binsCount);
+        manifest.add("counting", counting);
 
         if(config.expandedParametersJson != null) {
             manifest.add("expandedParameters", JsonParser.parseString(config.expandedParametersJson));
@@ -1996,88 +987,26 @@ public class ProfileRenderer {
             degradationArray.add(degradation);
         }
         manifest.add("degradations", degradationArray);
-        if(config.sketchesOutput != null) {
-            manifest.addProperty("sketchesOutput", config.sketchesOutput);
-        }
-        if(config.compareWithSource != null) {
-            manifest.addProperty("compareWith", config.compareWithSource);
-        }
         return manifest;
-    }
-
-    // ---- sketches ----
-
-    /**
-     * Base64 sketch binaries per field. With {@code values: hide}, item-bearing sketches
-     * (frequent items, sample) are excluded because their binaries contain raw values.
-     */
-    public static JsonObject buildSketches(final ProfileAccumulator accumulator, final Config config) {
-        final ProfileSpec spec = accumulator.getSpec();
-        final ProfileSpec.SketchParameters params = spec.getSketchParameters();
-        final Base64.Encoder encoder = Base64.getEncoder();
-
-        final JsonObject sketches = new JsonObject();
-        sketches.addProperty("formatVersion", PAYLOAD_FORMAT_VERSION);
-        final JsonObject fields = new JsonObject();
-        for(int i = 0; i < accumulator.getFieldCount(); i++) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(i);
-            final JsonObject o = new JsonObject();
-            final KllDoublesSketch kll = field.getKll();
-            if(kll != null && !kll.isEmpty()) {
-                o.addProperty("kll", encoder.encodeToString(kll.toByteArray()));
-            }
-            final CpcSketch cpc = field.cpcResult(params);
-            if(cpc != null && field.count > 0) {
-                o.addProperty("cpc", encoder.encodeToString(cpc.toByteArray()));
-            }
-            if(config.showValues) {
-                final ItemsSketch<String> fi = field.getFrequentItems();
-                if(fi != null && field.count > 0) {
-                    o.addProperty("fi", encoder.encodeToString(fi.toByteArray(new org.apache.datasketches.common.ArrayOfStringsSerDe())));
-                }
-            }
-            final CompactSketch theta = field.thetaResult(params);
-            if(theta != null) {
-                o.addProperty("theta", encoder.encodeToString(theta.toByteArray()));
-            }
-            if(!o.keySet().isEmpty()) {
-                fields.add(fieldSpec.path, o);
-            }
-        }
-        sketches.add("fields", fields);
-        if(config.showValues && spec.isSampleEnabled()) {
-            final VarOptItemsSketch<String> sample = accumulator.sampleResult();
-            if(sample != null && sample.getNumSamples() > 0) {
-                sketches.addProperty("sample", encoder.encodeToString(
-                        sample.toByteArray(new org.apache.datasketches.common.ArrayOfStringsSerDe())));
-            }
-        }
-        return sketches;
     }
 
     // ---- static fallback (readable without JavaScript) ----
 
-    private static String buildStaticTable(final ProfileAccumulator accumulator) {
-        final ProfileSpec spec = accumulator.getSpec();
-        final ProfileSpec.SketchParameters params = spec.getSketchParameters();
+    private static String buildStaticTable(final ProfileReport.Result result) {
         final StringBuilder sb = new StringBuilder();
         sb.append("<table><thead><tr>")
                 .append("<th>field</th><th>type</th><th>count</th><th>null</th><th>distinct&asymp;</th><th>min</th><th>max</th><th>mean</th>")
                 .append("</tr></thead><tbody>");
-        for(int i = 0; i < accumulator.getFieldCount(); i++) {
-            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
-            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(i);
-            sb.append("<tr><td>").append(escapeHtml(fieldSpec.path)).append("</td>")
-                    .append("<td>").append(fieldSpec.profileType.name().toLowerCase()).append("</td>")
+        for(final ProfileReport.FieldResult field : result.fields) {
+            sb.append("<tr><td>").append(escapeHtml(field.path)).append("</td>")
+                    .append("<td>").append(field.type).append("</td>")
                     .append("<td>").append(field.count).append("</td>")
-                    .append("<td>").append(field.nullCount).append("</td>");
-            final CpcSketch cpc = field.cpcResult(params);
-            sb.append("<td>").append(cpc != null && field.count > 0 ? String.format("%.0f", cpc.getEstimate()) : "-").append("</td>");
-            if(field.count > 0 && Double.isFinite(field.min)) {
+                    .append("<td>").append(field.nulls).append("</td>")
+                    .append("<td>").append(field.distinct == null ? "-" : String.format("%.0f", field.distinct)).append("</td>");
+            if(field.min != null && !"timestamp".equals(field.type)) {
                 sb.append("<td>").append(field.min).append("</td>")
                         .append("<td>").append(field.max).append("</td>")
-                        .append("<td>").append(String.format("%.4g", field.mean)).append("</td>");
+                        .append("<td>").append(field.mean == null ? "-" : String.format("%.4g", field.mean)).append("</td>");
             } else {
                 sb.append("<td>-</td><td>-</td><td>-</td>");
             }

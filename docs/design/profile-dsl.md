@@ -1,10 +1,11 @@
 # Profile Transform DSL (Design Document)
 
-Status: **Proposal** — the contract of a `profile` *transform* that replaces the `profile` sink: the same
-observations, emitted as record outputs any sink can store, with the HTML report as an optional file the
-transform writes. Nothing here is built yet; §13 gives the stages and §14 what is deliberately left out. The
-execution side is [profile-engine.md](profile-engine.md). The current sink is documented in
-`src/main/resources/server/docs/module/sink/profile.md`.
+Status: **Stage 1 implemented** — the contract of the `profile` *transform* that replaced the `profile`
+sink: the same observations, emitted as record outputs any sink can store, with the HTML report as an
+optional file the transform writes. `module: profile` accepts today what §13 lists under stage 1; the
+parameters of stages 2 and 3 are rejected at assembly with a "not implemented yet" message rather than
+ignored. §14 is what is deliberately left out. The execution side is [profile-engine.md](profile-engine.md);
+the user-facing reference is `src/main/resources/server/docs/module/transform/profile.md`.
 
 ## 1. Purpose and position
 
@@ -312,7 +313,9 @@ The transform reads its input twice. The first pass builds the whole-dataset pro
 §5.1) and, from its quantile sketch, the **edges** of every numeric-like field: the 100 equal-frequency
 cells of the whole dataset (fewer where ties collapse edges). The second pass counts, exactly, the rows of
 every group and target class in every cell, and for categorical fields in every value of the whole-dataset
-value table (the complete table, or the top values plus `(other)`).
+value list: the most frequent 50 values — of the exact table when the field has one, of the frequent items
+otherwise — plus `(other)`. (The `values` output still carries the complete exact table; the cap applies to
+what is counted per group, where a 1,000-value field would cost a 1,000-cell array per group.)
 
 Everything a comparison needs is a function of those counts:
 
@@ -362,7 +365,8 @@ axis when `mode: compare` declares one, otherwise none: with only `segments` or 
 output has no drift columns and the per-group values are read from `groups`. A segment or a time bucket
 differing from the rest is usually what the axis was declared to show, not a finding about the field, so it
 is not promoted to the field record unless asked for. `drift.exclude` removes fields that differ by
-construction (the time field the inputs were split on).
+construction (the time field the inputs were split on); the field of the drift axis itself is always left
+out for the same reason.
 
 `noiseKs` = 1.36·√(1/n₁ + 1/n₂) and `noisePsi` = (bins − 1)(1/n₁ + 1/n₂) are the sizes the statistic reaches
 between two random samples of one distribution. They are reference columns and take part in no ranking: when
@@ -631,8 +635,10 @@ resolution. The record outputs never degrade.
 ## 11. Raw values
 
 `values: hide` applies to every output and file: `values.value`, categorical `bins.value` and
-segment group labels become ranks (`#1`, `group #1`), `fields.top` is null, and the `sample` output and the value-bearing sketch
-binaries are not produced. Time bucket labels and input names are not values. The report and the outputs
+segment group labels (in `groups`, `bins` and `fields.driftVs` alike) become ranks (`#1`, `group #1`),
+`fields.top` is null, the report carries no value table of a discrete numeric field, and the `sample` output
+and the value-bearing sketch binaries are not produced. Statistics — minima, maxima, quantiles, histograms —
+are not values and are kept. Time bucket labels and input names are not values. The report and the outputs
 are otherwise as sensitive as the source data.
 
 ## 12. Constraints and diagnostics
@@ -658,15 +664,20 @@ depth (listed in the manifest).
 
 ## 13. Stages
 
-1. **The transform and the counting pass.** `fields`, `groups`, `values`, `bins`, `pairs`, `target`
-   (binary), `summary`; the full record identity of §4 (`dataset`, `partition`); §5.2 notable codes and null
-   sentinels; `sum`; §6 in full; the report and the payload file written by the transform; the sink, its
-   examples and its reference page removed.
+1. **The transform and the counting pass — implemented.** `fields`, `groups`, `values`, `bins`, `pairs`,
+   `target` (binary), `summary`; the full record identity of §4 (`dataset`, `partition`); §5.2 notable codes
+   and null sentinels; `sum`; §6 with declared edges and `drift.axis` / `drift.exclude`; the report and the
+   payload file written by the transform; the sink, its examples and its reference page removed. Also in
+   this stage, carried over from the sink: `keys` as a list of field names with the `kind: key` records
+   (`distinct` with bounds, capped `keyness`, `nullKeys`) — no `unique`, composite keys, domains or overlaps.
 2. **Runs and declarations.** `previous` and `changes`; `expectations` and `checks` with all three rule
-   kinds, severity and metadata (§9.2); freshness and missing buckets (§9.3); keys with `unique`, composite
-   keys, `domain` and input overlaps; the `sketches` and `sample` outputs; the numeric target.
+   kinds, severity and metadata (§9.2); freshness and missing buckets (§9.3) with `time.groups`; keys with
+   `unique`, composite keys, `domain` and input overlaps, and the key set sketches in the payload (§10.2);
+   the `sketches` and `sample` outputs; the numeric target.
 3. **Recurring runs and shapes.** `previous.window` and `deviation` (§9.4); `preset: monitor` (§9.5);
-   `unnest`; `time.timezone`; `bins.edges: previous`.
+   `unnest`; `time.timezone`; `bins.edges: previous`; `bins.mode: sketch` (moved here from stage 1: it needs
+   the per-group and per-class sketch sets the counting pass replaced, a second code path worth building
+   only once an input that cannot be read twice asks for it).
 
 The identity columns and the `checks` columns are in the first two stages on purpose: they are the part of
 the contract a history table and a notification depend on, and the part that is expensive to change later.

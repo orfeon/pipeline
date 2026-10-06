@@ -12,8 +12,8 @@ import java.util.Set;
 
 /**
  * One comparison axis of the profile (declared {@code segments} field or the {@code time} field).
- * A row is assigned to at most one group per axis; per-group sub-profiles are computed with the
- * same CombineFn as the global profile, keyed by {@link #groupKey}.
+ * A row is assigned to at most one group per axis; the counting pass counts each group's rows
+ * under {@link #groupKey}.
  */
 public class ProfileAxis implements Serializable {
 
@@ -41,6 +41,11 @@ public class ProfileAxis implements Serializable {
 
     public String id() {
         return kind.name() + ":" + field;
+    }
+
+    /** The axis as the records name it: {@code segments:<field>}, {@code time:<field>} or {@code inputs}. */
+    public String label() {
+        return Kind.inputs.equals(kind) ? kind.name() : id();
     }
 
     public String groupKey(final String group) {
@@ -74,7 +79,7 @@ public class ProfileAxis implements Serializable {
                 }
                 final Double numeric = raw instanceof Number ? ProfileSpec.toDouble(raw) : null;
                 if(numeric != null && symbols == null) {
-                    yield canonicalNumeric(numeric);
+                    yield ProfileReport.canonicalNumber(numeric);
                 }
                 final String s = ProfileSpec.toStringValue(raw, symbols);
                 yield s == null ? NULL_GROUP : (s.length() > 128 ? s.substring(0, 128) : s);
@@ -84,13 +89,6 @@ public class ProfileAxis implements Serializable {
                 yield ms == null ? null : truncateLabel(ms.longValue(), granularity);
             }
         };
-    }
-
-    private static String canonicalNumeric(final double v) {
-        if(v == Math.rint(v) && Double.isFinite(v) && Math.abs(v) < 1e15) {
-            return String.valueOf((long) v);
-        }
-        return String.valueOf(v);
     }
 
     /** UTC bucket label, e.g. month → {@code 2025-01}, week → the Monday date, hour → {@code 2025-01-15T03}. */
