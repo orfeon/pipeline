@@ -101,14 +101,16 @@ sinks:
 A config with only `sources` and the `profile` transform is valid: when `output.report` is set the report is
 written and nothing else needs to consume the transform.
 
-The `profile` sink stays for a deprecation period as a thin alias over the same core: it accepts the
-parameters of §3, keeps its output-location fallback (`{workDir}/{name}/report.html`, then
-`{tempLocation}/profile/{jobName}/{name}/report.html`), emits the `summary` record of §5.10 and logs a
-deprecation warning. New parameters are added to the transform only.
+**No compatibility with the sink.** The `profile` sink is removed in the change that adds the transform;
+there is no alias and no deprecation period. A sink config is rewritten by hand: the module moves to
+`transforms`, `output` becomes `output.report` (there is no default report location — no `output`, no
+file), `compareWith` becomes `previous`, and the sink's one output record becomes the `summary` output.
+Reports and sketch files written by the sink are not read (§9.1). Parameters described below as "as in the
+sink" keep their meaning; nothing else of the sink's behaviour is promised.
 
 ## 3. Parameters
 
-All optional. Parameters marked *kept* have the meaning they have in the sink today.
+All optional. Parameters marked *kept* have the meaning they have in the sink.
 
 | parameter | type | description |
 |---|---|---|
@@ -121,13 +123,13 @@ All optional. Parameters marked *kept* have the meaning they have in the sink to
 | `unnest` | String | An array-of-struct field to expand into rows before profiling (§7.4). |
 | `keys` | Array | Identifier declarations (§7). |
 | `segments` | Array | *kept* — fields to compare by, `[category]` or `[{field, topK}]`. |
-| `time` | String or Object | *kept* — `{field, granularity}`, plus `timezone` (an IANA zone id, default `UTC`) for the bucket boundaries. |
+| `time` | String or Object | *kept* — `{field, granularity}`, plus `timezone` (an IANA zone id, default `UTC`) for the bucket boundaries and `groups` (default true; false keeps freshness and the bucket row counts of §9.3 without profiling each bucket). |
 | `mode` / `baseline` | Enum / String | *kept* — `mode: compare` makes each input a comparison group; `baseline` names the reference input. |
 | `compare` | Array<Array<String\>\> | *kept* — declared comparable numeric field pairs. |
 | `target` | String or Object | The outcome field every other field is related to (§8). |
-| `bins` | Object | The counting pass (§6): `{mode: exact \| sketch, count: 10, edges: {<field>: [...]}}`. |
-| `drift` | Object | `{exclude: [...]}` — fields left out of the drift ranking (their statistics are still emitted). |
-| `previous` | Object | The run to diff against (§9.1): `{payload: uri}`, `{report: uri}`, or `{input: <name>}`; with `window`, the recent runs to measure against (§9.4). Supersedes `compareWith`, which is kept as an alias of `{report: uri}`. |
+| `bins` | Object | The counting pass (§6): `{mode: exact \| sketch, count: 10, edges: {<field>: [...]}}`; `edges: previous` reuses the edges of the `previous` run (§6.2). |
+| `drift` | Object | `{axis, exclude: [...]}` — the axis whose groups feed the `drift` columns of the default output (§6.3), and fields left out of the drift ranking (their statistics are still emitted). |
+| `previous` | Object | The run to diff against (§9.1): `{payload: uri}`, `{report: uri}`, or `{input: <name>}`; with `window`, the recent runs to measure against (§9.4). |
 | `expectations` | Array<Object\> | Declared expectations (§9.2). |
 | `accuracy` | Enum | *kept* — `low` / `default` / `high`; now also sizes the frequent-items map (§5.4). |
 | `associations` | Object | *kept* — `{numeric: all \| none}`. |
@@ -135,7 +137,7 @@ All optional. Parameters marked *kept* have the meaning they have in the sink to
 | `report` | Object | *kept* — `{title}`. |
 | `fanout` | Integer | *kept*. |
 
-Batch (bounded) inputs in the global window only, as today.
+Batch (bounded) inputs in the global window only.
 
 ## 4. Record identity
 
@@ -147,7 +149,7 @@ Every record of every output starts with the same columns:
 | `dataset` | STRING | `run.dataset`, default the module name — *what* was profiled; one history table holds many datasets |
 | `partition` | STRING | `run.partition` — *which slice* of the dataset (a logical date, a version label); null when not given |
 | `generatedAt` | TIMESTAMP | one instant per run, shared by all outputs |
-| `formatVersion` | INT64 | the version of this contract (starts at `2`; the sink's payload is `1`) |
+| `formatVersion` | INT64 | the version of this contract; starts at `2` so that it cannot be taken for the sink's payload (`1`), which is not read |
 
 Appending the outputs of successive runs to one table per output gives the history: the question "in which
 run did this field become entirely null" is one query over the default output.
@@ -160,7 +162,9 @@ one. A consumer that wants one record set per slice upserts on that key or reads
 
 Estimates are named `<stat>` with `<stat>_lo` / `<stat>_hi` — the naming of the evaluation transform's
 intervals; here the bounds are the sketch's two-standard-deviation bounds. A statistic without those columns
-is exact.
+is exact, with two stated exceptions: the quantile columns of §5.1 (`p01` … `p99`, `lengthP50`), whose error
+is the record's `rankError`, and the statistics read off the cell grid of §6.1 (`ks`, `groups.p50`), which
+are exact functions of exact counts but resolved to one cell.
 
 The identity columns and the shape of a `checks` record (§9.2) are meant to be shared with the evaluation
 transform, not owned by this one: a history table keyed by (`dataset`, `partition`) and a notification
@@ -187,7 +191,7 @@ bool: `trues`, `falses`;
 `nullLike`, `nullLikeRate` — rows whose value is a null sentinel (§5.2), and the null rate if they were
 counted as null;
 `notable` (ARRAY<STRING\>, §5.2);
-with a target: `association` and its kind (§8); with a baseline group: `drift`, `driftKind`, `driftVs`,
+with a target: `association` and its kind (§8); with a drift axis (§6.3): `drift`, `driftKind`, `driftVs`,
 `nullShift` (§6.3).
 
 ### 5.2 Notable codes
@@ -215,15 +219,15 @@ Present with `segments`, `time` or `mode: compare`. One record per axis × group
 
 `axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference group
 of the axis), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`,
-`p50` (interpolated from the cells of §6.1, exact to one cell), and against the baseline group of the axis
-(null on the baseline record and on axes without one): `ks` (numeric-like), `tvd` (string / bool), `psi`,
+`p50` (interpolated from the cells of §6.1, exact to one cell), and against the reference of the axis
+(null on the baseline record of the `inputs` axis): `ks` (numeric-like), `tvd` (string / bool), `psi`,
 `nullShift`, `noiseKs`, `noisePsi` (§6.3).
 
 The baseline of the `inputs` axis is `baseline`; `segments` and `time` axes take the rows outside the group
 as the reference (each group against the rest), so the drift columns are populated on every axis.
 
-Groups are bounded as today: the largest `topK` per segment field, the most recent 60 time buckets, every
-input.
+Groups are bounded: the largest `topK` per segment field, the most recent 60 time buckets, every input.
+With `time: {groups: false}` the time axis has no records here (§9.3).
 
 `sum` is exact and is there for reconciliation: with `mode: compare`, the row counts and the sums of two
 inputs (a source and its copy, a table before and after a migration) are compared as they are, not through
@@ -236,7 +240,9 @@ One record per field × value, for string, bool and **low-cardinality numeric** 
 `field`, `value` (STRING; `#<rank>` with `values: hide`), `rank`, `count`, `count_lo`, `count_hi`, `share`,
 `exact`.
 
-A field with at most `1000` distinct values is tabulated exactly (`exact: true`, bounds equal the count) —
+A field with at most `1000` distinct values, none longer than 256 characters, is tabulated exactly
+(`exact: true`, bounds equal the count; the table holds the values whole — a value is never shortened to
+make it fit, since two long values sharing a prefix would then count as one) —
 this is what makes a discrete numeric field readable (a publication lag concentrated on three values is
 three records, not a histogram bar). Above that the records are the frequent-items estimate; the map size
 follows `accuracy` (512 / 1024 / 4096). When the no-false-positive query returns nothing — values spread
@@ -260,8 +266,8 @@ Present with `target`. One record per field other than the target (§8).
 
 ### 5.7 Keys (`<name>.keys`)
 
-Present with `keys` (§7). Records of `kind: key` (one per declared key) and `kind: overlap` (one per
-declared comparison).
+Present with `keys` (§7). Records of `kind: key` (one per declared key, per input under `mode: compare`) and `kind: overlap` (one per
+comparison of §7.2 and §7.3).
 
 ### 5.8 Changes (`<name>.changes`)
 
@@ -273,12 +279,12 @@ Present with `expectations` (§9.2). One record per rule × matched field.
 
 ### 5.10 Summary (`<name>.summary`)
 
-One record per run — what the sink emits today, extended so that a later step can act without reading the
-other outputs: `rows`, `errorRows`, `fields`, `report` (the uri, null when none was written), `reportBytes`,
+One record per run, complete enough that a later step can act without reading the other outputs: `rows`, `errorRows`, `fields`, `report` (the uri, null when none was written), `reportBytes`,
 `degradations` (ARRAY<STRING\>, §10.3), one count per notable code (`allNull`, `constant`, …), one count
 per change kind, `checks`, `checksFailed`, `checksFailedWarn`, `checksFailedError` (§9.2), and with `time`:
-`latest` (the largest value of the time field), `freshnessSeconds` (`generatedAt` − `latest`) and
-`missingBuckets` (§9.3). A step that should run after the report is written waits on this output.
+`latest` (the largest value of the time field), `freshnessSeconds` (`generatedAt` − `latest`),
+`freshnessFromPartitionSeconds`, `missingBuckets` and `missingBucketLabels` (§9.3), and with `unnest`:
+`grain`, `parents`, `parentsEmpty`, `parentsNull` (§7.4). A step that should run after the report is written waits on this output.
 
 ### 5.11 Sketches and sample (`<name>.sketches`, `<name>.sample`)
 
@@ -296,7 +302,7 @@ Present with `compare`. One record per declared field pair: `a`, `b`, `countA`, 
 `noiseKs`, `noisePsi`. The two fields are counted in the second pass over one set of edges — the
 equal-frequency cells of the two fields' values pooled (§6.1) — so the statistics are exact like those of a
 group against its baseline. The report's Q-Q plot of a pair stays a sketch query (quantiles of each field at
-fixed ranks), as today.
+fixed ranks).
 
 ## 6. Bins and comparison statistics
 
@@ -317,10 +323,13 @@ Everything a comparison needs is a function of those counts:
   on the pooled side.
 - The group median is interpolated within its cell.
 
-`bins.edges` declares edges for a field in place of the quantile edges (`edgesKind: declared`): this is how
-a sparse region is resolved on purpose — the price bands above the 99th percentile hold a fraction of a
-percent of the rows and equal-frequency bins fold them into one — and how bins are made to follow a
-convention the data does not know (price bands, age bands).
+`bins.edges` declares the edges of a field's `bins` records (`edgesKind: declared`): this is how a sparse
+region is resolved on purpose — the price bands above the 99th percentile hold a fraction of a percent of
+the rows and equal-frequency bins fold them into one — and how bins are made to follow a convention the
+data does not know (price bands, age bands). The declared edges are counted *next to* the quantile cells,
+not instead of them: `bins`, PSI and the information value of that field use the declared edges, while KS
+and the group median keep the 100-cell grid, so declaring three price bands does not reduce a KS to three
+points.
 
 A declared field pair (§5.12) is counted the same way, each of its two fields over the cells of the two
 pooled. The second pass is skipped altogether when no output needs it (§9.5).
@@ -346,9 +355,14 @@ A group is compared with its baseline (§5.3) on three separate things, because 
   unchanged and whose null rate went from 0 to 8% has `ks` ≈ 0 and is the finding.
 - **Presence**: a field that exists on one side only is a `changes` record (§9.1), not a drift value.
 
-`drift` on the default output is the largest `ks` / `tvd` over the groups of the baseline axis
-(`driftKind` says which, `driftVs` the group); `drift.exclude` removes fields that differ by construction
-(the time field the inputs were split on).
+`drift` on the default output is the largest `ks` / `tvd` over the groups of **one** axis (`driftKind` says
+which statistic, `driftVs` the group, `nullShift` the largest null-rate difference on the same axis). The
+axis is `drift.axis` when given (`inputs`, `segments:<field>` or `time:<field>`), otherwise the `inputs`
+axis when `mode: compare` declares one, otherwise none: with only `segments` or `time` declared the default
+output has no drift columns and the per-group values are read from `groups`. A segment or a time bucket
+differing from the rest is usually what the axis was declared to show, not a finding about the field, so it
+is not promoted to the field record unless asked for. `drift.exclude` removes fields that differ by
+construction (the time field the inputs were split on).
 
 `noiseKs` = 1.36·√(1/n₁ + 1/n₂) and `noisePsi` = (bins − 1)(1/n₁ + 1/n₂) are the sizes the statistic reaches
 between two random samples of one distribution. They are reference columns and take part in no ranking: when
@@ -367,10 +381,18 @@ keys:
 
 ### 7.1 Key record
 
-`kind: key`, `key` (the fields joined by `+`), `distinct` / `_lo` / `_hi`, `keyness` (distinct / rows,
-capped at 1), and with `unique: true`: `duplicateKeys` and `duplicateRows` — exact, counted by a shuffle on
-the key hash (a set sketch cannot tell 146 duplicated rows in a million from none). A composite key is the
-tuple of its fields.
+`kind: key`, `key` (the fields joined by `+`), `axis`, `group`, `distinct` / `_lo` / `_hi`, `keyness`
+(distinct / rows, capped at 1), `nullKeys`, and with `unique: true`: `duplicateKeys` and `duplicateRows` —
+exact, counted by a shuffle on the key hash (a set sketch cannot tell 146 duplicated rows in a million from
+none). A composite key is the tuple of its fields.
+
+- **Uniqueness is a property of one input.** With `mode: compare` there is one key record per input
+  (`axis: inputs`, `group` the input) and duplicates are counted within each input; a key present in two
+  inputs is not a duplicate — that is the overlap of §7.2, and in a migration check it is the expected
+  result. With `mode: union` the inputs are one dataset and there is one record (`axis`, `group` null).
+- **A null key is not a key.** A row whose key is null — any field of a composite key — is counted in
+  `nullKeys` and takes no part in `distinct`, `duplicateKeys`, `duplicateRows` or an overlap. Whether null
+  keys are acceptable is an expectation on `nullKeys` or on the fields' `nullRate`.
 
 ### 7.2 Overlap record
 
@@ -387,9 +409,13 @@ Two keys without a common domain are not compared: two unrelated ten-digit ident
 
 ### 7.3 Against a previous run
 
-With `previous`, a key gets the retained and new shares against the previous run's set sketch when that
-run's `sketches` are reachable (§9.1); when they are not, the `changes` output says so instead of omitting
-the comparison.
+With `previous` as a file, a key gets `kind: overlap` records against the previous run (`group: previous`):
+the retained share (previous keys still present) and the new share (current keys not seen before). The set
+sketch of every declared key is part of the payload (§10.2) for exactly this purpose, so a payload or report
+file is always enough. A set sketch holds hashes, not values, and is included under `values: hide` too.
+
+With `previous: {input}` the previous run is field records, which carry no sketch: the comparison is not
+made, and a `changes` record of kind `key_overlap_unavailable` says so for each key.
 
 ### 7.4 Nested rows
 
@@ -399,7 +425,12 @@ the comparison.
 once per child, which is stated in the `summary` (`grain: lines`); to profile the parents at their own
 grain, run without `unnest`.
 
-Without `unnest` an array field is profiled as its element count, as today.
+A parent whose array is empty or null yields no row: a row of null child fields would be a child that does
+not exist, and would raise the null rate of every child field. So that such parents do not vanish
+unnoticed, the `summary` counts them: `parents`, `parentsEmpty`, `parentsNull`. `rows` is the number of
+child rows.
+
+Without `unnest` an array field is profiled as its element count.
 
 ## 8. Target
 
@@ -430,9 +461,10 @@ baseline or by declared bands, per split and per prediction set (§1.2).
 
 ### 9.1 Changes against a previous run
 
-`previous` names the run to diff against: the `payload` or `report` file of that run (format versions 1 and
-2 are read), or `{input: <name>}` — a collection holding the default output of earlier runs, of which the
-latest `generatedAt` before this run is taken (typically a `bigquery` source over the history table).
+`previous` names the run to diff against: the `payload` or `report` file of that run (written by this
+transform — a file of the sink, format version 1, is rejected when it is read), or `{input: <name>}` — a collection holding the default output of earlier runs, of which the
+latest run of the same `dataset` before this one is taken, in the order of §4 (`partition` when given,
+`generatedAt` otherwise; typically a `bigquery` source over the history table).
 
 `changes` records: `field`, `change`, `previous`, `current`, `detail`.
 
@@ -448,6 +480,7 @@ latest `generatedAt` before this run is taken (typically a `bigquery` source ove
 | `distribution_shift` | `ks` / `tvd` against the previous run above 0.1 and above its noise size |
 | `row_count` | one record for the dataset: rows before and after |
 | `deviation` | with `previous.window` only: a quantity outside its recent range (§9.4) |
+| `key_overlap_unavailable` | one record per key when the previous run carries no set sketch (§7.3) |
 
 The thresholds are defaults of the *listing*, not judgements — they decide what is worth a record — and
 are parameters (`previous.thresholds`). The first seven kinds need only the previous run's field records;
@@ -508,15 +541,18 @@ inspects the summary.
 
 ### 9.3 Freshness and volume
 
-Declaring `time` is enough for both:
+Declaring `time` is enough for both, and neither needs the buckets to be profiled: freshness is a maximum
+of the first pass and the bucket row counts are one small count shuffle. `time: {field, groups: false}`
+keeps exactly these two and drops the per-bucket records of `groups` — and with them the reason for a
+second pass (§9.5).
 
 - **Freshness.** `summary.latest` is the largest value of the time field and `summary.freshnessSeconds` its
   distance from `generatedAt`. With `run.partition` given as a date or timestamp the distance is also
   reported from the end of that slice (`freshnessFromPartitionSeconds`), which is the meaningful number for
   a backfill.
-- **Volume per bucket.** The `groups` output already has `groupRows` per time bucket. What it cannot show
-  is a bucket with no row at all, so the run reports the buckets missing between the first and the last
-  observed one: `summary.missingBuckets` (the count) and `summary.missingBucketLabels` (the first 100).
+- **Volume per bucket.** The `groups` output has `groupRows` per time bucket (when the buckets are
+  profiled). What it cannot show is a bucket with no row at all, so the run reports the buckets missing
+  between the first and the last observed one: `summary.missingBuckets` (the count) and `summary.missingBucketLabels` (the first 100).
   Calendar gaps that are expected (no rows on weekends) are a matter of the expectation's bound, not of the
   count.
 
@@ -542,18 +578,20 @@ This is a robust z-score and nothing more. Trend and seasonality models are not 
 A profile that runs on every load is paid for every time. `preset: monitor` changes the defaults to what a
 recurring check needs: `associations: {numeric: none}` (the correlation co-moments are quadratic in the
 number of numeric fields and dominate the per-row cost of a wide input), `sample: {enabled: false}` and
-`outputs: []`. Every parameter set explicitly overrides the preset.
+`outputs: []`, and `time.groups: false`. Every parameter set explicitly overrides the preset.
 
-Independently of the preset, the second pass runs only when something needs it — a group axis, a target, a
-declared pair, or the `bins` output. A monitor run with expectations on the default output and the row rules
-is a single pass.
+Independently of the preset, the second pass runs only when something needs it — a profiled group axis
+(`segments`, `mode: compare`, `time` with `groups: true`), a target, a declared pair, or the `bins` output.
+A monitor run with expectations on the default output, row rules, freshness and missing buckets reads its
+input once: the first pass, plus the bucket count shuffle when `time` is declared and one key shuffle per
+`unique` key.
 
 ## 10. The report
 
 ### 10.1 HTML
 
-`output.report` writes the single-file HTML report the sink writes today, rendered from the same
-aggregates as the record outputs — the two cannot disagree. Changes to its content follow from the above:
+`output.report` writes a single-file HTML report in the form of the sink's, rendered from the same
+aggregates as the record outputs — the two cannot disagree. Its content follows from the above:
 drift ranked by KS / TVD with the null shift next to it, notable fields in severity order with a count per
 code ahead of the list, bins from the counting pass, the changes and checks as tabs, and no leak badge.
 
@@ -578,17 +616,22 @@ Two things the report keeps and one that changes shape:
 `previous: {payload: ...}` and of scripts that want the whole run in one object; the structure is specified
 with `formatVersion` in the user-facing reference.
 
+The payload — embedded or as a file — always carries what a later run needs from this one and cannot
+recompute: the edges and counts of the whole-dataset bins (`bins.edges: previous`, `distribution_shift`)
+and the set sketch of every declared key (§7.3). Neither is subject to the size ladder of §10.3.
+
 ### 10.3 Size
 
 The report keeps a size limit and a fixed degradation order, recorded in `summary.degradations` and in the
-manifest. Sketch binaries are no longer embedded (they are the `sketches` output); the order is sample rows
+manifest. The per-field sketch binaries are not embedded (they are the `sketches` output; the key set
+sketches of §10.2 are the exception); the order is sample rows
 → correlation matrix reduced to the strongest pairs → histogram resolution → comparison groups → comparison
 resolution. The record outputs never degrade.
 
 ## 11. Raw values
 
-`values: hide` applies to every output and file: `values.value`, `fields.top`, categorical `bins.value` and
-segment group labels become ranks (`#1`, `group #1`), and the `sample` output and the value-bearing sketch
+`values: hide` applies to every output and file: `values.value`, categorical `bins.value` and
+segment group labels become ranks (`#1`, `group #1`), `fields.top` is null, and the `sample` output and the value-bearing sketch
 binaries are not produced. Time bucket labels and input names are not values. The report and the outputs
 are otherwise as sensitive as the source data.
 
@@ -597,21 +640,28 @@ are otherwise as sensitive as the source data.
 Rejected at assembly: an unbounded or windowed input; a `keys`, `segments`, `time`, `target`, `unnest`,
 `bins.edges` or `expectations` field missing from the (unnested) schema; a `time` field that is not a
 timestamp; a non-monotonic `bins.edges` list; `mode: compare` with fewer than two inputs; `previous.input`
-that is not an input of the module; `bins.edges: previous` without `previous`; an `outputs` entry that is
+that is not an input of the module; `bins.edges: previous` without a `previous` file (`payload` / `report`;
+the edges are needed at assembly, engine doc §6); an `outputs` entry that is
 not one of §3; a `rows` condition that does not parse or reads a field missing from the schema; a `matches`
 pattern that does not compile or names a non-string field; `freshness` or `buckets` without `time`;
-`previous.window` or a `deviation` threshold without `previous.input`; an unknown `severity` or `preset`.
+`previous.window` or a `deviation` threshold without `previous.input`; an unknown `severity` or `preset`;
+an expectation that could never produce a meaningful record — a `key` rule naming a key that `keys` does
+not declare (or `unique` on a key declared without `unique: true`), a `pair` rule naming a pair that
+`compare` does not declare, a `changes` rule without `previous` (or naming `deviation` without
+`previous.window`, or an unknown change kind); a `drift.axis` that is not a declared axis; a `previous`
+file that is not of this transform's format (format version 1, or no payload), which also rules it out as
+a source of `bins.edges: previous`.
 
-Reported, never fatal: a target with one class only (`summary` and the report carry the warning the sink
-logs today); a `previous` run that cannot supply what a comparison needs; a field skipped for its type or
+Reported, never fatal: a target with one class only (`summary` and the report carry the warning); a
+`previous` run that cannot supply what a comparison needs; a field skipped for its type or
 depth (listed in the manifest).
 
 ## 13. Stages
 
 1. **The transform and the counting pass.** `fields`, `groups`, `values`, `bins`, `pairs`, `target`
    (binary), `summary`; the full record identity of §4 (`dataset`, `partition`); §5.2 notable codes and null
-   sentinels; `sum`; §6 in full; the report and the payload file written by the transform; the sink as an
-   alias.
+   sentinels; `sum`; §6 in full; the report and the payload file written by the transform; the sink, its
+   examples and its reference page removed.
 2. **Runs and declarations.** `previous` and `changes`; `expectations` and `checks` with all three rule
    kinds, severity and metadata (§9.2); freshness and missing buckets (§9.3); keys with `unique`, composite
    keys, `domain` and input overlaps; the `sketches` and `sample` outputs; the numeric target.
