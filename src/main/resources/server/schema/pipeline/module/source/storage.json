@@ -28,8 +28,20 @@
         "format": {
           "type": "string",
           "title": "Format",
-          "description": "File format",
-          "enum": ["avro", "parquet", "csv", "json"]
+          "description": "File format. May be omitted when schema.encoding.format declares it (fwf)",
+          "enum": ["avro", "parquet", "csv", "json", "fwf"]
+        },
+        "additionalFields": {
+          "type": "object",
+          "title": "Additional Fields",
+          "description": "Output field names for where each record came from (for csv/json/fwf)",
+          "properties": {
+            "resource": { "type": "string", "title": "Resource", "description": "Output field name for the file path" },
+            "line": { "type": "string", "title": "Line", "description": "Output field name for the line number in the file" },
+            "lastModified": { "type": "string", "title": "Last Modified", "description": "Output field name for the file's last modification time" },
+            "entry": { "type": "string", "title": "Entry", "description": "Output field name for the entry name inside an archive" }
+          },
+          "additionalProperties": false
         }
       },
       "required": ["inputs"],
@@ -69,6 +81,49 @@
                 "type": "string",
                 "title": "Delimiter",
                 "description": "Field delimiter (for csv)"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "fwf" } }
+          },
+          "then": {
+            "properties": {
+              "compression": {
+                "type": "string",
+                "title": "Compression",
+                "description": "Compression type. Detected from the file name when omitted",
+                "enum": ["zip", "gzip", "bzip2", "zstd", "lzo", "lzop"]
+              },
+              "recordSplit": {
+                "type": "string",
+                "title": "Record Split",
+                "description": "How a file is cut into records: line (line feeds, CRLF and LF both) or length (no separators, every recordLength bytes of the layout)",
+                "enum": ["line", "length"],
+                "default": "line"
+              },
+              "skipHeaderLines": {
+                "type": "integer",
+                "title": "Skip Header Lines",
+                "description": "Number of header lines to skip at the beginning of each file"
+              },
+              "filterPrefix": {
+                "type": "string",
+                "title": "Filter Prefix",
+                "description": "Records starting with this prefix are excluded"
+              },
+              "delimiter": {
+                "type": "string",
+                "title": "Delimiter",
+                "description": "Record delimiter (default: line feed)"
+              },
+              "fields": {
+                "type": "array",
+                "title": "Fields",
+                "description": "Top-level layout fields to read (projection)",
+                "items": { "type": "string" }
               }
             }
           }

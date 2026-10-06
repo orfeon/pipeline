@@ -58,6 +58,26 @@ public class FwfDecoder implements Serializable {
         return new FwfDecoder(layout, options == null ? FwfOptions.defaults() : options);
     }
 
+    /**
+     * The decoder of a schema declared with {@code encoding.format: fwf} — the one entry point for
+     * modules, so that a projection is never forgotten: the layout is narrowed to the schema's
+     * fields (a declared {@code schema.fields} projection; all layout fields when omitted) and then
+     * to {@code fields} when given (a module-level projection such as storage's
+     * {@code parameters.fields}). {@link #getLayout()} of the result is the projected layout, whose
+     * {@link FwfLayout#toSchemaFields()} are the fields the decoder outputs.
+     */
+    public static FwfDecoder of(final Schema schema, final List<String> fields) {
+        if(schema == null || schema.getFwfLayout() == null) {
+            throw new IllegalArgumentException("schema does not declare encoding.format: fwf with a layout (schema.reference)");
+        }
+        FwfLayout layout = schema.getFwfLayout()
+                .project(schema.getFields().stream().map(Schema.Field::getName).toList());
+        if(fields != null && !fields.isEmpty()) {
+            layout = layout.project(fields);
+        }
+        return new FwfDecoder(layout, schema.getFwfOptions());
+    }
+
     public FwfLayout getLayout() {
         return layout;
     }
