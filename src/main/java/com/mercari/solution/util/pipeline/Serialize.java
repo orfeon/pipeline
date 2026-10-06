@@ -84,6 +84,8 @@ public class Serialize implements Serializable {
         final Format encodingFormat = switch (encoding.getFormat()) {
             case avro -> Format.avro;
             case protobuf -> Format.protobuf;
+            // fwf is decoded by the storage source / select fwf_decode, not by message (de)serializers
+            case fwf -> throw new IllegalArgumentException("schema.encoding.format: fwf is not supported by this module");
         };
         if(declared == null) {
             return encodingFormat;

@@ -116,8 +116,12 @@ The wire format used to decode/encode payload bytes. Only meaningful for modules
 
 | parameter   | optional  | type   | description                                            |
 |-------------|-----------|--------|--------------------------------------------------------|
-| format      | required  | Enum   | `avro`, `protobuf`.                                    |
+| format      | required  | Enum   | `avro`, `protobuf`, `fwf`.                             |
 | messageName | selective | String | Protobuf message full name. Required for `protobuf`.   |
+
+Other keys are options of the format. `fwf` (fixed-width records) takes `charset`, `unit`, `trim`,
+`emptyAsNull`, `onLengthMismatch`, `onParseError` and requires a layout document in `reference` —
+see [Fixed-Width Format (fwf)](fwf.md).
 
 ## reference
 
@@ -125,8 +129,8 @@ Where the schema definition document lives. Exactly one of `uri` / `inline` / `d
 
 | parameter   | optional  | type    | description                                                              |
 |-------------|-----------|---------|--------------------------------------------------------------------------|
-| uri         | selective | String  | Definition file location (`gs://…`): an `.avsc` file for avro, a descriptor file for protobuf. |
-| inline      | selective | String  | The definition document itself (e.g. Avro schema JSON).                  |
+| uri         | selective | String  | Definition file location (`gs://…`): an `.avsc` file for avro, a descriptor file for protobuf, a layout document (`.fwf.json`) for fwf. |
+| inline      | selective | String  | The definition document itself (e.g. Avro schema JSON). For `fwf` the layout may also be written as an object. |
 | destination | selective | Boolean | If `true`, use the schema of the write destination. Sink modules only — declaring it on a source module is an assembly-time error. |
 
 ## Examples
