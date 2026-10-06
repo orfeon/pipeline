@@ -214,6 +214,43 @@ public class SchemaFwfTest {
     }
 
     @Test
+    public void testDecoderOfSchemaAppliesProjections() {
+        final byte[] record = "AB  01231 x105".getBytes(StandardCharsets.UTF_8);
+
+        // no declared fields: the whole layout
+        final Schema all = Schema.parse("""
+                { "encoding": { "format": "fwf", "trim": "none" }, "reference": { "inline": %s } }
+                """.formatted(LAYOUT));
+        final FwfDecoder allDecoder = FwfDecoder.of(all, null);
+        Assertions.assertEquals(4, allDecoder.getLayout().getFields().size());
+        // the encoding options come with the schema
+        Assertions.assertEquals("AB  ", allDecoder.decode(record).get("code"));
+
+        // declared schema.fields narrow the layout, the module-level fields narrow it further
+        final Schema declared = Schema.parse("""
+                {
+                  "encoding": { "format": "fwf" },
+                  "reference": { "inline": %s },
+                  "fields": [ { "name": "item", "type": "record", "fields": [ { "name": "sku", "type": "string" } ] },
+                              { "name": "code", "type": "string" } ]
+                }
+                """.formatted(LAYOUT));
+        final FwfDecoder declaredDecoder = FwfDecoder.of(declared, List.of());
+        Assertions.assertEquals(java.util.Set.of("item", "code"), declaredDecoder.decode(record).keySet());
+        final FwfDecoder narrowed = FwfDecoder.of(declared, List.of("code"));
+        Assertions.assertEquals(Map.of("code", "AB"), narrowed.decode(record));
+
+        // a module-level field outside the declared projection is an error
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> FwfDecoder.of(declared, List.of("amount")));
+        Assertions.assertTrue(e.getMessage().contains("[amount]"), e.getMessage());
+
+        // a schema without a fwf layout
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> FwfDecoder.of(Schema.parse("{ \"fields\": [ { \"name\": \"a\", \"type\": \"string\" } ] }"), null));
+    }
+
+    @Test
     public void testCopyAndSerialize() {
         final Schema schema = Schema.parse("""
                 { "encoding": { "format": "fwf" }, "reference": { "inline": %s } }

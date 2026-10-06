@@ -1,19 +1,20 @@
 ---
 type: Source Module
 title: Storage Source Module
-description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, and JSON formats with schema auto-inference for binary formats. Includes column projection for Parquet, header skipping and line filtering for CSV, and compression support for text formats.
-tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json]
+description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), and source file / line number fields.
+tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width]
 timestamp: 2026-06-23T00:00:00Z
 ---
 
 # Storage Source Module
 
-Source Module for reading and parsing file contents from [Google Cloud Storage](https://cloud.google.com/storage/docs) (GCS), AWS S3, or local file systems. Supports four data formats:
+Source Module for reading and parsing file contents from [Google Cloud Storage](https://cloud.google.com/storage/docs) (GCS), AWS S3, or local file systems. Supports five data formats:
 
 - **Avro** - Reads Apache Avro files. Schema is automatically inferred from the file; no `schema` parameter is needed. Supports column projection via `schema` (declare a subset of the fields) or `fields`.
 - **Parquet** - Reads Apache Parquet files. Schema is automatically inferred from the file. Supports column projection via `fields` to read only specific columns.
 - **CSV** - Reads CSV (comma-separated values) text files. When `schema` is provided, each line is parsed into typed fields. When `schema` is not provided, each line is output as raw text.
 - **JSON** - Reads JSON Lines (newline-delimited JSON) text files. When `schema` is provided, each line is parsed into typed fields. When `schema` is not provided, each line is output as raw text.
+- **fwf** - Reads fixed-width text files: each field is a fixed byte (or character) range of the record, declared by a layout in `schema` — see [Fixed-Width Format (fwf)](../common/fwf.md). Records are read as bytes, so any charset works (e.g. `windows-31j` for Shift_JIS data).
 
 This module differs from the [Files Source Module](files.md): the Files module outputs file *metadata* (and optionally raw bytes), while the Storage module reads and parses file *contents* into structured records.
 
@@ -35,15 +36,15 @@ This module differs from the [Files Source Module](files.md): the Files module o
 |-----------|----------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | input     | selective required | String         | File path or glob pattern to read. Supports GCS (`gs://bucket/path/*.avro`), S3 (`s3://bucket/path/*`), and local paths. Either `input` or `inputs` must be specified.                          |
 | inputs    | selective required | Array<String\> | List of file paths or glob patterns to read. Results from all paths are merged. Either `input` or `inputs` must be specified.                                                                    |
-| format    | required | Enum           | Data format of the files to read. Values: `avro`, `parquet`, `csv`, `json`.                                                                                                                      |
+| format    | selective required | Enum           | Data format of the files to read. Values: `avro`, `parquet`, `csv`, `json`, `fwf`. May be omitted when `schema.encoding.format` declares it (`fwf`); when both are written they must agree. |
 
-### Parquet-specific parameters
+### Projection parameters
 
 | parameter | optional | type           | description                                                                                                                                                                                     |
 |-----------|----------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| fields    | optional | Array<String\> | Field names to read (column projection) for `avro` and `parquet` formats. Only the specified columns are read, reducing I/O and memory usage. Every name must exist in the input schema (a missing name is an assembly-time error). If not specified, all columns are read. |
+| fields    | optional | Array<String\> | Field names to read (column projection) for `avro`, `parquet` and `fwf` formats. Only the specified columns are read, reducing I/O and memory usage. Every name must exist in the input schema (a missing name is an assembly-time error). If not specified, all columns are read. For `fwf` the listed top-level layout fields are output in the listed order, and the other ranges are not decoded at all. |
 
-### CSV/JSON-specific parameters
+### CSV/JSON/fwf parameters
 
 | parameter       | optional | type    | description                                                                                                                                                           |
 |-----------------|----------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -51,6 +52,22 @@ This module differs from the [Files Source Module](files.md): the Files module o
 | filterPrefix    | optional | String  | Lines starting with this prefix are excluded. Useful for skipping CSV headers or comment lines (e.g. `"#"` or the first field of the header row).                     |
 | skipHeaderLines | optional | Integer | Number of header lines to skip at the beginning of each file. For example, set to `1` to skip a single header row in CSV files.                                       |
 | delimiter       | optional | String  | Custom record delimiter. Default is newline (`\n`). Use this when records are separated by a character or string other than newline.                                   |
+| recordSplit     | optional | Enum    | `fwf` only. How a file is cut into records. `line` (default): at line feeds — a carriage return before it is removed, so CRLF and LF files read the same — or at `delimiter` when given. `length`: the file has no separators and is cut every `recordLength` (of the layout) bytes. |
+
+For `fwf`, `filterPrefix` is compared with the record bytes (the prefix encoded in `schema.encoding.charset`), and blank lines are skipped.
+
+### Additional fields parameters
+
+Adds where each record came from as output fields (`csv`, `json` and `fwf` formats). Each parameter is the output field name; the fields are appended after the data fields. A name that is already a data field is an assembly-time error.
+
+| parameter                     | optional | type   | description |
+|-------------------------------|----------|--------|-------------|
+| additionalFields.resource     | optional | String | Output field name for the file path (e.g. `gs://bucket/dir/file.txt`). STRING. |
+| additionalFields.line         | optional | String | Output field name for the line number in the file (1-based, header and blank lines counted; the record number with `recordSplit: length`). INT64. |
+| additionalFields.lastModified | optional | String | Output field name for the file's last modification time. TIMESTAMP. Not available on GCS (the epoch), as in the [Files Source Module](files.md). |
+| additionalFields.entry        | optional | String | Output field name for the entry name inside an archive. STRING; always null for a plain file. |
+
+With `additionalFields`, `csv` and `json` files are read through the same byte-record reader as `fwf` (UTF-8, `schema` required): blank lines are skipped, and a line that can not be parsed as a record goes to the failure output.
 
 ### Reading from AWS S3
 
@@ -87,6 +104,14 @@ When a `schema` is provided, each line is parsed according to the schema field d
 
 - **CSV**: Fields are extracted by position according to the schema field order.
 - **JSON**: Each line is parsed as a JSON object and fields are mapped by name according to the schema.
+
+### fwf format
+
+`schema` is required: `encoding.format: fwf` with the layout document in `reference` (`uri` or `inline`), as described in [Fixed-Width Format (fwf)](../common/fwf.md). The output fields are the layout fields (nested records and arrays included), narrowed by a declared `schema.fields` and then by `fields`.
+
+A record whose length differs from the layout `recordLength`, or with a value that can not be converted, is a failure: the job fails with `failFast: true` (the batch default), and with `failFast: false` the record goes to the failure sinks (`system.failure`) while the rest is read. `schema.encoding.onLengthMismatch: pad` and `onParseError: null` relax this per schema.
+
+Files are not split: one file is read by one worker (a compressed file can not be split anyway).
 
 ### CSV and JSON formats without schema
 
@@ -304,3 +329,41 @@ sinks:
     parameters:
       table: "myproject.mydataset.orders"
 ```
+
+### Example 11: Read fixed-width (fwf) files
+
+Read gzip-compressed Shift_JIS fixed-width files. The layout is kept in a file next to the data, the
+format is taken from `schema.encoding.format`, and each record carries its file and line number.
+
+```yaml
+sources:
+  - name: orders
+    module: storage
+    parameters:
+      input: "gs://my-bucket/orders/**/*.txt.gz"
+      schema:
+        encoding:
+          format: fwf
+          charset: windows-31j
+        reference:
+          uri: gs://my-bucket/layouts/orders.fwf.json
+      fields: [shopCode, shopName, total, orderDate]
+      additionalFields:
+        resource: source_file
+        line: source_line
+```
+
+`orders.fwf.json`:
+
+```json
+{
+  "recordLength": 40,
+  "fields": [
+    { "name": "shopCode",  "type": "string",  "pos": 1,  "len": 4 },
+    { "name": "shopName",  "type": "string",  "pos": 5,  "len": 20 },
+    { "name": "total",     "type": "decimal", "pos": 25, "len": 8, "scale": 2 },
+    { "name": "orderDate", "type": "date",    "pos": 33, "len": 8, "pattern": "yyyyMMdd", "nullIf": ["00000000"] }
+  ]
+}
+```
+

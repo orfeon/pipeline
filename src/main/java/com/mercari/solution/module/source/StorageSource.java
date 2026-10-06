@@ -37,18 +37,39 @@ public class StorageSource extends Source {
         // for parquet
         private List<String> fields;
 
-        // for csv
+        // for csv, json, fwf
         private String filterPrefix;
         private Integer skipHeaderLines;
         private String delimiter;
 
-        public void validate() {
+        // for fwf
+        private StorageRecordReader.RecordSplit recordSplit;
+
+        // metadata (resource / entry / line / lastModified) -> output field name
+        private Map<String, String> additionalFields;
+
+        public void validate(final Schema schema) {
             final List<String> errorMessages = new ArrayList<>();
             if((inputs == null || inputs.isEmpty()) && input == null) {
                 errorMessages.add("parameters.input or inputs is required");
             }
+            // the format is derived from schema.encoding.format when omitted (work_fixedwidth.md §4.6)
+            final boolean fwfSchema = schema != null && schema.getFwfLayout() != null;
             if(this.format == null) {
-                errorMessages.add("parameters.format must not be null");
+                if(fwfSchema) {
+                    this.format = Format.fwf;
+                } else {
+                    errorMessages.add("parameters.format must not be null");
+                }
+            } else if(fwfSchema && !Format.fwf.equals(this.format)) {
+                errorMessages.add("parameters.format: " + this.format + " differs from schema.encoding.format: fwf");
+            }
+            if(additionalFields != null && !additionalFields.isEmpty()
+                    && (Format.avro.equals(format) || Format.parquet.equals(format))) {
+                errorMessages.add("parameters.additionalFields is not supported for format " + format + " yet (csv, json, fwf only)");
+            }
+            if(recordSplit != null && !Format.fwf.equals(format)) {
+                errorMessages.add("parameters.recordSplit is only supported for format fwf");
             }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -74,7 +95,8 @@ public class StorageSource extends Source {
         avro,
         parquet,
         csv,
-        json
+        json,
+        fwf
     }
 
     @Override
@@ -83,8 +105,25 @@ public class StorageSource extends Source {
             final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
-        parameters.validate();
+        parameters.validate(getSchema());
         parameters.setDefaults();
+
+        // fwf, and the csv / json options TextIO can not provide, read files as byte records
+        final boolean additionalFields = parameters.additionalFields != null && !parameters.additionalFields.isEmpty();
+        if(Format.fwf.equals(parameters.format) || additionalFields) {
+            final StorageRecordReader.Spec spec = new StorageRecordReader.Spec();
+            spec.format = StorageRecordReader.Format.valueOf(parameters.format.name());
+            spec.inputs = parameters.inputs;
+            spec.compression = parameters.compression;
+            spec.skipHeaderLines = parameters.skipHeaderLines;
+            spec.filterPrefix = parameters.filterPrefix;
+            spec.delimiter = parameters.delimiter;
+            spec.recordSplit = parameters.recordSplit;
+            spec.fields = Format.fwf.equals(parameters.format) ? parameters.fields : null;
+            spec.additionalFields = parameters.additionalFields;
+            return StorageRecordReader.expand(
+                    begin, getName(), spec, getSchema(), getTimestampAttribute(), getFailFast(), errorHandler);
+        }
 
         return switch (parameters.format) {
             case avro, parquet -> {
@@ -195,6 +234,7 @@ public class StorageSource extends Source {
                 yield MCollectionTuple
                         .of(output, inputSchema);
             }
+            case fwf -> throw new IllegalStateException("format fwf is read by StorageRecordReader");
         };
     }
 
