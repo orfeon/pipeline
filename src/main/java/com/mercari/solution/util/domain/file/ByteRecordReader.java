@@ -24,6 +24,8 @@ import java.util.Arrays;
 public class ByteRecordReader implements Closeable {
 
     private static final int READ_BUFFER_SIZE = 64 * 1024;
+    // the largest array the JVM is sure to allocate
+    private static final int MAX_RECORD_LENGTH = Integer.MAX_VALUE - 8;
 
     private final InputStream input;
     private final byte[] delimiter;
@@ -118,13 +120,19 @@ public class ByteRecordReader implements Closeable {
                 // the last record has no separator
                 break;
             }
-            final byte b = readBuffer[readPosition++];
-            consumed = true;
-            if(length == record.length) {
-                record = Arrays.copyOf(record, record.length * 2);
+            // copy up to and including the next byte that can end a separator in one go
+            int end = readPosition;
+            while(end < readLimit && readBuffer[end] != last) {
+                end++;
             }
-            record[length++] = b;
-            if(b == last && endsWithDelimiter()) {
+            final boolean candidate = end < readLimit;
+            final int size = (candidate ? end + 1 : end) - readPosition;
+            ensureCapacity(size);
+            System.arraycopy(readBuffer, readPosition, record, length, size);
+            readPosition += size;
+            length += size;
+            consumed = true;
+            if(candidate && endsWithDelimiter()) {
                 length -= delimiter.length;
                 break;
             }
@@ -136,16 +144,23 @@ public class ByteRecordReader implements Closeable {
         return true;
     }
 
+    // Room for {@code size} more bytes of the current record. A stream without any separator (a
+    // fixed-length file read as lines) ends up here as one record: report it instead of failing
+    // on the array size.
+    private void ensureCapacity(final int size) throws IOException {
+        if(size > MAX_RECORD_LENGTH - length) {
+            throw new IOException("record " + (number + 1) + " is longer than " + MAX_RECORD_LENGTH
+                    + " bytes: the stream does not seem to have the record separator");
+        }
+        final int required = length + size;
+        if(required > record.length) {
+            record = Arrays.copyOf(record, (int) Math.min(MAX_RECORD_LENGTH, Math.max(required, record.length * 2L)));
+        }
+    }
+
     private boolean endsWithDelimiter() {
-        if(length < delimiter.length) {
-            return false;
-        }
-        for(int i = 0; i < delimiter.length; i++) {
-            if(record[length - delimiter.length + i] != delimiter[i]) {
-                return false;
-            }
-        }
-        return true;
+        return length >= delimiter.length
+                && Arrays.equals(record, length - delimiter.length, length, delimiter, 0, delimiter.length);
     }
 
     private boolean fill() throws IOException {

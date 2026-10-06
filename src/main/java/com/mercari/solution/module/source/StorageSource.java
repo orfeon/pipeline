@@ -1,5 +1,7 @@
 package com.mercari.solution.module.source;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.coder.ElementCoder;
@@ -42,16 +44,27 @@ public class StorageSource extends Source {
         private Integer skipHeaderLines;
         private String delimiter;
 
-        // for fwf
-        private StorageRecordReader.RecordSplit recordSplit;
+        // for fwf: line | length. Held as text and parsed in validate: Gson turns an unknown enum
+        // value into null, which would silently read the file with the default
+        private String recordSplit;
 
         // metadata (resource / entry / line / lastModified) -> output field name
         private Map<String, String> additionalFields;
 
-        public void validate(final Schema schema) {
+        private transient StorageRecordReader.RecordSplit split;
+
+        /**
+         * @param declaredFormat the text of parameters.format in the config; Gson turns an unknown
+         *                       enum value into null, which must not pass for an omitted format
+         */
+        public void validate(final Schema schema, final String declaredFormat) {
             final List<String> errorMessages = new ArrayList<>();
             if((inputs == null || inputs.isEmpty()) && input == null) {
                 errorMessages.add("parameters.input or inputs is required");
+            }
+            if(this.format == null && declaredFormat != null) {
+                throw new IllegalModuleException("parameters.format: " + declaredFormat + " is not supported. supported formats: "
+                        + Arrays.toString(Format.values()));
             }
             // the format is derived from schema.encoding.format when omitted (work_fixedwidth.md §4.6)
             final boolean fwfSchema = schema != null && schema.getFwfLayout() != null;
@@ -68,8 +81,15 @@ public class StorageSource extends Source {
                     && (Format.avro.equals(format) || Format.parquet.equals(format))) {
                 errorMessages.add("parameters.additionalFields is not supported for format " + format + " yet (csv, json, fwf only)");
             }
-            if(recordSplit != null && !Format.fwf.equals(format)) {
-                errorMessages.add("parameters.recordSplit is only supported for format fwf");
+            if(recordSplit != null) {
+                if(!Format.fwf.equals(format)) {
+                    errorMessages.add("parameters.recordSplit is only supported for format fwf");
+                }
+                try {
+                    this.split = StorageRecordReader.RecordSplit.valueOf(recordSplit.trim());
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add("parameters.recordSplit must be line or length. but: " + recordSplit);
+                }
             }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -105,7 +125,7 @@ public class StorageSource extends Source {
             final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
-        parameters.validate(getSchema());
+        parameters.validate(getSchema(), declaredFormat());
         parameters.setDefaults();
 
         // fwf, and the csv / json options TextIO can not provide, read files as byte records
@@ -118,7 +138,7 @@ public class StorageSource extends Source {
             spec.skipHeaderLines = parameters.skipHeaderLines;
             spec.filterPrefix = parameters.filterPrefix;
             spec.delimiter = parameters.delimiter;
-            spec.recordSplit = parameters.recordSplit;
+            spec.recordSplit = parameters.split;
             spec.fields = Format.fwf.equals(parameters.format) ? parameters.fields : null;
             spec.additionalFields = parameters.additionalFields;
             return StorageRecordReader.expand(
@@ -238,6 +258,16 @@ public class StorageSource extends Source {
         };
     }
 
+    // the text of parameters.format as written in the config; null when omitted
+    private String declaredFormat() {
+        final JsonElement parameters = JsonParser.parseString(getParametersText());
+        if(!parameters.isJsonObject() || !parameters.getAsJsonObject().has("format")) {
+            return null;
+        }
+        final JsonElement format = parameters.getAsJsonObject().get("format");
+        return format.isJsonNull() ? null : format.isJsonPrimitive() ? format.getAsString() : format.toString();
+    }
+
     private static ParquetIO.Read createParquetRead(
             final String input,
             final org.apache.avro.Schema readSchema,
@@ -344,6 +374,8 @@ public class StorageSource extends Source {
         private final Schema inputSchema;
         private final Format format;
         private final String timestampAttribute;
+        // a date value is an epoch day, any other number is epoch micros
+        private final boolean timestampIsDate;
         private final boolean rawSchema;
 
         TextFormatDoFn(
@@ -357,6 +389,9 @@ public class StorageSource extends Source {
             this.inputSchema = inputSchema;
             this.format = format;
             this.timestampAttribute = timestampAttribute;
+            this.timestampIsDate = timestampAttribute != null && inputSchema != null
+                    && inputSchema.hasField(timestampAttribute)
+                    && Schema.Type.date.equals(inputSchema.getField(timestampAttribute).getFieldType().getType());
             this.rawSchema = rawSchema;
         }
 
@@ -385,6 +420,7 @@ public class StorageSource extends Source {
                     eventTimeEpochMillis = c.timestamp().getMillis();
                 } else {
                     eventTimeEpochMillis = switch (values.get(timestampAttribute)) {
+                        case Number n when timestampIsDate -> Math.multiplyExact(n.longValue(), 86_400_000L);
                         case Number n -> n.longValue() / 1000L;
                         case String s -> DateTimeUtil.toEpochMicroSecond(s) / 1000L;
                         case null, default -> c.timestamp().getMillis();

@@ -52,9 +52,9 @@ This module differs from the [Files Source Module](files.md): the Files module o
 | filterPrefix    | optional | String  | Lines starting with this prefix are excluded. Useful for skipping CSV headers or comment lines (e.g. `"#"` or the first field of the header row).                     |
 | skipHeaderLines | optional | Integer | Number of header lines to skip at the beginning of each file. For example, set to `1` to skip a single header row in CSV files.                                       |
 | delimiter       | optional | String  | Custom record delimiter. Default is newline (`\n`). Use this when records are separated by a character or string other than newline.                                   |
-| recordSplit     | optional | Enum    | `fwf` only. How a file is cut into records. `line` (default): at line feeds — a carriage return before it is removed, so CRLF and LF files read the same — or at `delimiter` when given. `length`: the file has no separators and is cut every `recordLength` (of the layout) bytes. |
+| recordSplit     | optional | Enum    | `fwf` only. How a file is cut into records. `line` (default): at line feeds — a carriage return before it is removed, so CRLF and LF files read the same — or at `delimiter` when given. `length`: the file has no separators and is cut every `recordLength` (of the layout) bytes — so it requires `schema.encoding.unit: byte` (the default) unless the charset is a single-byte one. |
 
-For `fwf`, `filterPrefix` is compared with the record bytes (the prefix encoded in `schema.encoding.charset`), and blank lines are skipped.
+For `fwf`, `filterPrefix` and `delimiter` are compared with the record bytes (the text encoded in `schema.encoding.charset`; a charset that writes a byte order mark, such as `UTF-16` without an explicit byte order, is an assembly-time error — use `UTF-16LE` / `UTF-16BE`), and blank lines are skipped. A byte order mark at the head of a UTF-8 file is skipped.
 
 ### Additional fields parameters
 
@@ -67,7 +67,7 @@ Adds where each record came from as output fields (`csv`, `json` and `fwf` forma
 | additionalFields.lastModified | optional | String | Output field name for the file's last modification time. TIMESTAMP. Not available on GCS (the epoch), as in the [Files Source Module](files.md). |
 | additionalFields.entry        | optional | String | Output field name for the entry name inside an archive. STRING; always null for a plain file. |
 
-With `additionalFields`, `csv` and `json` files are read through the same byte-record reader as `fwf` (UTF-8, `schema` required): blank lines are skipped, and a line that can not be parsed as a record goes to the failure output.
+With `additionalFields`, `csv` and `json` files are read through the same byte-record reader as `fwf` (UTF-8, `schema` required): blank lines are skipped, and a line that can not be parsed as a record goes to the failure output. As with `fwf`, a file is not split: one file is read by one worker, so prefer many files over one very large file when using `additionalFields`.
 
 ### Reading from AWS S3
 
@@ -112,6 +112,8 @@ When a `schema` is provided, each line is parsed according to the schema field d
 A record whose length differs from the layout `recordLength`, or with a value that can not be converted, is a failure: the job fails with `failFast: true` (the batch default), and with `failFast: false` the record goes to the failure sinks (`system.failure`) while the rest is read. `schema.encoding.onLengthMismatch: pad` and `onParseError: null` relax this per schema.
 
 Files are not split: one file is read by one worker (a compressed file can not be split anyway).
+
+An I/O error in the middle of a file (e.g. a truncated gzip file) is not a record error: the rest of that file can not be read. With `failFast: true` the job fails. With `failFast: false` the records read so far stay in the output and one failure record reports the file and the last record number read, so a file listed in the failures has been read only partially.
 
 ### CSV and JSON formats without schema
 

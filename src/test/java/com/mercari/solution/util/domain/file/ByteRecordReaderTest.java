@@ -75,6 +75,10 @@ public class ByteRecordReaderTest {
                 read(ByteRecordReader.delimited(stream("a|b||||c\r||d"), delimiter)));
         Assertions.assertEquals(List.of("1:a|b", "2:", "3:c\r", "4:d"),
                 read(ByteRecordReader.delimited(trickle("a|b||||c\r||d"), delimiter)));
+        // the separator straddles the read buffer boundary (64 KiB)
+        final String head = "x".repeat(64 * 1024 - 1);
+        Assertions.assertEquals(List.of("1:" + head, "2:y"),
+                read(ByteRecordReader.delimited(stream(head + "||y"), delimiter)));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ByteRecordReader.delimited(stream("a"), new byte[0]));
     }
 

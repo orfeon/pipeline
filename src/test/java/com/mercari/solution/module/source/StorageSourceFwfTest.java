@@ -49,6 +49,7 @@ public class StorageSourceFwfTest {
                         reference:
                           inline:
                             recordLength: 27
+                            description: order records
                             fields:
                               - { name: code,   type: string,  len: 4 }
                               - { name: name,   type: string,  len: 10 }
@@ -104,6 +105,8 @@ public class StorageSourceFwfTest {
         Assertions.assertEquals(List.of("code", "name", "amount", "day"),
                 output.getSchema().getFields().stream().map(Schema.Field::getName).toList());
         Assertions.assertEquals(Schema.Type.date, output.getSchema().getField("day").getFieldType().getType());
+        // the layout description becomes the description of the output schema
+        Assertions.assertEquals("order records", output.getSchema().getDescription());
 
         PAssert.that(output.getCollection()).satisfies(elements -> {
             final Map<String, Map<String, Object>> rows = byCode(elements);
@@ -283,6 +286,151 @@ public class StorageSourceFwfTest {
     }
 
     @Test
+    public void testLastModified() throws Exception {
+        // the default Metadata coder drops lastModifiedMillis at the reshuffle after the match
+        final String path = write("modified.txt", (RECORD_1 + "\r\n").getBytes(MS932));
+        final long lastModifiedMicros = Files.getLastModifiedTime(tempDir.resolve("modified.txt")).toMillis() * 1000L;
+        Assertions.assertTrue(lastModifiedMicros > 0);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      additionalFields: { lastModified: _modified }
+                %s
+                """.formatted(path, SCHEMA)));
+        final MCollection output = outputs.get("input");
+        Assertions.assertEquals(Schema.Type.timestamp, output.getSchema().getField("_modified").getFieldType().getType());
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(lastModifiedMicros, byCode(elements).get("A001").get("_modified"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testUtf8ByteOrderMark() throws Exception {
+        // a byte order mark at the head of a UTF-8 file is not data (TextIO drops it as well)
+        final ByteArrayOutputStream content = new ByteArrayOutputStream();
+        content.write(new byte[] { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF });
+        content.write("1,りんご\n2,みかん\n".getBytes(StandardCharsets.UTF_8));
+        final String path = write("bom.csv", content.toByteArray());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      format: csv
+                      additionalFields: { line: source_line }
+                      schema:
+                        fields:
+                          - { name: id, type: int64 }
+                          - { name: name, type: string }
+                """.formatted(path)));
+        PAssert.that(outputs.get("input").getCollection()).satisfies(elements -> {
+            final Set<String> rows = new HashSet<>();
+            for(final MElement element : elements) {
+                rows.add(element.getAsLong("id") + ":" + element.getAsString("name") + ":" + element.getAsLong("source_line"));
+            }
+            Assertions.assertEquals(Set.of("1:りんご:1", "2:みかん:2"), rows);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testTimestampAttributeOfDate() throws Exception {
+        // a date value is an epoch day, not epoch micros; a record without the value keeps the default timestamp
+        final String path = write("lines.txt", (RECORD_1 + "\r\n" + RECORD_3 + "\r\n").getBytes(MS932));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    timestampAttribute: day
+                    parameters:
+                      input: "%s"
+                %s
+                """.formatted(path, SCHEMA)));
+        final long expected = LocalDate.of(2024, 1, 31).toEpochDay() * 86_400_000L;
+        PAssert.that(outputs.get("input").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                if("A001".equals(element.getAsString("code"))) {
+                    Assertions.assertEquals(expected, element.getEpochMillis());
+                } else {
+                    Assertions.assertTrue(element.getEpochMillis() < 0);
+                }
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testTimestampAttributeOfDateOnTextPath() throws Exception {
+        // the same rule on the TextIO path (csv without additionalFields)
+        final String path = write("dates.csv", "1,2024-01-31\n".getBytes(StandardCharsets.UTF_8));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    timestampAttribute: day
+                    parameters:
+                      input: "%s"
+                      format: csv
+                      schema:
+                        fields:
+                          - { name: id, type: int64 }
+                          - { name: day, type: date }
+                """.formatted(path)));
+        final long expected = LocalDate.of(2024, 1, 31).toEpochDay() * 86_400_000L;
+        PAssert.that(outputs.get("input").getCollection()).satisfies(elements -> {
+            for(final MElement element : elements) {
+                Assertions.assertEquals(expected, element.getEpochMillis());
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testTruncatedFileWithFailFastOff() throws Exception {
+        // an I/O error in the middle of a file is not a record error: the records read so far stay,
+        // the rest of the file is not read, and the job goes on
+        final StringBuilder text = new StringBuilder();
+        final java.util.Random random = new java.util.Random(7);
+        for(int i = 0; i < 5000; i++) {
+            // digits that do not compress away, so that the cut falls inside the data
+            text.append(String.format("%04d", i)).append("東京商店　")
+                    .append(String.format("%05d", random.nextInt(100000))).append("20240131").append("\r\n");
+        }
+        final byte[] compressed = gzip(text.toString().getBytes(MS932));
+        final String path = write("truncated.txt.gz", java.util.Arrays.copyOf(compressed, compressed.length / 2));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    failFast: false
+                    parameters:
+                      input: "%s"
+                %s
+                """.formatted(path, SCHEMA)));
+        PAssert.that(outputs.get("input").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement ignored : elements) {
+                count++;
+            }
+            Assertions.assertTrue(count > 0 && count < 5000, "records read before the cut: " + count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testValidation() throws Exception {
         final String path = write("lines.txt", (RECORD_1 + "\r\n").getBytes(MS932));
         // format contradicts the schema encoding
@@ -341,6 +489,62 @@ public class StorageSourceFwfTest {
                         fields:
                           - { name: code, type: string }
                 """.formatted(path));
+        // a mistyped format is an error, with or without a fwf schema to derive it from
+        assertInvalid("parameters.format: fwff is not supported", """
+                      input: "%s"
+                      format: fwff
+                %s
+                """.formatted(path, SCHEMA));
+        assertInvalid("parameters.format: csvv is not supported", """
+                      input: "%s"
+                      format: csvv
+                      schema:
+                        fields:
+                          - { name: code, type: string }
+                """.formatted(path));
+        // filterPrefix is matched against bytes: a charset that writes a byte order mark has no single form
+        assertInvalid("parameters.filterPrefix can not be used with charset UTF-16", """
+                      input: "%s"
+                      recordSplit: length
+                      filterPrefix: "A"
+                      schema:
+                        encoding: { format: fwf, charset: UTF-16 }
+                        reference:
+                          inline:
+                            recordLength: 8
+                            fields:
+                              - { name: code, type: string, len: 8 }
+                """.formatted(path));
+        // an unknown recordSplit is an error, not a silent fallback to line
+        assertInvalid("parameters.recordSplit must be line or length", """
+                      input: "%s"
+                      recordSplit: fixed
+                %s
+                """.formatted(path, SCHEMA));
+        // recordSplit: length cuts bytes, but with unit: char the layout recordLength counts characters
+        assertInvalid("requires schema.encoding.unit: byte", """
+                      input: "%s"
+                      recordSplit: length
+                      schema:
+                        encoding: { format: fwf, charset: windows-31j, unit: char }
+                        reference:
+                          inline:
+                            recordLength: 4
+                            fields:
+                              - { name: code, type: string, len: 4 }
+                """.formatted(path));
+        // every UTF-16 / UTF-32 variant is rejected for line splitting, whatever its name
+        for(final String charset : List.of("UTF-16LE", "x-UTF-16LE-BOM", "UTF-32")) {
+            assertInvalid("can not be split into lines", """
+                      input: "%s"
+                      schema:
+                        encoding: { format: fwf, charset: %s }
+                        reference:
+                          inline:
+                            fields:
+                              - { name: code, type: string, len: 4 }
+                """.formatted(path, charset));
+        }
     }
 
     private void assertInvalid(final String expected, final String parameters) {

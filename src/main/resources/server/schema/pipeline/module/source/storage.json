@@ -87,8 +87,7 @@
         },
         {
           "if": {
-            "properties": { "format": { "const": "fwf" } },
-            "required": ["format"]
+            "properties": { "format": { "const": "fwf" } }
           },
           "then": {
             "properties": {
