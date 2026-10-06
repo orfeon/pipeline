@@ -9,6 +9,8 @@ import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
+import com.mercari.solution.util.schema.fwf.FwfLayout;
+import com.mercari.solution.util.schema.fwf.FwfOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +56,7 @@ public class Schema implements Serializable {
     private RowSchema row;
     private AvroSchema avro;
     private ProtobufSchema protobuf;
+    private FwfSchema fwf;
 
     private Boolean useDestinationSchema;
 
@@ -149,6 +152,29 @@ public class Schema implements Serializable {
 
     public Boolean getUseDestinationSchema() {
         return useDestinationSchema;
+    }
+
+    /** The fwf layout holder; null unless {@code encoding.format: fwf} was declared. */
+    public FwfSchema getFwf() {
+        return fwf;
+    }
+
+    /**
+     * The fwf layout document; null unless {@code encoding.format: fwf} was declared. This is the
+     * whole layout: when {@code fields} declare a projection, the caller narrows it with
+     * {@link FwfLayout#project} before building a decoder.
+     */
+    public FwfLayout getFwfLayout() {
+        return fwf == null ? null : fwf.getLayout();
+    }
+
+    /** The fwf conversion options from {@code encoding} (defaults unless {@code encoding.format: fwf} was declared). */
+    public FwfOptions getFwfOptions() {
+        if(encoding == null || encoding.getFormat() != Encoding.Format.fwf) {
+            // the option keys of another format are not fwf options
+            return FwfOptions.defaults();
+        }
+        return FwfOptions.of(encoding.getOptions());
     }
 
     /**
@@ -418,7 +444,60 @@ public class Schema implements Serializable {
             throw new IllegalArgumentException(String.join(", ", errorMessages));
         }
 
+        if(builder.fwf != null && !builder.fields.isEmpty()) {
+            validateFwfProjection(builder.fwf.getLayout(), builder.fields);
+        }
+
         return builder.build();
+    }
+
+    // Declared fields project the fwf layout (schema-redesign.md P3): unknown or duplicated names and
+    // incompatible types are assembly-time errors. Checked here, where the config declares the
+    // fields, and not in Builder.build(): a schema derived with Schema.builder(schema) keeps the
+    // layout holder while it adds, drops or renames fields.
+    private static void validateFwfProjection(final FwfLayout layout, final List<Field> declared) {
+        final List<String> names = new ArrayList<>();
+        for(final Field field : declared) {
+            if(names.contains(field.getName())) {
+                throw new IllegalArgumentException("schema.fields has a duplicated field name: " + field.getName());
+            }
+            names.add(field.getName());
+        }
+        // unknown names are rejected by project(); without duplicates it keeps the declared order
+        final List<Field> layoutFields = layout.project(names).toSchemaFields();
+        for(int i = 0; i < declared.size(); i++) {
+            validateFwfType("schema.fields[" + i + "] " + declared.get(i).getName(),
+                    declared.get(i).getFieldType(), layoutFields.get(i).getFieldType());
+        }
+    }
+
+    // The declared type must not contradict the layout: the same type, the same array element type
+    // and, for a record, every declared child present in the layout record with a compatible type.
+    private static void validateFwfType(final String path, final FieldType declared, final FieldType actual) {
+        if(declared.getType() != actual.getType()) {
+            throw new IllegalArgumentException(path + " type " + declared.getType()
+                    + " is incompatible with the fwf layout type " + actual.getType());
+        }
+        // the decoder enforces only what the layout declares: a field can not be made required here
+        if(Boolean.FALSE.equals(declared.getNullable()) && !Boolean.FALSE.equals(actual.getNullable())) {
+            throw new IllegalArgumentException(path + " is declared required, but the fwf layout field is nullable"
+                    + " (declare mode: required in the layout)");
+        }
+        switch (declared.getType()) {
+            case array -> validateFwfType(path + "[]", declared.getArrayValueType(), actual.getArrayValueType());
+            case element -> {
+                final List<Field> layoutChildren = actual.getElementSchema().getFields();
+                for(final Field child : declared.getElementSchema().getFields()) {
+                    final Field layoutChild = getField(layoutChildren, child.getName());
+                    if(layoutChild == null) {
+                        throw new IllegalArgumentException(path + "." + child.getName() + " is not in the fwf layout. available fields: "
+                                + layoutChildren.stream().map(Field::getName).toList());
+                    }
+                    validateFwfType(path + "." + child.getName(), child.getFieldType(), layoutChild.getFieldType());
+                }
+            }
+            default -> {}
+        }
     }
 
     // Parses the new-format keys (schema-redesign.md §2) into the same internals as the old
@@ -431,6 +510,7 @@ public class Schema implements Serializable {
 
         Encoding.Format format = null;
         String messageName = null;
+        final Map<String, String> encodingOptions = new HashMap<>();
         if(jsonObject.has("encoding")) {
             final JsonElement encodingElement = jsonObject.get("encoding");
             if(!encodingElement.isJsonObject()) {
@@ -452,7 +532,18 @@ public class Schema implements Serializable {
             if(encodingObject.has("messageName")) {
                 messageName = encodingObject.get("messageName").getAsString();
             }
-            builder.withEncoding(Encoding.of(format, messageName));
+            // format options (fwf: charset, unit, trim, ...); validated per format below
+            for(final Map.Entry<String, JsonElement> entry : encodingObject.entrySet()) {
+                if("format".equals(entry.getKey()) || "messageName".equals(entry.getKey())) {
+                    continue;
+                }
+                if(entry.getValue().isJsonPrimitive()) {
+                    encodingOptions.put(entry.getKey(), entry.getValue().getAsString());
+                } else if(Encoding.Format.fwf.equals(format)) {
+                    errorMessages.add("schema.encoding." + entry.getKey() + " must be a primitive value. but: " + entry.getValue());
+                }
+            }
+            builder.withEncoding(Encoding.of(format, messageName, encodingOptions));
         }
 
         String uri = null;
@@ -469,7 +560,16 @@ public class Schema implements Serializable {
                 uri = referenceObject.get("uri").getAsString();
             }
             if(referenceObject.has("inline")) {
-                inline = referenceObject.get("inline").getAsString();
+                final JsonElement inlineElement = referenceObject.get("inline");
+                if(inlineElement.isJsonPrimitive()) {
+                    inline = inlineElement.getAsString();
+                } else if(Encoding.Format.fwf.equals(format) && (inlineElement.isJsonObject() || inlineElement.isJsonArray())) {
+                    // the fwf layout may be written inline as a YAML / JSON object (work_fixedwidth.md §4.2)
+                    inline = inlineElement.toString();
+                } else {
+                    errorMessages.add("schema.reference.inline must be a string" + (Encoding.Format.fwf.equals(format) ? " or an object" : "") + ". but: " + inlineElement);
+                    return;
+                }
             }
             if(referenceObject.has("destination")) {
                 destination = referenceObject.get("destination").getAsBoolean();
@@ -521,6 +621,23 @@ public class Schema implements Serializable {
                 protobuf.descriptorFile = uri;
                 protobuf.messageName = messageName;
                 builder.withProtobuf(protobuf);
+            }
+            case fwf -> {
+                // the layout document (positions / lengths) is the definition: work_fixedwidth.md §3.2
+                if(!hasDocument) {
+                    errorMessages.add("schema.encoding with format fwf requires schema.reference.uri or schema.reference.inline (the layout document)");
+                    return;
+                }
+                try {
+                    FwfOptions.of(encodingOptions);
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add(e.getMessage());
+                    return;
+                }
+                final FwfSchema fwf = new FwfSchema();
+                fwf.json = inline;
+                fwf.file = uri;
+                builder.withFwf(fwf);
             }
         }
     }
@@ -1320,6 +1437,52 @@ public class Schema implements Serializable {
 
 
     /**
+     * The fixed-width layout document declared by {@code encoding.format: fwf} +
+     * {@code reference.uri / inline} (work_fixedwidth.md §4.2). Loaded at build time like the
+     * avro / protobuf definitions; the layout is serializable so that decoders can be built on workers.
+     */
+    public static class FwfSchema implements Serializable {
+
+        private String json;
+        private String file;
+        private FwfLayout layout;
+
+        public String getJson() {
+            return json;
+        }
+
+        public String getFile() {
+            return file;
+        }
+
+        public FwfLayout getLayout() {
+            if(layout == null) {
+                setup();
+            }
+            return layout;
+        }
+
+        private void setup() {
+            if(layout != null) {
+                return;
+            }
+            if(json == null && file != null) {
+                json = ResourceUtil.readString(file);
+            }
+            if(json == null) {
+                throw new IllegalArgumentException("fwf layout document is not declared");
+            }
+            try {
+                layout = FwfLayout.parse(json);
+            } catch (final RuntimeException e) {
+                throw new IllegalArgumentException("schema.reference" + (file != null ? " (uri: " + file + ")" : " (inline)")
+                        + ": " + e.getMessage(), e);
+            }
+        }
+
+    }
+
+    /**
      * The declared wire format (schema-redesign.md P2): how bytes map to/from elements.
      * Carries only the conversion spec, never the definition document (that is {@link Reference}).
      */
@@ -1327,11 +1490,14 @@ public class Schema implements Serializable {
 
         public enum Format {
             avro,
-            protobuf
+            protobuf,
+            fwf
         }
 
         private Format format;
         private String messageName;
+        // format options other than format / messageName (fwf: charset, unit, trim, ...)
+        private Map<String, String> options;
 
         public Format getFormat() {
             return format;
@@ -1341,16 +1507,25 @@ public class Schema implements Serializable {
             return messageName;
         }
 
+        public Map<String, String> getOptions() {
+            return options == null ? Map.of() : options;
+        }
+
         static Encoding of(final Format format, final String messageName) {
+            return of(format, messageName, null);
+        }
+
+        static Encoding of(final Format format, final String messageName, final Map<String, String> options) {
             final Encoding encoding = new Encoding();
             encoding.format = format;
             encoding.messageName = messageName;
+            encoding.options = options == null || options.isEmpty() ? null : new HashMap<>(options);
             return encoding;
         }
 
         @Override
         public String toString() {
-            return String.format("{ format: %s, messageName: %s }", format, messageName);
+            return String.format("{ format: %s, messageName: %s, options: %s }", format, messageName, getOptions());
         }
 
     }
@@ -1401,6 +1576,7 @@ public class Schema implements Serializable {
         private AvroSchema avro;
         private RowSchema row;
         private ProtobufSchema protobuf;
+        private FwfSchema fwf;
         private Boolean useDestinationSchema;
         private Encoding encoding;
         private Reference reference;
@@ -1470,6 +1646,12 @@ public class Schema implements Serializable {
                 this.row = new RowSchema();
                 this.row.schema = schema.row.schema;
             }
+            if(schema.fwf != null) {
+                this.fwf = new FwfSchema();
+                this.fwf.json = schema.fwf.json;
+                this.fwf.file = schema.fwf.file;
+                this.fwf.layout = schema.fwf.layout;
+            }
             this.encoding = schema.encoding;
             this.reference = schema.reference;
         }
@@ -1492,6 +1674,12 @@ public class Schema implements Serializable {
                     schema = Schema.of(avro.schema);
                     schema.avro.json = avro.json;
                     schema.avro.file = avro.file;
+                } else if(fwf != null) {
+                    fwf.setup();
+                    schema = Schema.of(fwf.layout.toSchemaFields());
+                    if(fwf.layout.getDescription() != null) {
+                        schema.description = fwf.layout.getDescription();
+                    }
                 } else if(Boolean.TRUE.equals(useDestinationSchema)
                         || (reference != null && Boolean.TRUE.equals(reference.getDestination()))) {
                     // destination-only declaration (schema-redesign.md §2 reference.destination):
@@ -1505,7 +1693,14 @@ public class Schema implements Serializable {
                 schema.avro = avro;
                 schema.protobuf = protobuf;
                 schema.row = row;
+                if(fwf != null) {
+                    // load the layout at build time (like avro / protobuf). The fields are not checked
+                    // against it here: Schema.parse validates a declared projection, and a derived
+                    // schema (Schema.builder(schema)) is free to change its fields.
+                    fwf.setup();
+                }
             }
+            schema.fwf = fwf;
             schema.name = name;
             schema.useDestinationSchema = useDestinationSchema;
             if(description != null && !description.isEmpty()) {
@@ -1547,6 +1742,11 @@ public class Schema implements Serializable {
 
         public Builder withProtobuf(ProtobufSchema protobuf) {
             this.protobuf = protobuf;
+            return this;
+        }
+
+        public Builder withFwf(FwfSchema fwf) {
+            this.fwf = fwf;
             return this;
         }
 
