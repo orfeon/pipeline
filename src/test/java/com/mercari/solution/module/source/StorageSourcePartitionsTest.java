@@ -227,6 +227,160 @@ public class StorageSourcePartitionsTest {
     }
 
     @Test
+    public void testNullPartitionsIsNoPartitions() throws Exception {
+        // an explicit null is an omitted parameter: the module has its one unnamed output
+        final String path = writePack();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: pack
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      archive:
+                        entries: ["ORD*.txt"]
+                      additionalFields: { entry: _entry, line: _line }
+                      partitions: null
+                %s
+                """.formatted(path, moduleLevel(ORDER_SCHEMA))));
+        PAssert.that(outputs.get("pack").getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(Set.of("A001:ORD240101.txt:1", "B002:ORD240101.txt:2", "C003:ORD240102.txt:1"), rows(elements, "code"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testStreamedArchiveAndEntryCounters() throws Exception {
+        // a tar.gz is read front to back: the same routing, and the entries no partition takes are counted
+        final java.io.ByteArrayOutputStream tarBytes = new java.io.ByteArrayOutputStream();
+        try(final org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
+                    new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(new java.util.zip.GZIPOutputStream(tarBytes))) {
+            final Map<String, byte[]> entries = new LinkedHashMap<>();
+            entries.put("ORD240101.txt", (ORDER_1 + "\r\n" + ORDER_2 + "\r\n").getBytes(MS932));
+            entries.put("docs/readme.txt", "no partition takes this entry".getBytes(StandardCharsets.UTF_8));
+            entries.put("ITEM240101.csv", "sku,qty\nS-1,3\n".getBytes(StandardCharsets.UTF_8));
+            entries.put("ORD240102.txt", (ORDER_3 + "\r\n").getBytes(MS932));
+            entries.put("notes.md", "nor this one".getBytes(StandardCharsets.UTF_8));
+            for(final Map.Entry<String, byte[]> entry : entries.entrySet()) {
+                final org.apache.commons.compress.archivers.tar.TarArchiveEntry tarEntry =
+                        new org.apache.commons.compress.archivers.tar.TarArchiveEntry(entry.getKey());
+                tarEntry.setSize(entry.getValue().length);
+                tar.putArchiveEntry(tarEntry);
+                tar.write(entry.getValue());
+                tar.closeArchiveEntry();
+            }
+        }
+        final String path = write("PACK240101.tar.gz", tarBytes.toByteArray());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: pack
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      archive: {}
+                      additionalFields: { entry: _entry, line: _line }
+                      partitions:
+                        - name: orders
+                          entries: ["ORD*.txt"]
+                %s
+                        - name: items
+                          entries: ["ITEM*.csv"]
+                          format: csv
+                          skipHeaderLines: 1
+                          schema:
+                            fields:
+                              - { name: sku, type: string }
+                              - { name: qty, type: int64 }
+                """.formatted(path, ORDER_SCHEMA)));
+        PAssert.that(outputs.get("pack.orders").getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(Set.of("A001:ORD240101.txt:1", "B002:ORD240101.txt:2", "C003:ORD240102.txt:1"), rows(elements, "code"));
+            return null;
+        });
+        PAssert.that(outputs.get("pack.items").getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(Set.of("S-1:ITEM240101.csv:2"), rows(elements, "sku"));
+            return null;
+        });
+        final org.apache.beam.sdk.PipelineResult result = pipeline.run();
+        result.waitUntilFinish();
+
+        final Map<String, Long> counters = new java.util.HashMap<>();
+        for(final org.apache.beam.sdk.metrics.MetricResult<Long> counter : result.metrics()
+                .queryMetrics(org.apache.beam.sdk.metrics.MetricsFilter.builder()
+                        .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.inNamespace("pack"))
+                        .build())
+                .getCounters()) {
+            counters.put(counter.getName().getName(), counter.getAttempted());
+        }
+        Assertions.assertEquals(3L, counters.get("archive_entries_read"), counters.toString());
+        Assertions.assertEquals(2L, counters.get("archive_entries_skipped"), counters.toString());
+    }
+
+    @Test
+    public void testTimestampAttributePerPartition() throws Exception {
+        // the module-level timestampAttribute is one name for all the partitions: a partition may
+        // declare its own, and one without the field keeps the default timestamp (with a warning)
+        final Map<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("events.csv", "e1,2024-01-31T00:00:00Z\n".getBytes(StandardCharsets.UTF_8));
+        entries.put("days.csv", "d1,2024-02-01\n".getBytes(StandardCharsets.UTF_8));
+        entries.put("items.csv", "i1,3\n".getBytes(StandardCharsets.UTF_8));
+        final String path = write("times.zip", zip(entries));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: pack
+                    module: storage
+                    timestampAttribute: at
+                    parameters:
+                      input: "%s"
+                      format: csv
+                      archive: {}
+                      partitions:
+                        - name: events
+                          entries: ["events.csv"]
+                          schema:
+                            fields:
+                              - { name: id, type: string }
+                              - { name: at, type: timestamp }
+                        - name: days
+                          entries: ["days.csv"]
+                          timestampAttribute: day
+                          schema:
+                            fields:
+                              - { name: id, type: string }
+                              - { name: day, type: date }
+                        - name: items
+                          entries: ["items.csv"]
+                          schema:
+                            fields:
+                              - { name: id, type: string }
+                              - { name: qty, type: int64 }
+                """.formatted(path)));
+        final long january31 = java.time.LocalDate.of(2024, 1, 31).toEpochDay() * 86_400_000L;
+        final long february1 = java.time.LocalDate.of(2024, 2, 1).toEpochDay() * 86_400_000L;
+        PAssert.that(outputs.get("pack.events").getCollection()).satisfies(elements -> {
+            for(final MElement element : elements) {
+                Assertions.assertEquals(january31, element.getEpochMillis());
+            }
+            return null;
+        });
+        PAssert.that(outputs.get("pack.days").getCollection()).satisfies(elements -> {
+            for(final MElement element : elements) {
+                Assertions.assertEquals(february1, element.getEpochMillis());
+            }
+            return null;
+        });
+        PAssert.that(outputs.get("pack.items").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                Assertions.assertTrue(element.getEpochMillis() < 0, "default timestamp: " + element.getEpochMillis());
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testValidation() throws Exception {
         final String path = writePack();
         final String partition = """
@@ -234,6 +388,48 @@ public class StorageSourcePartitionsTest {
                           entries: ["ORD*.txt"]
                 %s
                 """.formatted(ORDER_SCHEMA);
+
+        assertInvalid("parameters.partitions[0].schema.reference.destination is not applicable to source modules", """
+                      input: "%s"
+                      archive: {}
+                      format: csv
+                      additionalFields: { entry: _entry }
+                      partitions:
+                        - name: items
+                          entries: ["ITEM*.csv"]
+                          schema:
+                            reference: { destination: true }
+                """.formatted(path));
+        assertInvalid("parameters.partitions[0].schema: it defines no fields", """
+                      input: "%s"
+                      archive: {}
+                      format: csv
+                      partitions:
+                        - name: items
+                          entries: ["ITEM*.csv"]
+                          schema: {}
+                """.formatted(path));
+        assertInvalid("parameters.partitions[0].skipHeaderLines must be an integer. but: 1.7", """
+                      input: "%s"
+                      archive: {}
+                      format: csv
+                      partitions:
+                        - name: items
+                          entries: ["ITEM*.csv"]
+                          skipHeaderLines: 1.7
+                          schema:
+                            fields:
+                              - { name: sku, type: string }
+                """.formatted(path));
+        assertInvalid("parameters.partitions(orders).format: csv differs from schema.encoding.format: fwf", """
+                      input: "%s"
+                      archive: {}
+                      partitions:
+                        - name: orders
+                          entries: ["ORD*.txt"]
+                          format: csv
+                %s
+                """.formatted(path, ORDER_SCHEMA));
 
         assertInvalid("parameters.partitions requires parameters.archive", """
                       input: "%s"
@@ -307,6 +503,38 @@ public class StorageSourcePartitionsTest {
                           fields: [nothing]
                 %s
                 """.formatted(path, ORDER_SCHEMA));
+        // "{module}.failures" is the failure output of a module
+        assertInvalid("parameters.partitions[0].name: failures is reserved", """
+                      input: "%s"
+                      archive: {}
+                      partitions:
+                        - name: failures
+                          entries: ["ORD*.txt"]
+                %s
+                """.formatted(path, ORDER_SCHEMA));
+        // a timestampAttribute a partition declares itself must be one of its fields
+        assertInvalid("parameters.partitions(orders).timestampAttribute: day is not a field of this partition", """
+                      input: "%s"
+                      archive: {}
+                      partitions:
+                        - name: orders
+                          entries: ["ORD*.txt"]
+                          timestampAttribute: day
+                %s
+                """.formatted(path, ORDER_SCHEMA));
+        // the format derived from the module-level fwf schema is not a default for a partition with
+        // a schema of its own: its format has to be declared
+        assertInvalid("parameters.partitions[0].format is required", """
+                      input: "%s"
+                      archive: {}
+                      partitions:
+                        - name: items
+                          entries: ["ITEM*.csv"]
+                          schema:
+                            fields:
+                              - { name: sku, type: string }
+                %s
+                """.formatted(path, moduleLevel(ORDER_SCHEMA)));
         assertInvalid("parameters.partitions must be a non-empty array", """
                       input: "%s"
                       archive: {}

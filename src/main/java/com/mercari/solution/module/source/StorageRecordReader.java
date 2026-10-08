@@ -9,7 +9,6 @@ import com.mercari.solution.module.MErrorHandler;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ArchiveReader;
 import com.mercari.solution.util.domain.file.ByteRecordReader;
 import com.mercari.solution.util.schema.converter.CsvToElementConverter;
@@ -35,6 +34,8 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.joda.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -74,6 +75,8 @@ import java.util.function.Predicate;
  */
 final class StorageRecordReader {
 
+    private static final Logger LOG = LoggerFactory.getLogger(StorageRecordReader.class);
+
     enum Format { csv, json, fwf }
 
     enum RecordSplit { line, length }
@@ -81,7 +84,10 @@ final class StorageRecordReader {
     private static final List<String> ADDITIONAL_FIELD_KEYS = List.of("resource", "entry", "line", "lastModified");
     private static final List<String> PARTITION_KEYS = List.of(
             "name", "entries", "exclude", "format", "schema", "fields",
-            "skipHeaderLines", "filterPrefix", "delimiter", "recordSplit");
+            "skipHeaderLines", "filterPrefix", "delimiter", "recordSplit", "timestampAttribute");
+    // "{module}.failures" is the failure output of a module: the pipeline keeps it out of wildcard
+    // inputs ("{module}.*"), the dry-run report and the output log
+    private static final String RESERVED_PARTITION_NAME = "failures";
     private static final byte[] UTF8_BOM = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
     private static final long MILLIS_PER_DAY = 86_400_000L;
 
@@ -125,6 +131,8 @@ final class StorageRecordReader {
         String filterPrefix;
         String delimiter;
         RecordSplit recordSplit;
+        // the event time field of this partition; null: the module-level timestampAttribute
+        String timestampAttribute;
 
         // where the partition is declared, for error messages
         private String where() {
@@ -164,7 +172,10 @@ final class StorageRecordReader {
                     continue;
                 } else if(!names.add(partition.name)) {
                     errors.add(where + ".name: " + partition.name + " is duplicated");
+                } else if(RESERVED_PARTITION_NAME.equals(partition.name)) {
+                    errors.add(where + ".name: " + partition.name + " is reserved (the failure output of a module is {module}.failures)");
                 }
+                partition.timestampAttribute = text(object, "timestampAttribute", where, errors);
                 partition.entries = texts(object, "entries", where, errors);
                 partition.exclude = texts(object, "exclude", where, errors);
                 if(partition.entries == null || partition.entries.isEmpty()) {
@@ -183,11 +194,18 @@ final class StorageRecordReader {
                         partition.schema = Schema.parse(object.get("schema"));
                         if(partition.schema == null) {
                             errors.add(where + ".schema must be an object");
+                        } else if(partition.schema.isDestinationReference()) {
+                            // as for the module-level schema (Source.setup): it points at a write
+                            // target and has no fields to read records with
+                            errors.add(where + ".schema.reference.destination is not applicable to source modules");
                         } else {
                             partition.schema.setup();
                         }
                     } catch (final RuntimeException e) {
-                        errors.add(where + ".schema: " + e.getMessage());
+                        // a schema that defines no fields at all fails without a message
+                        errors.add(where + ".schema: " + (e.getMessage() == null
+                                ? "it defines no fields (declare fields, or encoding with reference)"
+                                : e.getMessage()));
                     }
                 }
                 final boolean fwfSchema = partition.schema != null && partition.schema.getFwfLayout() != null;
@@ -204,9 +222,7 @@ final class StorageRecordReader {
                         errors.add(where + ".format is required (or parameters.format for all partitions)");
                     }
                 }
-                if(partition.format != null && fwfSchema && partition.format != Format.fwf) {
-                    errors.add(where + ".format: " + partition.format + " differs from schema.encoding.format: fwf");
-                }
+                // a declared format that contradicts the schema is reported by Plan.of
 
                 final List<String> fields = texts(object, "fields", where, errors);
                 partition.fields = object.has("fields") ? fields : defaults.fields;
@@ -215,7 +231,10 @@ final class StorageRecordReader {
                 partition.skipHeaderLines = defaults.skipHeaderLines;
                 if(object.has("skipHeaderLines")) {
                     try {
-                        partition.skipHeaderLines = object.get("skipHeaderLines").getAsInt();
+                        // not getAsInt: it would cut 1.7 down to 1 and take [1] for 1, which the
+                        // module-level parameter rejects
+                        partition.skipHeaderLines = object.get("skipHeaderLines")
+                                .getAsJsonPrimitive().getAsBigDecimal().intValueExact();
                     } catch (final RuntimeException e) {
                         errors.add(where + ".skipHeaderLines must be an integer. but: " + object.get("skipHeaderLines"));
                     }
@@ -349,18 +368,11 @@ final class StorageRecordReader {
         }
 
         final List<Plan> plans = new ArrayList<>();
-        final List<Schema> outputSchemas = new ArrayList<>();
         for(final Partition partition : spec.partitions) {
-            final List<Schema.Field> fields = new ArrayList<>();
-            final Plan plan = Plan.of(plans.size(), partition, additionalFields, timestampAttribute, fields, errors);
-            if(plan == null) {
-                continue;
+            final Plan plan = Plan.of(plans.size(), partition, additionalFields, timestampAttribute, errors);
+            if(plan != null) {
+                plans.add(plan);
             }
-            plans.add(plan);
-            outputSchemas.add(Schema.builder()
-                    .withFields(fields)
-                    .withDescription(plan.description)
-                    .build());
         }
         if(!errors.isEmpty()) {
             throw new IllegalModuleException(errors);
@@ -384,22 +396,19 @@ final class StorageRecordReader {
                 .setCoder(ReadableFileCoder.of(MetadataCoderV2.of()))
                 .apply("ReadRecords", ParDo
                         .of(new ReadRecordsDoFn(name, compression, plans, spec.archive, archiveType,
-                                archiveNameCharset.name(), timestampAttribute, failFast, failureTag))
+                                archiveNameCharset.name(), failFast, failureTag))
                         .withOutputTags(plans.getFirst().tag, otherTags));
 
         errorHandler.addError(outputs.get(failureTag));
 
+        // MCollectionTuple sets the coder of each output from its schema
         if(!named) {
-            return MCollectionTuple.of(
-                    outputs.get(plans.getFirst().tag).setCoder(ElementCoder.of(outputSchemas.getFirst())),
-                    outputSchemas.getFirst());
+            final Plan plan = plans.getFirst();
+            return MCollectionTuple.of(outputs.get(plan.tag), plan.outputSchema);
         }
         MCollectionTuple tuple = MCollectionTuple.empty(begin.getPipeline());
-        for(int i = 0; i < plans.size(); i++) {
-            tuple = tuple.and(
-                    spec.partitions.get(i).name,
-                    outputs.get(plans.get(i).tag).setCoder(ElementCoder.of(outputSchemas.get(i))),
-                    outputSchemas.get(i));
+        for(final Plan plan : plans) {
+            tuple = tuple.and(plan.name, outputs.get(plan.tag), plan.outputSchema);
         }
         return tuple;
     }
@@ -463,12 +472,18 @@ final class StorageRecordReader {
         private boolean fixedLength;
         // metadata key -> output field name
         private Map<String, String> additionalFields;
+        // the event time field of the partition; null: the records keep the default timestamp
+        private String timestampAttribute;
         // the event time field is a date: its value is an epoch day, any other number is epoch micros
         private boolean timestampIsDate;
         private List<String> entries;
         private List<String> exclude;
-        private String description;
 
+        // assembly time only: the output of the partition (name: null for the unnamed output)
+        private transient String name;
+        private transient Schema outputSchema;
+
+        // set up on the workers
         private transient Charset charset;
         private transient Predicate<String> entryFilter;
 
@@ -478,7 +493,6 @@ final class StorageRecordReader {
                 final Partition partition,
                 final Map<String, String> additionalFields,
                 final String timestampAttribute,
-                final List<Schema.Field> fields,
                 final List<String> errors) {
 
             final String where = partition.where();
@@ -500,8 +514,11 @@ final class StorageRecordReader {
 
             final Plan plan = new Plan();
             plan.tag = new TupleTag<>("partition" + index);
+            plan.name = partition.name;
             plan.format = partition.format;
-            plan.description = schema.getDescription();
+            // the output fields: the data fields, then the additional fields
+            final List<Schema.Field> fields = new ArrayList<>();
+            String description = schema.getDescription();
             final Charset charset;
             if(partition.format == Format.fwf) {
                 if(schema.getFwfLayout() == null) {
@@ -526,12 +543,13 @@ final class StorageRecordReader {
                                 + charset.name() + ": the file is cut every recordLength bytes, but with unit: char recordLength counts characters");
                     }
                 } else if(isWideCharset(charset)) {
-                    errors.add("charset " + charset.name() + " can not be split into lines by a single-byte separator; use recordSplit: length (" + where + ")");
+                    errors.add("charset " + charset.name() + " can not be split into lines by a single-byte separator; use recordSplit: length"
+                            + (partition.name == null ? "" : " (" + where + ")"));
                 }
                 fields.addAll(layout.toSchemaFields());
-                if(plan.description == null) {
+                if(description == null) {
                     // a schema with declared fields does not take over the description of the layout
-                    plan.description = layout.getDescription();
+                    description = layout.getDescription();
                 }
             } else {
                 if(schema.getFwfLayout() != null) {
@@ -577,12 +595,32 @@ final class StorageRecordReader {
                 }
             }
 
-            final Schema.Field timestampField = timestampAttribute == null ? null : Schema.getField(fields, timestampAttribute);
+            // The event time field: the partition's own, else the module-level one. The module-level
+            // attribute is one name for all the partitions, and a partition may well not have it.
+            plan.timestampAttribute = partition.timestampAttribute != null ? partition.timestampAttribute : timestampAttribute;
+            final Schema.Field timestampField = plan.timestampAttribute == null ? null : Schema.getField(fields, plan.timestampAttribute);
+            if(plan.timestampAttribute != null && timestampField == null && partition.name != null) {
+                if(partition.timestampAttribute != null) {
+                    errors.add(where + ".timestampAttribute: " + plan.timestampAttribute + " is not a field of this partition");
+                } else {
+                    LOG.warn("storage source partition {}: timestampAttribute {} is not a field of this partition; "
+                                    + "its records keep the default timestamp (declare partitions[].timestampAttribute for it)",
+                            partition.name, plan.timestampAttribute);
+                    plan.timestampAttribute = null;
+                }
+            }
             plan.timestampIsDate = timestampField != null
                     && timestampField.getFieldType().getType() == Schema.Type.date;
             plan.entries = partition.entries == null ? List.of() : new ArrayList<>(partition.entries);
             plan.exclude = partition.exclude == null ? List.of() : new ArrayList<>(partition.exclude);
-            return errors.size() == errorCount ? plan : null;
+            if(errors.size() != errorCount) {
+                return null;
+            }
+            plan.outputSchema = Schema.builder()
+                    .withFields(fields)
+                    .withDescription(description)
+                    .build();
+            return plan;
         }
 
         void setup() {
@@ -628,7 +666,6 @@ final class StorageRecordReader {
         private final List<String> archiveEntries;
         private final List<String> archiveExclude;
         private final String archiveNameCharsetName;
-        private final String timestampAttribute;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
         private final Counter entriesRead;
@@ -645,7 +682,6 @@ final class StorageRecordReader {
                 final Archive archive,
                 final ArchiveReader.Type archiveType,
                 final String archiveNameCharsetName,
-                final String timestampAttribute,
                 final boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
@@ -657,7 +693,6 @@ final class StorageRecordReader {
             this.archiveEntries = archive == null || archive.entries == null ? List.of() : new ArrayList<>(archive.entries);
             this.archiveExclude = archive == null || archive.exclude == null ? List.of() : new ArrayList<>(archive.exclude);
             this.archiveNameCharsetName = archiveNameCharsetName;
-            this.timestampAttribute = timestampAttribute;
             this.failFast = failFast;
             this.failureTag = failureTag;
             this.entriesRead = Metrics.counter(name, "archive_entries_read");
@@ -882,10 +917,10 @@ final class StorageRecordReader {
         // The event time of a record: the value of timestampAttribute, or the given default without
         // the attribute or the value.
         private Instant eventTime(final Plan plan, final Map<String, Object> values, final Instant defaultTime) {
-            if(timestampAttribute == null) {
+            if(plan.timestampAttribute == null) {
                 return defaultTime;
             }
-            return switch (values.get(timestampAttribute)) {
+            return switch (values.get(plan.timestampAttribute)) {
                 case Number n when plan.timestampIsDate -> Instant.ofEpochMilli(Math.multiplyExact(n.longValue(), MILLIS_PER_DAY));
                 case Number n -> Instant.ofEpochMilli(n.longValue() / 1000L);
                 case String s -> Instant.ofEpochMilli(DateTimeUtil.toEpochMicroSecond(s) / 1000L);

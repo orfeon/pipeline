@@ -65,6 +65,10 @@ public class StorageSource extends Source {
          */
         public void validate(final Schema schema, final String declaredFormat) {
             final List<String> errorMessages = new ArrayList<>();
+            // partitions: null is an omitted parameter (Gson keeps an explicit null as JsonNull)
+            if(partitions != null && partitions.isJsonNull()) {
+                partitions = null;
+            }
             if((inputs == null || inputs.isEmpty()) && input == null) {
                 errorMessages.add("parameters.input or inputs is required");
             }
@@ -147,7 +151,12 @@ public class StorageSource extends Source {
         if(Format.fwf.equals(parameters.format) || additionalFields || parameters.archive != null || parameters.partitions != null) {
             // the module-level way of reading: the single output, or the defaults of the partitions
             final StorageRecordReader.Partition reading = new StorageRecordReader.Partition();
-            reading.format = parameters.format == null ? null : StorageRecordReader.Format.valueOf(parameters.format.name());
+            // As a default for partitions only a format that the config declares: the one derived from
+            // the module-level schema belongs to that schema, and a partition with its own schema must
+            // not inherit it (a partition that uses the module-level fwf schema is fwf by that schema).
+            final boolean inherited = parameters.partitions == null || declaredFormat() != null;
+            reading.format = parameters.format == null || !inherited
+                    ? null : StorageRecordReader.Format.valueOf(parameters.format.name());
             reading.schema = getSchema();
             reading.skipHeaderLines = parameters.skipHeaderLines;
             reading.filterPrefix = parameters.filterPrefix;

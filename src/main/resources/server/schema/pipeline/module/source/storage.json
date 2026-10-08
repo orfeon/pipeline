@@ -28,7 +28,7 @@
         "format": {
           "type": "string",
           "title": "Format",
-          "description": "File format. May be omitted when schema.encoding.format declares it (fwf)",
+          "description": "File format. May be omitted when schema.encoding.format declares it (fwf), or when every partition has its own format",
           "enum": ["avro", "parquet", "csv", "json", "fwf"]
         },
         "archive": {
@@ -59,7 +59,8 @@
               "skipHeaderLines": { "type": "integer", "title": "Skip Header Lines" },
               "filterPrefix": { "type": "string", "title": "Filter Prefix" },
               "delimiter": { "type": "string", "title": "Delimiter" },
-              "recordSplit": { "type": "string", "title": "Record Split", "enum": ["line", "length"] }
+              "recordSplit": { "type": "string", "title": "Record Split", "enum": ["line", "length"] },
+              "timestampAttribute": { "type": "string", "title": "Timestamp Attribute", "description": "The field of this partition to use as the event time. The source-level timestampAttribute when omitted" }
             },
             "required": ["name", "entries"],
             "additionalProperties": false
