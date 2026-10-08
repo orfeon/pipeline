@@ -2,7 +2,9 @@ package com.mercari.solution.util.domain.file;
 
 import org.apache.commons.compress.archivers.ArchiveEntry;
 import org.apache.commons.compress.archivers.ArchiveInputStream;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.archivers.zip.UnicodePathExtraField;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
 import org.apache.commons.compress.archivers.zip.ZipFile;
@@ -16,12 +18,15 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.NonWritableChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.zip.CRC32;
 
 /**
  * Reads the file entries of an archive one after another (work_fixedwidth.md §6): an archive is a
@@ -49,16 +54,59 @@ public final class ArchiveReader implements Closeable {
             if(fileName == null) {
                 return null;
             }
-            final String name = fileName.toLowerCase(Locale.ROOT);
+            final String name = expandShortSuffix(fileName);
             if(name.endsWith(".zip")) {
                 return zip;
             }
-            if(name.endsWith(".tar") || name.contains(".tar.") || name.endsWith(".tgz")
-                    || name.endsWith(".tbz2") || name.endsWith(".tbz") || name.endsWith(".tzst")) {
+            if(name.endsWith(".tar") || name.contains(".tar.")) {
                 return tar;
             }
             return null;
         }
+    }
+
+    // the short forms of a compressed tar and what they stand for
+    private static final Map<String, String> TAR_SHORT_SUFFIXES = Map.of(
+            ".tgz", ".tar.gz",
+            ".tbz2", ".tar.bz2",
+            ".tbz", ".tar.bz2",
+            ".tzst", ".tar.zst");
+
+    /**
+     * The file name in lower case, with the short form of a compressed tar written out
+     * ({@code logs.tgz} is {@code logs.tar.gz}): the name that says both the archive type and the
+     * compression around the archive.
+     */
+    public static String expandShortSuffix(final String fileName) {
+        final String name = fileName.toLowerCase(Locale.ROOT);
+        for(final Map.Entry<String, String> suffix : TAR_SHORT_SUFFIXES.entrySet()) {
+            if(name.endsWith(suffix.getKey())) {
+                return name.substring(0, name.length() - suffix.getKey().length()) + suffix.getValue();
+            }
+        }
+        return name;
+    }
+
+    // compressions that are common around a tar or on a file but that Beam can not decompress
+    private static final List<String> UNSUPPORTED_COMPRESSION_SUFFIXES = List.of(
+            ".xz", ".txz", ".lzma", ".lz4", ".lz", ".z", ".7z", ".rar", ".lzh");
+
+    /**
+     * The suffix of a file (or entry) name that says a compression which can not be read
+     * ({@code .xz}, {@code .lz4}, {@code .Z} ...), or null. Read as it is, such a file is garbage
+     * that may even pass as an empty tar, so callers reject it by name instead.
+     */
+    public static String unsupportedCompression(final String fileName) {
+        if(fileName == null) {
+            return null;
+        }
+        final String name = fileName.toLowerCase(Locale.ROOT);
+        for(final String suffix : UNSUPPORTED_COMPRESSION_SUFFIXES) {
+            if(name.endsWith(suffix)) {
+                return suffix;
+            }
+        }
+        return null;
     }
 
     private final Closeable archive;
@@ -87,7 +135,11 @@ public final class ArchiveReader implements Closeable {
         final ZipFile zipFile = ZipFile.builder()
                 .setSeekableByteChannel(new BlockBufferedChannel(channel))
                 .setCharset(nameCharset)
-                .setUseUnicodeExtraFields(true)
+                // By default the zip reader visits the local header of every entry while it opens the
+                // archive: a seek (a range request on object storage) per entry, selected or not. The
+                // local header of an entry is read when the entry is opened instead; what it would
+                // have added to the central directory is the Unicode name (centralDirectoryName).
+                .setIgnoreLocalFileHeader(true)
                 .get();
         return new ArchiveReader(zipFile, null);
     }
@@ -111,7 +163,7 @@ public final class ArchiveReader implements Closeable {
         if(zipFile != null) {
             while(zipEntries.hasMoreElements()) {
                 final ZipArchiveEntry entry = zipEntries.nextElement();
-                if(accept(entry, filter)) {
+                if(accept(entry, centralDirectoryName(entry), filter)) {
                     this.entryStream = zipFile.getInputStream(entry);
                     return true;
                 }
@@ -120,7 +172,7 @@ public final class ArchiveReader implements Closeable {
         }
         ArchiveEntry entry;
         while((entry = stream.getNextEntry()) != null) {
-            if(accept(entry, filter)) {
+            if(accept(entry, entry.getName(), filter)) {
                 this.entryStream = new EntryStream(stream);
                 return true;
             }
@@ -128,17 +180,45 @@ public final class ArchiveReader implements Closeable {
         return false;
     }
 
-    private boolean accept(final ArchiveEntry entry, final Predicate<String> filter) {
-        if(entry.isDirectory()) {
+    private boolean accept(final ArchiveEntry entry, final String entryPath, final Predicate<String> filter) {
+        if(entry.isDirectory() || isLink(entry)) {
             return false;
         }
-        final String entryName = normalize(entry.getName());
+        final String entryName = normalize(entryPath);
         if(entryName.isEmpty() || (filter != null && !filter.test(entryName))) {
             return false;
         }
         this.name = entryName;
         this.size = entry.getSize();
         return true;
+    }
+
+    // The name of a central directory entry: the Unicode Path extra field (Info-ZIP) wins over a
+    // name that is not flagged as UTF-8, as it does when the archive is read as a stream. The zip
+    // reader applies the field only together with the local headers, which are not read ahead.
+    private static String centralDirectoryName(final ZipArchiveEntry entry) {
+        if(!entry.getGeneralPurposeBit().usesUTF8ForNames()
+                && entry.getExtraField(UnicodePathExtraField.UPATH_ID) instanceof UnicodePathExtraField field
+                && field.getUnicodeName() != null) {
+            // the field is only valid for the name it was written for
+            final CRC32 crc = new CRC32();
+            crc.update(entry.getRawName());
+            if(crc.getValue() == field.getNameCRC32()) {
+                return new String(field.getUnicodeName(), StandardCharsets.UTF_8);
+            }
+        }
+        return entry.getName();
+    }
+
+    // A link is not a file: the "content" of a symbolic link in a zip is the path it points to, and
+    // a link in a tar has no content. A zip says so only in its central directory (the unix mode of
+    // the entry), so a zip read as a stream can not tell: there the link path is read as content.
+    private static boolean isLink(final ArchiveEntry entry) {
+        return switch (entry) {
+            case ZipArchiveEntry zip -> zip.isUnixSymlink();
+            case TarArchiveEntry tar -> tar.isSymbolicLink() || tar.isLink();
+            default -> false;
+        };
     }
 
     /** The path of the current entry inside the archive, with {@code /} separators and no leading {@code ./}. */
@@ -174,13 +254,16 @@ public final class ArchiveReader implements Closeable {
 
     private static String normalize(final String entryName) {
         String normalized = entryName.replace('\\', '/');
-        while(normalized.startsWith("./")) {
-            normalized = normalized.substring(2);
+        // in any order: "/./a.txt" is a.txt as well
+        while(true) {
+            if(normalized.startsWith("./")) {
+                normalized = normalized.substring(2);
+            } else if(normalized.startsWith("/")) {
+                normalized = normalized.substring(1);
+            } else {
+                return normalized;
+            }
         }
-        while(normalized.startsWith("/")) {
-            normalized = normalized.substring(1);
-        }
-        return normalized;
     }
 
     /**
@@ -239,10 +322,11 @@ public final class ArchiveReader implements Closeable {
 
     /**
      * Serves reads from one block of the underlying channel at a time. The zip reader locates the
-     * central directory by stepping backwards through the tail of the file and then hops between
-     * local headers with many small reads; on object storage every backward step or hop would
-     * otherwise be a range request of its own. Reading on within an entry stays sequential for the
-     * underlying channel (block after block), so it keeps one stream open.
+     * central directory by stepping backwards through the tail of the file and reads it, and the
+     * local header of an opened entry, with many small positioned reads; on object storage every
+     * backward step or positioned read would otherwise be a range request of its own. Reading on
+     * within an entry stays sequential for the underlying channel (block after block), so it keeps
+     * one stream open.
      */
     private static final class BlockBufferedChannel implements SeekableByteChannel {
 
@@ -266,6 +350,10 @@ public final class ArchiveReader implements Closeable {
         public int read(final ByteBuffer dst) throws IOException {
             if(!channel.isOpen()) {
                 throw new ClosedChannelException();
+            }
+            if(!dst.hasRemaining()) {
+                // nothing was asked for: not the end of the channel
+                return 0;
             }
             if(position >= size) {
                 return -1;

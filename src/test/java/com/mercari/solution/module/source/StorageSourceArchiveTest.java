@@ -315,6 +315,70 @@ public class StorageSourceArchiveTest {
     }
 
     @Test
+    public void testUnsupportedCompressionIsAFileFailure() throws Exception {
+        // .tar.xz would be read as a tar of garbage (and may pass as an empty one): rejected by its name
+        final String path = write("orders.tar.xz", tar(Map.of("ORD1.txt", ms932(RECORD_1 + "\r\n"))));
+        MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      archive: {}
+                %s
+                """.formatted(path, SCHEMA)));
+        final RuntimeException e = Assertions.assertThrows(RuntimeException.class, pipeline::run);
+        Assertions.assertTrue(String.valueOf(e.getMessage()).contains("orders.tar.xz is compressed with a format that is not supported (.xz)"), e.getMessage());
+    }
+
+    @Test
+    public void testFailureRecordsNameTheEntry() throws Exception {
+        // the failure output itself, through the storage failure sink
+        final Map<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("ORD1.txt", ms932(RECORD_1 + "\r\n" + "SHORT" + "\r\n"));
+        entries.put("ORD2.txt", ms932(RECORD_3 + "\r\n"));
+        final String path = write("bad.zip", zip(entries, StandardCharsets.UTF_8));
+        final Path failures = tempDir.resolve("failures");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                system:
+                  failure:
+                    failFast: false
+                    sinks:
+                      - name: dead_letter
+                        module: storage
+                        parameters:
+                          output: "%s/failed"
+                          format: json
+                          suffix: ".json"
+                          numShards: 1
+                sources:
+                  - name: input
+                    module: storage
+                    parameters:
+                      input: "%s"
+                      archive: {}
+                      additionalFields: { entry: _entry, line: _line }
+                %s
+                """.formatted(relativize(failures), path, SCHEMA)));
+        PAssert.that(outputs.get("input").getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(Set.of("A001:ORD1.txt:1", "C003:ORD2.txt:1"), rows(elements));
+            return null;
+        });
+        pipeline.run().waitUntilFinish();
+
+        final StringBuilder written = new StringBuilder();
+        try(final java.util.stream.Stream<Path> files = Files.walk(failures)) {
+            for(final Path file : files.filter(Files::isRegularFile).toList()) {
+                written.append(Files.readString(file, StandardCharsets.UTF_8));
+            }
+        }
+        final String failure = written.toString();
+        Assertions.assertTrue(failure.contains("ORD1.txt"), failure);
+        Assertions.assertTrue(failure.contains("record length 5 does not match"), failure);
+        Assertions.assertFalse(failure.contains("ORD2.txt"), failure);
+    }
+
+    @Test
     public void testValidation() throws Exception {
         final String path = write("PACK240101.zip", zip(orders(), StandardCharsets.UTF_8));
         assertInvalid("parameters.archive.type must be zip or tar", """

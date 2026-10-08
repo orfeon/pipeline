@@ -50,6 +50,7 @@ Everything that is "per file" without an archive is "per entry" with one:
 | `skipHeaderLines`, record numbers (`additionalFields.line`) | Restart for every entry. |
 | `additionalFields.entry` | The entry path (with `/` separators). `additionalFields.resource` stays the archive file. |
 | Directory entries | Ignored. |
+| Links (symbolic or hard) | Ignored: a link is not a file. A zip records links only in its table of contents, so a zip that is read front to back (`.zip.gz`) can not tell and reads the link's target path as content — exclude such entries with `exclude`. |
 | An entry that is a compressed file (`*.gz`, `*.bz2`, `*.zst` ...) | Decompressed, told from the entry name. `compression` applies to the archive file only. |
 | An archive inside the archive | Not opened: it is an ordinary entry, read only if selected. |
 | An archive with no matching entry | Normal: it produces no record. |
@@ -62,6 +63,8 @@ Everything that is "per file" without an archive is "per entry" with one:
 `compression` (or the file name) tells the compression of the archive file itself: a `.tar.gz` is a
 gzip-compressed tar, a `.zip.gz` a gzip-compressed zip (declare `type: zip`, the name does not say it).
 A zip compresses its entries itself and needs no `compression`.
+
+Supported compressions (around an archive, and of an entry): gzip (`.gz`), bzip2 (`.bz2`), zstd (`.zst`), lzo, deflate, snappy. A file or entry whose name says another one (`.xz`, `.txz`, `.lzma`, `.lz4`, `.lz`, `.Z`, `.7z`, `.rar`, `.lzh`) is a failure: it would otherwise be read as garbage.
 
 `compression: ZIP` is **not** the archive reader: it is the legacy way to read a zip, where all the
 entries are concatenated into one stream (so `skipHeaderLines` skips only the header of the first

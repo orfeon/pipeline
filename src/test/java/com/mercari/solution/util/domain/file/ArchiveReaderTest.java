@@ -2,6 +2,8 @@ package com.mercari.solution.util.domain.file;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -140,11 +142,14 @@ public class ArchiveReaderTest {
 
     @Test
     public void testCentralDirectoryReadsOnlySelectedEntries() throws IOException {
-        // a large incompressible entry in front of a small one: selecting the small one must not read the large one
-        final byte[] large = new byte[2_000_000];
+        // large incompressible entries in front of a small one: selecting the small one must not read
+        // the large ones, nor visit them (each lies in a block of its own: a visit would be a seek)
+        final byte[] large = new byte[100_000];
         new Random(1).nextBytes(large);
         final Map<String, byte[]> entries = new LinkedHashMap<>();
-        entries.put("large.bin", large);
+        for(int i = 0; i < 20; i++) {
+            entries.put("large" + i + ".bin", large);
+        }
         entries.put("small.txt", "small".getBytes(StandardCharsets.UTF_8));
         final CountingChannel channel = new CountingChannel(channel("large.zip", zip(entries, StandardCharsets.UTF_8)));
 
@@ -153,6 +158,27 @@ public class ArchiveReaderTest {
         Assertions.assertTrue(channel.bytesRead < 200_000, "bytes read: " + channel.bytesRead);
         // and the many small reads of the zip reader reach the storage as a few block reads
         Assertions.assertTrue(channel.seeks < 10, "seeks: " + channel.seeks);
+    }
+
+    @Test
+    public void testUnicodePathExtraField() throws IOException {
+        // Info-ZIP style: the name in a local charset without the UTF-8 flag, and the Unicode name in
+        // an extra field. The Unicode name is used whatever nameCharset says, on both read paths.
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try(final ZipArchiveOutputStream zip = new ZipArchiveOutputStream(bytes)) {
+            zip.setEncoding("windows-31j");
+            zip.setUseLanguageEncodingFlag(false);
+            zip.setCreateUnicodeExtraFields(ZipArchiveOutputStream.UnicodeExtraFieldPolicy.ALWAYS);
+            zip.putArchiveEntry(new ZipArchiveEntry("売上/一月.txt"));
+            zip.write("x".getBytes(StandardCharsets.UTF_8));
+            zip.closeArchiveEntry();
+        }
+        final byte[] archive = bytes.toByteArray();
+        final Predicate<String> filter = ArchiveReader.filter(List.of("売上/*.txt"), null);
+        Assertions.assertEquals(List.of("売上/一月.txt=x"),
+                read(ArchiveReader.zip(channel("upath.zip", archive), StandardCharsets.ISO_8859_1), filter));
+        Assertions.assertEquals(List.of("売上/一月.txt=x"),
+                read(ArchiveReader.zipStream(new ByteArrayInputStream(archive), StandardCharsets.ISO_8859_1), filter));
     }
 
     @Test
@@ -173,6 +199,59 @@ public class ArchiveReaderTest {
         Assertions.assertEquals(10, contents.size());
         Assertions.assertEquals("dir/file40.txt=content40", contents.get(0));
         Assertions.assertTrue(channel.seeks < 10, "seeks: " + channel.seeks);
+    }
+
+    @Test
+    public void testLinksAreNotFiles() throws IOException {
+        // tar: a symbolic link and a hard link have no content of their own
+        final ByteArrayOutputStream tarBytes = new ByteArrayOutputStream();
+        try(final TarArchiveOutputStream tar = new TarArchiveOutputStream(tarBytes)) {
+            final byte[] content = "alpha".getBytes(StandardCharsets.UTF_8);
+            final TarArchiveEntry file = new TarArchiveEntry("a.txt");
+            file.setSize(content.length);
+            tar.putArchiveEntry(file);
+            tar.write(content);
+            tar.closeArchiveEntry();
+            final TarArchiveEntry symlink = new TarArchiveEntry("link.txt", org.apache.commons.compress.archivers.tar.TarConstants.LF_SYMLINK);
+            symlink.setLinkName("a.txt");
+            tar.putArchiveEntry(symlink);
+            tar.closeArchiveEntry();
+            final TarArchiveEntry hardlink = new TarArchiveEntry("hard.txt", org.apache.commons.compress.archivers.tar.TarConstants.LF_LINK);
+            hardlink.setLinkName("a.txt");
+            tar.putArchiveEntry(hardlink);
+            tar.closeArchiveEntry();
+        }
+        Assertions.assertEquals(List.of("a.txt=alpha"),
+                read(ArchiveReader.tar(new ByteArrayInputStream(tarBytes.toByteArray()), StandardCharsets.UTF_8), null));
+
+        // zip (zip -y): the content of a symbolic link entry is the path it points to
+        final Path zipFile = tempDir.resolve("links.zip");
+        try(final org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream zip =
+                    new org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(zipFile)) {
+            final org.apache.commons.compress.archivers.zip.ZipArchiveEntry file = new org.apache.commons.compress.archivers.zip.ZipArchiveEntry("a.txt");
+            zip.putArchiveEntry(file);
+            zip.write("alpha".getBytes(StandardCharsets.UTF_8));
+            zip.closeArchiveEntry();
+            final org.apache.commons.compress.archivers.zip.ZipArchiveEntry symlink = new org.apache.commons.compress.archivers.zip.ZipArchiveEntry("link.txt");
+            symlink.setUnixMode(0120777);
+            zip.putArchiveEntry(symlink);
+            zip.write("a.txt".getBytes(StandardCharsets.UTF_8));
+            zip.closeArchiveEntry();
+        }
+        Assertions.assertEquals(List.of("a.txt=alpha"),
+                read(ArchiveReader.zip(Files.newByteChannel(zipFile), StandardCharsets.UTF_8), null));
+    }
+
+    @Test
+    public void testUnsupportedCompression() {
+        Assertions.assertEquals(".xz", ArchiveReader.unsupportedCompression("logs.tar.xz"));
+        Assertions.assertEquals(".lz4", ArchiveReader.unsupportedCompression("logs.tar.LZ4"));
+        Assertions.assertEquals(".z", ArchiveReader.unsupportedCompression("logs.tar.Z"));
+        Assertions.assertEquals(".txz", ArchiveReader.unsupportedCompression("logs.txz"));
+        Assertions.assertNull(ArchiveReader.unsupportedCompression("logs.tar.gz"));
+        Assertions.assertNull(ArchiveReader.unsupportedCompression("logs.tar.20240101"));
+        Assertions.assertNull(ArchiveReader.unsupportedCompression("PACK.zip"));
+        Assertions.assertNull(ArchiveReader.unsupportedCompression(null));
     }
 
     @Test
@@ -206,8 +285,15 @@ public class ArchiveReaderTest {
         Assertions.assertEquals(ArchiveReader.Type.tar, ArchiveReader.Type.detect("logs.tar"));
         Assertions.assertEquals(ArchiveReader.Type.tar, ArchiveReader.Type.detect("logs.tar.gz"));
         Assertions.assertEquals(ArchiveReader.Type.tar, ArchiveReader.Type.detect("logs.tgz"));
+        Assertions.assertEquals(ArchiveReader.Type.tar, ArchiveReader.Type.detect("logs.TBZ2"));
         Assertions.assertNull(ArchiveReader.Type.detect("data.txt.gz"));
         Assertions.assertNull(ArchiveReader.Type.detect(null));
+
+        // the short forms of a compressed tar say the compression as well
+        Assertions.assertEquals("logs.tar.gz", ArchiveReader.expandShortSuffix("logs.TGZ"));
+        Assertions.assertEquals("logs.tar.bz2", ArchiveReader.expandShortSuffix("logs.tbz"));
+        Assertions.assertEquals("logs.tar.zst", ArchiveReader.expandShortSuffix("logs.tzst"));
+        Assertions.assertEquals("pack.zip", ArchiveReader.expandShortSuffix("PACK.zip"));
     }
 
     private static final class CountingChannel implements SeekableByteChannel {

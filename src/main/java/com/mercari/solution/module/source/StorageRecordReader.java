@@ -146,11 +146,11 @@ final class StorageRecordReader {
             if(Compression.ZIP.equals(compression)) {
                 errors.add("parameters.compression: ZIP can not be used with parameters.archive (the archive reader opens the zip itself)");
             }
-            for(final String key : List.of("entries", "exclude")) {
-                final List<String> globs = "entries".equals(key) ? spec.archive.entries : spec.archive.exclude;
-                if(globs != null && globs.stream().anyMatch(g -> g == null || g.isBlank())) {
-                    errors.add("parameters.archive." + key + " must not contain an empty pattern");
-                }
+            if(hasBlank(spec.archive.entries)) {
+                errors.add("parameters.archive.entries must not contain an empty pattern");
+            }
+            if(hasBlank(spec.archive.exclude)) {
+                errors.add("parameters.archive.exclude must not contain an empty pattern");
             }
         }
         if(!errors.isEmpty()) {
@@ -286,6 +286,10 @@ final class StorageRecordReader {
         }
     }
 
+    private static boolean hasBlank(final List<String> globs) {
+        return globs != null && globs.stream().anyMatch(glob -> glob == null || glob.isBlank());
+    }
+
     // UTF-16 / UTF-32 and their variants: the bytes of a line feed appear inside other characters.
     // Asked of the charset itself (an ASCII letter does not fit in one byte) and not of its name:
     // the canonical names share no prefix (x-UTF-16LE-BOM, X-UTF-32BE-BOM ...)
@@ -413,7 +417,11 @@ final class StorageRecordReader {
                         while(reader.next(entryFilter)) {
                             position.entry = reader.name();
                             position.number = 0;
-                            readRecords(c, metadata, resource, decompressEntry(reader.name(), reader.stream()), position);
+                            // closed entry by entry: the decompressor of a compressed entry holds
+                            // native memory (closing the stream of an entry does not close the archive)
+                            try(final InputStream entry = decompressEntry(reader.name(), reader.stream())) {
+                                readRecords(c, metadata, resource, entry, position);
+                            }
                         }
                     }
                 } else {
@@ -440,14 +448,17 @@ final class StorageRecordReader {
                 final Position position) throws IOException {
 
             final InputStream input = StandardCharsets.UTF_8.equals(charset) ? skipByteOrderMark(stream) : stream;
-            final ByteRecordReader reader;
-            if(fixedLength) {
-                reader = ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
+            // one reader (and its buffers) for all the entries of an archive
+            if(position.reader != null) {
+                position.reader.reset(input);
+            } else if(fixedLength) {
+                position.reader = ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
             } else if(delimiter != null) {
-                reader = ByteRecordReader.delimited(input, delimiter);
+                position.reader = ByteRecordReader.delimited(input, delimiter);
             } else {
-                reader = ByteRecordReader.lines(input);
+                position.reader = ByteRecordReader.lines(input);
             }
+            final ByteRecordReader reader = position.reader;
             while(reader.next()) {
                 final long number = reader.number();
                 position.number = number;
@@ -515,6 +526,9 @@ final class StorageRecordReader {
             if(type == null) {
                 throw new IOException("can not tell the archive type of " + fileName + " from its name; set parameters.archive.type");
             }
+            if(compression == null) {
+                rejectUnsupportedCompression(fileName);
+            }
             final Compression outer = compression != null ? compression : archiveCompression(fileName);
             final Charset nameCharset = Charset.forName(archiveNameCharsetName);
             if(type == ArchiveReader.Type.zip && Compression.UNCOMPRESSED.equals(outer) && metadata.isReadSeekEfficient()) {
@@ -540,26 +554,30 @@ final class StorageRecordReader {
         // The compression around an archive, from its file name (.tar.gz, .tgz, .zip.gz ...). A plain
         // .zip is opened as it is: Beam calls it ZIP "compression" and would concatenate its entries.
         private static Compression archiveCompression(final String fileName) {
-            final String name = fileName.toLowerCase(Locale.ROOT);
-            if(name.endsWith(".tgz")) {
-                return Compression.GZIP;
-            } else if(name.endsWith(".tbz2") || name.endsWith(".tbz")) {
-                return Compression.BZIP2;
-            } else if(name.endsWith(".tzst")) {
-                return Compression.ZSTD;
-            }
-            final Compression detected = Compression.detect(fileName);
+            // .tgz is .tar.gz: the same reading of the name as the archive type detection
+            final Compression detected = Compression.detect(ArchiveReader.expandShortSuffix(fileName));
             return Compression.ZIP.equals(detected) ? Compression.UNCOMPRESSED : detected;
         }
 
         // An entry that is a compressed file itself (logs.tar of *.gz) is decompressed by its name.
         // An archive inside the archive is not opened: it is an ordinary entry.
         private static InputStream decompressEntry(final String entryName, final InputStream stream) throws IOException {
+            rejectUnsupportedCompression(entryName);
             final Compression entryCompression = Compression.detect(entryName);
             if(Compression.UNCOMPRESSED.equals(entryCompression) || Compression.ZIP.equals(entryCompression)) {
                 return stream;
             }
             return Channels.newInputStream(entryCompression.readDecompressed(Channels.newChannel(stream)));
+        }
+
+        // xz, lz4, compress ...: read as it is, such a file is garbage (a .tar.xz may even pass as an
+        // empty tar and give no record at all), so it is a failure by its name
+        private static void rejectUnsupportedCompression(final String name) throws IOException {
+            final String suffix = ArchiveReader.unsupportedCompression(name);
+            if(suffix != null) {
+                throw new IOException(name + " is compressed with a format that is not supported (" + suffix
+                        + "). supported: gz, bz2, zst, lzo, deflate, snappy");
+            }
         }
 
         // A byte order mark at the head of a UTF-8 file is not data (TextIO drops it as well): left in,
@@ -621,10 +639,11 @@ final class StorageRecordReader {
             return Module.processError(message, input, e, failFast);
         }
 
-        // the entry (of an archive) and the record being read
+        // the entry (of an archive) and the record being read, with the reader shared by the entries
         private static final class Position {
             String entry;
             long number;
+            ByteRecordReader reader;
         }
 
         private static boolean startsWith(final byte[] buffer, final int length, final byte[] prefix) {
