@@ -6,6 +6,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.joda.time.Instant;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -90,30 +91,35 @@ public class Cast implements SelectFunction {
             return uuidToBytes(value);
         }
         if(Schema.Type.decimal.equals(inputType)) {
-            return ElementSchemaUtil.getAsPrimitive(outputFieldType, decimalToNumber(value, inputFields.getFirst().getFieldType()));
+            return castDecimal(value, inputFields.getFirst().getFieldType());
         }
         return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
     }
 
-    // A decimal read from an avro record is the bytes of its unscaled value: without this the cast
-    // sees plain bytes and can not turn them into a number or its text.
-    private static Object decimalToNumber(final Object value, final Schema.FieldType decimalType) {
-        final byte[] bytes = switch (value) {
-            case ByteBuffer b -> {
-                final byte[] copy = new byte[b.remaining()];
-                b.duplicate().get(copy);
-                yield copy;
-            }
-            case byte[] b -> b;
-            case null, default -> null;
-        };
-        if(bytes == null || bytes.length == 0) {
-            return value;
+    // A decimal has no single representation: a BigDecimal (the json / fwf decoders), its text once
+    // the element has passed the map coder, or the bytes of the unscaled value when it is read from
+    // an avro record. All of them are read as the number first, so that the result of the cast does
+    // not depend on what is upstream (nor on whether the runner fused the steps).
+    private Object castDecimal(final Object value, final Schema.FieldType decimalType) {
+        // a cast to bytes keeps the bytes as they are
+        if(value == null || Schema.Type.bytes.equals(outputFieldType.getType())) {
+            return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
         }
-        final int scale = decimalType.getScale() == null ? 9 : decimalType.getScale();
-        final java.math.BigDecimal decimal = new java.math.BigDecimal(new java.math.BigInteger(bytes), scale).stripTrailingZeros();
-        // 100 is "1E+2" after stripTrailingZeros: keep the plain integer form for a cast to string
-        return decimal.scale() < 0 ? decimal.setScale(0) : decimal;
+        BigDecimal decimal;
+        try {
+            decimal = ElementSchemaUtil.getAsBigDecimal(value, decimalType.getScale() == null ? 9 : decimalType.getScale());
+        } catch (final NumberFormatException e) {
+            decimal = null;
+        }
+        if(decimal == null) {
+            return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+        }
+        return switch (outputFieldType.getType()) {
+            // plain notation without trailing zeros: neither "12.300000000" (the scale of the bytes) nor
+            // "1E+2" / "1E-7" (BigDecimal.toString)
+            case string, json -> decimal.stripTrailingZeros().toPlainString();
+            default -> ElementSchemaUtil.getAsPrimitive(outputFieldType, decimal);
+        };
     }
 
     private static String bytesToUuid(final Object value) {

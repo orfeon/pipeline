@@ -126,6 +126,10 @@ UUID values can be cast to `bytes` using their standard 16-byte representation,
 and 16-byte fields can be cast back to `uuid`. Casting a byte sequence whose
 length is not 16 to `uuid` produces an error.
 
+A `decimal` field is cast as its number: to an integer type it is truncated (`12.3` → `12`), to
+`string` it is written in plain notation without trailing zeros (`12.30` → `12.3`, never `1E+2`).
+A cast **to** `decimal` is not supported.
+
 ### constant
 
 Creates a field with a constant value.

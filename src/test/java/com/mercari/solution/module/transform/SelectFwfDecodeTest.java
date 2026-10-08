@@ -102,6 +102,63 @@ public class SelectFwfDecodeTest {
     }
 
     @Test
+    public void testRepeatedFieldsWithEmptyElements() throws Exception {
+        // an array holds no null: an empty text element is "", an empty number is its defaultValue,
+        // and without one the record is a failure (it used to crash the avro coder of the output)
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: lines
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { line: "A0102abcd0102" }
+                        - { line: "B02  ab  0304" }
+                        - { line: "C0102abcd  02" }
+                    schema:
+                      fields:
+                        - { name: line, type: string }
+                transforms:
+                  - name: decoded
+                    module: select
+                    inputs: [lines]
+                    failFast: false
+                    parameters:
+                      select:
+                        - name: row
+                          func: fwf_decode
+                          field: line
+                          schema:
+                            encoding: { format: fwf }
+                            reference:
+                              inline:
+                                fields:
+                                  - { name: code,   type: string, len: 1 }
+                                  - { name: marks,  type: int32,  len: 2, repeat: 2, defaultValue: 0 }
+                                  - { name: names,  type: string, len: 2, repeat: 2 }
+                                  - { name: scores, type: int32,  len: 2, repeat: 2 }
+                  - name: flat
+                    module: select
+                    inputs: [decoded]
+                    parameters:
+                      select:
+                        - { name: code, field: row.code }
+                        - { name: marks, field: row.marks }
+                        - { name: names, field: row.names }
+                """));
+        PAssert.that(outputs.get("flat").getCollection()).satisfies(elements -> {
+            final Set<String> rows = new HashSet<>();
+            for(final MElement element : elements) {
+                rows.add(element.getAsString("code") + ":" + element.getPrimitiveValue("marks") + ":" + element.getPrimitiveValue("names"));
+            }
+            // C has an empty score, which has no default: that record is the failure
+            Assertions.assertEquals(Set.of("A:[1, 2]:[ab, cd]", "B:[2, 0]:[ab, ]"), rows);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testDecodeStringFieldAndFailureRouting() throws Exception {
         // a string field is encoded back with the charset before it is cut; a record that can not be
         // decoded is a failure of that record, the others go on

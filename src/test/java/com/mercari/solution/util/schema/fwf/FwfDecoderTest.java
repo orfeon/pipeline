@@ -1,5 +1,6 @@
 package com.mercari.solution.util.schema.fwf;
 
+import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -70,7 +71,7 @@ public class FwfDecoderTest {
                 { "name": "emptyDate", "type": "date", "len": 8, "pattern": "yyyyMMdd", "nullIf": ["00000000"] },
                 { "name": "at",   "type": "timestamp", "len": 12, "pattern": "yyyyMMddHHmm", "zone": "Asia/Tokyo" },
                 { "name": "flag", "type": "bool", "len": 1 },
-                { "name": "marks", "type": "int32", "len": 2, "repeat": 3 },
+                { "name": "marks", "type": "int32", "len": 2, "repeat": 3, "defaultValue": 0 },
                 { "name": "items", "repeat": 2, "fields": [
                     { "name": "sku",   "type": "string", "len": 4 },
                     { "name": "qty",   "type": "int32",  "len": 2 },
@@ -119,8 +120,8 @@ public class FwfDecoderTest {
                 .toInstant().toEpochMilli() * 1000L;
         Assertions.assertEquals(expectedAt, values.get("at"));
         Assertions.assertEquals(true, values.get("flag"));
-        // repeated values keep their positions: the blank element stays null
-        Assertions.assertEquals(Arrays.asList(1, null, 3), values.get("marks"));
+        // repeated values keep their positions: the blank element is the defaultValue, never null
+        Assertions.assertEquals(Arrays.asList(1, 0, 3), values.get("marks"));
 
         final List<Map<String, Object>> items = (List<Map<String, Object>>) values.get("items");
         Assertions.assertEquals(2, items.size());
@@ -214,7 +215,7 @@ public class FwfDecoderTest {
 
         final Map<String, Object> values = decoder(Map.of("charset", "windows-31j", "onParseError", "null")).decode(broken);
         Assertions.assertNull(values.get("amount"));
-        Assertions.assertEquals(Arrays.asList(1, null, 3), values.get("marks"));
+        Assertions.assertEquals(Arrays.asList(1, 0, 3), values.get("marks"));
         Assertions.assertEquals(new BigDecimal("55.0"), values.get("weight"));
     }
 
@@ -297,6 +298,37 @@ public class FwfDecoderTest {
         final byte[] missingId = ("   " + "   " + "ab    " + "  ab  ").getBytes(StandardCharsets.UTF_8);
         final FwfException e = Assertions.assertThrows(FwfException.class, () -> FwfDecoder.of(layout, null).decode(missingId));
         Assertions.assertEquals("id", e.getField());
+    }
+
+    @Test
+    public void testArraysHoldNoNull() {
+        // an empty element of a repeated leaf: the empty text for a string, the defaultValue when
+        // declared, and otherwise a failure of the record (an array can not hold null)
+        final FwfLayout layout = FwfLayout.parse("""
+                { "fields": [
+                    { "name": "names",  "type": "string", "len": 2, "repeat": 3 },
+                    { "name": "counts", "type": "int32",  "len": 2, "repeat": 2, "defaultValue": 0 },
+                    { "name": "days",   "type": "date",   "len": 8, "repeat": 2, "pattern": "yyyyMMdd", "nullIf": ["00000000"] },
+                    { "name": "slots", "repeat": 2, "fields": [ { "name": "day", "type": "date", "len": 8, "pattern": "yyyyMMdd" } ] } ] }
+                """);
+        final FwfDecoder decoder = FwfDecoder.of(layout, null);
+        final Map<String, Object> values = decoder.decode(
+                ("ab" + "  " + "cd" + " 7" + "  " + "20240131" + "20240201" + "20240131" + "        ").getBytes(StandardCharsets.UTF_8));
+        Assertions.assertEquals(List.of("ab", "", "cd"), values.get("names"));
+        Assertions.assertEquals(List.of(7, 0), values.get("counts"));
+        // the fields of a repeated group can be null: the way to keep "no value" in a repeated field
+        Assertions.assertEquals((int) LocalDate.of(2024, 1, 31).toEpochDay(), ((List<Map<String, Object>>) values.get("slots")).get(0).get("day"));
+        Assertions.assertNull(((List<Map<String, Object>>) values.get("slots")).get(1).get("day"));
+
+        // a date has neither an empty form nor a default here
+        final FwfException e = Assertions.assertThrows(FwfException.class, () -> decoder.decode(
+                ("ab" + "  " + "cd" + " 7" + "  " + "20240131" + "00000000" + "20240131" + "        ").getBytes(StandardCharsets.UTF_8)));
+        Assertions.assertEquals("days[1]", e.getField());
+        Assertions.assertTrue(e.getMessage().contains("an array can not hold null"), e.getMessage());
+
+        // the schema says so: the elements of a repeated leaf are not nullable
+        final Schema.FieldType names = layout.toSchemaFields().get(0).getFieldType();
+        Assertions.assertFalse(names.getArrayValueType().getNullable());
     }
 
     @Test

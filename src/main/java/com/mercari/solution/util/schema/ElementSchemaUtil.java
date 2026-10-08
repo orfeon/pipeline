@@ -6,6 +6,8 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -289,6 +291,50 @@ public class ElementSchemaUtil {
             };
             default -> null;
         };
+    }
+
+    /**
+     * The number of a decimal value of a map element, which has no single representation there: a
+     * {@link BigDecimal} (the json and fwf decoders), its text once the element has passed the map
+     * coder, or another number.
+     *
+     * @return null when the value is none of them (null, bytes, ...)
+     * @throws NumberFormatException when the value is text that is not a number, or NaN / infinite
+     */
+    public static BigDecimal getAsBigDecimal(final Object value) {
+        return switch (value) {
+            case BigDecimal d -> d;
+            case String s -> new BigDecimal(s.trim());
+            // the shortest text that reads back as the same double / float (what BigDecimal.valueOf does)
+            case Number n -> new BigDecimal(n.toString());
+            case null, default -> null;
+        };
+    }
+
+    /**
+     * As {@link #getAsBigDecimal(Object)}, and also the bytes of the unscaled value (a decimal read
+     * from an avro record), which are read at {@code bytesScale}. Empty bytes are null.
+     */
+    public static BigDecimal getAsBigDecimal(final Object value, final int bytesScale) {
+        final byte[] unscaled = switch (value) {
+            case ByteBuffer b -> toBytes(b);
+            case byte[] b -> b;
+            case null, default -> null;
+        };
+        if(unscaled == null) {
+            return getAsBigDecimal(value);
+        }
+        return unscaled.length == 0 ? null : new BigDecimal(new BigInteger(unscaled), bytesScale);
+    }
+
+    /**
+     * The remaining bytes of a buffer, which is left as it is. Unlike {@link ByteBuffer#array()} this
+     * respects the position and limit of a slice and works for a read-only or direct buffer.
+     */
+    public static byte[] toBytes(final ByteBuffer buffer) {
+        final byte[] bytes = new byte[buffer.remaining()];
+        buffer.duplicate().get(bytes);
+        return bytes;
     }
 
     public static Map<String, Object> deepCopyMap(final Map<String, Object> original) {

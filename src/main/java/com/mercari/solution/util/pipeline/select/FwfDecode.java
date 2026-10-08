@@ -58,10 +58,8 @@ public class FwfDecode implements SelectFunction {
             final boolean ignore) {
 
         final String field = SelectFunction.getStringParameter(name, jsonObject, "field", name);
+        // throws when the field is not in the input
         final Schema.FieldType inputFieldType = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        if(inputFieldType == null) {
-            throw new IllegalArgumentException("SelectField fwf_decode: " + name + " missing inputField: " + field);
-        }
         switch (inputFieldType.getType()) {
             case bytes, string -> {}
             default -> throw new IllegalArgumentException("SelectField fwf_decode: " + name
@@ -104,9 +102,8 @@ public class FwfDecode implements SelectFunction {
         } catch (final IllegalArgumentException e) {
             throw new IllegalArgumentException("SelectField fwf_decode: " + name + ".fields: " + e.getMessage(), e);
         }
-        final Schema.FieldType outputFieldType = Schema.FieldType
-                .element(decoder.getLayout().toSchemaFields())
-                .withNullable(true);
+        // nullable (the default of a field type): a null input gives a null record
+        final Schema.FieldType outputFieldType = Schema.FieldType.element(decoder.getLayout().toSchemaFields());
 
         final List<Schema.Field> fields = new ArrayList<>();
         fields.add(Schema.Field.of(field, inputFieldType));
@@ -144,14 +141,10 @@ public class FwfDecode implements SelectFunction {
         return switch (value) {
             case null -> null;
             case byte[] bytes -> decoder.decode(bytes);
-            case ByteBuffer buffer -> {
-                if(buffer.hasArray()) {
-                    yield decoder.decode(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
-                }
-                final byte[] bytes = new byte[buffer.remaining()];
-                buffer.duplicate().get(bytes);
-                yield decoder.decode(bytes);
-            }
+            // a heap buffer is read in place (it may be a slice of a larger array); a read-only or direct one is copied
+            case ByteBuffer buffer -> buffer.hasArray()
+                    ? decoder.decode(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining())
+                    : decoder.decode(ElementSchemaUtil.toBytes(buffer));
             // with unit: byte the text is encoded back with the charset of the schema before it is cut
             case String text -> decoder.decode(text);
             default -> throw new IllegalArgumentException("SelectField fwf_decode: " + name
