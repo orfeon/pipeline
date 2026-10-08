@@ -54,6 +54,9 @@ public class StorageSource extends Source {
         // the matched files are zip / tar archives whose entries are the files to read
         private StorageRecordReader.Archive archive;
 
+        // named outputs for the entries of an archive, each with its own format / schema
+        private JsonElement partitions;
+
         private transient StorageRecordReader.RecordSplit split;
 
         /**
@@ -62,6 +65,10 @@ public class StorageSource extends Source {
          */
         public void validate(final Schema schema, final String declaredFormat) {
             final List<String> errorMessages = new ArrayList<>();
+            // partitions: null is an omitted parameter (Gson keeps an explicit null as JsonNull)
+            if(partitions != null && partitions.isJsonNull()) {
+                partitions = null;
+            }
             if((inputs == null || inputs.isEmpty()) && input == null) {
                 errorMessages.add("parameters.input or inputs is required");
             }
@@ -74,7 +81,8 @@ public class StorageSource extends Source {
             if(this.format == null) {
                 if(fwfSchema) {
                     this.format = Format.fwf;
-                } else {
+                } else if(partitions == null) {
+                    // with partitions the format may be declared by each of them
                     errorMessages.add("parameters.format must not be null");
                 }
             } else if(fwfSchema && !Format.fwf.equals(this.format)) {
@@ -87,8 +95,12 @@ public class StorageSource extends Source {
             if(archive != null && (Format.avro.equals(format) || Format.parquet.equals(format))) {
                 errorMessages.add("parameters.archive is not supported for format " + format + " yet (csv, json, fwf only)");
             }
+            if(partitions != null && (Format.avro.equals(format) || Format.parquet.equals(format))) {
+                errorMessages.add("parameters.partitions is not supported for format " + format + " (csv, json, fwf only)");
+            }
             if(recordSplit != null) {
-                if(!Format.fwf.equals(format)) {
+                // with partitions it is a default for the fwf ones
+                if(!Format.fwf.equals(format) && partitions == null) {
                     errorMessages.add("parameters.recordSplit is only supported for format fwf");
                 }
                 try {
@@ -136,20 +148,32 @@ public class StorageSource extends Source {
 
         // fwf, and the csv / json options TextIO can not provide, read files as byte records
         final boolean additionalFields = parameters.additionalFields != null && !parameters.additionalFields.isEmpty();
-        if(Format.fwf.equals(parameters.format) || additionalFields || parameters.archive != null) {
+        if(Format.fwf.equals(parameters.format) || additionalFields || parameters.archive != null || parameters.partitions != null) {
+            // the module-level way of reading: the single output, or the defaults of the partitions
+            final StorageRecordReader.Partition reading = new StorageRecordReader.Partition();
+            // As a default for partitions only a format that the config declares: the one derived from
+            // the module-level schema belongs to that schema, and a partition with its own schema must
+            // not inherit it (a partition that uses the module-level fwf schema is fwf by that schema).
+            final boolean inherited = parameters.partitions == null || declaredFormat() != null;
+            reading.format = parameters.format == null || !inherited
+                    ? null : StorageRecordReader.Format.valueOf(parameters.format.name());
+            reading.schema = getSchema();
+            reading.skipHeaderLines = parameters.skipHeaderLines;
+            reading.filterPrefix = parameters.filterPrefix;
+            reading.delimiter = parameters.delimiter;
+            reading.recordSplit = parameters.split;
+            reading.fields = Format.fwf.equals(parameters.format) || parameters.partitions != null ? parameters.fields : null;
+
             final StorageRecordReader.Spec spec = new StorageRecordReader.Spec();
-            spec.format = StorageRecordReader.Format.valueOf(parameters.format.name());
             spec.inputs = parameters.inputs;
             spec.compression = parameters.compression;
-            spec.skipHeaderLines = parameters.skipHeaderLines;
-            spec.filterPrefix = parameters.filterPrefix;
-            spec.delimiter = parameters.delimiter;
-            spec.recordSplit = parameters.split;
-            spec.fields = Format.fwf.equals(parameters.format) ? parameters.fields : null;
             spec.additionalFields = parameters.additionalFields;
             spec.archive = parameters.archive;
+            spec.partitions = parameters.partitions == null
+                    ? List.of(reading)
+                    : StorageRecordReader.Partition.parse(parameters.partitions, reading);
             return StorageRecordReader.expand(
-                    begin, getName(), spec, getSchema(), getTimestampAttribute(), getFailFast(), errorHandler);
+                    begin, getName(), spec, getTimestampAttribute(), getFailFast(), errorHandler);
         }
 
         return switch (parameters.format) {

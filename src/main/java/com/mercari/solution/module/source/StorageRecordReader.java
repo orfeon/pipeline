@@ -1,5 +1,7 @@
 package com.mercari.solution.module.source;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollectionTuple;
 import com.mercari.solution.module.MElement;
@@ -7,7 +9,6 @@ import com.mercari.solution.module.MErrorHandler;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ArchiveReader;
 import com.mercari.solution.util.domain.file.ByteRecordReader;
 import com.mercari.solution.util.schema.converter.CsvToElementConverter;
@@ -22,6 +23,8 @@ import org.apache.beam.sdk.io.ReadableFileCoder;
 import org.apache.beam.sdk.io.fs.EmptyMatchTreatment;
 import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.fs.MetadataCoderV2;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -31,6 +34,8 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.joda.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,50 +49,60 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
  * The storage source's byte-record read path (work_fixedwidth.md §5): files are matched and opened
  * through FileIO and cut into records as bytes ({@link ByteRecordReader}), instead of TextIO's
  * UTF-8 lines. It serves {@code format: fwf} and, for csv / json, the options TextIO can not
- * provide ({@code additionalFields}, {@code archive}). Everything file-scoped
+ * provide ({@code additionalFields}, {@code archive}, {@code partitions}). Everything file-scoped
  * ({@code skipHeaderLines}, record numbers) restarts per file, and a record that can not be decoded
  * goes to the failure output.
  *
  * <p>With {@code archive} (work_fixedwidth.md §6) a matched file is a zip / tar archive and each
  * selected entry is read as a file of its own: "per file" above becomes "per entry".
+ *
+ * <p>With {@code partitions} (§6.4) the entries of an archive go to named outputs, each with its
+ * own way of reading ({@link Partition}: format, schema, header lines ...). An entry is read by the
+ * first partition whose patterns match it and is not read at all when none does. Without
+ * partitions there is one unnamed {@link Partition}: the module's own output.
  */
 final class StorageRecordReader {
+
+    private static final Logger LOG = LoggerFactory.getLogger(StorageRecordReader.class);
 
     enum Format { csv, json, fwf }
 
     enum RecordSplit { line, length }
 
     private static final List<String> ADDITIONAL_FIELD_KEYS = List.of("resource", "entry", "line", "lastModified");
+    private static final List<String> PARTITION_KEYS = List.of(
+            "name", "entries", "exclude", "format", "schema", "fields",
+            "skipHeaderLines", "filterPrefix", "delimiter", "recordSplit", "timestampAttribute");
+    // "{module}.failures" is the failure output of a module: the pipeline keeps it out of wildcard
+    // inputs ("{module}.*"), the dry-run report and the output log
+    private static final String RESERVED_PARTITION_NAME = "failures";
     private static final byte[] UTF8_BOM = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
     private static final long MILLIS_PER_DAY = 86_400_000L;
 
     private StorageRecordReader() {}
 
-    /** What to read and how to cut it; resolved from the module parameters at assembly time. */
+    /** What to read; resolved from the module parameters at assembly time. */
     static class Spec implements Serializable {
-        Format format;
         List<String> inputs;
         String compression;
-        Integer skipHeaderLines;
-        String filterPrefix;
-        String delimiter;
-        RecordSplit recordSplit;
-        // projection: top-level field names (fwf only)
-        List<String> fields;
         // metadata key (resource / entry / line / lastModified) -> output field name
         Map<String, String> additionalFields;
         // null: the matched files are read as they are
         Archive archive;
+        // the outputs: one unnamed partition (the module's own output), or the named partitions
+        List<Partition> partitions;
     }
 
     /** parameters.archive: the matched files are archives whose entries are the files to read. */
@@ -101,29 +116,199 @@ final class StorageRecordReader {
         String nameCharset;
     }
 
+    /** One output and how its files (or archive entries) are read. */
+    static class Partition implements Serializable {
+        // null: the single unnamed output of the module
+        String name;
+        // globs on the archive entry path that route entries to this partition (named partitions)
+        List<String> entries;
+        List<String> exclude;
+        Format format;
+        Schema schema;
+        // projection: top-level field names (fwf only)
+        List<String> fields;
+        Integer skipHeaderLines;
+        String filterPrefix;
+        String delimiter;
+        RecordSplit recordSplit;
+        // the event time field of this partition; null: the module-level timestampAttribute
+        String timestampAttribute;
+
+        // where the partition is declared, for error messages
+        private String where() {
+            return name == null ? "parameters" : "parameters.partitions(" + name + ")";
+        }
+
+        /**
+         * parameters.partitions: every key that is omitted is taken from the module-level
+         * parameters ({@code defaults}); the format of a partition whose schema declares
+         * {@code encoding.format: fwf} is fwf.
+         */
+        static List<Partition> parse(final JsonElement partitionsElement, final Partition defaults) {
+            final List<String> errors = new ArrayList<>();
+            final List<Partition> partitions = new ArrayList<>();
+            if(!partitionsElement.isJsonArray() || partitionsElement.getAsJsonArray().isEmpty()) {
+                throw new IllegalModuleException("parameters.partitions must be a non-empty array");
+            }
+            final Set<String> names = new HashSet<>();
+            int index = 0;
+            for(final JsonElement element : partitionsElement.getAsJsonArray()) {
+                final String where = "parameters.partitions[" + index + "]";
+                index++;
+                if(!element.isJsonObject()) {
+                    errors.add(where + " must be an object. but: " + element);
+                    continue;
+                }
+                final JsonObject object = element.getAsJsonObject();
+                for(final String key : object.keySet()) {
+                    if(!PARTITION_KEYS.contains(key)) {
+                        errors.add(where + "." + key + " is not supported. supported keys: " + PARTITION_KEYS);
+                    }
+                }
+                final Partition partition = new Partition();
+                partition.name = text(object, "name", where, errors);
+                if(partition.name == null || partition.name.isBlank()) {
+                    errors.add(where + ".name is required");
+                    continue;
+                } else if(!names.add(partition.name)) {
+                    errors.add(where + ".name: " + partition.name + " is duplicated");
+                } else if(RESERVED_PARTITION_NAME.equals(partition.name)) {
+                    errors.add(where + ".name: " + partition.name + " is reserved (the failure output of a module is {module}.failures)");
+                }
+                partition.timestampAttribute = text(object, "timestampAttribute", where, errors);
+                partition.entries = texts(object, "entries", where, errors);
+                partition.exclude = texts(object, "exclude", where, errors);
+                if(partition.entries == null || partition.entries.isEmpty()) {
+                    errors.add(where + ".entries is required (the entries that go to this partition)");
+                }
+                if(hasBlank(partition.entries)) {
+                    errors.add(where + ".entries must not contain an empty pattern");
+                }
+                if(hasBlank(partition.exclude)) {
+                    errors.add(where + ".exclude must not contain an empty pattern");
+                }
+
+                partition.schema = defaults.schema;
+                if(object.has("schema")) {
+                    try {
+                        partition.schema = Schema.parse(object.get("schema"));
+                        if(partition.schema == null) {
+                            errors.add(where + ".schema must be an object");
+                        } else if(partition.schema.isDestinationReference()) {
+                            // as for the module-level schema (Source.setup): it points at a write
+                            // target and has no fields to read records with
+                            errors.add(where + ".schema.reference.destination is not applicable to source modules");
+                        } else {
+                            partition.schema.setup();
+                        }
+                    } catch (final RuntimeException e) {
+                        // a schema that defines no fields at all fails without a message
+                        errors.add(where + ".schema: " + (e.getMessage() == null
+                                ? "it defines no fields (declare fields, or encoding with reference)"
+                                : e.getMessage()));
+                    }
+                }
+                final boolean fwfSchema = partition.schema != null && partition.schema.getFwfLayout() != null;
+                final String format = text(object, "format", where, errors);
+                if(format != null) {
+                    try {
+                        partition.format = Format.valueOf(format.trim());
+                    } catch (final IllegalArgumentException e) {
+                        errors.add(where + ".format: " + format + " is not supported. supported formats: " + Arrays.toString(Format.values()));
+                    }
+                } else {
+                    partition.format = fwfSchema ? Format.fwf : defaults.format;
+                    if(partition.format == null) {
+                        errors.add(where + ".format is required (or parameters.format for all partitions)");
+                    }
+                }
+                // a declared format that contradicts the schema is reported by Plan.of
+
+                final List<String> fields = texts(object, "fields", where, errors);
+                partition.fields = object.has("fields") ? fields : defaults.fields;
+                partition.filterPrefix = object.has("filterPrefix") ? text(object, "filterPrefix", where, errors) : defaults.filterPrefix;
+                partition.delimiter = object.has("delimiter") ? text(object, "delimiter", where, errors) : defaults.delimiter;
+                partition.skipHeaderLines = defaults.skipHeaderLines;
+                if(object.has("skipHeaderLines")) {
+                    try {
+                        // not getAsInt: it would cut 1.7 down to 1 and take [1] for 1, which the
+                        // module-level parameter rejects
+                        partition.skipHeaderLines = object.get("skipHeaderLines")
+                                .getAsJsonPrimitive().getAsBigDecimal().intValueExact();
+                    } catch (final RuntimeException e) {
+                        errors.add(where + ".skipHeaderLines must be an integer. but: " + object.get("skipHeaderLines"));
+                    }
+                }
+                partition.recordSplit = defaults.recordSplit;
+                if(object.has("recordSplit")) {
+                    final String recordSplit = text(object, "recordSplit", where, errors);
+                    try {
+                        partition.recordSplit = recordSplit == null ? null : RecordSplit.valueOf(recordSplit.trim());
+                    } catch (final IllegalArgumentException e) {
+                        errors.add(where + ".recordSplit must be line or length. but: " + recordSplit);
+                    }
+                }
+                if(partition.format != Format.fwf) {
+                    if(object.has("recordSplit")) {
+                        errors.add(where + ".recordSplit is only supported for format fwf");
+                    }
+                    // module-level fwf options do not apply to a csv / json partition
+                    partition.recordSplit = null;
+                    partition.fields = null;
+                }
+                partitions.add(partition);
+            }
+            if(!errors.isEmpty()) {
+                throw new IllegalModuleException(errors);
+            }
+            return partitions;
+        }
+
+        private static String text(final JsonObject object, final String key, final String where, final List<String> errors) {
+            if(!object.has(key) || object.get(key).isJsonNull()) {
+                return null;
+            }
+            if(!object.get(key).isJsonPrimitive()) {
+                errors.add(where + "." + key + " must be a primitive value. but: " + object.get(key));
+                return null;
+            }
+            return object.get(key).getAsString();
+        }
+
+        private static List<String> texts(final JsonObject object, final String key, final String where, final List<String> errors) {
+            if(!object.has(key) || object.get(key).isJsonNull()) {
+                return null;
+            }
+            final List<String> values = new ArrayList<>();
+            final JsonElement element = object.get(key);
+            if(element.isJsonArray()) {
+                for(final JsonElement value : element.getAsJsonArray()) {
+                    if(value.isJsonPrimitive()) {
+                        values.add(value.getAsString());
+                    } else {
+                        errors.add(where + "." + key + " must be an array of strings. but: " + element);
+                        break;
+                    }
+                }
+            } else if(element.isJsonPrimitive()) {
+                values.add(element.getAsString());
+            } else {
+                errors.add(where + "." + key + " must be an array of strings. but: " + element);
+            }
+            return values;
+        }
+    }
+
     static MCollectionTuple expand(
             final PBegin begin,
             final String name,
             final Spec spec,
-            final Schema schema,
             final String timestampAttribute,
             final boolean failFast,
             final MErrorHandler errorHandler) {
 
         final List<String> errors = new ArrayList<>();
-        if(schema == null) {
-            errors.add("parameters.schema is required for format " + spec.format);
-        }
         final Compression compression = parseCompression(spec.compression, errors);
-        if(spec.recordSplit == RecordSplit.length && spec.delimiter != null) {
-            errors.add("parameters.delimiter can not be used with recordSplit: length");
-        }
-        if(spec.delimiter != null && spec.delimiter.isEmpty()) {
-            errors.add("parameters.delimiter must not be empty");
-        }
-        if(spec.skipHeaderLines != null && spec.skipHeaderLines < 0) {
-            errors.add("parameters.skipHeaderLines must not be negative");
-        }
         ArchiveReader.Type archiveType = null;
         Charset archiveNameCharset = StandardCharsets.UTF_8;
         if(spec.archive != null) {
@@ -153,56 +338,10 @@ final class StorageRecordReader {
                 errors.add("parameters.archive.exclude must not contain an empty pattern");
             }
         }
-        if(!errors.isEmpty()) {
-            throw new IllegalModuleException(errors);
-        }
-
-        // StorageSource has already rejected recordSplit for the other formats and a format that
-        // contradicts schema.encoding.format
-        final FwfDecoder decoder;
-        final Charset charset;
-        final List<Schema.Field> fields;
-        String description = schema.getDescription();
-        if(spec.format == Format.fwf) {
-            if(schema.getFwfLayout() == null) {
-                throw new IllegalModuleException("format fwf requires parameters.schema with encoding.format: fwf and a layout in reference (uri or inline)");
-            }
-            try {
-                decoder = FwfDecoder.of(schema, spec.fields);
-            } catch (final IllegalArgumentException e) {
-                throw new IllegalModuleException("parameters.fields: " + e.getMessage());
-            }
-            charset = decoder.getOptions().getCharset();
-            final FwfLayout layout = decoder.getLayout();
-            if(spec.recordSplit == RecordSplit.length) {
-                if(layout.getRecordLength() == null) {
-                    throw new IllegalModuleException("parameters.recordSplit: length requires recordLength in the fwf layout");
-                }
-                // the file is cut by bytes, but with unit: char the layout recordLength counts characters
-                if(decoder.getOptions().getUnit() != FwfOptions.Unit.byte_ && !isSingleByteCharset(charset)) {
-                    throw new IllegalModuleException("parameters.recordSplit: length requires schema.encoding.unit: byte for charset "
-                            + charset.name() + ": the file is cut every recordLength bytes, but with unit: char recordLength counts characters");
-                }
-            } else if(isWideCharset(charset)) {
-                throw new IllegalModuleException("charset " + charset.name() + " can not be split into lines by a single-byte separator; use recordSplit: length");
-            }
-            fields = new ArrayList<>(layout.toSchemaFields());
-            if(description == null) {
-                // a schema with declared fields does not take over the description of the layout
-                description = layout.getDescription();
-            }
-        } else {
-            decoder = null;
-            charset = StandardCharsets.UTF_8;
-            fields = new ArrayList<>(schema.getFields());
-        }
-
-        // filterPrefix and delimiter are compared with the record bytes
-        for(final Map.Entry<String, String> text : textParameters(spec).entrySet()) {
-            final String reason = unmatchable(charset);
-            if(reason != null) {
-                errors.add("parameters." + text.getKey() + " can not be used with charset " + charset.name() + ": " + reason);
-            }
+        final boolean named = spec.partitions.stream().anyMatch(p -> p.name != null);
+        if(named && spec.archive == null) {
+            // partitions route archive entries by their path
+            errors.add("parameters.partitions requires parameters.archive");
         }
 
         final Map<String, String> additionalFields = new LinkedHashMap<>();
@@ -218,40 +357,36 @@ final class StorageRecordReader {
                     errors.add("parameters.additionalFields." + key + " is not supported. supported keys: " + ADDITIONAL_FIELD_KEYS);
                 }
             }
-        }
-        for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
-            final String fieldName = entry.getValue();
-            if(fieldName == null || fieldName.isBlank()) {
-                errors.add("parameters.additionalFields." + entry.getKey() + " must be an output field name");
-            } else if(Schema.hasField(fields, fieldName)) {
-                errors.add("parameters.additionalFields." + entry.getKey() + ": the output field name " + fieldName + " is already used");
-            } else {
-                fields.add(Schema.Field.of(fieldName, switch (entry.getKey()) {
-                    case "line" -> Schema.FieldType.INT64;
-                    case "lastModified" -> Schema.FieldType.TIMESTAMP;
-                    default -> Schema.FieldType.STRING;
-                }));
+            for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
+                if(entry.getValue() == null || entry.getValue().isBlank()) {
+                    errors.add("parameters.additionalFields." + entry.getKey() + " must be an output field name");
+                }
             }
         }
         if(!errors.isEmpty()) {
             throw new IllegalModuleException(errors);
         }
-        final Schema outputSchema = Schema.builder()
-                .withFields(fields)
-                .withDescription(description)
-                .build();
 
-        // the event time field: a date value is an epoch day, any other number is epoch micros
-        final Schema.Field timestampField = timestampAttribute == null ? null : Schema.getField(fields, timestampAttribute);
-        final boolean timestampIsDate = timestampField != null
-                && timestampField.getFieldType().getType() == Schema.Type.date;
+        final List<Plan> plans = new ArrayList<>();
+        for(final Partition partition : spec.partitions) {
+            final Plan plan = Plan.of(plans.size(), partition, additionalFields, timestampAttribute, errors);
+            if(plan != null) {
+                plans.add(plan);
+            }
+        }
+        if(!errors.isEmpty()) {
+            throw new IllegalModuleException(errors);
+        }
 
         // Only MetadataCoderV2 carries lastModifiedMillis: with the default Metadata coder it is lost
         // at the reshuffle inside matchAll (the files source registers the coder the same way)
         begin.getPipeline().getCoderRegistry().registerCoderForClass(MatchResult.Metadata.class, MetadataCoderV2.of());
 
-        final TupleTag<MElement> outputTag = new TupleTag<>(){};
         final TupleTag<BadRecord> failureTag = new TupleTag<>(){};
+        TupleTagList otherTags = TupleTagList.of(failureTag);
+        for(final Plan plan : plans.subList(1, plans.size())) {
+            otherTags = otherTags.and(plan.tag);
+        }
         final PCollectionTuple outputs = begin
                 .apply("Patterns", Create.of(spec.inputs).withCoder(StringUtf8Coder.of()))
                 .apply("MatchFiles", FileIO.matchAll().withEmptyMatchTreatment(EmptyMatchTreatment.DISALLOW))
@@ -260,16 +395,22 @@ final class StorageRecordReader {
                 .apply("ReadMatches", FileIO.readMatches().withCompression(Compression.UNCOMPRESSED))
                 .setCoder(ReadableFileCoder.of(MetadataCoderV2.of()))
                 .apply("ReadRecords", ParDo
-                        .of(new ReadRecordsDoFn(name, spec, compression, schema, decoder, charset.name(),
-                                archiveType, archiveNameCharset.name(),
-                                additionalFields, timestampAttribute, timestampIsDate, failFast, failureTag))
-                        .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                        .of(new ReadRecordsDoFn(name, compression, plans, spec.archive, archiveType,
+                                archiveNameCharset.name(), failFast, failureTag))
+                        .withOutputTags(plans.getFirst().tag, otherTags));
 
         errorHandler.addError(outputs.get(failureTag));
 
-        return MCollectionTuple.of(
-                outputs.get(outputTag).setCoder(ElementCoder.of(outputSchema)),
-                outputSchema);
+        // MCollectionTuple sets the coder of each output from its schema
+        if(!named) {
+            final Plan plan = plans.getFirst();
+            return MCollectionTuple.of(outputs.get(plan.tag), plan.outputSchema);
+        }
+        MCollectionTuple tuple = MCollectionTuple.empty(begin.getPipeline());
+        for(final Plan plan : plans) {
+            tuple = tuple.and(plan.name, outputs.get(plan.tag), plan.outputSchema);
+        }
+        return tuple;
     }
 
     // null: detect from the file name
@@ -297,17 +438,6 @@ final class StorageRecordReader {
         return charset.canEncode() && "A".getBytes(charset).length != 1;
     }
 
-    private static Map<String, String> textParameters(final Spec spec) {
-        final Map<String, String> parameters = new LinkedHashMap<>();
-        if(spec.filterPrefix != null && !spec.filterPrefix.isEmpty()) {
-            parameters.put("filterPrefix", spec.filterPrefix);
-        }
-        if(spec.delimiter != null && !spec.delimiter.isEmpty()) {
-            parameters.put("delimiter", spec.delimiter);
-        }
-        return parameters;
-    }
-
     // Why a text can not be matched against record bytes in this charset; null when it can.
     // A decode-only charset can not produce the bytes at all, and one that writes a byte order mark
     // (UTF-16, UTF-32 without an explicit byte order) would put the mark in front of the text.
@@ -326,78 +456,254 @@ final class StorageRecordReader {
         return charset.canEncode() && charset.newEncoder().maxBytesPerChar() == 1.0f;
     }
 
+    /** A {@link Partition} resolved for the workers: how the records of its files are cut and decoded. */
+    private static final class Plan implements Serializable {
+
+        // an explicit id: the partitions are built at one call site
+        private TupleTag<MElement> tag;
+        private Format format;
+        // csv / json only: the fwf decoder carries its own (projected) layout
+        private Schema schema;
+        private FwfDecoder decoder;
+        private String charsetName;
+        private int skipHeaderLines;
+        private byte[] filterPrefix;
+        private byte[] delimiter;
+        private boolean fixedLength;
+        // metadata key -> output field name
+        private Map<String, String> additionalFields;
+        // the event time field of the partition; null: the records keep the default timestamp
+        private String timestampAttribute;
+        // the event time field is a date: its value is an epoch day, any other number is epoch micros
+        private boolean timestampIsDate;
+        private List<String> entries;
+        private List<String> exclude;
+
+        // assembly time only: the output of the partition (name: null for the unnamed output)
+        private transient String name;
+        private transient Schema outputSchema;
+
+        // set up on the workers
+        private transient Charset charset;
+        private transient Predicate<String> entryFilter;
+
+        // null (with the reasons added to errors) when the partition can not be read as declared
+        static Plan of(
+                final int index,
+                final Partition partition,
+                final Map<String, String> additionalFields,
+                final String timestampAttribute,
+                final List<String> errors) {
+
+            final String where = partition.where();
+            final int errorCount = errors.size();
+            final Schema schema = partition.schema;
+            if(schema == null) {
+                errors.add(where + ".schema is required for format " + partition.format);
+                return null;
+            }
+            if(partition.recordSplit == RecordSplit.length && partition.delimiter != null) {
+                errors.add(where + ".delimiter can not be used with recordSplit: length");
+            }
+            if(partition.delimiter != null && partition.delimiter.isEmpty()) {
+                errors.add(where + ".delimiter must not be empty");
+            }
+            if(partition.skipHeaderLines != null && partition.skipHeaderLines < 0) {
+                errors.add(where + ".skipHeaderLines must not be negative");
+            }
+
+            final Plan plan = new Plan();
+            plan.tag = new TupleTag<>("partition" + index);
+            plan.name = partition.name;
+            plan.format = partition.format;
+            // the output fields: the data fields, then the additional fields
+            final List<Schema.Field> fields = new ArrayList<>();
+            String description = schema.getDescription();
+            final Charset charset;
+            if(partition.format == Format.fwf) {
+                if(schema.getFwfLayout() == null) {
+                    errors.add("format fwf requires " + where + ".schema with encoding.format: fwf and a layout in reference (uri or inline)");
+                    return null;
+                }
+                try {
+                    plan.decoder = FwfDecoder.of(schema, partition.fields);
+                } catch (final IllegalArgumentException e) {
+                    errors.add(where + ".fields: " + e.getMessage());
+                    return null;
+                }
+                charset = plan.decoder.getOptions().getCharset();
+                final FwfLayout layout = plan.decoder.getLayout();
+                if(partition.recordSplit == RecordSplit.length) {
+                    if(layout.getRecordLength() == null) {
+                        errors.add(where + ".recordSplit: length requires recordLength in the fwf layout");
+                    }
+                    // the file is cut by bytes, but with unit: char the layout recordLength counts characters
+                    if(plan.decoder.getOptions().getUnit() != FwfOptions.Unit.byte_ && !isSingleByteCharset(charset)) {
+                        errors.add(where + ".recordSplit: length requires schema.encoding.unit: byte for charset "
+                                + charset.name() + ": the file is cut every recordLength bytes, but with unit: char recordLength counts characters");
+                    }
+                } else if(isWideCharset(charset)) {
+                    errors.add("charset " + charset.name() + " can not be split into lines by a single-byte separator; use recordSplit: length"
+                            + (partition.name == null ? "" : " (" + where + ")"));
+                }
+                fields.addAll(layout.toSchemaFields());
+                if(description == null) {
+                    // a schema with declared fields does not take over the description of the layout
+                    description = layout.getDescription();
+                }
+            } else {
+                if(schema.getFwfLayout() != null) {
+                    errors.add(where + ".format: " + partition.format + " differs from schema.encoding.format: fwf");
+                    return null;
+                }
+                plan.schema = schema;
+                charset = StandardCharsets.UTF_8;
+                fields.addAll(schema.getFields());
+            }
+            plan.charsetName = charset.name();
+            plan.skipHeaderLines = partition.skipHeaderLines == null ? 0 : partition.skipHeaderLines;
+            plan.fixedLength = partition.recordSplit == RecordSplit.length;
+
+            // filterPrefix and delimiter are compared with the record bytes
+            final boolean filterPrefix = partition.filterPrefix != null && !partition.filterPrefix.isEmpty();
+            final boolean delimiter = partition.delimiter != null && !partition.delimiter.isEmpty();
+            final String reason = filterPrefix || delimiter ? unmatchable(charset) : null;
+            if(reason != null) {
+                if(filterPrefix) {
+                    errors.add(where + ".filterPrefix can not be used with charset " + charset.name() + ": " + reason);
+                }
+                if(delimiter) {
+                    errors.add(where + ".delimiter can not be used with charset " + charset.name() + ": " + reason);
+                }
+            } else {
+                plan.filterPrefix = filterPrefix ? partition.filterPrefix.getBytes(charset) : null;
+                plan.delimiter = delimiter ? partition.delimiter.getBytes(charset) : null;
+            }
+
+            plan.additionalFields = new HashMap<>(additionalFields);
+            for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
+                final String fieldName = entry.getValue();
+                if(Schema.hasField(fields, fieldName)) {
+                    errors.add("parameters.additionalFields." + entry.getKey() + ": the output field name " + fieldName + " is already used"
+                            + (partition.name == null ? "" : " in partition " + partition.name));
+                } else {
+                    fields.add(Schema.Field.of(fieldName, switch (entry.getKey()) {
+                        case "line" -> Schema.FieldType.INT64;
+                        case "lastModified" -> Schema.FieldType.TIMESTAMP;
+                        default -> Schema.FieldType.STRING;
+                    }));
+                }
+            }
+
+            // The event time field: the partition's own, else the module-level one. The module-level
+            // attribute is one name for all the partitions, and a partition may well not have it.
+            plan.timestampAttribute = partition.timestampAttribute != null ? partition.timestampAttribute : timestampAttribute;
+            final Schema.Field timestampField = plan.timestampAttribute == null ? null : Schema.getField(fields, plan.timestampAttribute);
+            if(plan.timestampAttribute != null && timestampField == null && partition.name != null) {
+                if(partition.timestampAttribute != null) {
+                    errors.add(where + ".timestampAttribute: " + plan.timestampAttribute + " is not a field of this partition");
+                } else {
+                    LOG.warn("storage source partition {}: timestampAttribute {} is not a field of this partition; "
+                                    + "its records keep the default timestamp (declare partitions[].timestampAttribute for it)",
+                            partition.name, plan.timestampAttribute);
+                    plan.timestampAttribute = null;
+                }
+            }
+            plan.timestampIsDate = timestampField != null
+                    && timestampField.getFieldType().getType() == Schema.Type.date;
+            plan.entries = partition.entries == null ? List.of() : new ArrayList<>(partition.entries);
+            plan.exclude = partition.exclude == null ? List.of() : new ArrayList<>(partition.exclude);
+            if(errors.size() != errorCount) {
+                return null;
+            }
+            plan.outputSchema = Schema.builder()
+                    .withFields(fields)
+                    .withDescription(description)
+                    .build();
+            return plan;
+        }
+
+        void setup() {
+            this.charset = Charset.forName(charsetName);
+            this.entryFilter = ArchiveReader.filter(entries, exclude);
+            if(schema != null) {
+                schema.setup();
+            }
+        }
+
+        ByteRecordReader reader(final InputStream input) {
+            if(fixedLength) {
+                return ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
+            } else if(delimiter != null) {
+                return ByteRecordReader.delimited(input, delimiter);
+            } else {
+                return ByteRecordReader.lines(input);
+            }
+        }
+
+        Map<String, Object> decode(final byte[] buffer, final int length) {
+            final Map<String, Object> values = switch (format) {
+                case fwf -> decoder.decode(buffer, 0, length);
+                case csv -> CsvToElementConverter.convert(schema.getFields(), new String(buffer, 0, length, charset));
+                case json -> JsonToElementConverter.convert(schema.getFields(), new String(buffer, 0, length, charset));
+            };
+            if(values == null) {
+                throw new IllegalArgumentException("the record is not a single " + format + " record");
+            }
+            return values;
+        }
+
+    }
+
     private static class ReadRecordsDoFn extends DoFn<FileIO.ReadableFile, MElement> {
 
         private final String name;
-        private final Format format;
         private final Compression compression;
-        private final int skipHeaderLines;
-        private final byte[] filterPrefix;
-        private final byte[] delimiter;
-        private final boolean fixedLength;
-        private final Schema schema;
-        private final FwfDecoder decoder;
-        private final String charsetName;
+        private final List<Plan> plans;
         private final boolean archive;
         // null: told from the file name
         private final ArchiveReader.Type archiveType;
         private final List<String> archiveEntries;
         private final List<String> archiveExclude;
         private final String archiveNameCharsetName;
-        private final Map<String, String> additionalFields;
-        private final String timestampAttribute;
-        private final boolean timestampIsDate;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+        private final Counter entriesRead;
+        private final Counter entriesSkipped;
 
-        private transient Charset charset;
-        private transient Predicate<String> entryFilter;
+        private transient Predicate<String> archiveFilter;
+        // the plan of the archive entry the reader stands on
+        private transient int routed;
 
         ReadRecordsDoFn(
                 final String name,
-                final Spec spec,
                 final Compression compression,
-                final Schema schema,
-                final FwfDecoder decoder,
-                final String charsetName,
+                final List<Plan> plans,
+                final Archive archive,
                 final ArchiveReader.Type archiveType,
                 final String archiveNameCharsetName,
-                final Map<String, String> additionalFields,
-                final String timestampAttribute,
-                final boolean timestampIsDate,
                 final boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
-            final Charset charset = Charset.forName(charsetName);
             this.name = name;
-            this.format = spec.format;
             this.compression = compression;
-            this.skipHeaderLines = spec.skipHeaderLines == null ? 0 : spec.skipHeaderLines;
-            this.filterPrefix = spec.filterPrefix == null || spec.filterPrefix.isEmpty() ? null : spec.filterPrefix.getBytes(charset);
-            this.delimiter = spec.delimiter == null ? null : spec.delimiter.getBytes(charset);
-            this.fixedLength = spec.recordSplit == RecordSplit.length;
-            // csv / json only: the fwf decoder carries its own (projected) layout
-            this.schema = decoder == null ? schema : null;
-            this.decoder = decoder;
-            this.charsetName = charsetName;
-            this.archive = spec.archive != null;
+            this.plans = plans;
+            this.archive = archive != null;
             this.archiveType = archiveType;
-            this.archiveEntries = spec.archive == null || spec.archive.entries == null ? List.of() : new ArrayList<>(spec.archive.entries);
-            this.archiveExclude = spec.archive == null || spec.archive.exclude == null ? List.of() : new ArrayList<>(spec.archive.exclude);
+            this.archiveEntries = archive == null || archive.entries == null ? List.of() : new ArrayList<>(archive.entries);
+            this.archiveExclude = archive == null || archive.exclude == null ? List.of() : new ArrayList<>(archive.exclude);
             this.archiveNameCharsetName = archiveNameCharsetName;
-            this.additionalFields = new HashMap<>(additionalFields);
-            this.timestampAttribute = timestampAttribute;
-            this.timestampIsDate = timestampIsDate;
             this.failFast = failFast;
             this.failureTag = failureTag;
+            this.entriesRead = Metrics.counter(name, "archive_entries_read");
+            this.entriesSkipped = Metrics.counter(name, "archive_entries_skipped");
         }
 
         @Setup
         public void setup() {
-            this.charset = Charset.forName(charsetName);
-            this.entryFilter = ArchiveReader.filter(archiveEntries, archiveExclude);
-            if(decoder == null) {
-                this.schema.setup();
+            this.archiveFilter = ArchiveReader.filter(archiveEntries, archiveExclude);
+            for(final Plan plan : plans) {
+                plan.setup();
             }
         }
 
@@ -410,11 +716,13 @@ final class StorageRecordReader {
             final MatchResult.Metadata metadata = file.getMetadata();
             final String resource = metadata.resourceId().toString();
             // where the read stands, for the failure of an I/O error
-            final Position position = new Position();
+            final Position position = new Position(plans.size());
             try {
                 if(archive) {
                     try(final ArchiveReader reader = openArchive(file)) {
-                        while(reader.next(entryFilter)) {
+                        while(reader.next(this::route)) {
+                            position.plan = plans.get(routed);
+                            position.planIndex = routed;
                             position.entry = reader.name();
                             position.number = 0;
                             // closed entry by entry: the decompressor of a compressed entry holds
@@ -425,6 +733,7 @@ final class StorageRecordReader {
                         }
                     }
                 } else {
+                    position.plan = plans.getFirst();
                     try(final InputStream input = openFile(file, fileCompression(file))) {
                         readRecords(c, metadata, resource, input, position);
                     }
@@ -438,6 +747,22 @@ final class StorageRecordReader {
             }
         }
 
+        // The partition an archive entry goes to: the first one whose patterns match it. An entry
+        // that parameters.archive leaves out, or that no partition takes, is not read at all.
+        private boolean route(final String entryName) {
+            if(archiveFilter.test(entryName)) {
+                for(int i = 0; i < plans.size(); i++) {
+                    if(plans.get(i).entryFilter.test(entryName)) {
+                        this.routed = i;
+                        entriesRead.inc();
+                        return true;
+                    }
+                }
+            }
+            entriesSkipped.inc();
+            return false;
+        }
+
         // One file, or one entry of an archive: records are numbered from 1 and the header lines are
         // skipped for each of them. The stream is left open for the caller.
         private void readRecords(
@@ -447,38 +772,36 @@ final class StorageRecordReader {
                 final InputStream stream,
                 final Position position) throws IOException {
 
-            final InputStream input = StandardCharsets.UTF_8.equals(charset) ? skipByteOrderMark(stream) : stream;
-            // one reader (and its buffers) for all the entries of an archive
-            if(position.reader != null) {
-                position.reader.reset(input);
-            } else if(fixedLength) {
-                position.reader = ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
-            } else if(delimiter != null) {
-                position.reader = ByteRecordReader.delimited(input, delimiter);
+            final Plan plan = position.plan;
+            final InputStream input = StandardCharsets.UTF_8.equals(plan.charset) ? skipByteOrderMark(stream) : stream;
+            // one reader (and its buffers) per partition for all the entries of an archive
+            ByteRecordReader reader = position.readers[position.planIndex];
+            if(reader == null) {
+                reader = plan.reader(input);
+                position.readers[position.planIndex] = reader;
             } else {
-                position.reader = ByteRecordReader.lines(input);
+                reader.reset(input);
             }
-            final ByteRecordReader reader = position.reader;
             while(reader.next()) {
                 final long number = reader.number();
                 position.number = number;
-                if(number <= skipHeaderLines) {
+                if(number <= plan.skipHeaderLines) {
                     continue;
                 }
                 final byte[] buffer = reader.buffer();
                 final int length = reader.length();
                 // blank lines (and the CRLF / LF mix they come from) carry no record
-                if(length == 0 && !fixedLength) {
+                if(length == 0 && !plan.fixedLength) {
                     continue;
                 }
-                if(filterPrefix != null && startsWith(buffer, length, filterPrefix)) {
+                if(plan.filterPrefix != null && startsWith(buffer, length, plan.filterPrefix)) {
                     continue;
                 }
                 final Map<String, Object> values;
                 final Instant eventTime;
                 try {
-                    values = decode(buffer, length);
-                    for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
+                    values = plan.decode(buffer, length);
+                    for(final Map.Entry<String, String> entry : plan.additionalFields.entrySet()) {
                         values.put(entry.getValue(), switch (entry.getKey()) {
                             case "resource" -> resource;
                             case "line" -> number;
@@ -488,12 +811,12 @@ final class StorageRecordReader {
                         });
                     }
                     // a value that is not a time is a failure of the record as well
-                    eventTime = eventTime(values, c.timestamp());
+                    eventTime = eventTime(plan, values, c.timestamp());
                 } catch (final RuntimeException e) {
-                    c.output(failureTag, failure("Failed to decode " + format + " record", resource, position, buffer, length, e));
+                    c.output(failureTag, failure("Failed to decode " + plan.format + " record", resource, position, buffer, length, e));
                     continue;
                 }
-                c.outputWithTimestamp(MElement.of(values, eventTime), eventTime);
+                c.outputWithTimestamp(plan.tag, MElement.of(values, eventTime), eventTime);
             }
         }
 
@@ -591,26 +914,14 @@ final class StorageRecordReader {
             return pushback;
         }
 
-        private Map<String, Object> decode(final byte[] buffer, final int length) {
-            final Map<String, Object> values = switch (format) {
-                case fwf -> decoder.decode(buffer, 0, length);
-                case csv -> CsvToElementConverter.convert(schema.getFields(), new String(buffer, 0, length, charset));
-                case json -> JsonToElementConverter.convert(schema.getFields(), new String(buffer, 0, length, charset));
-            };
-            if(values == null) {
-                throw new IllegalArgumentException("the record is not a single " + format + " record");
-            }
-            return values;
-        }
-
         // The event time of a record: the value of timestampAttribute, or the given default without
         // the attribute or the value.
-        private Instant eventTime(final Map<String, Object> values, final Instant defaultTime) {
-            if(timestampAttribute == null) {
+        private Instant eventTime(final Plan plan, final Map<String, Object> values, final Instant defaultTime) {
+            if(plan.timestampAttribute == null) {
                 return defaultTime;
             }
-            return switch (values.get(timestampAttribute)) {
-                case Number n when timestampIsDate -> Instant.ofEpochMilli(Math.multiplyExact(n.longValue(), MILLIS_PER_DAY));
+            return switch (values.get(plan.timestampAttribute)) {
+                case Number n when plan.timestampIsDate -> Instant.ofEpochMilli(Math.multiplyExact(n.longValue(), MILLIS_PER_DAY));
                 case Number n -> Instant.ofEpochMilli(n.longValue() / 1000L);
                 case String s -> Instant.ofEpochMilli(DateTimeUtil.toEpochMicroSecond(s) / 1000L);
                 case null, default -> defaultTime;
@@ -632,18 +943,24 @@ final class StorageRecordReader {
                 input.put("entry", position.entry);
             }
             input.put("line", position.number);
-            if(buffer != null) {
+            if(buffer != null && position.plan != null) {
                 // for diagnosis only: undecodable bytes show up as U+FFFD here
-                input.put("record", new String(buffer, 0, length, charset));
+                input.put("record", new String(buffer, 0, length, position.plan.charset));
             }
             return Module.processError(message, input, e, failFast);
         }
 
-        // the entry (of an archive) and the record being read, with the reader shared by the entries
+        // the entry (of an archive) and the record being read, with the readers shared by the entries
         private static final class Position {
+            Plan plan;
+            int planIndex;
             String entry;
             long number;
-            ByteRecordReader reader;
+            final ByteRecordReader[] readers;
+
+            Position(final int plans) {
+                this.readers = new ByteRecordReader[plans];
+            }
         }
 
         private static boolean startsWith(final byte[] buffer, final int length, final byte[] prefix) {

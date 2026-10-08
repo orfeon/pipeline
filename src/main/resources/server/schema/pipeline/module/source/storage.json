@@ -28,7 +28,7 @@
         "format": {
           "type": "string",
           "title": "Format",
-          "description": "File format. May be omitted when schema.encoding.format declares it (fwf)",
+          "description": "File format. May be omitted when schema.encoding.format declares it (fwf), or when every partition has its own format",
           "enum": ["avro", "parquet", "csv", "json", "fwf"]
         },
         "archive": {
@@ -42,6 +42,29 @@
             "nameCharset": { "type": "string", "title": "Name Charset", "description": "Charset of the entry names (default UTF-8)" }
           },
           "additionalProperties": false
+        },
+        "partitions": {
+          "type": "array",
+          "title": "Partitions",
+          "description": "Named outputs for the entries of an archive, each with its own format / schema (requires archive). An entry goes to the first partition whose patterns match it",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "title": "Name", "description": "Output name, referenced as {sourceName}.{name}" },
+              "entries": { "type": "array", "title": "Entries", "description": "Globs of the entries that go to this partition", "items": { "type": "string" } },
+              "exclude": { "type": "array", "title": "Exclude", "description": "Globs of entries to leave out of this partition", "items": { "type": "string" } },
+              "format": { "type": "string", "title": "Format", "description": "Format of this partition. The module-level format when omitted", "enum": ["csv", "json", "fwf"] },
+              "schema": { "type": "object", "title": "Schema", "description": "Schema of this partition. The module-level schema when omitted" },
+              "fields": { "type": "array", "title": "Fields", "description": "Top-level layout fields to read (fwf projection)", "items": { "type": "string" } },
+              "skipHeaderLines": { "type": "integer", "title": "Skip Header Lines" },
+              "filterPrefix": { "type": "string", "title": "Filter Prefix" },
+              "delimiter": { "type": "string", "title": "Delimiter" },
+              "recordSplit": { "type": "string", "title": "Record Split", "enum": ["line", "length"] },
+              "timestampAttribute": { "type": "string", "title": "Timestamp Attribute", "description": "The field of this partition to use as the event time. The source-level timestampAttribute when omitted" }
+            },
+            "required": ["name", "entries"],
+            "additionalProperties": false
+          }
         },
         "additionalFields": {
           "type": "object",
