@@ -89,7 +89,31 @@ public class Cast implements SelectFunction {
         } else if(Schema.Type.bytes.equals(outputFieldType.getType()) && Schema.Type.uuid.equals(inputType)) {
             return uuidToBytes(value);
         }
+        if(Schema.Type.decimal.equals(inputType)) {
+            return ElementSchemaUtil.getAsPrimitive(outputFieldType, decimalToNumber(value, inputFields.getFirst().getFieldType()));
+        }
         return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+    }
+
+    // A decimal read from an avro record is the bytes of its unscaled value: without this the cast
+    // sees plain bytes and can not turn them into a number or its text.
+    private static Object decimalToNumber(final Object value, final Schema.FieldType decimalType) {
+        final byte[] bytes = switch (value) {
+            case ByteBuffer b -> {
+                final byte[] copy = new byte[b.remaining()];
+                b.duplicate().get(copy);
+                yield copy;
+            }
+            case byte[] b -> b;
+            case null, default -> null;
+        };
+        if(bytes == null || bytes.length == 0) {
+            return value;
+        }
+        final int scale = decimalType.getScale() == null ? 9 : decimalType.getScale();
+        final java.math.BigDecimal decimal = new java.math.BigDecimal(new java.math.BigInteger(bytes), scale).stripTrailingZeros();
+        // 100 is "1E+2" after stripTrailingZeros: keep the plain integer form for a cast to string
+        return decimal.scale() < 0 ? decimal.setScale(0) : decimal;
     }
 
     private static String bytesToUuid(final Object value) {

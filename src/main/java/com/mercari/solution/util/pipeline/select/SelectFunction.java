@@ -49,6 +49,7 @@ public interface SelectFunction extends Serializable {
         bytes_decode,
         base64_encode,
         base64_decode,
+        fwf_decode,
         reshape,
         tokenize_encode,
         tokenize_decode,
@@ -165,6 +166,7 @@ public interface SelectFunction extends Serializable {
             case bytes_decode -> Bytes.of(name, jsonObject, inputFields, false, ignore);
             case base64_encode -> Base64Coder.of(name, jsonObject, inputFields, true, ignore);
             case base64_decode -> Base64Coder.of(name, jsonObject, inputFields, false, ignore);
+            case fwf_decode -> FwfDecode.of(name, jsonObject, inputFields, ignore);
             case reshape -> Reshape.of(name, jsonObject, inputFields, ignore);
             case tokenize_encode -> Tokenize.of(name, jsonObject, inputFields, true, ignore);
             case tokenize_decode -> Tokenize.of(name, jsonObject, inputFields, false, ignore);

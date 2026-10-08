@@ -12,8 +12,8 @@ A fixed-width record has no delimiters: each field is a fixed range of the recor
 position and length. The fwf format decodes such records into typed (optionally nested and
 repeated) fields.
 
-> **Module support:** the [storage source](../source/storage.md) reads fwf files (`format: fwf`).
-> A select function `fwf_decode` (for records held in a bytes / string field) is planned.
+> **Module support:** the [storage source](../source/storage.md) reads fwf files (`format: fwf`), and the
+> select function [`fwf_decode`](../transform/select.md#fwf_decode) decodes a record held in a bytes / string field.
 
 ## Declaration
 

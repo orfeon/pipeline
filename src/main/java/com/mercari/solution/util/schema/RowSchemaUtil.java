@@ -1116,6 +1116,16 @@ public class RowSchemaUtil {
                 case String s -> s.getBytes(StandardCharsets.UTF_8);
                 default -> primitiveValue.toString().getBytes(StandardCharsets.UTF_8);
             };
+            // a decimal of a map element: a BigDecimal, its text (after the map coder), another number,
+            // or avro-style bytes of the unscaled value (scale 9, as in MElement.getAsBigDecimal)
+            case DECIMAL -> switch (primitiveValue) {
+                case BigDecimal d -> d;
+                case String s -> new BigDecimal(s.trim());
+                case Double d -> BigDecimal.valueOf(d);
+                case ByteBuffer b -> new BigDecimal(new java.math.BigInteger(b.array()), 9);
+                case Number n -> new BigDecimal(n.toString());
+                default -> throw new IllegalArgumentException("Not supported decimal value: " + primitiveValue + ", class: " + primitiveValue.getClass().getName());
+            };
             case BOOLEAN -> switch (primitiveValue) {
                 case Boolean b -> b;
                 case String s -> Boolean.parseBoolean(s);

@@ -19,6 +19,8 @@ import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -205,6 +207,32 @@ public class ElementToAvroConverter {
         }
     }
 
+    // The bytes of a decimal value (two's complement of the unscaled value at the schema scale), or
+    // null when the value is not a number: bytes already encoded, or base64 text of them. A text
+    // that is both a number and valid base64 ("1234") is read as the number.
+    private static ByteBuffer decimalBytes(final org.apache.avro.Schema fieldSchema, final Object value) {
+        final BigDecimal decimal;
+        try {
+            decimal = switch (value) {
+                case BigDecimal d -> d;
+                case String s -> new BigDecimal(s.trim());
+                case Double d -> BigDecimal.valueOf(d);
+                case Float f -> new BigDecimal(f.toString());
+                case Number n -> new BigDecimal(n.toString());
+                default -> null;
+            };
+        } catch (final NumberFormatException e) {
+            return null;
+        }
+        if(decimal == null) {
+            return null;
+        }
+        final int scale = fieldSchema.getLogicalType() instanceof LogicalTypes.Decimal type
+                ? type.getScale()
+                : fieldSchema.getObjectProp("scale") != null ? Integer.parseInt(fieldSchema.getObjectProp("scale").toString()) : 0;
+        return ByteBuffer.wrap(decimal.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray());
+    }
+
     private static Object convertValue(
             final String name,
             final org.apache.avro.Schema fieldSchema,
@@ -227,12 +255,20 @@ public class ElementToAvroConverter {
                 case ByteBuffer b -> new String(b.array(), StandardCharsets.UTF_8);
                 default -> value.toString();
             };
-            case BYTES -> switch (value) {
-                case byte[] b -> b;
-                case ByteBuffer b -> b;
-                case String s -> Base64.getDecoder().decode(s);
-                default -> throw new IllegalArgumentException("Not supported bytes value: " + value + ", class: " + value.getClass().getName());
-            };
+            case BYTES -> {
+                // A decimal of a map element is a BigDecimal (json / fwf decoders), or its text once it
+                // has passed the map coder: written as the unscaled value at the scale of the schema.
+                final ByteBuffer decimal = AvroSchemaUtil.isLogicalTypeDecimal(fieldSchema) ? decimalBytes(fieldSchema, value) : null;
+                if(decimal != null) {
+                    yield decimal;
+                }
+                yield switch (value) {
+                    case byte[] b -> b;
+                    case ByteBuffer b -> b;
+                    case String s -> Base64.getDecoder().decode(s);
+                    default -> throw new IllegalArgumentException("Not supported bytes value: " + value + ", class: " + value.getClass().getName());
+                };
+            }
             case INT -> switch (value) {
                 case Number n -> n.intValue();
                 case String s -> Integer.parseInt(s);
