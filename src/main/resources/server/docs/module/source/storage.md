@@ -1,7 +1,7 @@
 ---
 type: Source Module
 title: Storage Source Module
-description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), files packed in zip / tar archives (entries selected by glob), and source file / entry / line number fields.
+description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), files packed in zip / tar archives (entries selected by glob, optionally routed to named outputs with their own format and schema), and source file / entry / line number fields.
 tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width, zip, tar, archive]
 timestamp: 2026-06-23T00:00:00Z
 ---
@@ -68,6 +68,23 @@ Reads the matched files as zip / tar archives (`csv`, `json` and `fwf` formats):
 | archive.nameCharset | optional | String         | Charset of the entry names. Default `UTF-8` (e.g. `windows-31j` for a zip made on Japanese Windows). |
 
 `archive: {}` reads every file entry. For a zip on GCS / S3 / a local disk only the selected entries are read from storage. `compression: ZIP` can not be combined with `archive`.
+
+### Partitions parameters
+
+Routes the entries of an archive to **named outputs**, each read in its own way (`archive` is required). Use it when one archive packs several kinds of files: the archive is read once and every kind gets its own output, referenced as `{name of this step}.{partition name}`. With `partitions` the step has no unnamed output.
+
+| parameter                | optional | type           | description |
+|--------------------------|----------|----------------|-------------|
+| partitions[].name        | required | String         | Output name. Referenced as `{sourceName}.{name}`. Unique among the partitions. |
+| partitions[].entries     | required | Array<String\> | Globs of the entries that go to this partition (same syntax as `archive.entries`). |
+| partitions[].exclude     | optional | Array<String\> | Globs of entries to leave out of this partition. |
+| partitions[].format      | optional | Enum           | `csv`, `json` or `fwf`. Omitted: `fwf` when the partition's schema declares it, else the module-level `format`. |
+| partitions[].schema      | optional | [Schema](../common/schema.md) | Schema of this partition. Omitted: the module-level `schema`. |
+| partitions[].fields, skipHeaderLines, filterPrefix, delimiter, recordSplit | optional | | The same parameters as at the module level, for this partition. Omitted: the module-level value. |
+
+- An entry is read by the **first** partition whose `entries` / `exclude` match it. An entry that no partition matches (or that `archive.entries` / `archive.exclude` leave out) is not read at all.
+- `archive` (`type`, `nameCharset`, and `entries` / `exclude` as a filter in front of the partitions), `compression` and `additionalFields` are module-level only and apply to every partition.
+- A partition with no matching entry is an empty output.
 
 ### Additional fields parameters
 
@@ -404,5 +421,47 @@ sources:
       additionalFields:
         resource: source_file
         entry: source_entry
+```
+
+### Example 13: Several kinds of files from one archive
+
+Each zip packs fixed-width order files and csv item files. The archive is read once; each kind goes
+to its own output with its own format and schema.
+
+```yaml
+sources:
+  - name: pack
+    module: storage
+    parameters:
+      input: "gs://my-bucket/packs/PACK*.zip"
+      archive: {}
+      additionalFields:
+        entry: source_entry
+      partitions:
+        - name: orders
+          entries: ["ORD*.txt"]
+          schema:
+            encoding: { format: fwf, charset: windows-31j }
+            reference: { uri: gs://my-bucket/layouts/orders.fwf.json }
+        - name: items
+          entries: ["ITEM*.csv"]
+          format: csv
+          skipHeaderLines: 1
+          schema:
+            fields:
+              - { name: sku, type: string }
+              - { name: qty, type: int64 }
+
+sinks:
+  - name: orders_table
+    module: bigquery
+    inputs: [pack.orders]
+    parameters:
+      table: "myproject.mydataset.orders"
+  - name: items_table
+    module: bigquery
+    inputs: [pack.items]
+    parameters:
+      table: "myproject.mydataset.items"
 ```
 

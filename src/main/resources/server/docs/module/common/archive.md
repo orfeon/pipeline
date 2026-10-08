@@ -58,6 +58,13 @@ Everything that is "per file" without an archive is "per entry" with one:
 | A record that can not be decoded | A record failure, as without an archive; the failure names the entry. |
 | An I/O error inside an archive (truncated, corrupted) | A failure of the archive: the entries already read stay in the output and the rest is not read (see `failFast` in the module docs). |
 
+## Several kinds of files in one archive
+
+When an archive packs several kinds of files, the storage source's `partitions` routes its entries to
+named outputs, each with its own format and schema: the archive is read once, and an entry goes to
+the first partition whose patterns match it. See *Partitions parameters* in the
+[storage source](../source/storage.md).
+
 ## Compression around an archive
 
 `compression` (or the file name) tells the compression of the archive file itself: a `.tar.gz` is a

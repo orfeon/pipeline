@@ -43,6 +43,28 @@
           },
           "additionalProperties": false
         },
+        "partitions": {
+          "type": "array",
+          "title": "Partitions",
+          "description": "Named outputs for the entries of an archive, each with its own format / schema (requires archive). An entry goes to the first partition whose patterns match it",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "title": "Name", "description": "Output name, referenced as {sourceName}.{name}" },
+              "entries": { "type": "array", "title": "Entries", "description": "Globs of the entries that go to this partition", "items": { "type": "string" } },
+              "exclude": { "type": "array", "title": "Exclude", "description": "Globs of entries to leave out of this partition", "items": { "type": "string" } },
+              "format": { "type": "string", "title": "Format", "description": "Format of this partition. The module-level format when omitted", "enum": ["csv", "json", "fwf"] },
+              "schema": { "type": "object", "title": "Schema", "description": "Schema of this partition. The module-level schema when omitted" },
+              "fields": { "type": "array", "title": "Fields", "description": "Top-level layout fields to read (fwf projection)", "items": { "type": "string" } },
+              "skipHeaderLines": { "type": "integer", "title": "Skip Header Lines" },
+              "filterPrefix": { "type": "string", "title": "Filter Prefix" },
+              "delimiter": { "type": "string", "title": "Delimiter" },
+              "recordSplit": { "type": "string", "title": "Record Split", "enum": ["line", "length"] }
+            },
+            "required": ["name", "entries"],
+            "additionalProperties": false
+          }
+        },
         "additionalFields": {
           "type": "object",
           "title": "Additional Fields",
