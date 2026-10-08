@@ -586,7 +586,8 @@ public class FwfLayout implements Serializable {
             } else {
                 fieldType = Schema.FieldType.type(type);
             }
-            fieldType = fieldType.withNullable(!required);
+            // the elements of a repeated leaf are never null (FwfDecoder); a group element is a record
+            fieldType = fieldType.withNullable(!required && (repeat == null || isGroup()));
             if(repeat != null) {
                 fieldType = Schema.FieldType.array(fieldType);
             }

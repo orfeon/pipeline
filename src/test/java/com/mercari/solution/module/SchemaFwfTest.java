@@ -215,7 +215,7 @@ public class SchemaFwfTest {
 
     @Test
     public void testDecoderOfSchemaAppliesProjections() {
-        final byte[] record = "AB  01231 x105".getBytes(StandardCharsets.UTF_8);
+        final byte[] record = "AB  012312x105".getBytes(StandardCharsets.UTF_8);
 
         // no declared fields: the whole layout
         final Schema all = Schema.parse("""
@@ -278,11 +278,11 @@ public class SchemaFwfTest {
                 { "encoding": { "format": "fwf", "charset": "windows-31j" }, "reference": { "inline": %s } }
                 """.formatted(LAYOUT));
         final FwfDecoder decoder = FwfDecoder.of(schema.getFwfLayout(), schema.getFwfOptions());
-        final byte[] record = ("ＡＢ" + "0123" + "1 " + "x105").getBytes(Charset.forName("windows-31j"));
+        final byte[] record = ("ＡＢ" + "0123" + "12" + "x105").getBytes(Charset.forName("windows-31j"));
         final Map<String, Object> values = decoder.decode(record);
         Assertions.assertEquals("ＡＢ", values.get("code"));
         Assertions.assertEquals(new BigDecimal("12.3"), values.get("amount"));
-        Assertions.assertEquals(Arrays.asList(1, null), values.get("marks"));
+        Assertions.assertEquals(Arrays.asList(1, 2), values.get("marks"));
 
         final MElement element = MElement.of(values, 0L);
         final ElementCoder coder = ElementCoder.of(schema);

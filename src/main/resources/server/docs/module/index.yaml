@@ -100,7 +100,7 @@ transforms:
     description: Redistributes elements across workers to prevent fusion and enable checkpointing. Useful for balancing load after a fan-out step or before an expensive operation.
     tags: [transform, reshuffle, batch, streaming, fusion, checkpoint]
   - title: select
-    description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
+    description: Filters rows and transforms field values. Supports 28 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, fwf_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
     tags: [transform, select, filter, batch, streaming, field, projection]
 sinks:
   - title: auxia

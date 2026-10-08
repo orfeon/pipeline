@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Select Transform Module
-description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
+description: Filters rows and transforms field values. Supports 28 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, fwf_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
 tags: [transform, select, filter, batch, streaming, field, projection]
 timestamp: 2026-09-01T00:00:00Z
 ---
@@ -19,7 +19,7 @@ Supports:
 - **Nested structures** - Build nested elements and JSON objects.
 - **Stateful operations** - Access previous row values (lag) and compute windowed aggregations using `groupFields`.
 - **Array flattening** - Unnest array fields into multiple records.
-- **27 select functions** - Extensive library of built-in field transformation functions.
+- **28 select functions** - Extensive library of built-in field transformation functions.
 
 ## Transform module common parameters
 
@@ -125,6 +125,10 @@ Casts a field value to a different type.
 UUID values can be cast to `bytes` using their standard 16-byte representation,
 and 16-byte fields can be cast back to `uuid`. Casting a byte sequence whose
 length is not 16 to `uuid` produces an error.
+
+A `decimal` field is cast as its number: to an integer type it is truncated (`12.3` → `12`), to
+`string` it is written in plain notation without trailing zeros (`12.30` → `12.3`, never `1E+2`).
+A cast **to** `decimal` is not supported.
 
 ### constant
 
@@ -525,6 +529,29 @@ Decodes a Base64-encoded field.
   func: base64_decode
   field: base64_string
   type: bytes
+```
+
+### fwf_decode
+
+Decodes one fixed-width record held in a `bytes` or `string` field into a record (nested fields and arrays included). The layout is declared with a `schema` block exactly as for the storage source's `format: fwf` — see [Fixed-Width Format (fwf)](../common/fwf.md). Use it for records that arrive in a field (a message payload, a column of another source); to read fixed-width **files**, use the [storage source](../source/storage.md), which reads them record by record.
+
+| parameter | optional | type           | description                                                |
+|-----------|----------|----------------|------------------------------------------------------------|
+| field     | optional | String         | Source field (`bytes` or `string`). Defaults to `name`.     |
+| schema    | required | [Schema](../common/schema.md) | `encoding.format: fwf` (with `charset` etc.) and the layout document in `reference` (`uri` or `inline`). |
+| fields    | optional | Array<String\> | Top-level layout fields to decode (projection). Default: all. |
+
+- The output is a record whose fields are the layout fields. Take its fields out with a later select (`field: order.code`).
+- A `string` input is encoded back with `schema.encoding.charset` before it is cut by byte positions (lossless when the text came from that charset); for a layout that counts characters use `encoding.unit: char`.
+- A record that can not be decoded (wrong length, a value that does not convert) fails that record: the job fails with `failFast: true`, the record goes to the failure sinks with `failFast: false`.
+
+```yaml
+- name: order
+  func: fwf_decode
+  field: payload
+  schema:
+    encoding: { format: fwf, charset: windows-31j }
+    reference: { uri: gs://my-bucket/layouts/orders.fwf.json }
 ```
 
 ### reshape

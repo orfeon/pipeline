@@ -130,6 +130,42 @@ public class StorageSourceFwfTest {
     }
 
     @Test
+    public void testDecimalFlowsThroughATransform() throws Exception {
+        // a decimal of a fwf record crosses the map coder as text: a transform that reads it (the
+        // select output is an avro record) and a cast of it must still see the number
+        final String path = write("lines.txt", (RECORD_1 + "\r\n" + RECORD_2 + "\r\n").getBytes(MS932));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load("""
+                sources:
+                  - name: input
+                    module: storage
+                    parameters:
+                      input: "%s"
+                %s
+                transforms:
+                  - name: selected
+                    module: select
+                    inputs: [input]
+                    parameters:
+                      select:
+                        - { name: code }
+                        - { name: amount }
+                        - { name: amount_float, field: amount, type: float64 }
+                        - { name: amount_text, field: amount, type: string }
+                """.formatted(path, SCHEMA)));
+        Assertions.assertEquals(Schema.Type.decimal, outputs.get("selected").getSchema().getField("amount").getFieldType().getType());
+        PAssert.that(outputs.get("selected").getCollection()).satisfies(elements -> {
+            final Set<String> rows = new HashSet<>();
+            for(final MElement element : elements) {
+                rows.add(element.getAsString("code") + ":" + element.getAsDouble("amount") + ":" + element.getAsDouble("amount_float")
+                        + ":" + element.getAsString("amount_text"));
+            }
+            Assertions.assertEquals(Set.of("A001:12.3:12.3:12.3", "B002:4.5:4.5:4.5"), rows);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testGzipGlobAndAdditionalFields() throws Exception {
         write("part-a.txt", (RECORD_1 + "\r\n" + RECORD_2 + "\r\n").getBytes(MS932));
         write("part-b.txt.gz", gzip((RECORD_3 + "\r\n").getBytes(MS932)));

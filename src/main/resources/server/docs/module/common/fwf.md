@@ -12,8 +12,8 @@ A fixed-width record has no delimiters: each field is a fixed range of the recor
 position and length. The fwf format decodes such records into typed (optionally nested and
 repeated) fields.
 
-> **Module support:** the [storage source](../source/storage.md) reads fwf files (`format: fwf`).
-> A select function `fwf_decode` (for records held in a bytes / string field) is planned.
+> **Module support:** the [storage source](../source/storage.md) reads fwf files (`format: fwf`), and the
+> select function [`fwf_decode`](../transform/select.md#fwf_decode) decodes a record held in a bytes / string field.
 
 ## Declaration
 
@@ -83,7 +83,7 @@ and conversion attributes. Unknown keys are errors.
 | options      | all        | Free-form key/value metadata carried to the output schema. |
 | pos          | all        | 1-based start position, **relative to the enclosing scope** (the record for top-level fields, the group element for children). Omitted: right after the previous field. |
 | len          | leaf       | Required. Length of one value. |
-| repeat       | all        | Number of consecutive elements; the field becomes an array. A leaf occupies `len × repeat`, a group `size × repeat`. Empty elements stay in the array as null (positions are meaningful). |
+| repeat       | all        | Number of consecutive elements; the field becomes an array. A leaf occupies `len × repeat`, a group `size × repeat`. An array holds no null and keeps every position: an empty element is the field's `defaultValue`, or the empty text for a `string` / `json` field; without either the record is a failure. To keep "no value" in a repeated field (e.g. a repeated date), make it a repeated group with one field — the fields of a group can be null. |
 | fields       | group      | Child fields. Without `repeat`: a nested record. With `repeat`: an array of records. Nesting depth is unlimited. |
 | size         | group      | Length of one group element. Omitted: the extent of its children. |
 | scale        | decimal, float32, float64 | Implied decimal places: applied only when the value has **no** decimal point (`0012` with `scale: 1` → `1.2`). A value with a decimal point (` 12.3`) is read as is. |
@@ -109,7 +109,7 @@ so reserved areas and the line separator need not be declared.
    - `bool`: `1` / `true` / `t` / `y` / `yes` and `0` / `false` / `f` / `n` / `no` (case-insensitive).
    - `date` / `time` / `timestamp`: `pattern` (and `zone`), or ISO-8601.
    - `bytes`: the raw range, not decoded.
-5. null → `defaultValue`; still null in a `required` field → failure.
+5. null → `defaultValue`; still null in a `required` field → failure. Still null as an element of a repeated leaf → the empty text for `string` / `json`, a failure for the other types.
 
 Domain-specific meaning (combining a sign field with a value field, sentinel codes such as `999`,
 code-table lookups, time formats like `mss.S`) is out of scope of the decoder: do it downstream with

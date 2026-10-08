@@ -48,6 +48,7 @@ Modules such as `select`, `partition`, and `aggregation` accept an array of Sele
 | bytes_decode      | Decodes the byte array of the specified `field` with specified type in HBase toXxx format.                                                            | `field`, `type`              |
 | base64_encode     | Encodes the value of the specified `field` in Base64 format and converts it to a byte array.                                                          | `field`                      |
 | base64_decode     | Decodes the value of the specified `field` in Base64 format and converts it to a byte array.                                                          | `field`                      |
+| fwf_decode        | Decodes one fixed-width record in the specified bytes / string `field` into a record, by the layout of `schema` (see [Fixed-Width Format](fwf.md)). | `field`, `schema`, `fields`  |
 
 ### Stateful Aggregation functions
 

@@ -31,7 +31,9 @@ import java.util.Map;
  * </ol>
  *
  * Half-width spaces and the ideographic space (U+3000) are stripped. Values of repeated fields keep
- * their positions: an empty element stays null in the list instead of being dropped.
+ * their positions, and an array holds no null: an empty element of a repeated leaf is its
+ * defaultValue, the empty text for a string, and otherwise fails the record. (The fields of a
+ * repeated group can be null as anywhere else.)
  *
  * <p>Bytes that the charset can not decode (malformed, or without a mapping such as a NEC special
  * character under strict Shift_JIS) are never replaced with U+FFFD: with {@code unit: byte} they are
@@ -153,12 +155,25 @@ public class FwfDecoder implements Serializable {
             } else {
                 final List<Object> list = new ArrayList<>(field.getRepeat());
                 for(int i = 0; i < field.getRepeat(); i++) {
-                    list.add(decodeElement(field, source, start + i * field.unit(), i));
+                    final Object element = decodeElement(field, source, start + i * field.unit(), i);
+                    list.add(element == null ? emptyElement(field, i) : element);
                 }
                 values.put(field.getName(), list);
             }
         }
         return values;
+    }
+
+    // An array holds no null (the avro form of an element has non-null array items, and neither does
+    // BigQuery accept one), and an empty element can not be dropped: the position of an element is
+    // its meaning. An empty text element is the empty text; any other one needs a defaultValue.
+    private static Object emptyElement(final FwfLayout.Field field, final int index) {
+        return switch (field.getType()) {
+            case string, json -> "";
+            default -> throw new FwfException(path(field, index), null,
+                    "is empty, and an array can not hold null: declare defaultValue for the field"
+                            + " (or make it a repeated group, whose fields can be null)", null);
+        };
     }
 
     /**

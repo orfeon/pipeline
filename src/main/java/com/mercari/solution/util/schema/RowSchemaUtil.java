@@ -1113,9 +1113,20 @@ public class RowSchemaUtil {
             };
             case BYTES -> switch (primitiveValue) {
                 case byte[] bytes -> bytes;
+                // the bytes of a map element (base64_decode, a fwf bytes field, an avro record), not the text of the buffer object
+                case ByteBuffer b -> ElementSchemaUtil.toBytes(b);
                 case String s -> s.getBytes(StandardCharsets.UTF_8);
                 default -> primitiveValue.toString().getBytes(StandardCharsets.UTF_8);
             };
+            // a decimal of a map element: a BigDecimal, its text (after the map coder), another number,
+            // or avro-style bytes of the unscaled value (scale 9, as in MElement.getAsBigDecimal)
+            case DECIMAL -> {
+                final BigDecimal decimal = ElementSchemaUtil.getAsBigDecimal(primitiveValue, 9);
+                if(decimal == null) {
+                    throw new IllegalArgumentException("Not supported decimal value: " + primitiveValue + ", class: " + primitiveValue.getClass().getName());
+                }
+                yield decimal;
+            }
             case BOOLEAN -> switch (primitiveValue) {
                 case Boolean b -> b;
                 case String s -> Boolean.parseBoolean(s);
@@ -1186,6 +1197,10 @@ public class RowSchemaUtil {
                                 .map(Integer::shortValue)
                                 .collect(Collectors.toList());
                     case INT32, INT64, FLOAT, DOUBLE, STRING, BOOLEAN -> primitiveValue;
+                    // element by element, as the scalar values (the list may hold nulls)
+                    case DECIMAL, BYTES -> ((List<?>) primitiveValue).stream()
+                                .map(v -> convertPrimitive(fieldType.getCollectionElementType(), v))
+                                .collect(Collectors.toList());
                     case DATETIME -> ((List<Long>) primitiveValue).stream()
                                 .map(l -> l / 1000L)
                                 .map(Instant::ofEpochMilli)

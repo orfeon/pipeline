@@ -9,6 +9,7 @@ import com.mercari.solution.config.SourceConfig;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.apache.avro.LogicalType;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.SchemaBuilder;
@@ -19,6 +20,8 @@ import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -139,7 +142,12 @@ public class ElementToAvroConverter {
             case string -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING);
             case uuid -> LogicalTypes.uuid().addToSchema(org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING));
             case bytes -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BYTES);
-            case decimal -> LogicalTypes.decimal(38, 9).addToSchema(org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BYTES));
+            // the precision and scale of the field (a decimal read from avro keeps its own), else (38, 9)
+            case decimal -> LogicalTypes
+                    .decimal(
+                            fieldType.getPrecision() == null ? 38 : fieldType.getPrecision(),
+                            fieldType.getScale() == null ? 9 : fieldType.getScale())
+                    .addToSchema(org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BYTES));
             case int8, int16, int32 -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.INT);
             case int64 -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.LONG);
             case float8, float16, float32 -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.FLOAT);
@@ -205,6 +213,22 @@ public class ElementToAvroConverter {
         }
     }
 
+    // The bytes of a decimal value (two's complement of the unscaled value at the given scale), or
+    // null when the value is not a number: bytes already encoded, or base64 text of them. A text
+    // that is both a number and valid base64 ("1234") is read as the number.
+    private static ByteBuffer decimalBytes(final int scale, final Object value) {
+        final BigDecimal decimal;
+        try {
+            decimal = ElementSchemaUtil.getAsBigDecimal(value);
+        } catch (final NumberFormatException e) {
+            return null;
+        }
+        if(decimal == null) {
+            return null;
+        }
+        return ByteBuffer.wrap(decimal.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray());
+    }
+
     private static Object convertValue(
             final String name,
             final org.apache.avro.Schema fieldSchema,
@@ -227,12 +251,24 @@ public class ElementToAvroConverter {
                 case ByteBuffer b -> new String(b.array(), StandardCharsets.UTF_8);
                 default -> value.toString();
             };
-            case BYTES -> switch (value) {
-                case byte[] b -> b;
-                case ByteBuffer b -> b;
-                case String s -> Base64.getDecoder().decode(s);
-                default -> throw new IllegalArgumentException("Not supported bytes value: " + value + ", class: " + value.getClass().getName());
-            };
+            case BYTES -> {
+                // A decimal of a map element is a BigDecimal (json / fwf decoders), or its text once it
+                // has passed the map coder: written as the unscaled value at the scale of the schema.
+                // (the logical type is read as it is: this runs for every bytes value of every record)
+                if(fieldSchema.getLogicalType() instanceof LogicalTypes.Decimal decimalType) {
+                    final ByteBuffer decimal = decimalBytes(decimalType.getScale(), value);
+                    if(decimal != null) {
+                        yield decimal;
+                    }
+                }
+                // an avro generic record holds bytes as a ByteBuffer: a byte[] can not be written
+                yield switch (value) {
+                    case byte[] b -> ByteBuffer.wrap(b);
+                    case ByteBuffer b -> b;
+                    case String s -> ByteBuffer.wrap(Base64.getDecoder().decode(s));
+                    default -> throw new IllegalArgumentException("Not supported bytes value: " + value + ", class: " + value.getClass().getName());
+                };
+            }
             case INT -> switch (value) {
                 case Number n -> n.intValue();
                 case String s -> Integer.parseInt(s);

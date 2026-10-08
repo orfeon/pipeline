@@ -6,6 +6,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.joda.time.Instant;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -89,7 +90,36 @@ public class Cast implements SelectFunction {
         } else if(Schema.Type.bytes.equals(outputFieldType.getType()) && Schema.Type.uuid.equals(inputType)) {
             return uuidToBytes(value);
         }
+        if(Schema.Type.decimal.equals(inputType)) {
+            return castDecimal(value, inputFields.getFirst().getFieldType());
+        }
         return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+    }
+
+    // A decimal has no single representation: a BigDecimal (the json / fwf decoders), its text once
+    // the element has passed the map coder, or the bytes of the unscaled value when it is read from
+    // an avro record. All of them are read as the number first, so that the result of the cast does
+    // not depend on what is upstream (nor on whether the runner fused the steps).
+    private Object castDecimal(final Object value, final Schema.FieldType decimalType) {
+        // a cast to bytes keeps the bytes as they are
+        if(value == null || Schema.Type.bytes.equals(outputFieldType.getType())) {
+            return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+        }
+        BigDecimal decimal;
+        try {
+            decimal = ElementSchemaUtil.getAsBigDecimal(value, decimalType.getScale() == null ? 9 : decimalType.getScale());
+        } catch (final NumberFormatException e) {
+            decimal = null;
+        }
+        if(decimal == null) {
+            return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+        }
+        return switch (outputFieldType.getType()) {
+            // plain notation without trailing zeros: neither "12.300000000" (the scale of the bytes) nor
+            // "1E+2" / "1E-7" (BigDecimal.toString)
+            case string, json -> decimal.stripTrailingZeros().toPlainString();
+            default -> ElementSchemaUtil.getAsPrimitive(outputFieldType, decimal);
+        };
     }
 
     private static String bytesToUuid(final Object value) {

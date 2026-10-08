@@ -37,7 +37,10 @@ public class AvroToElementConverter {
             }
             case BYTES, FIXED -> {
                 if(AvroSchemaUtil.isLogicalTypeDecimal(avroFieldSchema)) {
-                    yield Schema.FieldType.DECIMAL;
+                    // the scale says how the bytes read: a decimal(10,2) is not the default (38,9)
+                    yield avroFieldSchema.getLogicalType() instanceof LogicalTypes.Decimal decimal
+                            ? Schema.FieldType.decimal(decimal.getPrecision(), decimal.getScale())
+                            : Schema.FieldType.DECIMAL;
                 } else {
                     yield Schema.FieldType.BYTES;
                 }

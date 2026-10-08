@@ -6,6 +6,7 @@ import com.google.api.services.bigquery.model.TableSchema;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,8 +111,15 @@ public class ElementToTableRowConverter {
                 default -> throw new IllegalArgumentException();
             };
             case decimal -> {
-                byte[] bytes = ((ByteBuffer) value).array();
-                yield BigDecimal.valueOf(new BigInteger(bytes).longValue(), 18).toString();
+                if(value instanceof ByteBuffer b) {
+                    yield BigDecimal.valueOf(new BigInteger(b.array()).longValue(), 18).toString();
+                }
+                // a decimal of a map element: a BigDecimal, its text (after the map coder) or a number
+                final BigDecimal decimal = ElementSchemaUtil.getAsBigDecimal(value);
+                if(decimal == null) {
+                    throw new IllegalArgumentException("Not supported decimal value: " + value + ", class: " + value.getClass().getName());
+                }
+                yield decimal.toPlainString();
             }
             case date -> LocalDate
                     .ofEpochDay((Integer) value)
