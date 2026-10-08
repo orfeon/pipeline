@@ -31,6 +31,18 @@
           "description": "File format. May be omitted when schema.encoding.format declares it (fwf)",
           "enum": ["avro", "parquet", "csv", "json", "fwf"]
         },
+        "archive": {
+          "type": "object",
+          "title": "Archive",
+          "description": "Read the matched files as zip / tar archives: every selected entry is read as a file of its own (for csv/json/fwf)",
+          "properties": {
+            "type": { "type": "string", "title": "Type", "description": "Archive type. Told from the file name when omitted", "enum": ["zip", "tar"] },
+            "entries": { "type": "array", "title": "Entries", "description": "Globs selecting the entries to read (* within a path segment, ** across segments). All file entries when omitted", "items": { "type": "string" } },
+            "exclude": { "type": "array", "title": "Exclude", "description": "Globs of entries to leave out", "items": { "type": "string" } },
+            "nameCharset": { "type": "string", "title": "Name Charset", "description": "Charset of the entry names (default UTF-8)" }
+          },
+          "additionalProperties": false
+        },
         "additionalFields": {
           "type": "object",
           "title": "Additional Fields",
