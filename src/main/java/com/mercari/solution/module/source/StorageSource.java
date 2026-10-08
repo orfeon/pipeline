@@ -51,6 +51,9 @@ public class StorageSource extends Source {
         // metadata (resource / entry / line / lastModified) -> output field name
         private Map<String, String> additionalFields;
 
+        // the matched files are zip / tar archives whose entries are the files to read
+        private StorageRecordReader.Archive archive;
+
         private transient StorageRecordReader.RecordSplit split;
 
         /**
@@ -80,6 +83,9 @@ public class StorageSource extends Source {
             if(additionalFields != null && !additionalFields.isEmpty()
                     && (Format.avro.equals(format) || Format.parquet.equals(format))) {
                 errorMessages.add("parameters.additionalFields is not supported for format " + format + " yet (csv, json, fwf only)");
+            }
+            if(archive != null && (Format.avro.equals(format) || Format.parquet.equals(format))) {
+                errorMessages.add("parameters.archive is not supported for format " + format + " yet (csv, json, fwf only)");
             }
             if(recordSplit != null) {
                 if(!Format.fwf.equals(format)) {
@@ -130,7 +136,7 @@ public class StorageSource extends Source {
 
         // fwf, and the csv / json options TextIO can not provide, read files as byte records
         final boolean additionalFields = parameters.additionalFields != null && !parameters.additionalFields.isEmpty();
-        if(Format.fwf.equals(parameters.format) || additionalFields) {
+        if(Format.fwf.equals(parameters.format) || additionalFields || parameters.archive != null) {
             final StorageRecordReader.Spec spec = new StorageRecordReader.Spec();
             spec.format = StorageRecordReader.Format.valueOf(parameters.format.name());
             spec.inputs = parameters.inputs;
@@ -141,6 +147,7 @@ public class StorageSource extends Source {
             spec.recordSplit = parameters.split;
             spec.fields = Format.fwf.equals(parameters.format) ? parameters.fields : null;
             spec.additionalFields = parameters.additionalFields;
+            spec.archive = parameters.archive;
             return StorageRecordReader.expand(
                     begin, getName(), spec, getSchema(), getTimestampAttribute(), getFailFast(), errorHandler);
         }

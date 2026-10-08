@@ -45,8 +45,8 @@ sources:
     description: Reads data from Google Cloud Spanner via SQL query or table scan. Supports batch partitioned queries, table key range filtering, change streams for CDC, view mode for periodic polling, microbatch mode for near real-time streaming, Data Boost, and timestamp-bound reads.
     tags: [source, spanner, batch, streaming, gcp, sql, cdc]
   - title: storage
-    description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), and source file / line number fields.
-    tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width]
+    description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), files packed in zip / tar archives (entries selected by glob), and source file / entry / line number fields.
+    tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width, zip, tar, archive]
   - title: tidb
     description: Reads records from TiDB (or MySQL compatible) databases in parallel. The table is split into chunks by TiKV region boundaries (with numeric MIN/MAX and whole-table fallbacks) and read by distributed workers under a consistent tidb_snapshot, so all workers see the same MVCC version without locking.
     tags: [source, tidb, mysql, batch, database, sql]

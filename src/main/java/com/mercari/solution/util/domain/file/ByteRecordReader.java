@@ -27,7 +27,7 @@ public class ByteRecordReader implements Closeable {
     // the largest array the JVM is sure to allocate
     private static final int MAX_RECORD_LENGTH = Integer.MAX_VALUE - 8;
 
-    private final InputStream input;
+    private InputStream input;
     private final byte[] delimiter;
     private final boolean stripCarriageReturn;
     private final int fixedLength;
@@ -70,6 +70,21 @@ public class ByteRecordReader implements Closeable {
             throw new IllegalArgumentException("record length must be positive. but: " + length);
         }
         return new ByteRecordReader(input, null, false, length);
+    }
+
+    /**
+     * Starts over on another stream with the same way of cutting records, keeping the buffers: the
+     * entries of an archive are read one after another, and a reader per entry would allocate its
+     * buffers anew for each of them. Records are numbered from 1 again.
+     */
+    public ByteRecordReader reset(final InputStream input) {
+        this.input = input;
+        this.readPosition = 0;
+        this.readLimit = 0;
+        this.endOfStream = false;
+        this.length = 0;
+        this.number = 0;
+        return this;
     }
 
     /** Advances to the next record; false at the end of the stream. */

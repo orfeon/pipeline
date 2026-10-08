@@ -8,6 +8,7 @@ import com.mercari.solution.module.Module;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.domain.file.ArchiveReader;
 import com.mercari.solution.util.domain.file.ByteRecordReader;
 import com.mercari.solution.util.schema.converter.CsvToElementConverter;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;
@@ -37,6 +38,7 @@ import java.io.PushbackInputStream;
 import java.io.Serializable;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -46,13 +48,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Predicate;
 
 /**
  * The storage source's byte-record read path (work_fixedwidth.md §5): files are matched and opened
  * through FileIO and cut into records as bytes ({@link ByteRecordReader}), instead of TextIO's
  * UTF-8 lines. It serves {@code format: fwf} and, for csv / json, the options TextIO can not
- * provide ({@code additionalFields}). Everything file-scoped ({@code skipHeaderLines}, record
- * numbers) restarts per file, and a record that can not be decoded goes to the failure output.
+ * provide ({@code additionalFields}, {@code archive}). Everything file-scoped
+ * ({@code skipHeaderLines}, record numbers) restarts per file, and a record that can not be decoded
+ * goes to the failure output.
+ *
+ * <p>With {@code archive} (work_fixedwidth.md §6) a matched file is a zip / tar archive and each
+ * selected entry is read as a file of its own: "per file" above becomes "per entry".
  */
 final class StorageRecordReader {
 
@@ -79,6 +86,19 @@ final class StorageRecordReader {
         List<String> fields;
         // metadata key (resource / entry / line / lastModified) -> output field name
         Map<String, String> additionalFields;
+        // null: the matched files are read as they are
+        Archive archive;
+    }
+
+    /** parameters.archive: the matched files are archives whose entries are the files to read. */
+    static class Archive implements Serializable {
+        // zip | tar; null: told from the file name
+        String type;
+        // globs on the entry path; empty: every file entry
+        List<String> entries;
+        List<String> exclude;
+        // charset of the entry names (zip entries flagged as UTF-8 are always UTF-8)
+        String nameCharset;
     }
 
     static MCollectionTuple expand(
@@ -103,6 +123,35 @@ final class StorageRecordReader {
         }
         if(spec.skipHeaderLines != null && spec.skipHeaderLines < 0) {
             errors.add("parameters.skipHeaderLines must not be negative");
+        }
+        ArchiveReader.Type archiveType = null;
+        Charset archiveNameCharset = StandardCharsets.UTF_8;
+        if(spec.archive != null) {
+            if(spec.archive.type != null) {
+                try {
+                    archiveType = ArchiveReader.Type.valueOf(spec.archive.type.trim().toLowerCase(Locale.ROOT));
+                } catch (final IllegalArgumentException e) {
+                    errors.add("parameters.archive.type must be zip or tar. but: " + spec.archive.type);
+                }
+            }
+            if(spec.archive.nameCharset != null) {
+                try {
+                    archiveNameCharset = Charset.forName(spec.archive.nameCharset.trim());
+                } catch (final IllegalArgumentException e) {
+                    errors.add("parameters.archive.nameCharset: " + spec.archive.nameCharset + " is not a supported charset");
+                }
+            }
+            // Beam's ZIP "compression" concatenates the entries of a zip into one stream: it is the
+            // legacy way to read a zip, and applying it first would leave no archive to read
+            if(Compression.ZIP.equals(compression)) {
+                errors.add("parameters.compression: ZIP can not be used with parameters.archive (the archive reader opens the zip itself)");
+            }
+            if(hasBlank(spec.archive.entries)) {
+                errors.add("parameters.archive.entries must not contain an empty pattern");
+            }
+            if(hasBlank(spec.archive.exclude)) {
+                errors.add("parameters.archive.exclude must not contain an empty pattern");
+            }
         }
         if(!errors.isEmpty()) {
             throw new IllegalModuleException(errors);
@@ -212,6 +261,7 @@ final class StorageRecordReader {
                 .setCoder(ReadableFileCoder.of(MetadataCoderV2.of()))
                 .apply("ReadRecords", ParDo
                         .of(new ReadRecordsDoFn(name, spec, compression, schema, decoder, charset.name(),
+                                archiveType, archiveNameCharset.name(),
                                 additionalFields, timestampAttribute, timestampIsDate, failFast, failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
@@ -234,6 +284,10 @@ final class StorageRecordReader {
             errors.add("parameters.compression: " + compression + " is not supported");
             return null;
         }
+    }
+
+    private static boolean hasBlank(final List<String> globs) {
+        return globs != null && globs.stream().anyMatch(glob -> glob == null || glob.isBlank());
     }
 
     // UTF-16 / UTF-32 and their variants: the bytes of a line feed appear inside other characters.
@@ -284,6 +338,12 @@ final class StorageRecordReader {
         private final Schema schema;
         private final FwfDecoder decoder;
         private final String charsetName;
+        private final boolean archive;
+        // null: told from the file name
+        private final ArchiveReader.Type archiveType;
+        private final List<String> archiveEntries;
+        private final List<String> archiveExclude;
+        private final String archiveNameCharsetName;
         private final Map<String, String> additionalFields;
         private final String timestampAttribute;
         private final boolean timestampIsDate;
@@ -291,6 +351,7 @@ final class StorageRecordReader {
         private final TupleTag<BadRecord> failureTag;
 
         private transient Charset charset;
+        private transient Predicate<String> entryFilter;
 
         ReadRecordsDoFn(
                 final String name,
@@ -299,6 +360,8 @@ final class StorageRecordReader {
                 final Schema schema,
                 final FwfDecoder decoder,
                 final String charsetName,
+                final ArchiveReader.Type archiveType,
+                final String archiveNameCharsetName,
                 final Map<String, String> additionalFields,
                 final String timestampAttribute,
                 final boolean timestampIsDate,
@@ -317,6 +380,11 @@ final class StorageRecordReader {
             this.schema = decoder == null ? schema : null;
             this.decoder = decoder;
             this.charsetName = charsetName;
+            this.archive = spec.archive != null;
+            this.archiveType = archiveType;
+            this.archiveEntries = spec.archive == null || spec.archive.entries == null ? List.of() : new ArrayList<>(spec.archive.entries);
+            this.archiveExclude = spec.archive == null || spec.archive.exclude == null ? List.of() : new ArrayList<>(spec.archive.exclude);
+            this.archiveNameCharsetName = archiveNameCharsetName;
             this.additionalFields = new HashMap<>(additionalFields);
             this.timestampAttribute = timestampAttribute;
             this.timestampIsDate = timestampIsDate;
@@ -327,6 +395,7 @@ final class StorageRecordReader {
         @Setup
         public void setup() {
             this.charset = Charset.forName(charsetName);
+            this.entryFilter = ArchiveReader.filter(archiveEntries, archiveExclude);
             if(decoder == null) {
                 this.schema.setup();
             }
@@ -340,68 +409,105 @@ final class StorageRecordReader {
             }
             final MatchResult.Metadata metadata = file.getMetadata();
             final String resource = metadata.resourceId().toString();
-            long number = 0;
-            try(final ByteRecordReader reader = open(file)) {
-                while(reader.next()) {
-                    number = reader.number();
-                    if(number <= skipHeaderLines) {
-                        continue;
-                    }
-                    final byte[] buffer = reader.buffer();
-                    final int length = reader.length();
-                    // blank lines (and the CRLF / LF mix they come from) carry no record
-                    if(length == 0 && !fixedLength) {
-                        continue;
-                    }
-                    if(filterPrefix != null && startsWith(buffer, length, filterPrefix)) {
-                        continue;
-                    }
-                    final Map<String, Object> values;
-                    final Instant eventTime;
-                    try {
-                        values = decode(buffer, length);
-                        for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
-                            values.put(entry.getValue(), switch (entry.getKey()) {
-                                case "resource" -> resource;
-                                case "line" -> number;
-                                case "lastModified" -> metadata.lastModifiedMillis() * 1000L;
-                                // entry: the archive entry name; a plain file has none
-                                default -> null;
-                            });
+            // where the read stands, for the failure of an I/O error
+            final Position position = new Position();
+            try {
+                if(archive) {
+                    try(final ArchiveReader reader = openArchive(file)) {
+                        while(reader.next(entryFilter)) {
+                            position.entry = reader.name();
+                            position.number = 0;
+                            // closed entry by entry: the decompressor of a compressed entry holds
+                            // native memory (closing the stream of an entry does not close the archive)
+                            try(final InputStream entry = decompressEntry(reader.name(), reader.stream())) {
+                                readRecords(c, metadata, resource, entry, position);
+                            }
                         }
-                        // a value that is not a time is a failure of the record as well
-                        eventTime = eventTime(values, c.timestamp());
-                    } catch (final RuntimeException e) {
-                        c.output(failureTag, failure("Failed to decode " + format + " record", resource, number, buffer, length, e));
-                        continue;
                     }
-                    c.outputWithTimestamp(MElement.of(values, eventTime), eventTime);
+                } else {
+                    try(final InputStream input = openFile(file, fileCompression(file))) {
+                        readRecords(c, metadata, resource, input, position);
+                    }
                 }
             } catch (final IOException e) {
                 // Not a record error: the file can not be read on from here. With failFast: false the
                 // records already read stay in the output, so the failure says how far the file was read.
-                c.output(failureTag, failure("Failed to read file after record " + number
-                        + "; the rest of the file is not read", resource, number, null, 0, e));
+                c.output(failureTag, failure("Failed to read file after record " + position.number
+                        + (position.entry == null ? "" : " of entry " + position.entry)
+                        + "; the rest of the file is not read", resource, position, null, 0, e));
             }
         }
 
-        private ByteRecordReader open(final FileIO.ReadableFile file) throws IOException {
-            final Compression fileCompression = compression != null
+        // One file, or one entry of an archive: records are numbered from 1 and the header lines are
+        // skipped for each of them. The stream is left open for the caller.
+        private void readRecords(
+                final ProcessContext c,
+                final MatchResult.Metadata metadata,
+                final String resource,
+                final InputStream stream,
+                final Position position) throws IOException {
+
+            final InputStream input = StandardCharsets.UTF_8.equals(charset) ? skipByteOrderMark(stream) : stream;
+            // one reader (and its buffers) for all the entries of an archive
+            if(position.reader != null) {
+                position.reader.reset(input);
+            } else if(fixedLength) {
+                position.reader = ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
+            } else if(delimiter != null) {
+                position.reader = ByteRecordReader.delimited(input, delimiter);
+            } else {
+                position.reader = ByteRecordReader.lines(input);
+            }
+            final ByteRecordReader reader = position.reader;
+            while(reader.next()) {
+                final long number = reader.number();
+                position.number = number;
+                if(number <= skipHeaderLines) {
+                    continue;
+                }
+                final byte[] buffer = reader.buffer();
+                final int length = reader.length();
+                // blank lines (and the CRLF / LF mix they come from) carry no record
+                if(length == 0 && !fixedLength) {
+                    continue;
+                }
+                if(filterPrefix != null && startsWith(buffer, length, filterPrefix)) {
+                    continue;
+                }
+                final Map<String, Object> values;
+                final Instant eventTime;
+                try {
+                    values = decode(buffer, length);
+                    for(final Map.Entry<String, String> entry : additionalFields.entrySet()) {
+                        values.put(entry.getValue(), switch (entry.getKey()) {
+                            case "resource" -> resource;
+                            case "line" -> number;
+                            case "lastModified" -> metadata.lastModifiedMillis() * 1000L;
+                            // entry: the archive entry name; null for a plain file
+                            default -> position.entry;
+                        });
+                    }
+                    // a value that is not a time is a failure of the record as well
+                    eventTime = eventTime(values, c.timestamp());
+                } catch (final RuntimeException e) {
+                    c.output(failureTag, failure("Failed to decode " + format + " record", resource, position, buffer, length, e));
+                    continue;
+                }
+                c.outputWithTimestamp(MElement.of(values, eventTime), eventTime);
+            }
+        }
+
+        // the compression of the file itself: the parameter, or what the file name says
+        private Compression fileCompression(final FileIO.ReadableFile file) {
+            return compression != null
                     ? compression
                     : Compression.detect(file.getMetadata().resourceId().getFilename());
+        }
+
+        private static InputStream openFile(final FileIO.ReadableFile file, final Compression fileCompression) throws IOException {
             final ReadableByteChannel channel = file.open();
             try {
-                InputStream input = Channels.newInputStream(fileCompression.readDecompressed(channel));
-                if(StandardCharsets.UTF_8.equals(charset)) {
-                    input = skipByteOrderMark(input);
-                }
-                if(fixedLength) {
-                    return ByteRecordReader.fixed(input, decoder.getLayout().getRecordLength());
-                } else if(delimiter != null) {
-                    return ByteRecordReader.delimited(input, delimiter);
-                } else {
-                    return ByteRecordReader.lines(input);
-                }
+                return Channels.newInputStream(fileCompression.readDecompressed(channel));
             } catch (final IOException | RuntimeException e) {
                 // nothing owns the channel yet
                 try {
@@ -410,6 +516,67 @@ final class StorageRecordReader {
                     e.addSuppressed(suppressed);
                 }
                 throw e;
+            }
+        }
+
+        private ArchiveReader openArchive(final FileIO.ReadableFile file) throws IOException {
+            final MatchResult.Metadata metadata = file.getMetadata();
+            final String fileName = metadata.resourceId().getFilename();
+            final ArchiveReader.Type type = archiveType != null ? archiveType : ArchiveReader.Type.detect(fileName);
+            if(type == null) {
+                throw new IOException("can not tell the archive type of " + fileName + " from its name; set parameters.archive.type");
+            }
+            if(compression == null) {
+                rejectUnsupportedCompression(fileName);
+            }
+            final Compression outer = compression != null ? compression : archiveCompression(fileName);
+            final Charset nameCharset = Charset.forName(archiveNameCharsetName);
+            if(type == ArchiveReader.Type.zip && Compression.UNCOMPRESSED.equals(outer) && metadata.isReadSeekEfficient()) {
+                // only the central directory and the selected entries are read
+                final SeekableByteChannel channel = file.openSeekable();
+                try {
+                    return ArchiveReader.zip(channel, nameCharset);
+                } catch (final IOException | RuntimeException e) {
+                    try {
+                        channel.close();
+                    } catch (final IOException suppressed) {
+                        e.addSuppressed(suppressed);
+                    }
+                    throw e;
+                }
+            }
+            final InputStream input = openFile(file, outer);
+            return type == ArchiveReader.Type.zip
+                    ? ArchiveReader.zipStream(input, nameCharset)
+                    : ArchiveReader.tar(input, nameCharset);
+        }
+
+        // The compression around an archive, from its file name (.tar.gz, .tgz, .zip.gz ...). A plain
+        // .zip is opened as it is: Beam calls it ZIP "compression" and would concatenate its entries.
+        private static Compression archiveCompression(final String fileName) {
+            // .tgz is .tar.gz: the same reading of the name as the archive type detection
+            final Compression detected = Compression.detect(ArchiveReader.expandShortSuffix(fileName));
+            return Compression.ZIP.equals(detected) ? Compression.UNCOMPRESSED : detected;
+        }
+
+        // An entry that is a compressed file itself (logs.tar of *.gz) is decompressed by its name.
+        // An archive inside the archive is not opened: it is an ordinary entry.
+        private static InputStream decompressEntry(final String entryName, final InputStream stream) throws IOException {
+            rejectUnsupportedCompression(entryName);
+            final Compression entryCompression = Compression.detect(entryName);
+            if(Compression.UNCOMPRESSED.equals(entryCompression) || Compression.ZIP.equals(entryCompression)) {
+                return stream;
+            }
+            return Channels.newInputStream(entryCompression.readDecompressed(Channels.newChannel(stream)));
+        }
+
+        // xz, lz4, compress ...: read as it is, such a file is garbage (a .tar.xz may even pass as an
+        // empty tar and give no record at all), so it is a failure by its name
+        private static void rejectUnsupportedCompression(final String name) throws IOException {
+            final String suffix = ArchiveReader.unsupportedCompression(name);
+            if(suffix != null) {
+                throw new IOException(name + " is compressed with a format that is not supported (" + suffix
+                        + "). supported: gz, bz2, zst, lzo, deflate, snappy");
             }
         }
 
@@ -453,7 +620,7 @@ final class StorageRecordReader {
         private BadRecord failure(
                 final String message,
                 final String resource,
-                final long number,
+                final Position position,
                 final byte[] buffer,
                 final int length,
                 final Throwable e) {
@@ -461,12 +628,22 @@ final class StorageRecordReader {
             final Map<String, Object> input = new HashMap<>();
             input.put("name", name);
             input.put("resource", resource);
-            input.put("line", number);
+            if(position.entry != null) {
+                input.put("entry", position.entry);
+            }
+            input.put("line", position.number);
             if(buffer != null) {
                 // for diagnosis only: undecodable bytes show up as U+FFFD here
                 input.put("record", new String(buffer, 0, length, charset));
             }
             return Module.processError(message, input, e, failFast);
+        }
+
+        // the entry (of an archive) and the record being read, with the reader shared by the entries
+        private static final class Position {
+            String entry;
+            long number;
+            ByteRecordReader reader;
         }
 
         private static boolean startsWith(final byte[] buffer, final int length, final byte[] prefix) {

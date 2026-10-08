@@ -1,8 +1,8 @@
 ---
 type: Source Module
 title: Storage Source Module
-description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), and source file / line number fields.
-tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width]
+description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, JSON, and fixed-width (fwf) formats with schema auto-inference for binary formats. Includes column projection, header skipping and line filtering, compression support for text formats, fixed-width records in any charset (e.g. Shift_JIS / windows-31j), files packed in zip / tar archives (entries selected by glob), and source file / entry / line number fields.
+tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json, fwf, fixed-width, zip, tar, archive]
 timestamp: 2026-06-23T00:00:00Z
 ---
 
@@ -48,13 +48,26 @@ This module differs from the [Files Source Module](files.md): the Files module o
 
 | parameter       | optional | type    | description                                                                                                                                                           |
 |-----------------|----------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| compression     | optional | Enum    | Compression format of the file. Values: `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, `LZO`, `LZOP`, `DEFLATE`. If not specified, auto-detected or assumed uncompressed.           |
+| compression     | optional | Enum    | Compression format of the file. Values: `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, `LZO`, `LZOP`, `DEFLATE`. If not specified, auto-detected or assumed uncompressed. `ZIP` is the legacy way to read a zip: its entries are concatenated into one stream (`skipHeaderLines` skips only the first entry's header). To read the entries of a zip or tar as separate files, use `archive` instead. |
 | filterPrefix    | optional | String  | Lines starting with this prefix are excluded. Useful for skipping CSV headers or comment lines (e.g. `"#"` or the first field of the header row).                     |
 | skipHeaderLines | optional | Integer | Number of header lines to skip at the beginning of each file. For example, set to `1` to skip a single header row in CSV files.                                       |
 | delimiter       | optional | String  | Custom record delimiter. Default is newline (`\n`). Use this when records are separated by a character or string other than newline.                                   |
 | recordSplit     | optional | Enum    | `fwf` only. How a file is cut into records. `line` (default): at line feeds — a carriage return before it is removed, so CRLF and LF files read the same — or at `delimiter` when given. `length`: the file has no separators and is cut every `recordLength` (of the layout) bytes — so it requires `schema.encoding.unit: byte` (the default) unless the charset is a single-byte one. |
 
 For `fwf`, `filterPrefix` and `delimiter` are compared with the record bytes (the text encoded in `schema.encoding.charset`; a charset that writes a byte order mark, such as `UTF-16` without an explicit byte order, is an assembly-time error — use `UTF-16LE` / `UTF-16BE`), and blank lines are skipped. A byte order mark at the head of a UTF-8 file is skipped.
+
+### Archive parameters
+
+Reads the matched files as zip / tar archives (`csv`, `json` and `fwf` formats): every selected entry is read as a file of its own, so `skipHeaderLines` and line numbers restart per entry. See [Archive (zip / tar)](../common/archive.md) for the entry semantics and how archives are read.
+
+| parameter           | optional | type           | description |
+|---------------------|----------|----------------|-------------|
+| archive.type        | optional | Enum           | `zip` or `tar`. Omitted: told from the file name (`.zip`, `.tar`, `.tar.gz`, `.tgz`, ...). |
+| archive.entries     | optional | Array<String\> | Globs selecting the entries to read, matched against the entry path (`*` within a path segment, `**` across segments). Omitted: every file entry. |
+| archive.exclude     | optional | Array<String\> | Globs of entries to leave out, applied after `entries`. |
+| archive.nameCharset | optional | String         | Charset of the entry names. Default `UTF-8` (e.g. `windows-31j` for a zip made on Japanese Windows). |
+
+`archive: {}` reads every file entry. For a zip on GCS / S3 / a local disk only the selected entries are read from storage. `compression: ZIP` can not be combined with `archive`.
 
 ### Additional fields parameters
 
@@ -65,9 +78,9 @@ Adds where each record came from as output fields (`csv`, `json` and `fwf` forma
 | additionalFields.resource     | optional | String | Output field name for the file path (e.g. `gs://bucket/dir/file.txt`). STRING. |
 | additionalFields.line         | optional | String | Output field name for the line number in the file (1-based, header and blank lines counted; the record number with `recordSplit: length`). INT64. |
 | additionalFields.lastModified | optional | String | Output field name for the file's last modification time. TIMESTAMP. Not available on GCS (the epoch), as in the [Files Source Module](files.md). |
-| additionalFields.entry        | optional | String | Output field name for the entry name inside an archive. STRING; always null for a plain file. |
+| additionalFields.entry        | optional | String | Output field name for the entry path inside an archive (see `archive`). STRING; null for a plain file. |
 
-With `additionalFields`, `csv` and `json` files are read through the same byte-record reader as `fwf` (UTF-8, `schema` required): blank lines are skipped, and a line that can not be parsed as a record goes to the failure output. As with `fwf`, a file is not split: one file is read by one worker, so prefer many files over one very large file when using `additionalFields`.
+With `additionalFields` or `archive`, `csv` and `json` files are read through the same byte-record reader as `fwf` (UTF-8, `schema` required): blank lines are skipped, and a line that can not be parsed as a record goes to the failure output. As with `fwf`, a file is not split: one file is read by one worker, so prefer many files over one very large file when using `additionalFields`.
 
 ### Reading from AWS S3
 
@@ -367,5 +380,29 @@ sources:
     { "name": "orderDate", "type": "date",    "pos": 33, "len": 8, "pattern": "yyyyMMdd", "nullIf": ["00000000"] }
   ]
 }
+```
+
+### Example 12: Read one kind of file out of zip archives
+
+Each zip packs several kinds of files; read only the order files, as fixed-width records, and keep
+the entry each record came from.
+
+```yaml
+sources:
+  - name: orders
+    module: storage
+    parameters:
+      input: "gs://my-bucket/packs/PACK*.zip"
+      archive:
+        entries: ["ORD*.txt"]
+      schema:
+        encoding:
+          format: fwf
+          charset: windows-31j
+        reference:
+          uri: gs://my-bucket/layouts/orders.fwf.json
+      additionalFields:
+        resource: source_file
+        entry: source_entry
 ```
 

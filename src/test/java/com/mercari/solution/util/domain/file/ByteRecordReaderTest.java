@@ -83,6 +83,23 @@ public class ByteRecordReaderTest {
     }
 
     @Test
+    public void testReset() throws IOException {
+        // one reader over several streams (the entries of an archive): records are numbered from 1 again
+        final ByteRecordReader reader = ByteRecordReader.lines(stream("a\nbb"));
+        final List<String> records = new ArrayList<>();
+        for(final String next : new String[] { null, "ccc\r\n", "", "d\ne\n" }) {
+            if(next != null) {
+                reader.reset(stream(next));
+            }
+            while(reader.next()) {
+                records.add(reader.number() + ":" + new String(reader.buffer(), 0, reader.length(), StandardCharsets.ISO_8859_1));
+            }
+            records.add("-");
+        }
+        Assertions.assertEquals(List.of("1:a", "2:bb", "-", "1:ccc", "-", "-", "1:d", "2:e", "-"), records);
+    }
+
+    @Test
     public void testFixed() throws IOException {
         Assertions.assertEquals(List.of("1:abc", "2:def"), read(ByteRecordReader.fixed(stream("abcdef"), 3)));
         // the stream does not end on a record boundary: the last record is short
