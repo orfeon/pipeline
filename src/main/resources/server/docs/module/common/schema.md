@@ -78,7 +78,9 @@ The `schema` block itself also accepts a `description` (the table / view / recor
 Sources fill it from the destination metadata the same way as field descriptions (BigQuery table
 description, jdbc table comment, Avro record `doc`); it appears as `description` of the module's
 output schema in the dry-run output. It is not carried into schemas derived by other modules, so a
-description always refers to the module that read it.
+description always refers to the module that read it. The `bigquery` sink uses the description of its
+input schema as the description of the tables it may create (see
+[bigquery sink](../sink/bigquery.md#table-creation-parameters)).
 
 Field descriptions are metadata: they never affect how data is read, converted or written, but
 they travel with the schema so that the dry-run output (Pipeline Builder, `run-pipeline` with `dryRun` /
