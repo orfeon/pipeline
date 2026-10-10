@@ -606,6 +606,17 @@ public class BigQuerySink extends Sink {
 
     }
 
+    // The description of a table this sink creates: the description of the input schema (a table
+    // description read by a source, an Avro record doc, a fwf layout description, ...) when it has
+    // one. In cdc mode the input schema is the change record envelope, not the destination table.
+    static String tableDescription(final Schema tableSchema, final boolean cdc) {
+        if(!cdc && tableSchema != null
+                && tableSchema.getDescription() != null && !tableSchema.getDescription().isBlank()) {
+            return tableSchema.getDescription();
+        }
+        return "Auto Generated at " + Instant.now();
+    }
+
     private static <InputT> BigQueryIO.Write<InputT> applyParameters(
             final BigQueryIO.Write<InputT> base,
             final Parameters parameters,
@@ -617,7 +628,7 @@ public class BigQuerySink extends Sink {
         final String table = parameters.table;
 
         BigQueryIO.Write<InputT> write = base
-                .withTableDescription("Auto Generated at " + Instant.now())
+                .withTableDescription(tableDescription(tableSchema, parameters.cdc))
                 .withWriteDisposition(parameters.writeDisposition)
                 .withCreateDisposition(parameters.createDisposition)
                 .withMethod(parameters.method);
@@ -875,6 +886,7 @@ public class BigQuerySink extends Sink {
         private final String partitioningField;
         private final List<String> clusteringFields;
         private final boolean cdc;
+        private final String tableDescription;
 
         public DynamicDestinationFunc(
                 final Schema tableSchema,
@@ -887,6 +899,7 @@ public class BigQuerySink extends Sink {
             this.partitioningField = parameters.partitioningField;
             this.clusteringFields = parameters.clusteringFields;
             this.cdc = parameters.cdc;
+            this.tableDescription = tableDescription(tableSchema, parameters.cdc);
         }
 
         @Override
@@ -907,11 +920,11 @@ public class BigQuerySink extends Sink {
                 }
                 if(clusteringFields != null && !clusteringFields.isEmpty()) {
                     final Clustering clustering = new Clustering().setFields(clusteringFields);
-                    return new TableDestination(destination, null, timePartitioning, clustering);
+                    return new TableDestination(destination, tableDescription, timePartitioning, clustering);
                 }
-                return new TableDestination(destination, null, timePartitioning);
+                return new TableDestination(destination, tableDescription, timePartitioning);
             } else {
-                return new TableDestination(destination, null);
+                return new TableDestination(destination, tableDescription);
             }
         }
 

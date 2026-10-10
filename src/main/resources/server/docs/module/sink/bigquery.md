@@ -73,6 +73,13 @@ when the table is auto-created (`CREATE_IF_NEEDED`), when a file load with `WRIT
 the schema of an existing table, and for fields added through `schemaUpdateOptions`. Appending to an
 existing table without schema updates leaves its descriptions untouched.
 
+The description of the input schema itself — a `bigquery` table description or a `jdbc` table comment
+read by a source, an Avro record `doc`, the `description` of a [fwf](../common/fwf.md) layout — becomes
+the description of a table this sink creates (also with a dynamic destination). When the input schema
+has none (or several inputs are merged into one schema), the table description is
+`Auto Generated at {time}`. The description is set when the sink creates the table; the
+[CDC apply mode](#cdc-apply-mode) writes to existing tables only and never sets it.
+
 ### Streaming mode parameters
 
 These parameters are applicable only in streaming mode.

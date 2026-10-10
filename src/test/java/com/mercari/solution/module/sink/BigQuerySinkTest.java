@@ -107,6 +107,31 @@ public class BigQuerySinkTest {
     }
 
     @Test
+    public void testTableDescriptionFromInputSchema() {
+        final Schema described = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription("Race details (RA)")
+                .build();
+        Assertions.assertEquals("Race details (RA)", BigQuerySink.tableDescription(described, false));
+        // in cdc mode the input schema is the change record envelope, not the destination table
+        Assertions.assertTrue(BigQuerySink.tableDescription(described, true).startsWith("Auto Generated at "));
+    }
+
+    @Test
+    public void testTableDescriptionWithoutSchemaDescription() {
+        final Schema plain = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .build();
+        Assertions.assertTrue(BigQuerySink.tableDescription(plain, false).startsWith("Auto Generated at "));
+        final Schema blank = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription("  ")
+                .build();
+        Assertions.assertTrue(BigQuerySink.tableDescription(blank, false).startsWith("Auto Generated at "));
+        Assertions.assertTrue(BigQuerySink.tableDescription(null, false).startsWith("Auto Generated at "));
+    }
+
+    @Test
     public void testDynamicDestinationTableTemplate() throws Exception {
         // table with a template expression routes through DynamicDestinationFunc at graph build
         final String configJson = """
