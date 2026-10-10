@@ -301,7 +301,7 @@ public class QueryTransform extends Transform {
                 } catch (final Throwable e) {
                     throw new IllegalModuleException(
                             "query transform module[" + getName()
-                                    + "] failed to plan buffer insertSql, cause: " + e.getMessage());
+                                    + "] failed to plan buffer insertSql, cause: " + causeMessages(e));
                 }
             } else {
                 bufferRowSchema = inputSchema;
@@ -318,7 +318,7 @@ public class QueryTransform extends Transform {
                 } catch (final Throwable e) {
                     throw new IllegalModuleException(
                             "query transform module[" + getName()
-                                    + "] failed to plan buffer restoreSql, cause: " + e.getMessage());
+                                    + "] failed to plan buffer restoreSql, cause: " + causeMessages(e));
                 }
             }
         }
@@ -341,7 +341,7 @@ public class QueryTransform extends Transform {
             query = builder.build();
         } catch (final Throwable e) {
             throw new IllegalModuleException(
-                    "query transform module[" + getName() + "] failed to plan sql, cause: " + e.getMessage());
+                    "query transform module[" + getName() + "] failed to plan sql, cause: " + causeMessages(e));
         }
 
         final Map<String, Schema> outputSchemas = query.getOutputSchemas();
@@ -1271,6 +1271,26 @@ public class QueryTransform extends Transform {
                 @StateId("maxTs") final ValueState<Long> maxTs) {
             processor.onTtl(c.timestamp(), buffer, count, restored, maxTs);
         }
+    }
+
+    /**
+     * The messages of the whole cause chain. The top-level planning error only restates the SQL;
+     * the reason (Calcite's parse / validation message) sits in its causes. A cause that merely
+     * repeats what an outer message already says is skipped.
+     */
+    static String causeMessages(final Throwable e) {
+        final StringBuilder sb = new StringBuilder();
+        for(Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
+            final String message = t.getMessage();
+            if(message == null || message.isBlank() || sb.indexOf(message.strip()) >= 0) {
+                continue;
+            }
+            if(!sb.isEmpty()) {
+                sb.append(", caused by: ");
+            }
+            sb.append(message.strip());
+        }
+        return sb.isEmpty() ? String.valueOf(e) : sb.toString();
     }
 
 }

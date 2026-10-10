@@ -1111,4 +1111,89 @@ public class QueryTransformTest {
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
     }
 
+    @Test
+    public void testQueryAfterSelect() throws Exception {
+        // The select output schema is AVRO-typed: its runtime avro schema is transient and is
+        // not materialized on the worker, where the query is planned again in @Setup.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "select",
+                      "module": "select",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "select": [
+                          { "name": "userId" },
+                          { "name": "events" }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["select"],
+                      "parameters": {
+                        "sql": "SELECT i.userId, e.category AS category, DIV(e.amount, 2) AS half FROM INPUT AS i, UNNEST(i.events) AS e"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_USERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<String, Long> halves = new HashMap<>();
+            long total = 0;
+            for(final MElement element : elements) {
+                Assertions.assertEquals("u1", element.getAsString("userId"));
+                halves.merge(element.getAsString("category"), element.getAsLong("half"), Long::sum);
+                total++;
+            }
+            Assertions.assertEquals(3L, total);
+            // a: 1 / 2 + 2 / 2 = 0 + 1, b: 5 / 2 = 2
+            Assertions.assertEquals(Map.of("a", 1L, "b", 2L), halves);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testPlanErrorReportsTheCause() throws Exception {
+        // The top-level planning error only restates the SQL: the validator's reason must be
+        // carried into the module error.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "sql": "SELECT NO_SUCH_FUNCTION(userId) AS a FROM INPUT"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_USERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("No match found for function signature NO_SUCH_FUNCTION"),
+                "unexpected message: " + e.getMessage());
+    }
+
 }

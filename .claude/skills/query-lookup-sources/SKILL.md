@@ -292,7 +292,9 @@ Query2.builder()
   (BigQuery lex), but a UDF inside a LATERAL block round-trips through
   generated SQL whose unquoted identifiers are uppercased — uppercase matches
   both paths. Functions propagate into the per-block evaluator automatically.
-- Built-ins live in `util/pipeline/udf/DateTimeFunctions` (`CURRENT_DATE_`)
+- Built-ins live in `util/pipeline/udf/DateTimeFunctions` (`CURRENT_DATE_`),
+  `MathFunctions` (`DIV` — absent from Calcite's BigQuery library; boxed
+  parameters, because a NULL literal argument NPEs on primitive ones)
   and are always registered; add new built-ins there.
 - Functions are attached to the default schema via `SchemaPlus.add(name, fn)`
   in `Query2.createRootSchema` (and to the root schema in

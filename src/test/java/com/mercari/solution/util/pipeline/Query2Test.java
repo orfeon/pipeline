@@ -571,4 +571,37 @@ public class Query2Test {
             query.teardown();
         }
     }
+
+    @Test
+    public void testBuiltinDivFunction() {
+        // DIV is BigQuery's integer division; the Calcite BigQuery library does not ship it.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSql("""
+                        SELECT
+                          DIV(qty, 1000) AS d1,
+                          DIV(-7, 2) AS d2,
+                          DIV(qty, CAST(NULL AS BIGINT)) AS d3,
+                          qty / 1000 AS d4
+                        FROM INPUT
+                        """)
+                .build();
+        Assertions.assertEquals(Schema.Type.int64,
+                query.getOutputSchema().getField("d1").getFieldType().getType());
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(MElement.of(Map.of("userId", 1L, "qty", 1489L), TIMESTAMP)), TIMESTAMP);
+            final MElement output = outputs.getFirst();
+            Assertions.assertEquals(1L, output.getAsLong("d1"));
+            // truncated toward zero, as in BigQuery
+            Assertions.assertEquals(-3L, output.getAsLong("d2"));
+            Assertions.assertNull(output.getPrimitiveValue("d3"));
+            // `/` between integers is an integer division too (unlike BigQuery)
+            Assertions.assertEquals(1L, output.getAsLong("d4"));
+        } finally {
+            query.teardown();
+        }
+    }
+
 }

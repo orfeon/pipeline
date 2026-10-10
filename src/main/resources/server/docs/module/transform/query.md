@@ -714,7 +714,12 @@ Timestamps compare at millisecond precision inside queries.
 
 ### Numeric
 
-`ABS` `CEIL` `FLOOR` `ROUND` `TRUNC` `TRUNCATE` `MOD` `SIGN` `EXP` `LN` `LOG` `LOG10` `POW` `POWER` `SQRT` `CBRT` `PI` `RAND` `RAND_INTEGER` `DEGREES` `RADIANS` `IS_INF` `IS_NAN` — trigonometric: `SIN` `COS` `TAN` `COT` `SEC` `CSC` `ASIN` `ACOS` `ATAN` `ATAN2` and hyperbolic variants (`SINH` `COSH` `TANH` `COTH` `SECH` `CSCH` `ASINH` `ACOSH` `ATANH`) — overflow-safe: `SAFE_ADD` `SAFE_SUBTRACT` `SAFE_MULTIPLY` `SAFE_DIVIDE` `SAFE_NEGATE` — bitwise: `BITAND` `BITOR` `BITXOR` `BITNOT` `BIT_COUNT`
+`ABS` `CEIL` `FLOOR` `ROUND` `TRUNC` `TRUNCATE` `MOD` `SIGN` `EXP` `LN` `LOG` `LOG10` `POW` `POWER` `SQRT` `CBRT` `PI` `RAND` `RAND_INTEGER` `DEGREES` `RADIANS` `IS_INF` `IS_NAN` — trigonometric: `SIN` `COS` `TAN` `COT` `SEC` `CSC` `ASIN` `ACOS` `ATAN` `ATAN2` and hyperbolic variants (`SINH` `COSH` `TANH` `COTH` `SECH` `CSCH` `ASINH` `ACOSH` `ATANH`) — overflow-safe: `SAFE_ADD` `SAFE_SUBTRACT` `SAFE_MULTIPLY` `SAFE_DIVIDE` `SAFE_NEGATE` — bitwise: `BITAND` `BITOR` `BITXOR` `BITNOT` `BIT_COUNT` — integer division: `DIV` (built-in)
+
+Division differs from BigQuery in two ways:
+
+- `/` between two integers is an **integer division** (`1489 / 1000` → `1`), where BigQuery returns a `FLOAT64`. `DIV(x, y)` is the explicit integer division (truncated toward zero, `NULL` if an argument is `NULL`, an error on division by zero); for a fractional result make one operand a float (`x / 1000e0`, `CAST(x AS DOUBLE) / 1000`) or use `SAFE_DIVIDE`.
+- A decimal literal such as `10.0` is a `DECIMAL`, so `x / 10.0` yields a `decimal` column. Write the literal in exponent form (`x / 10e0`) to get a `float64`.
 
 ### Date / time
 
