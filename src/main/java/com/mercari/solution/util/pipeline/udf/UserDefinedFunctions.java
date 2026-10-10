@@ -67,7 +67,7 @@ public final class UserDefinedFunctions {
      * ARRAY_CUM_SUM(_INT) / ARRAY_COMPACT / ARRAY_DISTINCT},
      * {@link TimeBucketFunctions TIME_BUCKET},
      * {@link DecayFunctions DECAY_SUM / DECAY_AVG / DECAY_COUNT},
-     * {@link StatFunctions BETA_SAMPLE}, and the linear-algebra/model
+     * {@link StatFunctions BETA_SAMPLE}, {@link MathFunctions DIV}, and the linear-algebra/model
      * built-ins {@link MatrixFunctions COSINE_SIMILARITY / MATRIX_MULTIPLY /
      * MATRIX_SOLVE / MAHALANOBIS / POLY_FIT / LINEAR_REG / BAYES_LINREG /
      * LINREG_PREDICT / BAYES_PREDICT / AS_DOUBLE_ARRAY}). For ARG_MAX /
@@ -95,6 +95,7 @@ public final class UserDefinedFunctions {
         sequenceFamily.addAll(TimeBucketFunctions.builtIns());
         sequenceFamily.addAll(DecayFunctions.builtIns());
         sequenceFamily.addAll(StatFunctions.builtIns());
+        sequenceFamily.addAll(MathFunctions.builtIns());
         sequenceFamily.addAll(MatrixFunctions.builtIns());
         for (final Map.Entry<String, Function> entry : sequenceFamily) {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())

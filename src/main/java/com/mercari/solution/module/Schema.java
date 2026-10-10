@@ -211,10 +211,15 @@ public class Schema implements Serializable {
     }
 
     public int countFields() {
+        // the logical fields survive serialization; the row / avro holders' runtime schemas
+        // (AvroSchema.schema is transient) may not be materialized on a worker
+        if(this.fields != null && !this.fields.isEmpty()) {
+            return this.fields.size();
+        }
         return switch (type) {
             case ELEMENT, DOCUMENT, ENTITY -> this.fields.size();
             case ROW -> this.row.schema.getFieldCount();
-            case AVRO -> this.avro.schema.getFields().size();
+            case AVRO -> getAvroSchema().getFields().size();
             default -> throw new IllegalArgumentException();
         };
     }
