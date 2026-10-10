@@ -606,6 +606,37 @@ public class BigQuerySink extends Sink {
 
     }
 
+    private static final String GENERATED_DESCRIPTION_PREFIX = "Auto Generated at ";
+    // BigQuery rejects a longer table description
+    private static final int MAX_TABLE_DESCRIPTION_LENGTH = 16384;
+
+    // The description of the tables this sink writes to, or null to leave them alone.
+    //
+    // It is the description of the input schema (a table description read by a source, an Avro
+    // record doc, a fwf layout description, ...) when it has one. The text this sink generates
+    // itself is not a description of the data: read back from a table the sink created, it would
+    // only hand a stale generation time to the next table.
+    //
+    // BigQueryIO sets the description when it creates a table and, with FILE_LOADS, patches it again
+    // after every load job - on a table that already existed as well (tables.patch, which also needs
+    // bigquery.tables.update). A sink that never creates its tables (CREATE_NEVER, which the cdc
+    // mode requires) therefore sets none and the tables keep their own.
+    static String tableDescription(
+            final Schema inputSchema,
+            final BigQueryIO.Write.CreateDisposition createDisposition) {
+
+        if(!BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED.equals(createDisposition)) {
+            return null;
+        }
+        final String description = inputSchema == null ? null : inputSchema.getDescription();
+        if(description == null || description.isBlank() || description.startsWith(GENERATED_DESCRIPTION_PREFIX)) {
+            return GENERATED_DESCRIPTION_PREFIX + Instant.now();
+        }
+        return description.length() > MAX_TABLE_DESCRIPTION_LENGTH
+                ? description.substring(0, MAX_TABLE_DESCRIPTION_LENGTH)
+                : description;
+    }
+
     private static <InputT> BigQueryIO.Write<InputT> applyParameters(
             final BigQueryIO.Write<InputT> base,
             final Parameters parameters,
@@ -615,17 +646,21 @@ public class BigQuerySink extends Sink {
             final MErrorHandler errorHandler) {
 
         final String table = parameters.table;
+        final String description = tableDescription(tableSchema, parameters.createDisposition);
 
         BigQueryIO.Write<InputT> write = base
-                .withTableDescription("Auto Generated at " + Instant.now())
                 .withWriteDisposition(parameters.writeDisposition)
                 .withCreateDisposition(parameters.createDisposition)
                 .withMethod(parameters.method);
 
         if(TemplateUtil.isTemplateText(table)) {
-            write = write.to(new DynamicDestinationFunc<>(tableSchema, destinationFunction, parameters));
+            // BigQueryIO takes the description of a dynamic destination from getTable only
+            write = write.to(new DynamicDestinationFunc<>(tableSchema, destinationFunction, parameters, description));
         } else {
             write = write.to(table);
+            if(description != null) {
+                write = write.withTableDescription(description);
+            }
             if(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED.equals(parameters.createDisposition)) {
                 write = write.withSchema(ElementToTableRowConverter.convertSchema(tableSchema));
             }
@@ -875,11 +910,13 @@ public class BigQuerySink extends Sink {
         private final String partitioningField;
         private final List<String> clusteringFields;
         private final boolean cdc;
+        private final String tableDescription;
 
         public DynamicDestinationFunc(
                 final Schema tableSchema,
                 final SerializableFunction<T, String> destinationFunction,
-                final Parameters parameters) {
+                final Parameters parameters,
+                final String tableDescription) {
 
             this.tableSchema = tableSchema;
             this.destinationFunction = destinationFunction;
@@ -887,6 +924,9 @@ public class BigQuerySink extends Sink {
             this.partitioningField = parameters.partitioningField;
             this.clusteringFields = parameters.clusteringFields;
             this.cdc = parameters.cdc;
+            // fixed at graph construction: the load job id is derived from the table destination,
+            // so the description must not change between the calls of getTable
+            this.tableDescription = tableDescription;
         }
 
         @Override
@@ -907,11 +947,11 @@ public class BigQuerySink extends Sink {
                 }
                 if(clusteringFields != null && !clusteringFields.isEmpty()) {
                     final Clustering clustering = new Clustering().setFields(clusteringFields);
-                    return new TableDestination(destination, null, timePartitioning, clustering);
+                    return new TableDestination(destination, tableDescription, timePartitioning, clustering);
                 }
-                return new TableDestination(destination, null, timePartitioning);
+                return new TableDestination(destination, tableDescription, timePartitioning);
             } else {
-                return new TableDestination(destination, null);
+                return new TableDestination(destination, tableDescription);
             }
         }
 

@@ -73,6 +73,23 @@ when the table is auto-created (`CREATE_IF_NEEDED`), when a file load with `WRIT
 the schema of an existing table, and for fields added through `schemaUpdateOptions`. Appending to an
 existing table without schema updates leaves its descriptions untouched.
 
+With `createDisposition: CREATE_IF_NEEDED`, the sink also sets the table description (the same for a
+dynamic destination). It is the description of the input schema itself — a `bigquery` table
+description or a `jdbc` table comment read by a source, an Avro record `doc`, the `description` of a
+[fwf](../common/fwf.md) layout. When the input schema has none, the table description is
+`Auto Generated at {time}`: several inputs merged into one schema carry no description (unless
+[`union.baseInput`](../common/union.md) names the input whose schema is used), and a description of
+that generated form, read back from a table this sink created, counts as none. A description longer
+than 16,384 characters (the BigQuery limit) is truncated.
+
+When the description is applied depends on the write method. `STREAMING_INSERTS` and the Storage
+Write API methods set it only when the sink creates the table. `FILE_LOADS` applies it again after
+every load job, so it also replaces the description of a table that already existed (and the load
+needs the `bigquery.tables.update` permission).
+
+With `createDisposition: CREATE_NEVER` (the default, and what the [CDC apply mode](#cdc-apply-mode)
+requires) the sink never sets a table description: the tables keep their own.
+
 ### Streaming mode parameters
 
 These parameters are applicable only in streaming mode.

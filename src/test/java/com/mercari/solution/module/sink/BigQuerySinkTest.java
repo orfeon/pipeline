@@ -6,6 +6,7 @@ import com.mercari.solution.config.Config;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.junit.jupiter.api.Assertions;
@@ -19,6 +20,9 @@ import java.util.Map;
  * The pipelines are only applied, never run, so no BigQuery service is needed.
  */
 public class BigQuerySinkTest {
+
+    private static final BigQueryIO.Write.CreateDisposition CREATE_IF_NEEDED =
+            BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED;
 
     private static final String CREATE_SOURCE_JSON = """
             {
@@ -104,6 +108,55 @@ public class BigQuerySinkTest {
         Assertions.assertEquals(
                 "myproject.mydataset.mytable",
                 fn.apply(new TableRow().set("category", "a")));
+    }
+
+    @Test
+    public void testTableDescriptionFromInputSchema() {
+        final Schema described = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription("Race details (RA)")
+                .build();
+        Assertions.assertEquals("Race details (RA)", BigQuerySink.tableDescription(described, CREATE_IF_NEEDED));
+        // a sink that never creates its tables (also the cdc mode) leaves their descriptions alone:
+        // with FILE_LOADS, BigQueryIO would patch the description of the existing table after every load
+        Assertions.assertNull(BigQuerySink.tableDescription(described, BigQueryIO.Write.CreateDisposition.CREATE_NEVER));
+    }
+
+    @Test
+    public void testTableDescriptionWithoutSchemaDescription() {
+        final Schema plain = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .build();
+        Assertions.assertTrue(BigQuerySink.tableDescription(plain, CREATE_IF_NEEDED).startsWith("Auto Generated at "));
+        final Schema blank = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription("  ")
+                .build();
+        Assertions.assertTrue(BigQuerySink.tableDescription(blank, CREATE_IF_NEEDED).startsWith("Auto Generated at "));
+        Assertions.assertTrue(BigQuerySink.tableDescription(null, CREATE_IF_NEEDED).startsWith("Auto Generated at "));
+    }
+
+    @Test
+    public void testTableDescriptionIgnoresGeneratedDescription() {
+        // a table this sink created carries "Auto Generated at {time}"; read back by a bigquery
+        // source, it must not hand its stale generation time to the next table
+        final String generated = "Auto Generated at 2020-01-01T00:00:00.000Z";
+        final Schema schema = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription(generated)
+                .build();
+        final String description = BigQuerySink.tableDescription(schema, CREATE_IF_NEEDED);
+        Assertions.assertTrue(description.startsWith("Auto Generated at "));
+        Assertions.assertNotEquals(generated, description);
+    }
+
+    @Test
+    public void testTableDescriptionTruncatedToBigQueryLimit() {
+        final Schema schema = Schema.builder()
+                .withField("category", Schema.FieldType.STRING)
+                .withDescription("x".repeat(20000))
+                .build();
+        Assertions.assertEquals("x".repeat(16384), BigQuerySink.tableDescription(schema, CREATE_IF_NEEDED));
     }
 
     @Test
