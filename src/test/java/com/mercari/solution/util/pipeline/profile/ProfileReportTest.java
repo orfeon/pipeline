@@ -51,7 +51,11 @@ public class ProfileReportTest {
     @Test
     public void testNoise() {
         Assertions.assertEquals(1.36 * Math.sqrt(1d / 303 + 1d / 900000), ProfileReport.noiseKs(303, 900000), 1e-12);
-        Assertions.assertEquals(9 * (1d / 303 + 1d / 900000), ProfileReport.noisePsi(10, 303, 900000), 1e-12);
+        // the 95% point, as noiseKs: chi-squared with bins - 1 degrees of freedom, 16.919 at 9 (1.88 times the mean)
+        Assertions.assertEquals(16.919, ProfileReport.chiSquared95(9), 0.03);
+        Assertions.assertEquals(3.841, ProfileReport.chiSquared95(1), 0.12);
+        Assertions.assertEquals(30.144, ProfileReport.chiSquared95(19), 0.03);
+        Assertions.assertEquals(ProfileReport.chiSquared95(9) * (1d / 303 + 1d / 900000), ProfileReport.noisePsi(10, 303, 900000), 1e-12);
         Assertions.assertNull(ProfileReport.noiseKs(0, 10));
         Assertions.assertNull(ProfileReport.noisePsi(1, 10, 10));
     }
@@ -528,6 +532,74 @@ public class ProfileReportTest {
         Assertions.assertTrue(result.axes.isEmpty());
         Assertions.assertTrue(ProfileReport.binRecords(result, config(null, null)).isEmpty());
         Assertions.assertEquals(2 + 4 + 2, ProfileReport.valueRecords(result, config(null, null)).size());
+    }
+
+    @Test
+    public void testHighCardinalityValues() {
+        final Schema schema = Schema.builder()
+                .withField("id", Schema.FieldType.STRING)
+                .withField("kind", Schema.FieldType.STRING)
+                .withField("flag", Schema.FieldType.STRING)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, Set.of("id", "flag"), "default", false, false);
+        final ProfileAccumulator accumulator = ProfileAccumulator.of(spec);
+        final int rows = 60_000;
+        for(int i = 0; i < rows; i++) {
+            accumulator.add(ProfileRow.of(spec, MElement.builder()
+                    // 30,000 values of two rows each: none is frequent
+                    .withString("id", "id" + (i / 2))
+                    // one value on 30% of the rows over 6,000 others
+                    .withString("kind", i % 10 < 3 ? "hot" : "k" + (i % 6000))
+                    .withString("flag", i % 3 == 0 ? "a" : "b")
+                    .build()).values, null);
+        }
+        final ProfileReport.Result result = ProfileReport.build(accumulator, null, null, config(null, null), null);
+
+        // candidates: the count written is the bound that is certain, and no top value is named
+        final ProfileReport.FieldResult id = result.fields.get(0);
+        Assertions.assertEquals("candidates", id.valuesKind);
+        Assertions.assertFalse(id.values.isEmpty());
+        for(final ProfileReport.ValueRow value : id.values) {
+            Assertions.assertEquals(value.lower, value.count);
+            Assertions.assertTrue(value.count <= 2 && value.upper >= 2, value.count + " .. " + value.upper);
+            Assertions.assertFalse(value.exact);
+        }
+        Assertions.assertNull(id.top);
+        Assertions.assertNull(id.topShare);
+        Assertions.assertFalse(id.notable.contains("dominant_value"));
+
+        // a frequent value: named, with a share that does not exceed the true one
+        final ProfileReport.FieldResult kind = result.fields.get(1);
+        Assertions.assertEquals("frequent", kind.valuesKind);
+        Assertions.assertEquals("hot", kind.top);
+        Assertions.assertTrue(kind.topShare <= 0.3 && kind.topShare > 0.25, "topShare: " + kind.topShare);
+        Assertions.assertTrue(kind.values.getFirst().upper >= 0.3 * rows);
+
+        // a key reports the count its field reports: the value table when there is one, else the same sketch
+        final Map<String, ProfileReport.KeyResult> keys = new HashMap<>();
+        for(final ProfileReport.KeyResult key : result.keys) {
+            keys.put(key.key, key);
+        }
+        Assertions.assertEquals(id.distinct, keys.get("id").distinct);
+        Assertions.assertEquals(id.distinctLower, keys.get("id").distinctLower);
+        Assertions.assertEquals(2d, keys.get("flag").distinct);
+        Assertions.assertEquals(2d, keys.get("flag").distinctUpper);
+        Assertions.assertEquals(2d / rows, keys.get("flag").keyness, 1e-12);
+    }
+
+    @Test
+    public void testOtherShare() {
+        final ProfileReport.FieldResult string = new ProfileReport.FieldResult();
+        string.type = "string";
+        // the last cell is "(other)"
+        Assertions.assertEquals(0.98, ProfileReport.otherShare(new long[] { 1, 1, 98 }), 1e-12);
+        Assertions.assertTrue(ProfileReport.comparableValues(string, new long[] { 40, 40, 20 }, new long[] { 30, 40, 30 }));
+        // two disjoint sets of keys both fall in "(other)": their distance over the cells would read as zero
+        Assertions.assertFalse(ProfileReport.comparableValues(string, new long[] { 1, 1, 98 }, new long[] { 50, 50, 0 }));
+        Assertions.assertFalse(ProfileReport.comparableValues(string, new long[] { 50, 50, 0 }, new long[] { 0, 0, 100 }));
+        final ProfileReport.FieldResult numeric = new ProfileReport.FieldResult();
+        numeric.type = "numeric";
+        Assertions.assertTrue(ProfileReport.comparableValues(numeric, new long[] { 1, 1, 98 }, new long[] { 50, 50, 0 }));
     }
 
     @Test

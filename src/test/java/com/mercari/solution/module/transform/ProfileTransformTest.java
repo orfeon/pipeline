@@ -471,7 +471,10 @@ public class ProfileTransformTest {
                             "ks " + record.getAsDouble("ks") + " noise " + record.getAsDouble("noiseKs"));
                     // the values are the same; what moved is how often there is one
                     Assertions.assertEquals(0.1, record.getAsDouble("nullShift"), 0.02);
-                    Assertions.assertEquals(9 * (1d / record.getAsLong("count") + 1d / rows), record.getAsDouble("noisePsi"), 1e-9);
+                    // the 95% point of ten bins: chi-squared 16.919 at nine degrees of freedom
+                    final double sizes = 1d / record.getAsLong("count") + 1d / rows;
+                    Assertions.assertEquals(16.919 * sizes, record.getAsDouble("noisePsi"), 0.03 * sizes);
+                    Assertions.assertTrue(record.getAsDouble("psi") < record.getAsDouble("noisePsi"));
                 }
                 if("category".equals(record.getAsString("field"))) {
                     checked++;

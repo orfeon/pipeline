@@ -1012,7 +1012,7 @@ function driftTable(s, axis, ai, title, limit) {
     + '<th title="KS (largest gap between the two cumulative distributions) for numeric fields, total variation distance for categories: 0 … 1, from exact counts">KS / TVD</th>'
     + '<th title="the size KS reaches between two random samples of one distribution at these row counts — a value below it is not a difference when the two sides are samples">noise</th>'
     + '<th title="population stability index over the bins (0 = identical)">PSI</th>'
-    + '<th title="the expected PSI between two random samples of one distribution at these row counts">noise</th>'
+    + '<th title="the size PSI reaches between two random samples of one distribution at these row counts (95%)">noise</th>'
     + '<th title="null rate of the group minus the null rate of its reference">null shift</th></tr></thead><tbody></tbody></table>');
   const tbody = table.querySelector("tbody");
   for (const r of shown) {
@@ -1221,7 +1221,7 @@ function targetRateOption(f, baseRate) {
   if (!P.keys) return;
   const s = document.getElementById("tab-keys");
   s.append(el('<h2 class="sec">Declared keys</h2>'));
-  const table = el('<table class="data"><thead><tr><th>field</th><th title="Theta sketch estimate of the number of distinct values">distinct (Theta)</th><th>95% bounds</th>'
+  const table = el('<table class="data"><thead><tr><th>field</th><th title="number of distinct values: exact for a field with a value table, else a sketch estimate">distinct</th><th>95% bounds</th>'
     + '<th title="distinct / rows with a key, capped at 100%: 100% means every keyed row has its own value, lower means repeated values">keyness (distinct / rows)</th>'
     + '<th title="rows whose key is null">null keys</th></tr></thead><tbody></tbody></table>');
   const tbody = table.querySelector("tbody");
