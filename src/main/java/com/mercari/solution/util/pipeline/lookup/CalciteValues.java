@@ -2,7 +2,10 @@ package com.mercari.solution.util.pipeline.lookup;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.schema.CalciteSchemaUtil;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.ByteString;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeField;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
@@ -34,7 +37,8 @@ import java.util.Map;
  *       TIMESTAMP → epoch-millis {@link Long} (the project's epoch-micros primitives
  *       are converted; sub-millisecond precision is not observable inside SQL)</li>
  *   <li>BINARY/VARBINARY → Avatica {@link ByteString}</li>
- *   <li>ARRAY → {@link List}, ROW → {@code Object[]}</li>
+ *   <li>ARRAY → {@link List}, ROW → {@code Object[]}, MAP → {@link Map} (string keys,
+ *       values in these forms)</li>
  * </ul>
  *
  * <p>Both the in-memory input tables and every {@link LookupSource} produce
@@ -84,9 +88,31 @@ public final class CalciteValues {
                 yield values;
             }
             case element -> toInternalRow(fieldType.getElementSchema(), primitive);
-            case map -> primitive;
+            case map -> toInternalMap(fieldType.getMapValueType(), primitive);
             default -> throw new IllegalArgumentException(
                     "Unsupported field type for SQL: " + fieldType.getType());
+        };
+    }
+
+    /**
+     * Map values → Calcite-internal values (the keys stay strings), as array elements are:
+     * SQL reads them by the map's value type ({@code m['k']}), and the result conversion
+     * ({@link #toPrimitive(RelDataType, Object)}) converts them back by it.
+     */
+    private static Object toInternalMap(final Schema.FieldType valueType, final Object primitive) {
+        if (valueType == null || !(primitive instanceof Map<?, ?> map)) {
+            return primitive;
+        }
+        return switch (valueType.getType()) {
+            // the internal form is the primitive one
+            case bool, string, uuid, json, enumeration -> primitive;
+            default -> {
+                final Map<Object, Object> values = new LinkedHashMap<>();
+                for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                    values.put(entry.getKey(), toInternal(valueType, entry.getValue()));
+                }
+                yield values;
+            }
         };
     }
 
@@ -147,35 +173,108 @@ public final class CalciteValues {
      * Converts directly-executed result rows (Calcite-internal values, see
      * {@link BindableQuery}) into the same per-row primitive maps
      * {@link #convertResultSet} produces — {@link #toPrimitive} handles both
-     * the Avatica-rendered and the internal representations.
-     *
-     * @param fieldNames the SQL output aliases ({@code RelRoot.fields}); the
-     *        physical row type's own names are not reliable — a trivial rename
-     *        projection is removed during planning. {@code null} falls back to
-     *        the row type's names.
+     * the Avatica-rendered and the internal representations. The per-column
+     * plan (output names, how each column is converted) is derived once from
+     * the result row type: build one converter per compiled statement, not per
+     * evaluation.
      */
-    public static List<Map<String, Object>> convertInternalRows(
-            final List<String> fieldNames,
-            final org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType rowType,
-            final List<Object[]> rows) {
-        final int fieldCount = rowType.getFieldCount();
-        final String[] names = new String[fieldCount];
-        final int[] sqlTypes = new int[fieldCount];
-        for (int i = 0; i < fieldCount; i++) {
-            final var field = rowType.getFieldList().get(i);
-            names[i] = fieldNames != null && i < fieldNames.size()
-                    ? fieldNames.get(i) : field.getName();
-            sqlTypes[i] = field.getType().getSqlTypeName().getJdbcOrdinal();
-        }
-        final List<Map<String, Object>> results = new ArrayList<>(rows.size());
-        for (final Object[] row : rows) {
-            final Map<String, Object> values = new HashMap<>();
-            for (int i = 0; i < fieldCount; i++) {
-                values.put(names[i], toPrimitive(sqlTypes[i], row[i]));
+    public static final class RowConverter {
+
+        private final String[] names;
+        private final int[] sqlTypes;
+        // non-null for the columns whose values are converted by their type (structs)
+        private final RelDataType[] nestedTypes;
+
+        /**
+         * @param fieldNames the SQL output aliases ({@code RelRoot.fields}); the
+         *        physical row type's own names are not reliable — a trivial rename
+         *        projection is removed during planning. {@code null} falls back to
+         *        the row type's names.
+         */
+        public RowConverter(final List<String> fieldNames, final RelDataType rowType) {
+            final List<RelDataTypeField> fields = rowType.getFieldList();
+            this.names = new String[fields.size()];
+            this.sqlTypes = new int[fields.size()];
+            this.nestedTypes = new RelDataType[fields.size()];
+            for (int i = 0; i < fields.size(); i++) {
+                final RelDataTypeField field = fields.get(i);
+                names[i] = fieldNames != null && i < fieldNames.size()
+                        ? fieldNames.get(i) : field.getName();
+                sqlTypes[i] = field.getType().getSqlTypeName().getJdbcOrdinal();
+                if (CalciteSchemaUtil.isNested(field.getType())) {
+                    nestedTypes[i] = field.getType();
+                }
             }
-            results.add(values);
         }
-        return results;
+
+        public List<Map<String, Object>> convert(final List<Object[]> rows) {
+            final List<Map<String, Object>> results = new ArrayList<>(rows.size());
+            for (final Object[] row : rows) {
+                final Map<String, Object> values = new HashMap<>();
+                for (int i = 0; i < names.length; i++) {
+                    values.put(names[i], nestedTypes[i] != null
+                            ? toPrimitive(nestedTypes[i], row[i])
+                            : toPrimitive(sqlTypes[i], row[i]));
+                }
+                results.add(values);
+            }
+            return results;
+        }
+    }
+
+    /**
+     * A nested value (see {@link CalciteSchemaUtil#isNested}) to primitive, by its type: a ROW
+     * becomes a field-name keyed map, the representation of an element field, and the values
+     * inside it are converted as the top-level ones are.
+     */
+    private static Object toPrimitive(final RelDataType type, final Object value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (type.getSqlTypeName()) {
+            case ROW -> {
+                final Object[] row = switch (value) {
+                    case Object[] objects -> objects;
+                    case List<?> list -> list.toArray();
+                    case java.sql.Struct struct -> {
+                        try {
+                            yield struct.getAttributes();
+                        } catch (final SQLException e) {
+                            throw new IllegalStateException("failed to read struct value", e);
+                        }
+                    }
+                    default -> throw new IllegalStateException(
+                            "Unsupported struct value: " + value.getClass());
+                };
+                final List<RelDataTypeField> fields = type.getFieldList();
+                final Map<String, Object> values = new HashMap<>();
+                for (int i = 0; i < fields.size(); i++) {
+                    values.put(fields.get(i).getName(),
+                            toPrimitive(fields.get(i).getType(), i < row.length ? row[i] : null));
+                }
+                yield values;
+            }
+            case ARRAY, MULTISET -> {
+                final List<?> list = asList(value);
+                if (list == null) {
+                    throw new IllegalStateException("Unsupported array value: " + value.getClass());
+                }
+                final List<Object> converted = new ArrayList<>(list.size());
+                for (final Object element : list) {
+                    converted.add(toPrimitive(type.getComponentType(), element));
+                }
+                yield converted;
+            }
+            case MAP -> {
+                final Map<String, Object> converted = new LinkedHashMap<>();
+                for (final Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                    converted.put(String.valueOf(entry.getKey()),
+                            toPrimitive(type.getValueType(), entry.getValue()));
+                }
+                yield converted;
+            }
+            default -> toPrimitive(type.getSqlTypeName().getJdbcOrdinal(), value);
+        };
     }
 
     private static Object toPrimitive(final int sqlType, final Object value) {

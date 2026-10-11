@@ -117,6 +117,7 @@ coercion. When writing a new source, return exactly these (see `CalciteValues`):
 | TIMESTAMP | epoch-millis `Long` (project micros are truncated) |
 | BINARY | vendored Avatica `ByteString` |
 | ARRAY / ROW | `List` / `Object[]` |
+| MAP | `Map` (string keys, values in this table's forms) |
 
 Result extraction inverts Avatica's local-wallclock rendering
 (`Timestamp.toLocalDateTime().toInstant(UTC)` — NOT `toInstant()`, which is
@@ -361,6 +362,31 @@ Query2.builder()
   `java.sql.Array`s — `CalciteValues.asList/toInternalList` converts them
   back to internal `List`s (both in the lateral runtime and the outer
   result conversion).
+- **Output schema = JDBC metadata + the planned row type.**
+  `Query2.deriveOutputSchemas` prepares the statement and reads
+  `ResultSetMetaData`, which has no shape for a struct (a ROW column is a
+  bare `STRUCT`, an array of ROWs only a type name). Columns that
+  `CalciteSchemaUtil.isNested` (ROW, MAP, array of non-scalars) are derived
+  from `planned.relNode().getRowType()` instead, and
+  `CalciteValues.RowConverter` (built once per compiled statement) converts
+  their values by the same predicate over the physical row type (ROW
+  `Object[]` → field-name keyed `Map`, scalars inside as top-level ones).
+  Map values are internal values too: `CalciteValues.toInternal` converts
+  them by the map's value type on the way in, and `createRelDataType` builds
+  that value type recursively (a map of arrays / structs / maps keeps its
+  shape) — leave either out and a pass-through `map<timestamp>` comes out
+  ×1000. Scalar columns and arrays of
+  scalars deliberately stay on the metadata path (`ARRAY<ANY>` results of
+  `ARRAY_COMPACT` etc. included). Keep the two sides in step: a type added
+  to one must be added to the other. Nested ROW fields named `EXPR$n` are
+  rejected at construction; a multi-column `ARRAY(SELECT a AS x, b AS y …)`
+  yields named fields, `STRUCT(a AS x)` / `SELECT AS STRUCT` do not parse.
+  Input struct columns are `StructKind.PEEK_FIELDS`, so `i.*` expands a
+  top-level struct column into its fields.
+  An array directly inside an array is rejected at construction: the
+  ELEMENT coder (`UnionMapCoder`) has no list-in-list branch, so it would
+  only fail in `pipeline.run()` - a `Query2`-level test never reaches the
+  coder, so cover a new output shape with a `QueryTransformTest` e2e too.
 - **`float32` → `FLOAT` (double)**: `CalciteSchemaUtil.convertSchema` maps
   float32 to Calcite `FLOAT`, which is 8-byte. Any source returning `Float`
   where the schema says float32 will CCE in generated code — widen to `Double`
@@ -762,11 +788,15 @@ moved. Hard-won facts:
   a trivial rename projection is removed by `ProjectRemoveRule` (it ignores
   names — `root.project(true)` does NOT survive planning). The JDBC layer
   renames at the metadata level; `Query2` threads `root.fields` into
-  `CalciteValues.convertInternalRows`. Symptom when this is wrong: chained/
+  `CalciteValues.RowConverter`. Symptom when this is wrong: chained/
   derived-table queries silently return null for re-aliased columns.
 - Single-column results may come out of the bindable as bare values or
   one-element arrays depending on the chosen PhysType (`Prefer.ARRAY` is a
-  preference, not a guarantee) — `BindableQuery.toArray` normalizes.
+  preference, not a guarantee) — `BindableQuery.toArray` normalizes. A single
+  column that is a one-field ROW is itself a one-element array: the two forms
+  are told apart by nesting depth against the column type (a bare
+  `Object[]{7}` struct used to be taken for the row and failed with
+  "Unsupported struct value").
 - Values now arrive Calcite-internal (no Avatica local-wallclock rendering);
   `CalciteValues.toPrimitive`'s Number branches and the lateral runtime's
   `toInternal` already handled both forms, so conversions stayed shared.

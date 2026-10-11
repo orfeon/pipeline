@@ -218,14 +218,15 @@ public class Query2 implements Serializable {
     private static final class CompiledStatement {
         final Statement statement;
         final BindableQuery bindableQuery;
-        final List<String> fieldNames;
+        final CalciteValues.RowConverter rowConverter;
         final IntermediateTable intermediate;
 
         CompiledStatement(Statement statement, BindableQuery bindableQuery,
                 List<String> fieldNames, IntermediateTable intermediate) {
             this.statement = statement;
             this.bindableQuery = bindableQuery;
-            this.fieldNames = fieldNames;
+            // derived once here, not per evaluation
+            this.rowConverter = new CalciteValues.RowConverter(fieldNames, bindableQuery.rowType());
             this.intermediate = intermediate;
         }
     }
@@ -569,7 +570,8 @@ public class Query2 implements Serializable {
             forEachStatement(buffers, runtimes, (index, statement, planned, rootSchema, intermediate) -> {
                 if (statement.output() || statement.kind() != Statement.Kind.QUERY) {
                     try (final PreparedStatement s = prepare(planned)) {
-                        schemas.put(index, CalciteSchemaUtil.convertSchema(s.getMetaData()));
+                        schemas.put(index, CalciteSchemaUtil.convertSchema(
+                                s.getMetaData(), planned.relNode().getRowType()));
                     }
                 }
             });
@@ -762,8 +764,7 @@ public class Query2 implements Serializable {
 
     private static List<MElement> toElements(final CompiledStatement statement,
             final List<Object[]> rows, final Instant timestamp) {
-        final List<Map<String, Object>> valuesList = CalciteValues.convertInternalRows(
-                statement.fieldNames, statement.bindableQuery.rowType(), rows);
+        final List<Map<String, Object>> valuesList = statement.rowConverter.convert(rows);
         return MElement.ofList(valuesList, timestamp);
     }
 

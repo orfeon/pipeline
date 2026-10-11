@@ -5,6 +5,7 @@ import com.mercari.solution.config.Config;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
+import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -1164,6 +1166,76 @@ public class QueryTransformTest {
             Assertions.assertEquals(Map.of("a", 1L, "b", 2L), halves);
             return null;
         });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testArrayOfStructsOutput() throws Exception {
+        // An array-of-structs output column, passed through and rebuilt; the following select
+        // converts the elements by the query's output schema.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "sql": "SELECT i.userId, i.events AS events, ARRAY(SELECT e.category AS category, e.amount * 2 AS doubled FROM UNNEST(i.events) AS e WHERE e.category = 'a') AS doubled FROM INPUT AS i"
+                      }
+                    },
+                    {
+                      "name": "select",
+                      "module": "select",
+                      "inputs": ["query"],
+                      "parameters": {
+                        "select": [
+                          { "name": "userId" },
+                          { "name": "events" },
+                          { "name": "doubled" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_USERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        for(final String name : List.of("query", "select")) {
+            final MCollection output = outputs.get(name);
+            Assertions.assertNotNull(output);
+            final Schema.FieldType doubled = output.getSchema().getField("doubled").getFieldType();
+            Assertions.assertEquals(Schema.Type.array, doubled.getType());
+            Assertions.assertEquals(Schema.Type.element, doubled.getArrayValueType().getType());
+
+            PAssert.that(output.getCollection()).satisfies(elements -> {
+                long total = 0;
+                for(final MElement element : elements) {
+                    final Map<String, Object> values = element.asPrimitiveMap();
+                    final boolean u1 = "u1".equals(String.valueOf(values.get("userId")));
+                    Assertions.assertEquals(u1 ? 3 : 0, ((List<?>) values.get("events")).size());
+                    final List<?> rebuilt = (List<?>) values.get("doubled");
+                    Assertions.assertEquals(u1 ? 2 : 0, rebuilt.size());
+                    long sum = 0;
+                    for(final Object item : rebuilt) {
+                        final Map<?, ?> struct = (Map<?, ?>) item;
+                        Assertions.assertEquals("a", String.valueOf(struct.get("category")));
+                        sum += ((Number) struct.get("doubled")).longValue();
+                    }
+                    // a: 1 * 2 + 2 * 2
+                    Assertions.assertEquals(u1 ? 6L : 0L, sum);
+                    total++;
+                }
+                Assertions.assertEquals(2L, total);
+                return null;
+            });
+        }
 
         pipeline.run();
     }
