@@ -10,6 +10,7 @@ import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -1194,6 +1195,44 @@ public class QueryTransformTest {
                 IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
         Assertions.assertTrue(e.getMessage().contains("No match found for function signature NO_SUCH_FUNCTION"),
                 "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testCauseMessages() {
+        // a cause that its wrapper restates is not repeated
+        Assertions.assertEquals(
+                "failed to plan query: SELECT F(a) FROM INPUT, caused by: From line 1, column 8: No match found",
+                QueryTransform.causeMessages(new IllegalArgumentException(
+                        "failed to plan query: SELECT F(a) FROM INPUT",
+                        new IllegalStateException("From line 1, column 8: No match found",
+                                new RuntimeException("No match found")))));
+        Assertions.assertEquals(
+                "java.lang.IllegalStateException: boom",
+                QueryTransform.causeMessages(new RuntimeException(new IllegalStateException("boom"))));
+
+        // a terse cause is kept even when the SQL restated by the top-level message contains it
+        Assertions.assertEquals(
+                "failed to plan query: SELECT amount FROM INPUT, caused by: amount",
+                QueryTransform.causeMessages(new IllegalArgumentException(
+                        "failed to plan query: SELECT amount FROM INPUT",
+                        new java.util.NoSuchElementException("amount"))));
+
+        // a throwable without a message is named by its class
+        Assertions.assertEquals(
+                "failed to plan sql, caused by: java.lang.StackOverflowError",
+                QueryTransform.causeMessages(
+                        new IllegalArgumentException("failed to plan sql", new StackOverflowError())));
+        Assertions.assertEquals(
+                "java.lang.IllegalArgumentException",
+                QueryTransform.causeMessages(new IllegalArgumentException()));
+
+        // a cyclic cause chain terminates
+        final RuntimeException first = new RuntimeException("first");
+        final RuntimeException second = new RuntimeException("second", first);
+        first.initCause(second);
+        Assertions.assertEquals("first, caused by: second",
+                Assertions.assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> QueryTransform.causeMessages(first)));
     }
 
 }

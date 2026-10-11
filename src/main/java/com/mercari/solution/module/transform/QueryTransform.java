@@ -46,9 +46,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -1275,22 +1277,30 @@ public class QueryTransform extends Transform {
 
     /**
      * The messages of the whole cause chain. The top-level planning error only restates the SQL;
-     * the reason (Calcite's parse / validation message) sits in its causes. A cause that merely
-     * repeats what an outer message already says is skipped.
+     * the reason (Calcite's parse / validation message) sits in its causes. A cause that its
+     * wrapper merely restates ({@code "<position>: <cause message>"}, {@code new X(cause)}) is
+     * skipped; a throwable without a message is named by its class.
      */
     static String causeMessages(final Throwable e) {
         final StringBuilder sb = new StringBuilder();
-        for(Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
-            final String message = t.getMessage();
-            if(message == null || message.isBlank() || sb.indexOf(message.strip()) >= 0) {
-                continue;
+        // identity set: a cyclic cause chain must not loop forever
+        final Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        String wrapperMessage = null;
+        for(Throwable t = e; t != null && visited.add(t); t = t.getCause()) {
+            final String message = t.getMessage() == null || t.getMessage().isBlank()
+                    ? t.getClass().getName()
+                    : t.getMessage().strip();
+            // compared with the wrapper only (not with everything said so far): the top-level
+            // message restates the SQL, which may well contain a terse cause message
+            if(wrapperMessage == null || !wrapperMessage.endsWith(message)) {
+                if(!sb.isEmpty()) {
+                    sb.append(", caused by: ");
+                }
+                sb.append(message);
             }
-            if(!sb.isEmpty()) {
-                sb.append(", caused by: ");
-            }
-            sb.append(message.strip());
+            wrapperMessage = message;
         }
-        return sb.isEmpty() ? String.valueOf(e) : sb.toString();
+        return sb.toString();
     }
 
 }
