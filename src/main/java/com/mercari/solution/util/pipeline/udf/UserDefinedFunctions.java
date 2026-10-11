@@ -3,6 +3,14 @@ package com.mercari.solution.util.pipeline.udf;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.AggregateFunctionImpl;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.ScalarFunctionImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlFunctionCategory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlIdentifier;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperatorTable;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlSyntax;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlLibrary;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlNameMatcher;
 
 import java.io.Serializable;
 import java.lang.reflect.Method;
@@ -52,6 +60,59 @@ public final class UserDefinedFunctions {
     }
 
     /**
+     * The operator table of every query: Calcite's standard operators plus the
+     * BigQuery library, <em>minus</em> the library operators that a built-in
+     * replaces ({@link ParseDateTimeFunctions}). A built-in must not share a
+     * name with an operator of this table (two candidates break overload
+     * resolution), so a replaced operator is removed here and the built-in
+     * resolves through the schema instead. The outer query and the LATERAL
+     * block evaluator must both use this table.
+     */
+    public static SqlOperatorTable libraryOperatorTable() {
+        return LibraryOperatorTable.INSTANCE;
+    }
+
+    /**
+     * A filtering view rather than a rebuilt table: the library table's own lookup must stay
+     * in charge (a table rebuilt from the operator list no longer resolves COUNT(*)).
+     * Stateless, so one instance (built on first use) serves every query.
+     */
+    private static final class LibraryOperatorTable implements SqlOperatorTable {
+
+        private static final LibraryOperatorTable INSTANCE = new LibraryOperatorTable();
+
+        private final SqlOperatorTable library = SqlLibraryOperatorTableFactory.INSTANCE
+                .getOperatorTable(SqlLibrary.STANDARD, SqlLibrary.BIG_QUERY);
+
+        @Override
+        public void lookupOperatorOverloads(
+                final SqlIdentifier opName,
+                final SqlFunctionCategory category,
+                final SqlSyntax syntax,
+                final List<SqlOperator> operatorList,
+                final SqlNameMatcher nameMatcher) {
+            final List<SqlOperator> found = new ArrayList<>();
+            library.lookupOperatorOverloads(opName, category, syntax, found, nameMatcher);
+            addNotReplaced(found, operatorList);
+        }
+
+        @Override
+        public List<SqlOperator> getOperatorList() {
+            final List<SqlOperator> operators = new ArrayList<>();
+            addNotReplaced(library.getOperatorList(), operators);
+            return operators;
+        }
+
+        private static void addNotReplaced(final List<SqlOperator> from, final List<SqlOperator> to) {
+            for (final SqlOperator operator : from) {
+                if (!ParseDateTimeFunctions.NAMES.contains(operator.getName())) {
+                    to.add(operator);
+                }
+            }
+        }
+    }
+
+    /**
      * Materializes the descriptors into Calcite functions (name → overloads),
      * prepending the built-in functions ({@link DateTimeFunctions}, the
      * {@code SEQ_*} sequence-pattern family: {@link SequenceMatchFunctions
@@ -67,7 +128,9 @@ public final class UserDefinedFunctions {
      * ARRAY_CUM_SUM(_INT) / ARRAY_COMPACT / ARRAY_DISTINCT},
      * {@link TimeBucketFunctions TIME_BUCKET},
      * {@link DecayFunctions DECAY_SUM / DECAY_AVG / DECAY_COUNT},
-     * {@link StatFunctions BETA_SAMPLE}, {@link MathFunctions DIV}, and the linear-algebra/model
+     * {@link StatFunctions BETA_SAMPLE}, {@link MathFunctions DIV},
+     * {@link ParseDateTimeFunctions PARSE_DATE / PARSE_TIME / PARSE_DATETIME /
+     * PARSE_TIMESTAMP}, and the linear-algebra/model
      * built-ins {@link MatrixFunctions COSINE_SIMILARITY / MATRIX_MULTIPLY /
      * MATRIX_SOLVE / MAHALANOBIS / POLY_FIT / LINEAR_REG / BAYES_LINREG /
      * LINREG_PREDICT / BAYES_PREDICT / AS_DOUBLE_ARRAY}). For ARG_MAX /
@@ -96,6 +159,7 @@ public final class UserDefinedFunctions {
         sequenceFamily.addAll(DecayFunctions.builtIns());
         sequenceFamily.addAll(StatFunctions.builtIns());
         sequenceFamily.addAll(MathFunctions.builtIns());
+        sequenceFamily.addAll(ParseDateTimeFunctions.builtIns());
         sequenceFamily.addAll(MatrixFunctions.builtIns());
         for (final Map.Entry<String, Function> entry : sequenceFamily) {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())

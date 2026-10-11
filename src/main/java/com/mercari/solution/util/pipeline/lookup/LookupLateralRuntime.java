@@ -169,12 +169,7 @@ public final class LookupLateralRuntime implements AutoCloseable {
                 .defaultSchema(rootSchema)
                 // Match the outer query's operator surface (ARRAY_AGG etc.);
                 // the planner chains the catalog reader for schema UDFs itself.
-                .operatorTable(org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
-                        .sql.fun.SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
-                                org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
-                                        .sql.fun.SqlLibrary.STANDARD,
-                                org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
-                                        .sql.fun.SqlLibrary.BIG_QUERY))
+                .operatorTable(UserDefinedFunctions.libraryOperatorTable())
                 .build();
         this.planner = Frameworks.getPlanner(config);
         try {

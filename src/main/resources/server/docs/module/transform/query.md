@@ -726,6 +726,15 @@ Division differs from BigQuery in two ways:
 
 `CURRENT_DATE` `CURRENT_TIME` `CURRENT_DATETIME` `CURRENT_TIMESTAMP` `LOCALTIME` `LOCALTIMESTAMP` (see also the built-in `CURRENT_DATE_` with a time-zone argument) — constructors: `DATE` `TIME` `DATETIME` `TIMESTAMP` `DATE_FROM_UNIX_DATE` `TIMESTAMP_SECONDS` `TIMESTAMP_MILLIS` `TIMESTAMP_MICROS` — arithmetic: `DATE_ADD` `DATE_SUB` `DATE_DIFF` `DATE_TRUNC` `TIME_ADD` `TIME_SUB` `TIME_DIFF` `TIME_TRUNC` `DATETIME_ADD` `DATETIME_SUB` `DATETIME_DIFF` `DATETIME_TRUNC` `TIMESTAMP_ADD` `TIMESTAMP_SUB` `TIMESTAMP_DIFF` `TIMESTAMP_TRUNC` `TIMESTAMPADD` `TIMESTAMPDIFF` `LAST_DAY` — parts: `EXTRACT` `YEAR` `QUARTER` `MONTH` `WEEK` `DAYOFMONTH` `DAYOFWEEK` `DAYOFYEAR` `HOUR` `MINUTE` `SECOND` — format/parse: `FORMAT_DATE` `FORMAT_TIME` `FORMAT_DATETIME` `FORMAT_TIMESTAMP` `PARSE_DATE` `PARSE_TIME` `PARSE_DATETIME` `PARSE_TIMESTAMP` — epoch: `UNIX_DATE` `UNIX_SECONDS` `UNIX_MILLIS` `UNIX_MICROS`
 
+`PARSE_DATE(format, string)` / `PARSE_TIME(format, string)` / `PARSE_DATETIME(format, string)` / `PARSE_TIMESTAMP(format, string [, timeZone])` take BigQuery format elements (`%Y` `%m` `%d` `%H` `%M` `%S` `%j` `%F` `%T` …):
+
+- Unseparated fields work: `PARSE_TIME("%H%M", "1935")` → `19:35:00`, `PARSE_TIMESTAMP("%Y%m%d%H%M%S", "20261003193512")`. `%H` `%I` `%M` `%S` `%m` `%d` `%e` `%W` take two digits and `%j` three when another numeric field follows directly.
+- `PARSE_TIMESTAMP` reads the string as a wall clock in `timeZone` (a region id such as `"Asia/Tokyo"` or an offset such as `"+09:00"`; UTC by default) and returns that instant: `PARSE_TIMESTAMP("%Y%m%d%H%M", "202610031005", "Asia/Tokyo")` → `2026-10-03T01:05:00Z`. A wall clock skipped by a daylight-saving transition is shifted forward by the gap; a repeated one is the earlier instant.
+- A string the format does not match, and an out-of-range field (hour `24`, minute `60`, February 30), are errors rather than being rolled over. `NULL` → `NULL`.
+- A non-string argument is cast to a string implicitly (`PARSE_DATE("%Y%m%d", 20261003)`).
+- Other characters of the format are matched as is: `PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%S", "2026-10-03T19:35:12")`. Write an element only with `%`: a bare element name in the text (`YYYY`, `MM`, `DD`, `D` …) is read as that element, not as text.
+- The last field of an unseparated run is not width-checked: `PARSE_DATE("%Y%m%d", "202610031")` is `2026-10-31` and `PARSE_TIME("%H%M", "193")` is `19:03`, not errors. Check the length first (`LENGTH(s) = 8`) when the input may be malformed.
+
 ### Conditional / comparison
 
 `CASE` `COALESCE` `IF` `IFNULL` `NULLIF` `GREATEST` `LEAST` `BETWEEN` `IN` `EXISTS` `IS [NOT] NULL` `IS [NOT] TRUE/FALSE/UNKNOWN` `IS [NOT] DISTINCT FROM`

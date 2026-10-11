@@ -302,6 +302,38 @@ Query2.builder()
   int32 column or `MOD(...)` does not), it implicitly casts DECIMAL / DOUBLE /
   VARCHAR arguments to BIGINT, and a primitive parameter NPEs on a NULL
   argument.
+- **Replacing a library function** (`ParseDateTimeFunctions`: `PARSE_DATE` /
+  `PARSE_TIME` / `PARSE_DATETIME` / `PARSE_TIMESTAMP`): a built-in cannot
+  simply share a library operator's name (two candidates break overload
+  resolution), so `UserDefinedFunctions.libraryOperatorTable()` hides the
+  replaced operators and the built-in resolves through the schema under the
+  same name. Both front-ends use that table (`Query2.plan` and
+  `LookupLateralRuntime.init` — the block's SQL text carries the plain
+  function name). It is a **filtering view over the library table**, not a
+  table rebuilt from `getOperatorList()`: a rebuilt `SqlOperatorTables.of(...)`
+  no longer resolves `COUNT(*)` ("Unknown identifier '*'"). Why the PARSE_*
+  functions are replaced: Calcite (1.40 and still 1.42) maps `%H` / `%M` /
+  `%S` to one-letter `SimpleDateFormat` fields, so an unseparated `%H%M`
+  reads "1935" as hour 1 + minute 935 = 16:35 without an error — and it calls
+  `setLenient(false)` *before* `setCalendar`, which leaves the parser lenient.
+  The replacement keeps Calcite's format model (`FormatModels.BIG_QUERY`) and
+  only widens the fixed-width elements (`%H` `%I` `%M` `%S` `%W` `%e`, `%j`);
+  it also returns the real instant for the time-zone argument (Calcite re-adds
+  the zone offset, i.e. ignores the zone). A replacement must keep the
+  library operator's operand types: the parameters are **VARCHAR, not ANY** —
+  the library operators cast a non-string argument implicitly (STRING
+  operands), and an ANY parameter turns `PARSE_DATE("%Y%m%d", intColumn)`
+  into a per-element runtime error. The cached `SimpleDateFormat` is mutable
+  state: a zone name in the string (`%Z`) switches its time zone, so the
+  zone is restored before every parse. Two more departures from Calcite's
+  model: literal text is quoted in the Java pattern (unquoted, the `T` of an
+  ISO format is an illegal pattern letter), and a format without a zone
+  element is parsed in UTC and converted with `java.time` (the strict
+  calendar rejects a wall clock inside a daylight-saving gap). Note that the
+  BigQuery model also tokenizes bare element names (`"yyyyMMdd"` parses as
+  three elements), so only text that is not an element name is a literal.
+  Known gap: the last field of an unseparated run takes every remaining
+  digit (`"202610031"` → day 31); `SimpleDateFormat` cannot enforce a width.
 - Functions are attached to the default schema via `SchemaPlus.add(name, fn)`
   in `Query2.createRootSchema` (and to the root schema in
   `LookupLateralRuntime.init`) — not via a custom operator table.
@@ -316,8 +348,10 @@ Query2.builder()
   construction). `RUNNING` is reserved (a MATCH_RECOGNIZE keyword) — a
   surprising alias failure.
 - The validator's operator table chains the **BigQuery library**
-  (`SqlLibraryOperatorTableFactory`, in `Query2.prepare` and mirrored in
-  `LookupLateralRuntime.init`) — that is what provides `ARRAY_AGG` etc.
+  (`UserDefinedFunctions.libraryOperatorTable()` — the
+  `SqlLibraryOperatorTableFactory` table minus the replaced operators — in
+  `Query2.plan` and mirrored in `LookupLateralRuntime.init`) — that is what
+  provides `ARRAY_AGG` etc.
   Window functions (`OVER`) work in the enumerable path, both outer and
   inside LATERAL blocks. One roundtrip wart: `ARRAY_AGG(x ORDER BY y)`
   inside a LATERAL block fails — `RelToSqlConverter` unparses the collation
