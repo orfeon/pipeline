@@ -185,7 +185,8 @@ One record per profiled field.
 (non-null, readable), `nulls`, `nullRate`, `errors`, `distinct` / `_lo` / `_hi`, `distinctExact` (true when
 the value table of §5.4 is complete, in which case the bounds equal the estimate);
 numeric-like: `min`, `max`, `sum`, `mean`, `stddev`, `skewness`, `zeros`, `nans`, `infs`, `p01`, `p05`, `p25`,
-`p50`, `p75`, `p95`, `p99`, `rankError` (the quantile sketch's normalized rank error);
+`p50`, `p75`, `p95`, `p99`, `rankError` (the quantile sketch's normalized rank error; 0 when the quantiles
+are read off the exact value table);
 string: `empties`, `blanks` (whitespace only, full-width included), `lengthMin`, `lengthMax`, `lengthP50`,
 `top` (the most frequent value; null with `values: hide`), `topShare`;
 bool: `trues`, `falses`;
@@ -220,7 +221,8 @@ Present with `segments`, `time` or `mode: compare`. One record per axis × group
 
 `axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference group
 of the axis), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`,
-`p50` (interpolated from the cells of §6.1, exact to one cell), and against the reference of the axis
+`p50` (interpolated from the cells of §6.1, exact to one cell; the exact median for a field with one cell
+per value), and against the reference of the axis
 (null on the baseline record of the `inputs` axis): `ks` (numeric-like), `tvd` (string / bool), `psi`,
 `nullShift`, `noiseKs`, `noisePsi` (§6.3).
 
@@ -311,7 +313,9 @@ fixed ranks).
 
 The transform reads its input twice. The first pass builds the whole-dataset profile (the statistics of
 §5.1) and, from its quantile sketch, the **edges** of every numeric-like field: the 100 equal-frequency
-cells of the whole dataset (fewer where ties collapse edges). The second pass counts, exactly, the rows of
+cells of the whole dataset (fewer where ties collapse edges). A numeric field with an exact value table
+(§5.4, at most 1,000 distinct values) gets **one cell per distinct value** instead: its cells come from no
+sketch, and a statistic read off them is exact rather than resolved to one cell. The second pass counts, exactly, the rows of
 every group and target class in every cell, and for categorical fields in every value of the whole-dataset
 value list: the most frequent 50 values — of the exact table when the field has one, of the frequent items
 otherwise — plus `(other)`. (The `values` output still carries the complete exact table; the cap applies to
@@ -320,11 +324,14 @@ what is counted per group, where a 1,000-value field would cost a 1,000-cell arr
 Everything a comparison needs is a function of those counts:
 
 - `bins` are the cells merged into `bins.count` (default 10) equal-frequency bins.
-- KS is the largest cumulative difference over the cells (a 100-point grid).
+- KS is the largest cumulative difference over the cells (a 100-point grid; the exact KS for a field with
+  one cell per value).
 - PSI and the information value are computed over the merged bins, with the 0.5-per-bin smoothing the sink
   already uses for the information value. No epsilon floor is needed: an equal-frequency bin is never empty
   on the pooled side.
-- The group median is interpolated within its cell.
+- The group median is interpolated within its cell. For a field with one cell per value it is the value of
+  the cell (the lower of the two middle values of an even count): interpolating inside a cell would report
+  0.42 as the median of a 0 / 1 field.
 
 `bins.edges` declares the edges of a field's `bins` records (`edgesKind: declared`): this is how a sparse
 region is resolved on purpose — the price bands above the 99th percentile hold a fraction of a percent of
@@ -344,9 +351,17 @@ and the comparison statistics carry the sketch error. It exists for inputs that 
 
 Counts are exact *for the edges on the record*. The edges come from a sketch and can move by its rank error
 between two runs over the same data, so two runs agree exactly when the edges are the same: declared edges,
-or `bins.edges: previous`, which reuses the edges of the `previous` run and makes a history of bin counts
-comparable bin by bin. With quantile edges the counts of two runs differ by the rows between the two edge
-positions, and the derived statistics differ in the third decimal (engine doc §7).
+the cells of a field with an exact value table (one per value, §6.1), or `bins.edges: previous`, which
+reuses the edges of the `previous` run and makes a history of bin counts comparable bin by bin. With
+quantile edges the counts of two runs differ by the rows between the two edge positions.
+
+How much that moves a derived statistic depends on the rank error against the width of a cell (1% of the
+rows). The value sketch is therefore sized apart from the other sketches (`accuracy` low / default / high:
+k = 400 / 1,600 / 3,200, a rank error of about 0.7% / 0.2% / 0.1%), so that an edge moves by a fraction of a
+cell. At k = 200 (rank error 1.33%, more than a cell) a ten-bin split held 9.0% to 11.0% of the rows from
+one run to the next, and the PSI of one pair of windows read 0.093 and 0.119 on the same data, while KS
+moved in the third decimal. PSI is the statistic to distrust across runs with sketch edges: compare KS, or
+fix the edges.
 
 ### 6.3 Drift columns
 

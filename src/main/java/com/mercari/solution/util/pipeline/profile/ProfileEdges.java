@@ -18,10 +18,14 @@ import java.util.Map;
  * the counted values for a string field — the declared edges of the fields that have them, and
  * the pooled cells of every declared field pair. A cell is right-closed: a value equal to a split
  * point belongs to the cell below it.
+ *
+ * <p>A field with an exact value table gets one cell per distinct value instead: its cells do not
+ * depend on a sketch, so they are the same on every run over the same data, and the statistics
+ * read off them (KS, the median of a group) are exact.
  */
 public class ProfileEdges implements Serializable {
 
-    /** Equal-frequency cells per numeric-like field (fewer where ties collapse split points). */
+    /** Equal-frequency cells per numeric-like field without a value table (fewer where ties collapse split points). */
     public static final int CELLS = 100;
 
     /** Cell of a null value. */
@@ -32,6 +36,7 @@ public class ProfileEdges implements Serializable {
     public static final String OTHER = "(other)";
 
     private final double[][] splits;          // numeric-like: interior split points, strictly increasing
+    private final boolean[] valueCells;       // numeric-like: one cell per distinct value (the splits are the values below the maximum)
     private final double[][] declared;        // numeric-like: declared split points, or null
     private final String[][] categories;      // string: the counted values; every other value is the last cell
     private final int[][] pairFields;         // [pair] = {field a, field b}
@@ -41,12 +46,14 @@ public class ProfileEdges implements Serializable {
 
     private ProfileEdges(
             final double[][] splits,
+            final boolean[] valueCells,
             final double[][] declared,
             final String[][] categories,
             final int[][] pairFields,
             final double[][] pairSplits) {
 
         this.splits = splits;
+        this.valueCells = valueCells;
         this.declared = declared;
         this.categories = categories;
         this.pairFields = pairFields;
@@ -89,6 +96,7 @@ public class ProfileEdges implements Serializable {
         final ProfileSpec spec = accumulator.getSpec();
         final int n = spec.getFields().size();
         final double[][] splits = new double[n][];
+        final boolean[] valueCells = new boolean[n];
         final double[][] declared = new double[n][];
         final String[][] categories = new String[n][];
         final Map<String, Integer> indexOfPath = new HashMap<>();
@@ -100,7 +108,13 @@ public class ProfileEdges implements Serializable {
                 case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
                     final KllDoublesSketch kll = field.getKll();
                     if(field.count > 0 && kll != null && !kll.isEmpty()) {
-                        splits[i] = quantileSplits(kll, CELLS);
+                        final Map<Double, Long> table = field.getNumericValues();
+                        if(table != null && !table.isEmpty()) {
+                            splits[i] = valueSplits(table);
+                            valueCells[i] = true;
+                        } else {
+                            splits[i] = quantileSplits(kll, CELLS);
+                        }
                         if(declaredEdges != null && declaredEdges.containsKey(fieldSpec.path)) {
                             declared[i] = declaredEdges.get(fieldSpec.path);
                         }
@@ -130,7 +144,13 @@ public class ProfileEdges implements Serializable {
                 pairSplits[p] = quantileSplits(pooled, CELLS);
             }
         }
-        return new ProfileEdges(splits, declared, categories, pairFields, pairSplits);
+        return new ProfileEdges(splits, valueCells, declared, categories, pairFields, pairSplits);
+    }
+
+    /** One cell per value of an exact value table: every distinct value below the maximum is a split point. */
+    static double[] valueSplits(final Map<Double, Long> table) {
+        final double[] values = table.keySet().stream().mapToDouble(Double::doubleValue).sorted().toArray();
+        return Arrays.copyOf(values, values.length - 1);
     }
 
     /** The distinct interior quantiles at 1/cells … (cells-1)/cells, below the maximum. */
@@ -182,6 +202,11 @@ public class ProfileEdges implements Serializable {
 
     public double[] getSplits(final int field) {
         return splits[field];
+    }
+
+    /** True when each cell of the field holds one distinct value: the upper edge of the cell. */
+    public boolean hasValueCells(final int field) {
+        return valueCells[field];
     }
 
     public double[] getDeclared(final int field) {

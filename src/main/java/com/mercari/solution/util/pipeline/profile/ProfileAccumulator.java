@@ -419,7 +419,7 @@ public class ProfileAccumulator implements Serializable {
                     acc.valuesDropped = true;
                 }
                 case STRING -> {
-                    acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
+                    acc.kll = KllDoublesSketch.newHeapInstance(params.kllLengthK);
                     acc.frequentItems = new ItemsSketch<>(params.fiMaxMapSize);
                     acc.stringValues = new java.util.HashMap<>();
                 }

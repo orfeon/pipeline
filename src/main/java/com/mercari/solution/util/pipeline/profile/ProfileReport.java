@@ -164,6 +164,7 @@ public class ProfileReport {
         public double[] cellEdges;      // numeric-like: cells + 1 edges from min to max
         public String[] cellLabels;     // categorical: one label per cell
         public long[] cells;            // whole-dataset counts per cell
+        public boolean valueCells;      // numeric-like: a cell holds one distinct value, its upper edge
         public int[] binOfCell;         // numeric-like without declared edges: cell → bin
         public Double[] binLower;       // per bin; null for an open end of declared edges
         public Double[] binUpper;
@@ -420,6 +421,16 @@ public class ProfileReport {
 
     /** The median read off ordered cells by linear interpolation within the cell that holds it. */
     public static Double median(final long[] cells, final double[] edges, final double min, final double max) {
+        return median(cells, edges, min, max, false);
+    }
+
+    /**
+     * @param valueCells each cell holds one distinct value, its upper edge: the median is that value
+     *                   (the lower of the two middle values of an even count), not a point inside the cell
+     */
+    public static Double median(
+            final long[] cells, final double[] edges, final double min, final double max, final boolean valueCells) {
+
         final long total = total(cells);
         if(total == 0) {
             return null;
@@ -428,6 +439,9 @@ public class ProfileReport {
         double cumulative = 0;
         for(int i = 0; i < cells.length; i++) {
             if(cells[i] > 0 && cumulative + cells[i] >= rank) {
+                if(valueCells) {
+                    return edges[i + 1];
+                }
                 final double lower = Math.max(edges[i], min);
                 final double upper = Math.min(edges[i + 1], max);
                 final double t = (rank - cumulative) / cells[i];
@@ -576,6 +590,8 @@ public class ProfileReport {
                         r.distinctUpper = r.distinct;
                         r.distinctExact = true;
                         r.valuesKind = "exact";
+                        r.quantiles = exactQuantiles(table, QUANTILE_RANKS);
+                        r.rankError = 0d;
                         table.entrySet().stream()
                                 .sorted((a, b) -> {
                                     final int c = Long.compare(b.getValue(), a.getValue());
@@ -623,6 +639,29 @@ public class ProfileReport {
         r.skewness = finite(r.skewness);
         buildNotable(r, fieldSpec, field);
         return r;
+    }
+
+    /** The quantiles of an exact value table: per rank the smallest value whose cumulative share reaches it. */
+    static Double[] exactQuantiles(final Map<Double, Long> table, final double[] ranks) {
+        final List<Map.Entry<Double, Long>> entries = new ArrayList<>(table.entrySet());
+        entries.sort(Map.Entry.comparingByKey());
+        long total = 0;
+        for(final Map.Entry<Double, Long> entry : entries) {
+            total += entry.getValue();
+        }
+        final Double[] quantiles = new Double[ranks.length];
+        for(int q = 0; q < ranks.length; q++) {
+            final double target = ranks[q] * total;
+            long cumulative = 0;
+            for(final Map.Entry<Double, Long> entry : entries) {
+                cumulative += entry.getValue();
+                quantiles[q] = entry.getKey();
+                if(cumulative >= target) {
+                    break;
+                }
+            }
+        }
+        return quantiles;
     }
 
     private static Double finite(final Double value) {
@@ -753,6 +792,7 @@ public class ProfileReport {
             r.cellEdges[0] = field.min;
             System.arraycopy(splits, 0, r.cellEdges, 1, splits.length);
             r.cellEdges[r.cellEdges.length - 1] = field.max;
+            r.valueCells = edges.hasValueCells(r.index);
             final double[] declared = edges.getDeclared(r.index);
             if(declared != null) {
                 r.edgesKind = "declared";
@@ -821,7 +861,7 @@ public class ProfileReport {
                     g.stddev = Math.sqrt(group.m2(field.index) / (g.count - 1));
                 }
             }
-            g.p50 = median(g.cells, field.cellEdges, g.min, g.max);
+            g.p50 = median(g.cells, field.cellEdges, g.min, g.max, field.valueCells);
         }
         return g;
     }

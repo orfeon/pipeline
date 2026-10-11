@@ -89,7 +89,13 @@ Unchanged from the sink, with these differences:
 - **Null sentinels and blanks** are two more counters per string field.
 - **No per-class sketches.** The target split of every field is pass 2's `target` axis.
 - **Edges.** Per numeric-like field, the quantiles at 1/100 … 99/100 of the pass 1 KLL sketch, deduplicated
-  (ties collapse cells), and next to them the declared `bins.edges` of the fields that have them. Per
+  (ties collapse cells), and next to them the declared `bins.edges` of the fields that have them. A field
+  whose exact value table survived pass 1 takes its split points from the table instead — every distinct
+  value below the maximum, so each cell holds one value (`ProfileEdges.hasValueCells`): reproducible, and
+  the cell grid no longer blurs a discrete field. The value sketch has its own size (`kllK` 400 / 1,600 /
+  3,200 by `accuracy`; the string-length sketch keeps 100 / 200 / 800 as `kllLengthK`): its rank error has
+  to stay well below the 1% of a cell, or the edges — and the PSI computed over them — move from run to run
+  (dsl §6.2). Per
   categorical field, the most frequent 50 values (of the value table, or of the frequent-items result) plus
   `(other)`. Per declared pair, the same quantiles of the two
   fields' sketches merged.
@@ -120,7 +126,9 @@ bucket is profiled.
 two more arrays per field. Adding a value is a binary search over at most 99 edges (a hash lookup for a
 categorical field). At 650 fields and 100 cells a group's accumulator is about 0.5 MB without a target and
 1–1.5 MB with one; a run with 30 groups gathers 15–45 MB on the finalize worker — smaller than the
-per-group sketch sets it replaces, which is why the group sketches are not kept alongside.
+per-group sketch sets it replaces, which is why the group sketches are not kept alongside. A field with one
+cell per value can hold up to 1,000 cells (the bound of the value table): the worst case — every field an
+integer with close to 1,000 values — is ten times these sizes, and is not measured.
 
 Everything dsl §6 emits is a function of these arrays:
 

@@ -954,6 +954,8 @@ public class ProfileRenderer {
 
         final JsonObject sketchParameters = new JsonObject();
         sketchParameters.addProperty("kllK", params.kllK);
+        sketchParameters.addProperty("kllRankError", org.apache.datasketches.kll.KllSketch.getNormalizedRankError(params.kllK, false));
+        sketchParameters.addProperty("kllLengthK", params.kllLengthK);
         sketchParameters.addProperty("cpcLgK", params.cpcLgK);
         sketchParameters.addProperty("fiMaxMapSize", params.fiMaxMapSize);
         sketchParameters.addProperty("thetaLgK", params.thetaLgK);

@@ -28,7 +28,7 @@ use the `evaluation` transform; to rank candidate features against a baseline, t
 |---|---|---|
 | counts, null counts, min, max, sum, mean, stddev | one pass | exact |
 | values of a field with at most 1,000 distinct values | one pass (value table) | exact (`exact: true`, `distinctExact: true`) |
-| quantiles | KLL sketch | within the record's `rankError` |
+| quantiles | KLL sketch (the value table when the field has one) | within the record's `rankError` (0 with a value table) |
 | distinct counts, frequent values of high-cardinality fields, key sets | CPC / Frequent Items / Theta sketches | estimates with `_lo` / `_hi` bounds |
 | bin counts, and everything computed from them: KS, TVD, PSI, information value, rate per bin | **a second pass over fixed edges** | exact for the edges on the record |
 
@@ -39,8 +39,13 @@ equal-frequency cells of the whole dataset for a numeric field, the most frequen
 is skipped when nothing needs it: no `segments` / `time` / `mode: compare`, no `target`, no `compare`
 and `bins` not in `outputs`.
 
-Edges come from a sketch, so two runs over the same data can place them slightly differently; the
-counts are exact for the edges written on each record. Declare `bins.edges` for a field to fix them.
+A numeric field with at most 1,000 distinct values gets one cell per value instead of the 100 cells:
+its cells are the same on every run, and its KS and group medians are exact.
+
+For the other numeric fields the edges come from a sketch, so two runs over the same data can place
+them slightly differently; the counts are exact for the edges written on each record. KS barely moves
+with the edges, PSI and the information value move more (they are computed over ten bins whose
+boundaries shift): to compare PSI between runs, declare `bins.edges` for the field, which fixes them.
 
 The observations per field type:
 
@@ -82,7 +87,7 @@ unsupported types are skipped and listed in the report appendix.
 | target | optional | String or Object | The binary outcome every other field is related to. Shorthand `sold_flag` for a bool field (positive = `true`), or longhand `{field: is_sold, positive: 1}` / `{field: status, positive: sold}` for numeric and string fields (`positive` is required there; any other non-null value is negative, null target rows are left out). Adds the `target` output and the `positives` / `rate` columns of `bins`. |
 | bins | optional | Object | `{count: 10, edges: {<field>: [...]}}`. `count`: the number of equal-frequency bins the cells are merged into (2–100, default 10). `edges`: split points declared for a numeric field instead of the equal-frequency ones — bins are right-closed, the first and the last are open-ended. Declared edges are counted next to the quantile cells: `bins`, PSI and the information value of that field use them, KS and the group median keep the 100-cell grid. |
 | drift | optional | Object | `{axis, exclude: [...]}`. `axis`: the axis whose groups feed the `drift` columns of the default output — `inputs`, `segments:<field>` or `time:<field>`; default the `inputs` axis when `mode: compare` declares one, otherwise none. `exclude`: fields left out of those columns (their statistics are still emitted), e.g. the time field the inputs were split on. The field of the drift axis itself is always left out: it differs from the rows outside its own group by construction. |
-| accuracy | optional | Enum | `low`, `default`, `high`. Sketch sizes: KLL k = 100 / 200 / 800, CPC and Theta lgK = 10 / 12 / 14, frequent-items map 512 / 1024 / 4096. |
+| accuracy | optional | Enum | `low`, `default`, `high`. Sketch sizes: KLL k = 400 / 1600 / 3200 for values (normalized rank error about 0.7% / 0.2% / 0.1%; it sizes the quantiles and the edges of the cells) and 100 / 200 / 800 for string lengths, CPC and Theta lgK = 10 / 12 / 14, frequent-items map 512 / 1024 / 4096. |
 | associations | optional | Object | `{numeric: all}` (default) computes the Pearson correlation of all numeric pairs for the report; `{numeric: none}` disables it. The cost is quadratic in the number of numeric fields. |
 | sample | optional | Object | `{enabled: true, k: 10000}`. VarOpt row sampling for the report's sample values and scatter plots. Disabled automatically with `values: hide`. |
 | report | optional | Object | `{title: ...}`. Report title (defaults to the step name). |
@@ -104,7 +109,8 @@ sets with that key the later `generatedAt` is the current one.
 A column `<stat>` with `<stat>_lo` / `<stat>_hi` next to it is an estimate with two-standard-deviation
 bounds. A column without them is exact, with two exceptions: the quantile columns (their error is
 `rankError`) and the statistics read off the cell grid (`ks`, `groups.p50`), which are exact functions
-of exact counts resolved to one cell.
+of exact counts resolved to one cell — and exact outright for a field with one cell per value, where
+`groups.p50` is a value of the field (the lower of the two middle values of an even count).
 
 ### Fields (`<name>`, the default output)
 

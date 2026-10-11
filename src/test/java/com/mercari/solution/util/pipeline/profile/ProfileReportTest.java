@@ -107,6 +107,12 @@ public class ProfileReportTest {
         // the group's own range bounds the interpolation
         Assertions.assertEquals(12d, ProfileReport.median(new long[] { 0, 8, 0 }, edges, 11, 13), 1e-12);
         Assertions.assertNull(ProfileReport.median(new long[3], edges, 0, 30));
+        // a 0 / 1 field: cells [0,0] (0,1]. Interpolating inside the second cell gives a value the field never takes
+        final double[] flagEdges = { 0, 0, 1 };
+        Assertions.assertEquals(1d / 6, ProfileReport.median(new long[] { 4, 6 }, flagEdges, 0, 1), 1e-12);
+        // with one cell per value the median is the value of the cell
+        Assertions.assertEquals(1d, ProfileReport.median(new long[] { 4, 6 }, flagEdges, 0, 1, true));
+        Assertions.assertEquals(0d, ProfileReport.median(new long[] { 5, 5 }, flagEdges, 0, 1, true));
 
         final double[] interval = ProfileReport.wilson(50, 100);
         Assertions.assertTrue(interval[0] < 0.5 && interval[1] > 0.5);
@@ -430,6 +436,47 @@ public class ProfileReportTest {
         // the information value follows the field's bins
         Assertions.assertEquals(4, bandedTarget.positiveBins.length);
         Assertions.assertNotEquals(plainTarget.iv, bandedTarget.iv);
+    }
+
+    @Test
+    public void testValueTableFieldsHaveOneCellPerValue() {
+        final Passes passes = passes(5000, 41, null, null);
+        final int qty = 2;
+        // every distinct value below the maximum is a split point: nothing here depends on what the sketch drew
+        Assertions.assertTrue(passes.edges.hasValueCells(qty));
+        Assertions.assertArrayEquals(new double[] { 1, 2 }, passes.edges.getSplits(qty));
+        // a continuous field keeps the quantile cells
+        Assertions.assertFalse(passes.edges.hasValueCells(0));
+
+        final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config(null, null), null);
+        final ProfileReport.FieldResult field = result.fields.get(qty);
+        Assertions.assertArrayEquals(new double[] { 1, 1, 2, 3 }, field.cellEdges);
+
+        // the quantiles of the field are read off the table
+        final List<Double> all = new ArrayList<>();
+        final List<Double> positive = new ArrayList<>();
+        final List<Double> negative = new ArrayList<>();
+        final ProfileSpec.TargetSpec target = passes.spec.getTarget();
+        for(final ProfileRow row : passes.rows) {
+            final double value = ProfileEdges.numeric(row.values[qty]);
+            all.add(value);
+            final Boolean targetClass = target.classOf(row.values[target.fieldIndex]);
+            if(targetClass != null) {
+                (targetClass ? positive : negative).add(value);
+            }
+        }
+        all.sort(null);
+        Assertions.assertEquals(0d, field.rankError);
+        final double[] ranks = { 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99 };
+        for(int q = 0; q < ranks.length; q++) {
+            Assertions.assertEquals(all.get((int) Math.ceil(ranks[q] * all.size()) - 1), field.quantiles[q], "rank " + ranks[q]);
+        }
+
+        // the median of a group is a value of the field: the lower of the two middle values
+        positive.sort(null);
+        negative.sort(null);
+        Assertions.assertEquals(positive.get((positive.size() - 1) / 2), result.target.positiveGroup.fields[qty].p50);
+        Assertions.assertEquals(negative.get((negative.size() - 1) / 2), result.target.negativeGroup.fields[qty].p50);
     }
 
     @Test
