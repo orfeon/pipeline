@@ -433,6 +433,20 @@ public class ProfileStages {
             this.summaryTag = summaryTag;
         }
 
+        /**
+         * The id the runner gave this job, read off the worker's options by name: the option belongs to
+         * the runner (Dataflow's {@code jobId}), whose classes are not on every runner's classpath.
+         */
+        private static String jobIdOf(final org.apache.beam.sdk.options.PipelineOptions options) {
+            try {
+                final com.fasterxml.jackson.databind.JsonNode id = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .valueToTree(options).path("options").path("jobId");
+                return id.isTextual() && !id.asText().isEmpty() ? id.asText() : null;
+            } catch (final Throwable e) {
+                return null;
+            }
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) throws Exception {
             if(c.element() == null) {
@@ -453,6 +467,7 @@ public class ProfileStages {
                     }
                 }
             }
+            config.jobId = jobIdOf(c.getPipelineOptions());
             final ProfileReport.Result result = ProfileReport.build(accumulator, cells, edges, config, groupTotals);
 
             for(final MElement record : ProfileReport.fieldRecords(result, config)) {

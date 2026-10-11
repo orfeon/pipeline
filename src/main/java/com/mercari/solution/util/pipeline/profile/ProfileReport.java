@@ -26,7 +26,7 @@ import java.util.Set;
  */
 public class ProfileReport {
 
-    public static final int FORMAT_VERSION = 2;
+    public static final int FORMAT_VERSION = 3;
 
     /** Group key of the whole dataset in the counting pass. */
     public static final String ALL_KEY = "\u001Eall";
@@ -57,6 +57,7 @@ public class ProfileReport {
         public String moduleName;
         public List<String> inputNames = List.of();
         public String runId;
+        public String jobId;            // the id the runner gave the job, when the worker knows it
         public String dataset;
         public String partition;
         public String expandedParametersJson;   // JSON text (JsonObject is not Serializable)
@@ -270,6 +271,7 @@ public class ProfileReport {
 
     public static class Result {
         public Instant generatedAt;
+        public String runId;
         public long rows;
         public long errorRows;
         public List<FieldResult> fields = new ArrayList<>();
@@ -290,6 +292,20 @@ public class ProfileReport {
             }
             return counts;
         }
+    }
+
+    /**
+     * The run id of a run that declares none: the id the runner gave the job when it has one, else the
+     * job name with the instant of the run, so that two runs of one config never share an id.
+     */
+    public static String defaultRunId(final String jobId, final String jobName, final Instant generatedAt) {
+        if(jobId != null && !jobId.isEmpty()) {
+            return jobId;
+        }
+        final String time = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+                .withZone(java.time.ZoneOffset.UTC)
+                .format(generatedAt);
+        return (jobName == null || jobName.isEmpty() ? "profile" : jobName) + "-" + time;
     }
 
     // ---- null sentinels ----
@@ -504,6 +520,7 @@ public class ProfileReport {
         final ProfileSpec spec = accumulator.getSpec();
         final Result result = new Result();
         result.generatedAt = Instant.now();
+        result.runId = config.runId != null ? config.runId : defaultRunId(config.jobId, config.jobName, result.generatedAt);
         result.rows = accumulator.getRowCount();
         result.errorRows = accumulator.getErrorCount();
 
@@ -1249,7 +1266,7 @@ public class ProfileReport {
         return Schema.builder()
                 .withField("runId", Schema.FieldType.STRING)
                 .withField("dataset", Schema.FieldType.STRING)
-                .withField("partition", Schema.FieldType.STRING)
+                .withField("partitionId", Schema.FieldType.STRING)
                 .withField("generatedAt", Schema.FieldType.TIMESTAMP)
                 .withField("formatVersion", Schema.FieldType.INT64);
     }
@@ -1259,14 +1276,14 @@ public class ProfileReport {
                 .withField("field", Schema.FieldType.STRING)
                 .withField("type", Schema.FieldType.STRING)
                 .withField("sourceType", Schema.FieldType.STRING)
-                .withField("rows", Schema.FieldType.INT64)
+                .withField("rowCount", Schema.FieldType.INT64)
                 .withField("count", Schema.FieldType.INT64)
-                .withField("nulls", Schema.FieldType.INT64)
+                .withField("nullCount", Schema.FieldType.INT64)
                 .withField("nullRate", Schema.FieldType.FLOAT64)
                 .withField("errors", Schema.FieldType.INT64)
-                .withField("distinct", Schema.FieldType.FLOAT64)
-                .withField("distinct_lo", Schema.FieldType.FLOAT64)
-                .withField("distinct_hi", Schema.FieldType.FLOAT64)
+                .withField("distinctCount", Schema.FieldType.FLOAT64)
+                .withField("distinctCount_lo", Schema.FieldType.FLOAT64)
+                .withField("distinctCount_hi", Schema.FieldType.FLOAT64)
                 .withField("distinctExact", Schema.FieldType.BOOLEAN)
                 .withField("min", Schema.FieldType.FLOAT64)
                 .withField("max", Schema.FieldType.FLOAT64)
@@ -1308,15 +1325,17 @@ public class ProfileReport {
     public static Schema groupsSchema() {
         return identity()
                 .withField("axis", Schema.FieldType.STRING)
-                .withField("group", Schema.FieldType.STRING)
+                .withField("groupName", Schema.FieldType.STRING)
                 .withField("baseline", Schema.FieldType.BOOLEAN)
                 .withField("field", Schema.FieldType.STRING)
                 .withField("groupRows", Schema.FieldType.INT64)
                 .withField("count", Schema.FieldType.INT64)
-                .withField("nulls", Schema.FieldType.INT64)
+                .withField("nullCount", Schema.FieldType.INT64)
                 .withField("nullRate", Schema.FieldType.FLOAT64)
                 .withField("min", Schema.FieldType.FLOAT64)
                 .withField("max", Schema.FieldType.FLOAT64)
+                .withField("minTime", Schema.FieldType.TIMESTAMP)
+                .withField("maxTime", Schema.FieldType.TIMESTAMP)
                 .withField("sum", Schema.FieldType.FLOAT64)
                 .withField("mean", Schema.FieldType.FLOAT64)
                 .withField("stddev", Schema.FieldType.FLOAT64)
@@ -1348,7 +1367,7 @@ public class ProfileReport {
         return identity()
                 .withField("field", Schema.FieldType.STRING)
                 .withField("axis", Schema.FieldType.STRING)
-                .withField("group", Schema.FieldType.STRING)
+                .withField("groupName", Schema.FieldType.STRING)
                 .withField("bin", Schema.FieldType.INT64)
                 .withField("lower", Schema.FieldType.FLOAT64)
                 .withField("upper", Schema.FieldType.FLOAT64)
@@ -1397,9 +1416,9 @@ public class ProfileReport {
         return identity()
                 .withField("kind", Schema.FieldType.STRING)
                 .withField("key", Schema.FieldType.STRING)
-                .withField("distinct", Schema.FieldType.FLOAT64)
-                .withField("distinct_lo", Schema.FieldType.FLOAT64)
-                .withField("distinct_hi", Schema.FieldType.FLOAT64)
+                .withField("distinctCount", Schema.FieldType.FLOAT64)
+                .withField("distinctCount_lo", Schema.FieldType.FLOAT64)
+                .withField("distinctCount_hi", Schema.FieldType.FLOAT64)
                 .withField("keyness", Schema.FieldType.FLOAT64)
                 .withField("nullKeys", Schema.FieldType.INT64)
                 .build();
@@ -1407,7 +1426,7 @@ public class ProfileReport {
 
     public static Schema summarySchema() {
         final Schema.Builder b = identity()
-                .withField("rows", Schema.FieldType.INT64)
+                .withField("rowCount", Schema.FieldType.INT64)
                 .withField("errorRows", Schema.FieldType.INT64)
                 .withField("fields", Schema.FieldType.INT64)
                 .withField("report", Schema.FieldType.STRING)
@@ -1442,9 +1461,9 @@ public class ProfileReport {
 
     private static MElement.Builder record(final Config config, final Result result) {
         return MElement.builder()
-                .withString("runId", config.runId)
+                .withString("runId", result.runId)
                 .withString("dataset", config.dataset)
-                .withString("partition", config.partition)
+                .withString("partitionId", config.partition)
                 .withTimestamp("generatedAt", result.generatedAt)
                 .withInt64("formatVersion", (long) FORMAT_VERSION);
     }
@@ -1461,14 +1480,14 @@ public class ProfileReport {
                     .withString("field", f.path)
                     .withString("type", f.type)
                     .withString("sourceType", f.sourceType)
-                    .withInt64("rows", f.rows)
+                    .withInt64("rowCount", f.rows)
                     .withInt64("count", f.count)
-                    .withInt64("nulls", f.nulls)
+                    .withInt64("nullCount", f.nulls)
                     .withFloat64("nullRate", f.nullRate)
                     .withInt64("errors", f.errors)
-                    .withFloat64("distinct", f.distinct)
-                    .withFloat64("distinct_lo", f.distinctLower)
-                    .withFloat64("distinct_hi", f.distinctUpper)
+                    .withFloat64("distinctCount", f.distinct)
+                    .withFloat64("distinctCount_lo", f.distinctLower)
+                    .withFloat64("distinctCount_hi", f.distinctUpper)
                     .withBool("distinctExact", f.distinctExact)
                     .withFloat64("min", time ? null : f.min)
                     .withFloat64("max", time ? null : f.max)
@@ -1531,15 +1550,17 @@ public class ProfileReport {
                     final boolean time = "timestamp".equals(field.type);
                     records.add(record(config, result)
                             .withString("axis", axis.label)
-                            .withString("group", label)
+                            .withString("groupName", label)
                             .withBool("baseline", group.baseline)
                             .withString("field", field.path)
                             .withInt64("groupRows", group.rows)
                             .withInt64("count", gf.count)
-                            .withInt64("nulls", gf.nulls)
+                            .withInt64("nullCount", gf.nulls)
                             .withFloat64("nullRate", gf.nullRate)
                             .withFloat64("min", time ? null : gf.min)
                             .withFloat64("max", time ? null : gf.max)
+                            .withTimestamp("minTime", time ? instantOf(gf.min) : null)
+                            .withTimestamp("maxTime", time ? instantOf(gf.max) : null)
                             .withFloat64("sum", gf.sum)
                             .withFloat64("mean", gf.mean)
                             .withFloat64("stddev", gf.stddev)
@@ -1605,7 +1626,7 @@ public class ProfileReport {
             final MElement.Builder record = record(config, result)
                     .withString("field", field.path)
                     .withString("axis", axis)
-                    .withString("group", group)
+                    .withString("groupName", group)
                     .withInt64("bin", (long) b)
                     .withFloat64("lower", field.binLower == null ? null : field.binLower[b])
                     .withFloat64("upper", field.binUpper == null ? null : field.binUpper[b])
@@ -1633,7 +1654,7 @@ public class ProfileReport {
             records.add(record(config, result)
                     .withString("field", field.path)
                     .withString("axis", axis)
-                    .withString("group", group)
+                    .withString("groupName", group)
                     .withInt64("bin", (long) bins.length)
                     .withFloat64("lower", null)
                     .withFloat64("upper", null)
@@ -1734,9 +1755,9 @@ public class ProfileReport {
             records.add(record(config, result)
                     .withString("kind", "key")
                     .withString("key", key.key)
-                    .withFloat64("distinct", key.distinct)
-                    .withFloat64("distinct_lo", key.distinctLower)
-                    .withFloat64("distinct_hi", key.distinctUpper)
+                    .withFloat64("distinctCount", key.distinct)
+                    .withFloat64("distinctCount_lo", key.distinctLower)
+                    .withFloat64("distinctCount_hi", key.distinctUpper)
                     .withFloat64("keyness", key.keyness)
                     .withInt64("nullKeys", key.nullKeys)
                     .build());
@@ -1752,7 +1773,7 @@ public class ProfileReport {
             final Result result, final Config config, final Long reportBytes, final List<String> degradations) {
 
         final MElement.Builder b = record(config, result)
-                .withInt64("rows", result.rows)
+                .withInt64("rowCount", result.rows)
                 .withInt64("errorRows", result.errorRows)
                 .withInt64("fields", (long) result.fields.size())
                 .withString("report", reportBytes == null ? null : config.reportOutput)

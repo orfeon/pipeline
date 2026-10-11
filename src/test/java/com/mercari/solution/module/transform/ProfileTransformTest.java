@@ -140,11 +140,11 @@ public class ProfileTransformTest {
             final MElement price = fields.get("price");
             Assertions.assertEquals("run-1", price.getAsString("runId"));
             Assertions.assertEquals("items", price.getAsString("dataset"));
-            Assertions.assertEquals("2025-01", price.getAsString("partition"));
-            Assertions.assertEquals(2L, price.getAsLong("formatVersion"));
+            Assertions.assertEquals("2025-01", price.getAsString("partitionId"));
+            Assertions.assertEquals(3L, price.getAsLong("formatVersion"));
             Assertions.assertNotNull(price.getPrimitiveValue("generatedAt"));
             Assertions.assertEquals("numeric", price.getAsString("type"));
-            Assertions.assertEquals((long) ROWS, price.getAsLong("rows"));
+            Assertions.assertEquals((long) ROWS, price.getAsLong("rowCount"));
             Assertions.assertEquals((long) ROWS, price.getAsLong("count"));
             Assertions.assertEquals(0d, price.getAsDouble("min"));
             Assertions.assertEquals((ROWS - 1) * 1.5, price.getAsDouble("max"));
@@ -160,8 +160,8 @@ public class ProfileTransformTest {
             // qty: three values, tabulated exactly
             final MElement qty = fields.get("qty");
             Assertions.assertEquals(Boolean.TRUE, qty.getPrimitiveValue("distinctExact"));
-            Assertions.assertEquals(3d, qty.getAsDouble("distinct"));
-            Assertions.assertEquals(3d, qty.getAsDouble("distinct_lo"));
+            Assertions.assertEquals(3d, qty.getAsDouble("distinctCount"));
+            Assertions.assertEquals(3d, qty.getAsDouble("distinctCount_lo"));
 
             // status: the string 'null' on 30% of the rows
             final MElement status = fields.get("status");
@@ -225,9 +225,9 @@ public class ProfileTransformTest {
                     // the classes split at the median: a bin is all positive or all negative, but for the one that holds it
                     final double rate = record.getAsDouble("rate");
                     Assertions.assertTrue(rate >= 0 && rate <= 1);
-                } else if("price".equals(field) && "segments:category".equals(axis) && "cat0".equals(record.getAsString("group"))) {
+                } else if("price".equals(field) && "segments:category".equals(axis) && "cat0".equals(record.getAsString("groupName"))) {
                     priceInCat0 += record.getAsLong("count");
-                } else if("price".equals(field) && "target".equals(axis) && "positive".equals(record.getAsString("group"))) {
+                } else if("price".equals(field) && "target".equals(axis) && "positive".equals(record.getAsString("groupName"))) {
                     pricePositive += record.getAsLong("count");
                 } else if("memo".equals(field)) {
                     memoNull += record.getAsLong("count");
@@ -308,7 +308,7 @@ public class ProfileTransformTest {
                 count++;
                 Assertions.assertEquals("key", record.getAsString("kind"));
                 Assertions.assertEquals("id", record.getAsString("key"));
-                Assertions.assertEquals(ROWS, record.getAsDouble("distinct"), ROWS * 0.05);
+                Assertions.assertEquals(ROWS, record.getAsDouble("distinctCount"), ROWS * 0.05);
                 Assertions.assertTrue(record.getAsDouble("keyness") <= 1d);
                 Assertions.assertEquals(0L, record.getAsLong("nullKeys"));
             }
@@ -320,7 +320,7 @@ public class ProfileTransformTest {
             int count = 0;
             for(final MElement record : records) {
                 count++;
-                Assertions.assertEquals((long) ROWS, record.getAsLong("rows"));
+                Assertions.assertEquals((long) ROWS, record.getAsLong("rowCount"));
                 Assertions.assertEquals(0L, record.getAsLong("errorRows"));
                 Assertions.assertEquals(10L, record.getAsLong("fields"));
                 Assertions.assertEquals(report, record.getAsString("report"));
@@ -343,7 +343,7 @@ public class ProfileTransformTest {
         Assertions.assertFalse(html.contains("__PROFILE_"), "unreplaced template placeholder");
         final JsonObject embedded = extractJsonBlock(html, "profile-payload");
         final JsonObject manifest = extractJsonBlock(html, "profile-manifest");
-        Assertions.assertEquals(2, embedded.get("formatVersion").getAsInt());
+        Assertions.assertEquals(3, embedded.get("formatVersion").getAsInt());
         Assertions.assertEquals(ROWS, embedded.get("rows").getAsLong());
         Assertions.assertEquals("items profile", embedded.get("title").getAsString());
         Assertions.assertEquals(1, embedded.getAsJsonObject("notableCounts").get("all_null").getAsInt());
@@ -389,7 +389,7 @@ public class ProfileTransformTest {
 
         // the payload file is the same payload and manifest in one document
         final JsonObject payloadFile = JsonParser.parseString(Files.readString(Paths.get(payload))).getAsJsonObject();
-        Assertions.assertEquals(2, payloadFile.get("formatVersion").getAsInt());
+        Assertions.assertEquals(3, payloadFile.get("formatVersion").getAsInt());
         Assertions.assertEquals(embedded, payloadFile.getAsJsonObject("payload"));
         Assertions.assertEquals(manifest, payloadFile.getAsJsonObject("manifest"));
     }
@@ -456,7 +456,7 @@ public class ProfileTransformTest {
             for(final MElement record : records) {
                 Assertions.assertEquals("inputs", record.getAsString("axis"));
                 final boolean baseline = Boolean.TRUE.equals(record.getPrimitiveValue("baseline"));
-                Assertions.assertEquals("before".equals(record.getAsString("group")), baseline);
+                Assertions.assertEquals("before".equals(record.getAsString("groupName")), baseline);
                 if(baseline) {
                     // the reference has nothing to be compared with
                     Assertions.assertNull(record.getAsDouble("ks"));
@@ -507,7 +507,7 @@ public class ProfileTransformTest {
             for(final MElement record : records) {
                 Assertions.assertNull(record.getAsString("report"));
                 Assertions.assertNull(record.getAsLong("reportBytes"));
-                Assertions.assertEquals(2L * rows, record.getAsLong("rows"));
+                Assertions.assertEquals(2L * rows, record.getAsLong("rowCount"));
             }
             return null;
         });
@@ -546,7 +546,7 @@ public class ProfileTransformTest {
             for(final MElement record : records) {
                 if(record.getAsString("axis") != null) {
                     // segment values are raw data: masked
-                    Assertions.assertTrue(record.getAsString("group").startsWith("group #"), record.getAsString("group"));
+                    Assertions.assertTrue(record.getAsString("groupName").startsWith("group #"), record.getAsString("groupName"));
                     continue;
                 }
                 if("price".equals(record.getAsString("field"))) {
@@ -599,7 +599,7 @@ public class ProfileTransformTest {
             int qtyGroups = 0;
             for(final MElement record : records) {
                 // numeric segment values are raw values too
-                Assertions.assertTrue(record.getAsString("group").startsWith("group #"), record.getAsString("group"));
+                Assertions.assertTrue(record.getAsString("groupName").startsWith("group #"), record.getAsString("groupName"));
                 if("segments:qty".equals(record.getAsString("axis")) && "price".equals(record.getAsString("field"))) {
                     qtyGroups++;
                 }
@@ -646,7 +646,7 @@ public class ProfileTransformTest {
             Assertions.assertEquals(300L, fields.get("id").getAsLong("count"));
             Assertions.assertEquals(0.2, fields.get("price").getAsDouble("nullRate"), 0.08);
             Assertions.assertEquals("profile", fields.get("price").getAsString("dataset"));
-            Assertions.assertNull(fields.get("price").getAsString("partition"));
+            Assertions.assertNull(fields.get("price").getAsString("partitionId"));
             return null;
         });
         // the default outputs include the bins, so the counting pass ran
