@@ -988,12 +988,14 @@ function openDetail(path) {
 })();
 
 // ---- drift of group fields against their reference (the baseline input, or the rows outside the group) ----
+const DRIFT_EXCLUDE = new Set(P.driftExclude || []);
 function driftRows(axis) {
   const rows = [];
   for (const g of axis.groups) {
     if (axis.baseline != null && g.value === axis.baseline) continue;
     for (const [path, gf] of Object.entries(g.fields)) {
       if (path === axis.field) continue;   // the axis field differs from the rest by construction
+      if (DRIFT_EXCLUDE.has(path)) continue;   // parameters.drift.exclude: fields that differ between groups by construction
       const d = gf.ks != null ? gf.ks : gf.tvd;
       if (d == null && gf.nullShift == null) continue;
       rows.push({path, vs: g.value, kind: gf.ks != null ? "KS" : gf.tvd != null ? "TVD" : "", drift: d, psi: gf.psi,

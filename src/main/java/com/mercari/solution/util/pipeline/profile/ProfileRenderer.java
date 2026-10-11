@@ -263,7 +263,11 @@ public class ProfileRenderer {
                 payload.add("sample", sample);
             }
         }
-        payload.add("suggestions", buildSuggestions(accumulator, spec));
+        payload.add("suggestions", buildSuggestions(accumulator, spec, config));
+        // the fields parameters.drift.exclude keeps out of every drift ranking, the report's tables included
+        final JsonArray driftExclude = new JsonArray();
+        config.driftExclude.stream().sorted().forEach(driftExclude::add);
+        payload.add("driftExclude", driftExclude);
         return payload;
     }
 
@@ -831,7 +835,20 @@ public class ProfileRenderer {
     }
 
     /** Declarations the run could have used, inferred from names and cardinalities (profile-dsl.md §10.1). */
-    private static JsonArray buildSuggestions(final ProfileAccumulator accumulator, final ProfileSpec spec) {
+    private static JsonArray buildSuggestions(
+            final ProfileAccumulator accumulator, final ProfileSpec spec, final ProfileReport.Config config) {
+
+        // what the run already declares is not a next step
+        final java.util.Set<String> declaredSegments = new java.util.HashSet<>();
+        boolean timeDeclared = false;
+        for(final ProfileAxis axis : config.axes) {
+            if(ProfileAxis.Kind.segments.equals(axis.kind)) {
+                declaredSegments.add(axis.field);
+            } else if(ProfileAxis.Kind.time.equals(axis.kind)) {
+                timeDeclared = true;
+            }
+        }
+
         final JsonArray suggestions = new JsonArray();
         final long rows = accumulator.getRowCount();
         final ProfileSpec.SketchParameters params = spec.getSketchParameters();
@@ -855,7 +872,7 @@ public class ProfileRenderer {
                     if(ProfileSpec.ProfileType.STRING.equals(fieldSpec.profileType)
                             && cpc != null && field.count > 0) {
                         final double distinct = cpc.getEstimate();
-                        if(distinct >= 2 && distinct <= 50) {
+                        if(distinct >= 2 && distinct <= 50 && !declaredSegments.contains(fieldSpec.path)) {
                             segmentCandidates.add(fieldSpec.path);
                         }
                     }
@@ -884,7 +901,7 @@ public class ProfileRenderer {
                     "low-cardinality categorical field (2-50 distinct values)",
                     "segments: [" + path + "]"));
         }
-        if(timestampFields.size() == 1) {
+        if(timestampFields.size() == 1 && !timeDeclared) {
             suggestions.add(suggestion("time", timestampFields,
                     "the only timestamp field in the dataset",
                     "time: " + timestampFields.getFirst()));

@@ -346,6 +346,12 @@ public class ProfileTransformTest {
         Assertions.assertEquals(3, embedded.get("formatVersion").getAsInt());
         Assertions.assertEquals(ROWS, embedded.get("rows").getAsLong());
         Assertions.assertEquals("items profile", embedded.get("title").getAsString());
+        // what the run declares is not suggested as a next step (category is a segment, created_at the time axis)
+        for(final JsonElement suggestion : embedded.getAsJsonArray("suggestions")) {
+            final String yaml = suggestion.getAsJsonObject().get("yaml").getAsString();
+            Assertions.assertFalse(yaml.equals("segments: [category]") || yaml.startsWith("time:"), yaml);
+        }
+        Assertions.assertEquals(0, embedded.getAsJsonArray("driftExclude").size());
         Assertions.assertEquals(1, embedded.getAsJsonObject("notableCounts").get("all_null").getAsInt());
         Assertions.assertEquals("run-1", manifest.getAsJsonObject("job").get("runId").getAsString());
         Assertions.assertTrue(manifest.getAsJsonObject("counting").get("pass").getAsBoolean());
