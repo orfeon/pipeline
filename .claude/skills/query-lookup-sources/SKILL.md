@@ -292,8 +292,16 @@ Query2.builder()
   (BigQuery lex), but a UDF inside a LATERAL block round-trips through
   generated SQL whose unquoted identifiers are uppercased — uppercase matches
   both paths. Functions propagate into the per-block evaluator automatically.
-- Built-ins live in `util/pipeline/udf/DateTimeFunctions` (`CURRENT_DATE_`)
-  and are always registered; add new built-ins there.
+- Built-ins live in `util/pipeline/udf/DateTimeFunctions` (`CURRENT_DATE_`),
+  `MathFunctions` (`DIV` — absent from Calcite's BigQuery library)
+  and are always registered; add new built-ins there. Give a numeric built-in
+  ANY-typed `Object` parameters checked at runtime (as `DIV` / `TIME_BUCKET`
+  do), not a typed signature: Calcite passes an INTEGER argument to a boxed
+  `Long` parameter without a cast, so the generated call does not compile
+  (Janino: "No applicable constructor/method found" — literals work, an
+  int32 column or `MOD(...)` does not), it implicitly casts DECIMAL / DOUBLE /
+  VARCHAR arguments to BIGINT, and a primitive parameter NPEs on a NULL
+  argument.
 - Functions are attached to the default schema via `SchemaPlus.add(name, fn)`
   in `Query2.createRootSchema` (and to the root schema in
   `LookupLateralRuntime.init`) — not via a custom operator table.

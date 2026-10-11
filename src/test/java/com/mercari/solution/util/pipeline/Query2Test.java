@@ -571,4 +571,119 @@ public class Query2Test {
             query.teardown();
         }
     }
+
+    @Test
+    public void testBuiltinDivFunction() {
+        // DIV is BigQuery's integer division; the Calcite BigQuery library does not ship it.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSql("""
+                        SELECT
+                          DIV(qty, 1000) AS d1,
+                          DIV(-7, 2) AS d2,
+                          DIV(qty, CAST(NULL AS BIGINT)) AS d3,
+                          qty / 1000 AS d4
+                        FROM INPUT
+                        """)
+                .build();
+        Assertions.assertEquals(Schema.Type.int64,
+                query.getOutputSchema().getField("d1").getFieldType().getType());
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(MElement.of(Map.of("userId", 1L, "qty", 1489L), TIMESTAMP)), TIMESTAMP);
+            final MElement output = outputs.getFirst();
+            Assertions.assertEquals(1L, output.getAsLong("d1"));
+            // truncated toward zero, as in BigQuery
+            Assertions.assertEquals(-3L, output.getAsLong("d2"));
+            Assertions.assertNull(output.getPrimitiveValue("d3"));
+            // `/` between integers is an integer division too (unlike BigQuery)
+            Assertions.assertEquals(1L, output.getAsLong("d4"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testBuiltinDivFunctionIntegerArguments() {
+        // An INTEGER argument (an int32 column, MOD / CHAR_LENGTH results) is not cast to BIGINT
+        // by Calcite: DIV must take it as it comes.
+        final Schema schema = Schema.of(List.of(
+                Schema.Field.of("qty", Schema.FieldType.INT64),
+                Schema.Field.of("n32", Schema.FieldType.INT32.withNullable(true)),
+                Schema.Field.of("name", Schema.FieldType.STRING)));
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", schema)
+                .withSql("""
+                        SELECT
+                          DIV(n32, 2) AS d1,
+                          DIV(qty, n32) AS d2,
+                          DIV(MOD(qty, 100), 10) AS d3,
+                          DIV(CHAR_LENGTH(name), 2) AS d4,
+                          DIV(qty, NULL) AS d5
+                        FROM INPUT
+                        """)
+                .build();
+        for(final String field : List.of("d1", "d2", "d3", "d4", "d5")) {
+            Assertions.assertEquals(Schema.Type.int64,
+                    query.getOutputSchema().getField(field).getFieldType().getType());
+        }
+        query.setup();
+        try {
+            final MElement output = query.execute(
+                    List.of(MElement.of(Map.of("qty", 1489L, "n32", 7, "name", "abcde"), TIMESTAMP)),
+                    TIMESTAMP).getFirst();
+            Assertions.assertEquals(3L, output.getAsLong("d1"));
+            Assertions.assertEquals(212L, output.getAsLong("d2"));
+            Assertions.assertEquals(8L, output.getAsLong("d3"));
+            Assertions.assertEquals(2L, output.getAsLong("d4"));
+            Assertions.assertNull(output.getPrimitiveValue("d5"));
+
+            // a NULL int32 argument yields NULL
+            final Map<String, Object> values = new HashMap<>();
+            values.put("qty", 1489L);
+            values.put("n32", null);
+            values.put("name", "abcde");
+            final MElement nullOutput = query.execute(
+                    List.of(MElement.of(values, TIMESTAMP)), TIMESTAMP).getFirst();
+            Assertions.assertNull(nullOutput.getPrimitiveValue("d1"));
+            Assertions.assertNull(nullOutput.getPrimitiveValue("d2"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testBuiltinDivFunctionErrors() {
+        // division by zero, the int64 overflow and a non-integer argument (which must not be
+        // truncated to an integer before dividing) are errors
+        final Map<String, String> expectedMessages = new LinkedHashMap<>();
+        expectedMessages.put("DIV(qty, 0)", "DIV: division by zero");
+        expectedMessages.put("DIV(-9223372036854775807 - userId, -1)", "DIV: int64 overflow");
+        expectedMessages.put("DIV(qty, 2.5)", "DIV divisor must be an integer");
+        expectedMessages.put("DIV(qty, 25e-1)", "DIV divisor must be an integer");
+        expectedMessages.put("DIV('10', qty)", "DIV dividend must be an integer");
+        for(final Map.Entry<String, String> entry : expectedMessages.entrySet()) {
+            final Query2 query = Query2.builder()
+                    .withInput("INPUT", inputSchema())
+                    .withSql("SELECT " + entry.getKey() + " AS d FROM INPUT")
+                    .build();
+            query.setup();
+            try {
+                final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
+                        () -> query.execute(
+                                List.of(MElement.of(Map.of("userId", 1L, "qty", 9L), TIMESTAMP)), TIMESTAMP),
+                        entry.getKey());
+                Throwable root = e;
+                while(root.getCause() != null) {
+                    root = root.getCause();
+                }
+                Assertions.assertTrue(String.valueOf(root.getMessage()).contains(entry.getValue()),
+                        entry.getKey() + ": unexpected message: " + root.getMessage());
+            } finally {
+                query.teardown();
+            }
+        }
+    }
+
 }
