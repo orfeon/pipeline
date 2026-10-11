@@ -69,38 +69,47 @@ public final class UserDefinedFunctions {
      * block evaluator must both use this table.
      */
     public static SqlOperatorTable libraryOperatorTable() {
-        final SqlOperatorTable library = SqlLibraryOperatorTableFactory.INSTANCE
-                .getOperatorTable(SqlLibrary.STANDARD, SqlLibrary.BIG_QUERY);
-        // A filtering view rather than a rebuilt table: the library table's own lookup must stay
-        // in charge (a table rebuilt from the operator list no longer resolves COUNT(*)).
-        return new SqlOperatorTable() {
-            @Override
-            public void lookupOperatorOverloads(
-                    final SqlIdentifier opName,
-                    final SqlFunctionCategory category,
-                    final SqlSyntax syntax,
-                    final List<SqlOperator> operatorList,
-                    final SqlNameMatcher nameMatcher) {
-                final List<SqlOperator> found = new ArrayList<>();
-                library.lookupOperatorOverloads(opName, category, syntax, found, nameMatcher);
-                for (final SqlOperator operator : found) {
-                    if (!ParseDateTimeFunctions.NAMES.contains(operator.getName())) {
-                        operatorList.add(operator);
-                    }
-                }
-            }
+        return LibraryOperatorTable.INSTANCE;
+    }
 
-            @Override
-            public List<SqlOperator> getOperatorList() {
-                final List<SqlOperator> operators = new ArrayList<>();
-                for (final SqlOperator operator : library.getOperatorList()) {
-                    if (!ParseDateTimeFunctions.NAMES.contains(operator.getName())) {
-                        operators.add(operator);
-                    }
+    /**
+     * A filtering view rather than a rebuilt table: the library table's own lookup must stay
+     * in charge (a table rebuilt from the operator list no longer resolves COUNT(*)).
+     * Stateless, so one instance (built on first use) serves every query.
+     */
+    private static final class LibraryOperatorTable implements SqlOperatorTable {
+
+        private static final LibraryOperatorTable INSTANCE = new LibraryOperatorTable();
+
+        private final SqlOperatorTable library = SqlLibraryOperatorTableFactory.INSTANCE
+                .getOperatorTable(SqlLibrary.STANDARD, SqlLibrary.BIG_QUERY);
+
+        @Override
+        public void lookupOperatorOverloads(
+                final SqlIdentifier opName,
+                final SqlFunctionCategory category,
+                final SqlSyntax syntax,
+                final List<SqlOperator> operatorList,
+                final SqlNameMatcher nameMatcher) {
+            final List<SqlOperator> found = new ArrayList<>();
+            library.lookupOperatorOverloads(opName, category, syntax, found, nameMatcher);
+            addNotReplaced(found, operatorList);
+        }
+
+        @Override
+        public List<SqlOperator> getOperatorList() {
+            final List<SqlOperator> operators = new ArrayList<>();
+            addNotReplaced(library.getOperatorList(), operators);
+            return operators;
+        }
+
+        private static void addNotReplaced(final List<SqlOperator> from, final List<SqlOperator> to) {
+            for (final SqlOperator operator : from) {
+                if (!ParseDateTimeFunctions.NAMES.contains(operator.getName())) {
+                    to.add(operator);
                 }
-                return operators;
             }
-        };
+        }
     }
 
     /**
