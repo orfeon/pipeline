@@ -485,6 +485,37 @@ public class Query2LateralTest {
         }
     }
 
+    @Test
+    public void testParseTimeInsideLateralBlock() {
+        // The PARSE_* built-ins replace the library functions in the per-block evaluator too
+        // (the block travels as SQL text): an unseparated time must not be misread there.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, s.latest AS latest
+                        FROM INPUT AS i
+                        JOIN LATERAL (
+                          SELECT MAX(PARSE_TIME('%H%M', CONCAT('19', CAST(e.AMOUNT AS VARCHAR)))) AS latest
+                          FROM db.EVENTS AS e
+                          WHERE e.USER_ID = i.userId
+                        ) AS s ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            // amounts 10, 20, 30 -> "1910", "1920", "1930"
+            Assertions.assertEquals(
+                    java.time.LocalTime.parse("19:30:00").toNanoOfDay() / 1000L,
+                    outputs.getFirst().getAsLong("latest"));
+        } finally {
+            query.teardown();
+        }
+    }
+
     private static Map<Long, MElement> collectByUser(final List<MElement> outputs) {
         final Map<Long, MElement> byUser = new HashMap<>();
         for (final MElement output : outputs) {

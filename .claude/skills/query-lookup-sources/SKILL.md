@@ -302,6 +302,23 @@ Query2.builder()
   int32 column or `MOD(...)` does not), it implicitly casts DECIMAL / DOUBLE /
   VARCHAR arguments to BIGINT, and a primitive parameter NPEs on a NULL
   argument.
+- **Replacing a library function** (`ParseDateTimeFunctions`: `PARSE_DATE` /
+  `PARSE_TIME` / `PARSE_DATETIME` / `PARSE_TIMESTAMP`): a built-in cannot
+  simply share a library operator's name (two candidates break overload
+  resolution), so `UserDefinedFunctions.libraryOperatorTable()` hides the
+  replaced operators and the built-in resolves through the schema under the
+  same name. Both front-ends use that table (`Query2.plan` and
+  `LookupLateralRuntime.init` — the block's SQL text carries the plain
+  function name). It is a **filtering view over the library table**, not a
+  table rebuilt from `getOperatorList()`: a rebuilt `SqlOperatorTables.of(...)`
+  no longer resolves `COUNT(*)` ("Unknown identifier '*'"). Why the PARSE_*
+  functions are replaced: Calcite (1.40 and still 1.42) maps `%H` / `%M` /
+  `%S` to one-letter `SimpleDateFormat` fields, so an unseparated `%H%M`
+  reads "1935" as hour 1 + minute 935 = 16:35 without an error — and it calls
+  `setLenient(false)` *before* `setCalendar`, which leaves the parser lenient.
+  The replacement keeps Calcite's format model (`FormatModels.BIG_QUERY`) and
+  only widens those elements; it also returns the real instant for the
+  time-zone argument (Calcite re-adds the zone offset, i.e. ignores the zone).
 - Functions are attached to the default schema via `SchemaPlus.add(name, fn)`
   in `Query2.createRootSchema` (and to the root schema in
   `LookupLateralRuntime.init`) — not via a custom operator table.

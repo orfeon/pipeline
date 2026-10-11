@@ -53,8 +53,6 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.Abs
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlLibrary;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParser;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlValidator;
@@ -871,8 +869,7 @@ public class Query2 implements Serializable {
         // the BigQuery lex) + schema-registered UDFs via the catalog reader.
         final SqlValidator validator = SqlValidatorUtil.newValidator(
                 SqlOperatorTables.chain(
-                        SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
-                                SqlLibrary.STANDARD, SqlLibrary.BIG_QUERY),
+                        UserDefinedFunctions.libraryOperatorTable(),
                         catalogReader),
                 catalogReader, typeFactory,
                 SqlValidator.Config.DEFAULT.withIdentifierExpansion(true));
