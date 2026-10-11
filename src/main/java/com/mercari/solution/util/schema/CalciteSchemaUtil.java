@@ -94,13 +94,22 @@ public class CalciteSchemaUtil {
             case REAL -> Schema.FieldType.FLOAT32;
             case FLOAT, DOUBLE -> Schema.FieldType.FLOAT64;
             case DECIMAL -> Schema.FieldType.DECIMAL;
-            case CHAR, VARCHAR -> Schema.FieldType.STRING;
+            // an untyped NULL is a string, as the metadata path makes a top-level one
+            case CHAR, VARCHAR, NULL -> Schema.FieldType.STRING;
             case DATE -> Schema.FieldType.DATE;
-            case TIME -> Schema.FieldType.TIME;
+            case TIME, TIME_WITH_LOCAL_TIME_ZONE -> Schema.FieldType.TIME;
             case TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> Schema.FieldType.TIMESTAMP;
             case BINARY, VARBINARY -> Schema.FieldType.BYTES;
-            case ARRAY, MULTISET -> Schema.FieldType.array(
-                    convertFieldType(relType.getComponentType(), path));
+            case ARRAY, MULTISET -> {
+                final SqlTypeName componentType = relType.getComponentType().getSqlTypeName();
+                if (componentType == SqlTypeName.ARRAY || componentType == SqlTypeName.MULTISET) {
+                    // the element coder (UnionMapCoder) has no list directly inside a list
+                    throw new IllegalArgumentException("Not supported array of arrays: " + relType
+                            + " of output column: " + path
+                            + " (wrap the inner array in a struct: ARRAY(SELECT x AS inner_array ...))");
+                }
+                yield Schema.FieldType.array(convertFieldType(relType.getComponentType(), path));
+            }
             case MAP -> {
                 final SqlTypeName keyType = relType.getKeyType().getSqlTypeName();
                 if (keyType != SqlTypeName.CHAR && keyType != SqlTypeName.VARCHAR) {
@@ -266,9 +275,11 @@ public class CalciteSchemaUtil {
             final Schema.FieldType fieldType,
             final RelDataTypeFactory relDataTypeFactory) {
         final RelDataType relDataType = switch (fieldType.getType()) {
+            // The value type is built recursively: createSqlType(ARRAY / ROW / MAP) is a type
+            // without a component, fields or a key (an assertion error where assertions are on).
             case map -> relDataTypeFactory.createMapType(
                         relDataTypeFactory.createSqlType(SqlTypeName.VARCHAR),
-                        relDataTypeFactory.createSqlType(convertSqlTypeName(fieldType.getMapValueType())));
+                        createRelDataType(fieldType.getMapValueType(), relDataTypeFactory));
             case array -> relDataTypeFactory.createArrayType(
                         createRelDataType(fieldType.getArrayValueType(), relDataTypeFactory), -1L);
             // A matrix field surfaces as a flat ARRAY (row-major; the shape lives in the schema).

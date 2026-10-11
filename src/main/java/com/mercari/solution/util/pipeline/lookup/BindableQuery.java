@@ -64,6 +64,8 @@ public final class BindableQuery {
 
     private final Bindable<?> bindable;
     private final RelDataType rowType;
+    // see toArray: how many one-field ROWs a single-column result nests
+    private final int singleFieldRowDepth;
     private final RelNode physicalPlan;
     private final SchemaPlus rootSchema;
     private final JavaTypeFactory typeFactory;
@@ -77,6 +79,7 @@ public final class BindableQuery {
             JavaTypeFactory typeFactory, Map<String, Object> internalParameters) {
         this.bindable = bindable;
         this.rowType = physicalPlan.getRowType();
+        this.singleFieldRowDepth = singleFieldRowDepth(this.rowType);
         this.physicalPlan = physicalPlan;
         this.rootSchema = rootSchema;
         this.typeFactory = typeFactory;
@@ -177,24 +180,53 @@ public final class BindableQuery {
                         "query guard: evaluation produced more than maxRows=" + maxRows
                                 + " result rows");
             }
-            rows.add(toArray(row, fieldCount));
+            rows.add(toArray(row, fieldCount, singleFieldRowDepth));
         }
         return rows;
     }
 
     // The enumerable's row format for a single-column result may be the bare
     // value or a one-element array depending on the chosen PhysType; normalize
-    // to an array. (A single column of ROW type whose struct has exactly one
-    // field is ambiguous here; such results are not produced by this engine's
-    // supported output shapes.)
-    private static Object[] toArray(final Object row, final int fieldCount) {
+    // to an array. A single column that is a one-field ROW (a struct output
+    // column) is itself a one-element array, so the two forms are told apart
+    // by depth: the bare value nests as many one-element arrays as the column
+    // type nests one-field ROWs, the wrapped row one more. (A NULL inside
+    // cuts the nesting short, so a wrapped row whose struct is NULL reads as
+    // a struct with a NULL field; the bare form — any plan with a calc on
+    // top — is exact.)
+    private static Object[] toArray(final Object row, final int fieldCount,
+            final int singleFieldRowDepth) {
         if (fieldCount == 1) {
-            if (row instanceof Object[] array && array.length == 1) {
+            if (row instanceof Object[] array && array.length == 1
+                    && oneElementArrayDepth(array) > singleFieldRowDepth) {
                 return array;
             }
             return new Object[]{row};
         }
         return (Object[]) row;
+    }
+
+    private static int oneElementArrayDepth(Object value) {
+        int depth = 0;
+        while (value instanceof Object[] array && array.length == 1) {
+            depth++;
+            value = array[0];
+        }
+        return depth;
+    }
+
+    /** The one-field ROWs a single-column row type nests at its top (0 when it is not a struct). */
+    private static int singleFieldRowDepth(final RelDataType rowType) {
+        if (rowType.getFieldCount() != 1) {
+            return 0;
+        }
+        int depth = 0;
+        RelDataType type = rowType.getFieldList().get(0).getType();
+        while (type.isStruct() && type.getFieldCount() == 1) {
+            depth++;
+            type = type.getFieldList().get(0).getType();
+        }
+        return depth;
     }
 
     /**
