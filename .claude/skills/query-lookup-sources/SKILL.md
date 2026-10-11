@@ -361,6 +361,22 @@ Query2.builder()
   `java.sql.Array`s — `CalciteValues.asList/toInternalList` converts them
   back to internal `List`s (both in the lateral runtime and the outer
   result conversion).
+- **Output schema = JDBC metadata + the planned row type.**
+  `Query2.deriveOutputSchemas` prepares the statement and reads
+  `ResultSetMetaData`, which has no shape for a struct (a ROW column is a
+  bare `STRUCT`, an array of ROWs only a type name). Columns that
+  `CalciteSchemaUtil.isNested` (ROW, MAP, array of non-scalars) are derived
+  from `planned.relNode().getRowType()` instead, and
+  `CalciteValues.convertInternalRows` converts their values by the same
+  predicate over the physical row type (ROW `Object[]` → field-name keyed
+  `Map`, scalars inside as top-level ones). Scalar columns and arrays of
+  scalars deliberately stay on the metadata path (`ARRAY<ANY>` results of
+  `ARRAY_COMPACT` etc. included). Keep the two sides in step: a type added
+  to one must be added to the other. Nested ROW fields named `EXPR$n` are
+  rejected at construction; a multi-column `ARRAY(SELECT a AS x, b AS y …)`
+  yields named fields, `STRUCT(a AS x)` / `SELECT AS STRUCT` do not parse.
+  Input struct columns are `StructKind.PEEK_FIELDS`, so `i.*` expands a
+  top-level struct column into its fields.
 - **`float32` → `FLOAT` (double)**: `CalciteSchemaUtil.convertSchema` maps
   float32 to Calcite `FLOAT`, which is 8-byte. Any source returning `Float`
   where the schema says float32 will CCE in generated code — widen to `Double`

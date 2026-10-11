@@ -569,7 +569,8 @@ public class Query2 implements Serializable {
             forEachStatement(buffers, runtimes, (index, statement, planned, rootSchema, intermediate) -> {
                 if (statement.output() || statement.kind() != Statement.Kind.QUERY) {
                     try (final PreparedStatement s = prepare(planned)) {
-                        schemas.put(index, CalciteSchemaUtil.convertSchema(s.getMetaData()));
+                        schemas.put(index, CalciteSchemaUtil.convertSchema(
+                                s.getMetaData(), planned.relNode().getRowType()));
                     }
                 }
             });
