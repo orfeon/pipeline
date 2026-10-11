@@ -684,6 +684,18 @@ public class ProfileTransformTest {
                 "\"bins\": { \"edges\": { \"category\": [1] } }", "must be numeric",
                 "\"drift\": { \"axis\": \"segments:category\" }", "parameters.drift.axis must be one of the declared axes",
                 "\"segmentz\": [\"category\"]", "unknown parameter: parameters.segmentz"));
+        cases.putAll(Map.of(
+                // declared in the design, not built: said so rather than left to the JSON parser
+                "\"keys\": [{ \"fields\": [\"id\", \"category\"], \"unique\": true }]", "parameters.keys object form",
+                // a name the schema does not have is a typo, also next to a name it has
+                "\"drift\": { \"exclude\": [\"prise\"] }", "parameters.drift.exclude field not found in input schema: prise",
+                "\"fields\": { \"include\": [\"price\", \"prise\"] }", "parameters.fields.include field not found in input schema: prise",
+                "\"fields\": { \"exclude\": [\"prise\"] }", "parameters.fields.exclude field not found in input schema: prise",
+                // the schema has the field: the filter is what removed it
+                "\"fields\": { \"exclude\": [\"category\"] }, \"segments\": [\"category\"]",
+                "parameters.segments field is in the input schema but not profiled (excluded by parameters.fields.exclude): category",
+                "\"fields\": { \"exclude\": [\"id\"] }, \"keys\": [\"id\"]",
+                "parameters.keys field is in the input schema but not profiled"));
         for(final Map.Entry<String, String> entry : cases.entrySet()) {
             final String configJson = """
                     {
@@ -707,6 +719,21 @@ public class ProfileTransformTest {
         } catch (final java.io.IOException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    @Test
+    public void testDuplicateModuleName() {
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "transforms": [
+                    { "name": "before", "module": "profile", "inputs": ["before"] }
+                  ]
+                }
+                """.formatted(sampleSource("before", 1, 5, 0));
+        final TestPipeline rejected = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Throwable error = Assertions.assertThrows(Throwable.class, () -> MPipeline.apply(rejected, load(configJson)));
+        Assertions.assertTrue(messages(error).contains("declared more than once: `before` (source, transform)"), messages(error));
     }
 
     private static String messages(final Throwable error) {

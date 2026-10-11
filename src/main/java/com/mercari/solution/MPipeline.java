@@ -182,6 +182,7 @@ public class MPipeline {
 
         final Map<String, MCollection> outputs = new HashMap<>();
         final Set<String> executedModuleNames = new HashSet<>();
+        checkModuleNames(config);
         final Set<String> moduleNames = moduleNames(config);
         final Set<String> controlOutputModuleNames = controlOutputModuleNames(config);
 
@@ -527,6 +528,37 @@ public class MPipeline {
             return object;
         }
         return json;
+    }
+
+    /**
+     * A name identifies one module: outputs are registered and referenced by it. Two modules of one name
+     * used to surface as "No input for modules" (or as a module silently not built).
+     */
+    private static void checkModuleNames(final Config config) {
+        final Map<String, List<String>> kindsOfName = new java.util.LinkedHashMap<>();
+        final Map<String, List<? extends com.mercari.solution.config.ModuleConfig>> modulesOfKind = new java.util.LinkedHashMap<>();
+        modulesOfKind.put("source", config.getSources());
+        modulesOfKind.put("transform", config.getTransforms());
+        modulesOfKind.put("sink", config.getSinks());
+        modulesOfKind.put("action", config.getActions());
+        for(final Map.Entry<String, List<? extends com.mercari.solution.config.ModuleConfig>> entry : modulesOfKind.entrySet()) {
+            for(final com.mercari.solution.config.ModuleConfig module : entry.getValue()) {
+                if(module == null || module.getName() == null || Boolean.TRUE.equals(module.getIgnore())) {
+                    continue;
+                }
+                kindsOfName.computeIfAbsent(module.getName(), k -> new ArrayList<>()).add(entry.getKey());
+            }
+        }
+        final List<String> duplicates = new ArrayList<>();
+        for(final Map.Entry<String, List<String>> entry : kindsOfName.entrySet()) {
+            if(entry.getValue().size() > 1) {
+                duplicates.add("`" + entry.getKey() + "` (" + String.join(", ", entry.getValue()) + ")");
+            }
+        }
+        if(!duplicates.isEmpty()) {
+            throw new IllegalModuleException("", "pipeline", "Module names must be unique across sources, transforms, sinks and actions; declared more than once: "
+                    + String.join(", ", duplicates));
+        }
     }
 
     private static Set<String> moduleNames(final Config config) {
