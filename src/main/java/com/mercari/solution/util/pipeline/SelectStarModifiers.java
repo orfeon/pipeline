@@ -11,13 +11,17 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlP
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParser;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.util.SqlBasicVisitor;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.util.SqlShuttle;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlValidator;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -28,12 +32,14 @@ import java.util.function.Supplier;
  * <ol>
  *   <li>{@link #extract} cuts the modifiers out of the SQL text, blanking them with spaces so
  *       that every other token keeps its line and column;</li>
- *   <li>a scratch parse + validation of that text tells what each star expands to (the
- *       validator replaces a star by its columns, which carry the star's position);</li>
+ *   <li>a scratch parse + validation of that text tells what the stars of a select list expand
+ *       to (the validator replaces a select list by its expanded items);</li>
  *   <li>in a fresh parse, each modified star is replaced by those columns — without the
  *       excepted ones, and with the replaced ones swapped for their expression.</li>
  * </ol>
- * The result is an ordinary statement for the rest of the front-end.
+ * Steps 2 and 3 are repeated, one select list at a time and in the order the validator goes
+ * through them: a star over a subquery that has modifiers of its own must be expanded from
+ * the rewritten subquery. The result is an ordinary statement for the rest of the front-end.
  */
 final class SelectStarModifiers {
 
@@ -44,8 +50,11 @@ final class SelectStarModifiers {
     record Replace(String name, int start, int end) {
     }
 
-    /** The modifiers of one star, which is at {@code line}:{@code column} (1-based, as the parser counts). */
-    record Modifier(int line, int column, List<String> except, List<Replace> replaces) {
+    /**
+     * The modifiers of one star, which is at {@code line}:{@code column} (1-based, as the parser
+     * counts). They are the {@code [start, end)} range of the original SQL.
+     */
+    record Modifier(int line, int column, int start, int end, List<String> except, List<Replace> replaces) {
 
         String describe() {
             return "star at line " + line + ", column " + column;
@@ -75,7 +84,7 @@ final class SelectStarModifiers {
         }
 
         String name() {
-            return kind == Kind.QUOTED ? text.substring(1, text.length() - 1) : text;
+            return kind == Kind.QUOTED ? text.substring(1, text.length() - 1).replace("\\`", "`") : text;
         }
     }
 
@@ -102,9 +111,13 @@ final class SelectStarModifiers {
                 continue;
             }
             final Token star = tokens.get(t);
-            modifiers.add(new Modifier(star.line(), star.column(), List.copyOf(except), List.copyOf(replaces)));
-            blank(blanked, tokens.get(t + 1).start(), tokens.get(next - 1).end());
-            t = next - 1;
+            final Modifier modifier = new Modifier(star.line(), star.column(),
+                    tokens.get(t + 1).start(), tokens.get(next - 1).end(),
+                    List.copyOf(except), List.copyOf(replaces));
+            modifiers.add(modifier);
+            blank(blanked, modifier.start(), modifier.end());
+            // The scan goes on inside the modifiers: a replacement expression can have a
+            // subquery with a modified star of its own.
         }
         return new Extracted(sql, blanked.toString(), List.copyOf(modifiers));
     }
@@ -215,7 +228,8 @@ final class SelectStarModifiers {
             if (Character.isWhitespace(c)) {
                 i++;
                 continue;
-            } else if (c == '-' && i + 1 < length && sql.charAt(i + 1) == '-') {
+            } else if ((c == '-' || c == '/') && i + 1 < length && sql.charAt(i + 1) == c) {
+                // a line comment: -- or //
                 while (i < length && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
                     i++;
                 }
@@ -224,17 +238,14 @@ final class SelectStarModifiers {
                 final int close = sql.indexOf("*/", i + 2);
                 i = close < 0 ? length : close + 2;
                 continue;
-            } else if (c == '\'' || c == '"') {
+            } else if (c == '\'' || c == '"' || c == '`') {
+                // a string literal or a quoted identifier: a backslash escapes the quote
                 i++;
                 while (i < length && sql.charAt(i) != c) {
                     i += sql.charAt(i) == '\\' ? 2 : 1;
                 }
                 i = Math.min(i + 1, length);
-                kind = Kind.STRING;
-            } else if (c == '`') {
-                final int close = sql.indexOf('`', i + 1);
-                i = close < 0 ? length : close + 1;
-                kind = Kind.QUOTED;
+                kind = c == '`' ? Kind.QUOTED : Kind.STRING;
             } else if (Character.isLetter(c) || c == '_') {
                 while (i < length && isWordPart(sql.charAt(i))) {
                     i++;
@@ -260,10 +271,37 @@ final class SelectStarModifiers {
 
     // ---- rewrite (syntax tree) ----
 
+    /** A select item that takes the place of a modified star, made anew for each tree. */
+    @FunctionalInterface
+    private interface Column {
+        SqlNode item(SqlParserPos pos) throws SqlParseException;
+    }
+
+    /** The select items that take the place of a modified star. */
+    private record Rewrite(Modifier modifier, List<Column> columns) {
+
+        List<SqlNode> items(final SqlParserPos pos) {
+            final List<SqlNode> items = new ArrayList<>();
+            try {
+                for (final Column column : columns) {
+                    items.add(column.item(pos));
+                }
+            } catch (final SqlParseException e) {
+                throw new IllegalArgumentException("SELECT * REPLACE: failed to parse an expression"
+                        + " of the " + modifier.describe() + ": " + e.getMessage(), e);
+            }
+            return items;
+        }
+    }
+
+    /** A select list to expand: the position of each of its modified stars, and the modifiers. */
+    private record Target(SqlSelect select, Map<SqlParserPos, Modifier> modifiers) {
+    }
+
     /**
      * Parses the statement with every modified star replaced by its explicit column list.
      *
-     * @param scratchValidator a validator used for this call only: validating is what expands
+     * @param scratchValidator validators used for this call only: validating is what expands
      *                         the stars, and it leaves state behind in the validator
      */
     static SqlNode parse(
@@ -271,19 +309,39 @@ final class SelectStarModifiers {
             final SqlParser.Config parserConfig,
             final Supplier<SqlValidator> scratchValidator) throws SqlParseException {
 
-        final SqlNode parsed = SqlParser.create(extracted.sql(), parserConfig).parseStmt();
-        if (extracted.modifiers().isEmpty()) {
-            return parsed;
+        final List<Modifier> pending = new ArrayList<>(extracted.modifiers());
+        final Map<SqlParserPos, Rewrite> rewrites = new HashMap<>();
+        while (true) {
+            // a fresh tree each time: a validation changes the one it is given
+            final SqlNode statement = SqlParser.create(extracted.sql(), parserConfig).parseStmt();
+            if (extracted.modifiers().isEmpty()) {
+                return statement;
+            }
+            rewrite(statement, rewrites);
+            final Target target = next(statement, pending);
+            if (target == null) {
+                if (!pending.isEmpty()) {
+                    // the lexical scan took something else for a modifier
+                    throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: the "
+                            + pending.getFirst().describe() + " is not a select item");
+                }
+                return statement;
+            }
+            rewrites.putAll(expand(target, statement, scratchValidator.get(), extracted, parserConfig));
+            pending.removeAll(target.modifiers().values());
         }
+    }
 
-        // 1. what each modified star expands to
-        final Map<SqlParserPos, Modifier> modifiers = locate(parsed, extracted.modifiers());
-        final SqlNode validated = scratchValidator.get().validate(parsed);
-        final Map<SqlParserPos, List<SqlNode>> expansions = expansions(validated, modifiers);
+    private static boolean isStar(final SqlNode node) {
+        return node instanceof SqlIdentifier identifier && identifier.isStar();
+    }
 
-        // 2. a fresh tree with the stars replaced
-        final SqlNode rewritten = SqlParser.create(extracted.sql(), parserConfig).parseStmt();
-        rewritten.accept(new SqlBasicVisitor<Void>() {
+    /** Replaces the stars whose columns are known. */
+    private static void rewrite(final SqlNode statement, final Map<SqlParserPos, Rewrite> rewrites) {
+        if (rewrites.isEmpty()) {
+            return;
+        }
+        statement.accept(new SqlBasicVisitor<Void>() {
             @Override
             public Void visit(final SqlCall call) {
                 if (call instanceof SqlSelect select) {
@@ -291,140 +349,220 @@ final class SelectStarModifiers {
                     final List<SqlNode> items = new ArrayList<>();
                     boolean changed = false;
                     for (final SqlNode item : selectList) {
-                        final Modifier modifier = modifiers.get(item.getParserPosition());
-                        if (modifier == null || !isStar(item)) {
+                        final Rewrite rewrite = isStar(item) ? rewrites.get(item.getParserPosition()) : null;
+                        if (rewrite == null) {
                             items.add(item);
                             continue;
                         }
-                        final List<SqlNode> expansion = expansions.get(item.getParserPosition());
-                        if (expansion == null) {
-                            throw new IllegalArgumentException(
-                                    "SELECT * EXCEPT / REPLACE: could not expand the " + modifier.describe());
-                        }
-                        try {
-                            items.addAll(columns((SqlIdentifier) item, modifier, expansion, extracted, parserConfig));
-                        } catch (final SqlParseException e) {
-                            throw new IllegalArgumentException("SELECT * REPLACE: failed to parse an expression"
-                                    + " of the " + modifier.describe() + ": " + e.getMessage(), e);
-                        }
+                        items.addAll(rewrite.items(item.getParserPosition()));
                         changed = true;
                     }
                     if (changed) {
                         select.setSelectList(new SqlNodeList(items, selectList.getParserPosition()));
                     }
                 }
+                // goes on into the new items: a replacement expression can have a modified star
                 return super.visit(call);
             }
         });
-        return rewritten;
     }
 
-    private static boolean isStar(final SqlNode node) {
-        return node instanceof SqlIdentifier identifier && identifier.isStar();
-    }
-
-    /** The parser position of each modified star: the star token ends the (possibly qualified) identifier. */
-    private static Map<SqlParserPos, Modifier> locate(final SqlNode parsed, final List<Modifier> modifiers) {
-        final Map<SqlParserPos, Modifier> located = new HashMap<>();
-        parsed.accept(new SqlBasicVisitor<Void>() {
+    /**
+     * The first select list with stars whose modifiers are pending, in the order the validator
+     * expands the select lists: by then, the select lists such a star depends on (a subquery
+     * of its FROM clause, a common table expression) have been rewritten, and no other pending
+     * star has been validated without its modifiers. The star token ends the (possibly
+     * qualified) star identifier.
+     */
+    private static Target next(final SqlNode statement, final List<Modifier> pending) {
+        final Target[] found = new Target[1];
+        statement.accept(new SqlBasicVisitor<Void>() {
             @Override
             public Void visit(final SqlCall call) {
-                if (call instanceof SqlSelect select) {
+                if (found[0] != null) {
+                    return null;
+                }
+                if (!(call instanceof SqlSelect select)) {
+                    return super.visit(call);
+                }
+                descend(select.getFrom(), select.getWhere(), select.getGroup(), select.getWindowList(),
+                        select.getQualify(), select.getSelectList());
+                if (found[0] == null) {
+                    final Map<SqlParserPos, Modifier> modifiers = new LinkedHashMap<>();
                     for (final SqlNode item : select.getSelectList()) {
                         if (!isStar(item)) {
                             continue;
                         }
                         final SqlParserPos pos = item.getParserPosition();
-                        for (final Modifier modifier : modifiers) {
+                        for (final Modifier modifier : pending) {
                             if (modifier.line() == pos.getEndLineNum() && modifier.column() == pos.getEndColumnNum()) {
-                                located.put(pos, modifier);
+                                modifiers.put(pos, modifier);
                             }
                         }
                     }
+                    if (!modifiers.isEmpty()) {
+                        found[0] = new Target(select, modifiers);
+                    }
                 }
-                return super.visit(call);
+                descend(select.getHaving(), select.getOrderList(), select.getOffset(), select.getFetch());
+                return null;
+            }
+
+            private void descend(final SqlNode... nodes) {
+                for (final SqlNode node : nodes) {
+                    if (node != null && found[0] == null) {
+                        node.accept(this);
+                    }
+                }
             }
         });
-        for (final Modifier modifier : modifiers) {
-            if (!located.containsValue(modifier)) {
-                // the lexical scan took something else for a modifier
-                throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: the " + modifier.describe()
-                        + " is not a select item");
-            }
-        }
-        return located;
+        return found[0];
     }
 
     /**
-     * The select items each modified star was expanded to by the validator. An expanded item
-     * carries the position of its star; the fields of an expanded struct column may carry none,
-     * and then follow the item they belong to.
+     * What takes the place of each modified star of a select list. Validating the statement
+     * replaces the select list by its expanded items: one for an item, its columns for a star.
      */
-    private static Map<SqlParserPos, List<SqlNode>> expansions(
-            final SqlNode validated, final Map<SqlParserPos, Modifier> modifiers) {
-        final Map<SqlParserPos, List<SqlNode>> expansions = new HashMap<>();
-        validated.accept(new SqlBasicVisitor<Void>() {
-            @Override
-            public Void visit(final SqlCall call) {
-                if (call instanceof SqlSelect select) {
-                    List<SqlNode> current = null;
-                    for (final SqlNode item : select.getSelectList()) {
-                        final SqlParserPos pos = item.getParserPosition();
-                        if (modifiers.containsKey(pos)) {
-                            current = expansions.computeIfAbsent(pos, p -> new ArrayList<>());
-                            current.add(item);
-                        } else if (current != null && pos.getLineNum() == 0) {
-                            current.add(item);
-                        } else {
-                            current = null;
-                        }
-                    }
-                }
-                return super.visit(call);
+    private static Map<SqlParserPos, Rewrite> expand(
+            final Target target,
+            final SqlNode statement,
+            final SqlValidator validator,
+            final Extracted extracted,
+            final SqlParser.Config parserConfig) {
+
+        final SqlSelect select = target.select();
+        final SqlNodeList parsedList = select.getSelectList();
+        final List<SqlNode> parsed = new ArrayList<>(parsedList);
+        RuntimeException failure = null;
+        try {
+            validator.validate(statement);
+        } catch (final RuntimeException e) {
+            failure = e;
+        }
+        final SqlNodeList expandedList = select.getSelectList();
+        final String star = target.modifiers().values().iterator().next().describe();
+        if (expandedList == parsedList) {
+            // the validation did not get as far as this select list
+            if (failure != null) {
+                throw failure;
             }
-        });
-        return expansions;
+            throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: could not expand the " + star);
+        }
+        // A failure after the select list was expanded is left to the validation of the rewritten
+        // statement: it may be the star without its modifiers that does not validate (a column
+        // that is not grouped, the column count of a UNION, of an IN subquery ...).
+        final List<SqlNode> expanded = new ArrayList<>(expandedList);
+        final int[] counts = counts(parsed, expanded);
+        if (counts == null) {
+            throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: could not expand the " + star);
+        }
+
+        final Map<SqlParserPos, Rewrite> rewrites = new HashMap<>();
+        int offset = 0;
+        for (int i = 0; i < parsed.size(); i++) {
+            final SqlNode item = parsed.get(i);
+            final Modifier modifier = isStar(item) ? target.modifiers().get(item.getParserPosition()) : null;
+            if (modifier != null) {
+                rewrites.put(item.getParserPosition(), new Rewrite(modifier, columns((SqlIdentifier) item,
+                        modifier, expanded.subList(offset, offset + counts[i]), extracted, parserConfig)));
+            }
+            offset += counts[i];
+        }
+        return rewrites;
+    }
+
+    /**
+     * How many expanded items each item of a select list stands for, or null when they do not
+     * add up. An item that is not a star is one item. The columns of a qualified star carry
+     * its position. Those of a bare star do not all (the fields of a struct column and the
+     * keys of a NATURAL / USING join have none): they are what is left.
+     */
+    private static int[] counts(final List<SqlNode> parsed, final List<SqlNode> expanded) {
+        final int[] counts = new int[parsed.size()];
+        int bare = 0;
+        int rest = expanded.size();
+        for (int i = 0; i < parsed.size(); i++) {
+            final SqlNode item = parsed.get(i);
+            if (!isStar(item)) {
+                counts[i] = 1;
+            } else if (((SqlIdentifier) item).names.size() > 1) {
+                final SqlParserPos pos = item.getParserPosition();
+                counts[i] = (int) expanded.stream().filter(e -> pos.equals(e.getParserPosition())).count();
+                if (counts[i] == 0) {
+                    return null;
+                }
+            } else {
+                counts[i] = -1;
+                bare++;
+            }
+            rest -= Math.max(counts[i], 0);
+        }
+        if (bare == 0) {
+            return rest == 0 ? counts : null;
+        }
+        if (rest < bare || rest % bare != 0) {
+            return null;
+        }
+        for (int i = 0; i < counts.length; i++) {
+            if (counts[i] < 0) {
+                counts[i] = rest / bare;
+            }
+        }
+        return counts;
     }
 
     /** The explicit select items that replace a modified star. */
-    private static List<SqlNode> columns(
+    private static List<Column> columns(
             final SqlIdentifier star,
             final Modifier modifier,
             final List<SqlNode> expansion,
             final Extracted extracted,
-            final SqlParser.Config parserConfig) throws SqlParseException {
+            final SqlParser.Config parserConfig) {
 
-        final SqlParserPos pos = star.getParserPosition();
         final int qualifiers = star.names.size() - 1;
 
-        // an expanded item is alias.column, or alias.column.field... for a struct column that the
-        // star expands into its fields
-        final List<SqlIdentifier> identifiers = new ArrayList<>();
+        // An expanded item is alias.column, or alias.column.field... for a struct column that the
+        // star expands into its fields. The key of a NATURAL / USING join is an expression AS key.
+        final List<Column> kept = new ArrayList<>();
         final List<String> columnNames = new ArrayList<>();
         final List<String> leafNames = new ArrayList<>();
         for (final SqlNode item : expansion) {
-            final SqlNode node = item.getKind() == SqlKind.AS ? ((SqlCall) item).operand(0) : item;
-            if (!(node instanceof SqlIdentifier identifier)) {
+            SqlNode node = item.getKind() == SqlKind.AS ? ((SqlCall) item).operand(0) : item;
+            while (node.getKind() == SqlKind.CAST) {
+                // a type coercion of the validator (the columns of a UNION): made again on the
+                // rewritten statement
+                node = ((SqlCall) node).operand(0);
+            }
+            if (node instanceof SqlIdentifier identifier) {
+                final List<String> names = identifier.names;
+                columnNames.add(names.get(Math.min(Math.max(qualifiers, 1), names.size() - 1)));
+                leafNames.add(names.getLast());
+                final List<String> resolvable = resolvable(names, qualifiers);
+                kept.add(pos -> new SqlIdentifier(resolvable, pos));
+            } else if (item.getKind() == SqlKind.AS && ((SqlCall) item).operand(1) instanceof SqlIdentifier alias) {
+                columnNames.add(alias.getSimple());
+                leafNames.add(alias.getSimple());
+                kept.add(pos -> copy(item));
+            } else {
                 throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: unexpected expansion "
                         + item + " of the " + modifier.describe());
             }
-            final List<String> names = identifier.names;
-            identifiers.add(identifier);
-            columnNames.add(names.get(Math.min(Math.max(qualifiers, 1), names.size() - 1)));
-            leafNames.add(names.getLast());
         }
 
-        // item index -> what to do with it (null: keep)
-        final Map<Integer, Replace> replaced = new LinkedHashMap<>();
-        final Map<Integer, Boolean> excepted = new HashMap<>();
+        // item index -> what to do with it (neither: keep)
+        final Set<Integer> excepted = new HashSet<>();
+        final Map<Integer, Replace> replaced = new HashMap<>();
         for (final String name : modifier.except()) {
             for (final int index : match(name, "EXCEPT", columnNames, leafNames, modifier)) {
-                excepted.put(index, true);
+                if (!excepted.add(index)) {
+                    throw new IllegalArgumentException("SELECT * EXCEPT: column " + name
+                            + " is given more than once in the modifiers of the " + modifier.describe());
+                }
             }
         }
         for (final Replace replace : modifier.replaces()) {
             for (final int index : match(replace.name(), "REPLACE", columnNames, leafNames, modifier)) {
-                if (excepted.containsKey(index) || replaced.containsKey(index)) {
+                if (excepted.contains(index) || replaced.containsKey(index)) {
                     throw new IllegalArgumentException("SELECT * REPLACE: column " + replace.name()
                             + " is given more than once in the modifiers of the " + modifier.describe());
                 }
@@ -432,20 +570,19 @@ final class SelectStarModifiers {
             }
         }
 
-        final List<SqlNode> columns = new ArrayList<>();
-        final List<Replace> emitted = new ArrayList<>();
-        for (int i = 0; i < identifiers.size(); i++) {
-            if (excepted.containsKey(i)) {
+        final List<Column> columns = new ArrayList<>();
+        final Set<Replace> emitted = new HashSet<>();
+        for (int i = 0; i < kept.size(); i++) {
+            if (excepted.contains(i)) {
                 continue;
             }
             final Replace replace = replaced.get(i);
             if (replace == null) {
-                columns.add(resolvable(identifiers.get(i), qualifiers, pos));
-            } else if (!emitted.contains(replace)) {
+                columns.add(kept.get(i));
+            } else if (emitted.add(replace)) {
                 // a struct column expanded into several fields is replaced as a whole
-                emitted.add(replace);
-                columns.add(SqlStdOperatorTable.AS.createCall(pos,
-                        parseExpression(extracted.original(), replace, parserConfig),
+                columns.add(pos -> SqlStdOperatorTable.AS.createCall(pos,
+                        parseExpression(extracted, replace, parserConfig),
                         new SqlIdentifier(replace.name(), pos)));
             }
         }
@@ -475,27 +612,51 @@ final class SelectStarModifiers {
         }
         throw new IllegalArgumentException("SELECT * " + keyword + ": column " + name
                 + " is not a column of the " + modifier.describe() + " (columns: "
-                + String.join(", ", leafNames) + ")");
+                + String.join(", ", new LinkedHashSet<>(columnNames)) + ")");
     }
 
     /**
-     * The expanded identifier as it can be written in the statement. A bare star over an
-     * unaliased subquery expands to columns qualified by a generated alias, which the statement
-     * does not have.
+     * The names of an expanded identifier as they can be written in the statement. A bare star
+     * over an unaliased subquery expands to columns qualified by a generated alias, which the
+     * statement does not have.
      */
-    private static SqlIdentifier resolvable(final SqlIdentifier identifier, final int qualifiers, final SqlParserPos pos) {
-        final List<String> names = identifier.names;
+    private static List<String> resolvable(final List<String> names, final int qualifiers) {
         if (qualifiers == 0 && names.size() > 1 && names.getFirst().startsWith("EXPR$")) {
-            return new SqlIdentifier(names.subList(1, names.size()), pos);
+            return List.copyOf(names.subList(1, names.size()));
         }
-        return new SqlIdentifier(names, pos);
+        return List.copyOf(names);
     }
 
-    /** Parses a replacement expression where it stands in the SQL, so its positions are the original ones. */
+    /** A copy that shares no node with the validated tree it is taken from. */
+    private static SqlNode copy(final SqlNode node) {
+        return node.accept(new SqlShuttle() {
+            @Override
+            public SqlNode visit(final SqlIdentifier id) {
+                return new SqlIdentifier(id.names, id.getParserPosition());
+            }
+
+            @Override
+            public SqlNode visit(final SqlCall call) {
+                final CallCopyingArgHandler handler = new CallCopyingArgHandler(call, true);
+                call.getOperator().acceptCall(this, call, false, handler);
+                return handler.result();
+            }
+        });
+    }
+
+    /**
+     * Parses a replacement expression where it stands in the SQL, so its positions are the
+     * original ones. The modifiers inside it are blanked out, as they are in the statement.
+     */
     private static SqlNode parseExpression(
-            final String sql, final Replace replace, final SqlParser.Config parserConfig) throws SqlParseException {
-        final StringBuilder text = new StringBuilder(sql.substring(0, replace.end()));
+            final Extracted extracted, final Replace replace, final SqlParser.Config parserConfig) throws SqlParseException {
+        final StringBuilder text = new StringBuilder(extracted.original().substring(0, replace.end()));
         blank(text, 0, replace.start());
+        for (final Modifier nested : extracted.modifiers()) {
+            if (nested.start() >= replace.start() && nested.end() <= replace.end()) {
+                blank(text, nested.start(), nested.end());
+            }
+        }
         return SqlParser.create(text.toString(), parserConfig).parseExpression();
     }
 
