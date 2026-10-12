@@ -76,6 +76,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Executes Calcite SQL over bounded, in-memory {@link MElement} lists,
@@ -868,18 +869,22 @@ public class Query2 implements Serializable {
 
         // Standard operators + the BigQuery library (ARRAY_AGG etc. — matching
         // the BigQuery lex) + schema-registered UDFs via the catalog reader.
-        final SqlValidator validator = SqlValidatorUtil.newValidator(
+        final Supplier<SqlValidator> validators = () -> SqlValidatorUtil.newValidator(
                 SqlOperatorTables.chain(
                         UserDefinedFunctions.libraryOperatorTable(),
                         catalogReader),
                 catalogReader, typeFactory,
                 SqlValidator.Config.DEFAULT.withIdentifierExpansion(true));
+        final SqlValidator validator = validators.get();
 
         final SqlParser.Config parserConfig = SqlParser.configBuilder()
                 .setCaseSensitive(false)
                 .setLex(Lex.BIG_QUERY)
                 .build();
-        final SqlNode parsed = SqlParser.create(sql, parserConfig).parseStmt();
+        // SELECT * EXCEPT(...) / REPLACE(...) are not in the parser: such a star is
+        // replaced by its explicit column list here.
+        final SqlNode parsed = SelectStarModifiers.parse(
+                SelectStarModifiers.extract(sql), parserConfig, validators);
         final SqlNode validated = validator.validate(parsed);
 
         final VolcanoPlanner volcano = new VolcanoPlanner();

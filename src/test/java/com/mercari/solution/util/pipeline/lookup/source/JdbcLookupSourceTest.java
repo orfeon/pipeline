@@ -117,6 +117,33 @@ public class JdbcLookupSourceTest {
     }
 
     @Test
+    public void testStarExceptOverLookupTable() {
+        // SELECT * EXCEPT is an explicit column list by the time the join is planned: it stays
+        // a key-driven lookup.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("USERS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, u.* EXCEPT(USER_ID, EMAIL) REPLACE(UPPER(u.NAME) AS NAME)
+                        FROM INPUT AS i
+                        JOIN db.USERS AS u ON u.USER_ID = i.userId
+                        """)
+                .build();
+        Assertions.assertEquals(List.of("userId", "NAME", "SCORE"),
+                query.getOutputSchema().getFields().stream().map(f -> f.getName()).toList());
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, "-"), input(99L, 0L, "-")), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals("ALICE", outputs.getFirst().getAsString("NAME"));
+            Assertions.assertEquals(1.5d, outputs.getFirst().getAsDouble("SCORE"), 1e-9);
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testLeftJoinKeepsUnmatched() {
         final Query2 query = Query2.builder()
                 .withInput("INPUT", inputSchema())

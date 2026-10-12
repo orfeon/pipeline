@@ -362,6 +362,24 @@ Query2.builder()
   `java.sql.Array`s — `CalciteValues.asList/toInternalList` converts them
   back to internal `List`s (both in the lateral runtime and the outer
   result conversion).
+- **`SELECT * EXCEPT(...)` / `REPLACE(...)` are rewritten before planning**
+  (`util/pipeline/SelectStarModifiers`, called from `Query2.plan`): the
+  vendored parser has neither (no Babel parser in the jar) and the
+  validator's star expansion is private. The modifiers are cut out of the
+  SQL text by a small lexer and **blanked with spaces** (every other token
+  keeps its line/column, so validator errors still point into the user's
+  SQL); a scratch parse + validation shows what each star expands to (the
+  validator replaces the select list in place and the expanded identifiers
+  carry the star's `SqlParserPos` — except struct fields under a bare `*`,
+  which have position 0:0 and are attributed to the preceding item); a
+  fresh parse then gets the star replaced by the explicit list. The scratch
+  validator must be a separate instance (`plan` hands a supplier). A star
+  is recognized lexically only after `SELECT` / `DISTINCT` / `ALL` / `,` /
+  `.` — `n * REPLACE(s, 'a', 'b')` is a multiplication. A `PEEK_FIELDS`
+  struct column expands into its fields: modifiers match the top-level
+  column first, then a leaf field name. A bare `*` over an unaliased
+  subquery expands with a generated `EXPR$n` qualifier, which is stripped.
+  SQL inside LATERAL blocks is unaffected (it is regenerated from the rel).
 - **Output schema = JDBC metadata + the planned row type.**
   `Query2.deriveOutputSchemas` prepares the statement and reads
   `ResultSetMetaData`, which has no shape for a struct (a ROW column is a
