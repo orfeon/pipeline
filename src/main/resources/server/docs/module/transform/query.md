@@ -87,7 +87,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
 - **`SELECT * EXCEPT(...)` / `SELECT * REPLACE(...)`** (BigQuery's star modifiers) select every column but some, or with some recomputed in place:
   - `SELECT i.* EXCEPT(items), ARRAY(SELECT e.id AS id, e.price / 10e0 AS price FROM UNNEST(i.items) AS e) AS items FROM INPUT AS i` — every column as it is, `items` rebuilt (it moves to the end).
-  - `SELECT * REPLACE(UPPER(name) AS name, price / 10e0 AS price) FROM INPUT` — the replaced columns keep their position. Both can be given, `EXCEPT` first: `i.* EXCEPT(a, b) REPLACE(x + 1 AS x)`.
+  - `SELECT * REPLACE(UPPER(name) AS name, price / 10e0 AS price) FROM INPUT` — the replaced columns keep their position. Both can be given, `EXCEPT` first: `i.* EXCEPT(a, b) REPLACE(x + 1 AS x)`. A replaced column keeps its name as the input spells it.
   - A column that is not in the star, a column named twice, and an `EXCEPT` that leaves no column are rejected at pipeline construction.
   - They nest: a modified star can be over a subquery, a `WITH` table or a `LATERAL` block that has modifiers of its own, and a `REPLACE` expression can have one — `SELECT * REPLACE(ARRAY(SELECT e.* REPLACE(e.price / 10e0 AS price) FROM UNNEST(items) AS e) AS items) FROM INPUT` rebuilds an array of structs in place, with one field changed.
   - A top-level struct column, which a star expands into its fields, is taken as a whole: `EXCEPT(head)` removes all its fields and `REPLACE(expr AS head)` puts one column `head` in their place. A field name can also be given (`EXCEPT(price)`), when no column of the star has that name.

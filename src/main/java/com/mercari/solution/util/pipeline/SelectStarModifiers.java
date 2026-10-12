@@ -107,6 +107,13 @@ final class SelectStarModifiers {
             if (end > 0) {
                 next = end;
             }
+            if (isMalformedModifier(tokens, next)) {
+                final Token keyword = tokens.get(next);
+                throw new IllegalArgumentException("SELECT * EXCEPT / REPLACE: malformed " + keyword.text()
+                        + " at line " + keyword.line() + ", column " + keyword.column()
+                        + ": expected EXCEPT(column, ...) and / or REPLACE(expression AS column, ...),"
+                        + " in this order");
+            }
             if (next == t + 1) {
                 continue;
             }
@@ -120,6 +127,29 @@ final class SelectStarModifiers {
             // subquery with a modified star of its own.
         }
         return new Extracted(sql, blanked.toString(), List.copyOf(modifiers));
+    }
+
+    /**
+     * Whether a modifier that could not be read starts at {@code from}, after a star or its
+     * other modifier: the parser's error for it would not tell. {@code EXCEPT (SELECT ...)} is
+     * the set operator and left to the parser.
+     */
+    private static boolean isMalformedModifier(final List<Token> tokens, final int from) {
+        if (from + 1 >= tokens.size() || !tokens.get(from + 1).isSymbol('(')) {
+            return false;
+        }
+        if (tokens.get(from).isWord("REPLACE")) {
+            return true;
+        }
+        if (!tokens.get(from).isWord("EXCEPT")) {
+            return false;
+        }
+        if (from + 2 >= tokens.size()) {
+            return true;
+        }
+        final Token first = tokens.get(from + 2);
+        return !(first.isSymbol('(') || first.isWord("SELECT") || first.isWord("WITH")
+                || first.isWord("VALUES") || first.isWord("TABLE"));
     }
 
     /** A star after one of these is a select item, not a multiplication. */
@@ -580,10 +610,13 @@ final class SelectStarModifiers {
             if (replace == null) {
                 columns.add(kept.get(i));
             } else if (emitted.add(replace)) {
-                // a struct column expanded into several fields is replaced as a whole
+                // A struct column expanded into several fields is replaced as a whole. The
+                // column keeps its name as it is spelled in the star, not in the modifier.
+                final String name = columnNames.get(i).equalsIgnoreCase(replace.name())
+                        ? columnNames.get(i) : leafNames.get(i);
                 columns.add(pos -> SqlStdOperatorTable.AS.createCall(pos,
                         parseExpression(extracted, replace, parserConfig),
-                        new SqlIdentifier(replace.name(), pos)));
+                        new SqlIdentifier(name, pos)));
             }
         }
         if (columns.isEmpty()) {

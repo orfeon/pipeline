@@ -330,6 +330,39 @@ public class Query2StarModifierTest {
     }
 
     @Test
+    public void testReplaceKeepsColumnName() {
+        // REPLACE changes the value of a column, not the spelling of its name.
+        final Query2 query = Query2.of("INPUT", inputSchema(),
+                "SELECT * EXCEPT(ITEMS, Laps) REPLACE(UPPER(id) AS ID, n + 1 AS N) FROM INPUT");
+        Assertions.assertEquals(List.of("id", "n"), fieldNames(query));
+        Assertions.assertEquals(Map.of("id", "A", "n", 4L), evaluate(query, input()));
+    }
+
+    @Test
+    public void testMalformedModifier() {
+        for (final String sql : List.of(
+                "SELECT * EXCEPT(id n) FROM INPUT",
+                "SELECT * EXCEPT() FROM INPUT",
+                "SELECT * EXCEPT(i.id) FROM INPUT AS i",
+                "SELECT * REPLACE(n + 1) FROM INPUT",
+                "SELECT * REPLACE(n + 1 n) FROM INPUT",
+                "SELECT * EXCEPT(items) REPLACE(n + 1) FROM INPUT",
+                "SELECT * REPLACE(n + 1 AS n) EXCEPT(items) FROM INPUT")) {
+            final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
+                    () -> Query2.of("INPUT", inputSchema(), sql), sql);
+            Assertions.assertTrue(messages(e).contains("SELECT * EXCEPT / REPLACE: malformed"),
+                    sql + ": " + messages(e));
+        }
+        final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
+                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(items)\n  REPLACE(n + 1) FROM INPUT"));
+        Assertions.assertTrue(messages(e).contains("malformed REPLACE at line 2, column 3"), messages(e));
+
+        // the set operator is not a modifier
+        Assertions.assertTrue(SelectStarModifiers
+                .extract("SELECT * EXCEPT (SELECT 1)").modifiers().isEmpty());
+    }
+
+    @Test
     public void testNotAModifier() {
         // a multiplication by the REPLACE function, and the EXCEPT set operator
         Assertions.assertTrue(SelectStarModifiers
