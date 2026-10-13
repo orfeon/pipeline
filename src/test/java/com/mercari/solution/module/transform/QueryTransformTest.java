@@ -1241,6 +1241,77 @@ public class QueryTransformTest {
     }
 
     @Test
+    public void testStarExceptAndReplace() throws Exception {
+        // SELECT * EXCEPT / REPLACE: every column as it is, but one rebuilt.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "except",
+                      "module": "query",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "sql": "SELECT i.* EXCEPT(events), ARRAY(SELECT e.category AS category, e.amount * 2 AS doubled FROM UNNEST(i.events) AS e WHERE e.category = 'a') AS events FROM INPUT AS i"
+                      }
+                    },
+                    {
+                      "name": "replace",
+                      "module": "query",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "sql": "SELECT * REPLACE(CARDINALITY(events) AS events) FROM INPUT"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_USERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection except = outputs.get("except");
+        Assertions.assertEquals(List.of("userId", "events"),
+                except.getSchema().getFields().stream().map(Schema.Field::getName).toList());
+        Assertions.assertEquals(Schema.Type.element,
+                except.getSchema().getField("events").getFieldType().getArrayValueType().getType());
+        PAssert.that(except.getCollection()).satisfies(elements -> {
+            long total = 0;
+            for(final MElement element : elements) {
+                final Map<String, Object> values = element.asPrimitiveMap();
+                final boolean u1 = "u1".equals(String.valueOf(values.get("userId")));
+                final List<?> events = (List<?>) values.get("events");
+                Assertions.assertEquals(u1 ? 2 : 0, events.size());
+                for(final Object event : events) {
+                    Assertions.assertTrue(((Map<?, ?>) event).containsKey("doubled"));
+                }
+                total++;
+            }
+            Assertions.assertEquals(2L, total);
+            return null;
+        });
+
+        final MCollection replace = outputs.get("replace");
+        Assertions.assertEquals(List.of("userId", "events"),
+                replace.getSchema().getFields().stream().map(Schema.Field::getName).toList());
+        PAssert.that(replace.getCollection()).satisfies(elements -> {
+            long total = 0;
+            for(final MElement element : elements) {
+                final Map<String, Object> values = element.asPrimitiveMap();
+                final boolean u1 = "u1".equals(String.valueOf(values.get("userId")));
+                Assertions.assertEquals(u1 ? 3L : 0L, ((Number) values.get("events")).longValue());
+                total++;
+            }
+            Assertions.assertEquals(2L, total);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testPlanErrorReportsTheCause() throws Exception {
         // The top-level planning error only restates the SQL: the validator's reason must be
         // carried into the module error.

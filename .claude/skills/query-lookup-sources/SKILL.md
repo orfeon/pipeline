@@ -362,6 +362,41 @@ Query2.builder()
   `java.sql.Array`s — `CalciteValues.asList/toInternalList` converts them
   back to internal `List`s (both in the lateral runtime and the outer
   result conversion).
+- **`SELECT * EXCEPT(...)` / `REPLACE(...)` are rewritten before planning**
+  (`util/pipeline/SelectStarModifiers`, called from `Query2.plan`): the
+  vendored parser has neither (no Babel parser in the jar) and the
+  validator's star expansion is private. The modifiers are cut out of the
+  SQL text by a small lexer and **blanked with spaces** (every other token
+  keeps its line/column, so validator errors still point into the user's
+  SQL); a scratch parse + validation shows what the stars of a select list
+  expand to (the validator replaces the select list in place: one item per
+  item, its columns per star); a fresh parse then gets those stars replaced
+  by the explicit list. This runs **one select list per round, in the
+  validator's order** (the subqueries of FROM / WHERE / GROUP BY and of the
+  list, the list itself, then HAVING / ORDER BY): a star over a subquery /
+  CTE / LATERAL block with modifiers of its own must be expanded from the
+  rewritten block, and a star inside a `REPLACE` expression is in the tree
+  only once the outer star is rewritten. Expanded items are attributed **by
+  count, not by position**: the columns of a qualified star carry its
+  `SqlParserPos`, but under a bare `*` the fields of a struct column and
+  the keys of a NATURAL / USING join (`COALESCE(a.k, b.k) AS k`, kept as
+  that expression) have position 0:0 — a bare star takes what the other
+  items leave. A UNION's type coercion wraps expanded columns in `CAST`
+  (unwrapped: it is made again on the rewritten statement). A scratch
+  validation that fails **after** the round's select list was expanded is
+  ignored — it may be the star without its modifiers that fails (an
+  ungrouped column, the column count of a UNION / IN subquery); the real
+  validation reports what is left. Each round needs a fresh validator
+  (`plan` hands a supplier) and builds its select items anew (a validation
+  changes nodes in place). A star is recognized lexically only after
+  `SELECT` / `DISTINCT` / `ALL` / `,` / `.` — `n * REPLACE(s, 'a', 'b')` is
+  a multiplication; the lexer skips strings, backtick names and `--` /
+  `//` / `/* */` comments, as the parser does. A `PEEK_FIELDS` struct
+  column expands into its fields: modifiers match the top-level column
+  first, then a leaf field name. A bare `*` over an unaliased subquery
+  expands with a generated `EXPR$n` qualifier, which is stripped (two such
+  subqueries with a common column name are then ambiguous).
+  SQL inside LATERAL blocks is unaffected (it is regenerated from the rel).
 - **Output schema = JDBC metadata + the planned row type.**
   `Query2.deriveOutputSchemas` prepares the statement and reads
   `ResultSetMetaData`, which has no shape for a struct (a ROW column is a

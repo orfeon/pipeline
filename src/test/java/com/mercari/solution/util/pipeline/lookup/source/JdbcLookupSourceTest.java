@@ -117,6 +117,61 @@ public class JdbcLookupSourceTest {
     }
 
     @Test
+    public void testStarExceptOverLookupTable() {
+        // SELECT * EXCEPT is an explicit column list by the time the join is planned: it stays
+        // a key-driven lookup.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("USERS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, u.* EXCEPT(USER_ID, EMAIL) REPLACE(UPPER(u.NAME) AS NAME)
+                        FROM INPUT AS i
+                        JOIN db.USERS AS u ON u.USER_ID = i.userId
+                        """)
+                .build();
+        Assertions.assertEquals(List.of("userId", "NAME", "SCORE"),
+                query.getOutputSchema().getFields().stream().map(f -> f.getName()).toList());
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, "-"), input(99L, 0L, "-")), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals("ALICE", outputs.getFirst().getAsString("NAME"));
+            Assertions.assertEquals(1.5d, outputs.getFirst().getAsDouble("SCORE"), 1e-9);
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testStarExceptInsideLateral() {
+        // A modified star in a LATERAL block, and one over the block: the outer star is
+        // expanded from the block as its own modifiers leave it.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, s.* EXCEPT(USER_ID)
+                        FROM INPUT AS i
+                        JOIN LATERAL (
+                          SELECT e.* EXCEPT(CATEGORY) FROM db.EVENTS AS e WHERE e.USER_ID = i.userId
+                        ) AS s ON TRUE
+                        """)
+                .build();
+        Assertions.assertEquals(List.of("userId", "SEQ"),
+                query.getOutputSchema().getFields().stream().map(f -> f.getName()).toList());
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(2L, 0L, "-"), input(99L, 0L, "-")), TIMESTAMP);
+            Assertions.assertEquals(List.of(1L, 9L),
+                    outputs.stream().map(output -> output.getAsLong("SEQ")).sorted().toList());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testLeftJoinKeepsUnmatched() {
         final Query2 query = Query2.builder()
                 .withInput("INPUT", inputSchema())
