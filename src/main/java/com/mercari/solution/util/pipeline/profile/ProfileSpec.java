@@ -77,7 +77,8 @@ public class ProfileSpec implements Serializable {
 
     /** Actual sketch parameters resolved from the accuracy preset. */
     public static class SketchParameters implements Serializable {
-        public int kllK;
+        public int kllK;                // values: the quantiles of the records and the edges of the counting pass
+        public int kllLengthK;          // string lengths
         public int cpcLgK;
         public int fiMaxMapSize;
         public int thetaLgK;
@@ -90,19 +91,22 @@ public class ProfileSpec implements Serializable {
             final SketchParameters p = new SketchParameters();
             switch (accuracy == null ? "default" : accuracy) {
                 case "low" -> {
-                    p.kllK = 100;
+                    p.kllK = 400;
+                    p.kllLengthK = 100;
                     p.cpcLgK = 10;
                     p.thetaLgK = 10;
                     p.fiMaxMapSize = 512;
                 }
                 case "high" -> {
-                    p.kllK = 800;
+                    p.kllK = 3200;
+                    p.kllLengthK = 800;
                     p.cpcLgK = 14;
                     p.thetaLgK = 14;
                     p.fiMaxMapSize = 4096;
                 }
                 default -> {
-                    p.kllK = 200;
+                    p.kllK = 1600;
+                    p.kllLengthK = 200;
                     p.cpcLgK = 12;
                     p.thetaLgK = 12;
                     p.fiMaxMapSize = 1024;
