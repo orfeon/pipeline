@@ -224,7 +224,8 @@ of the axis), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, 
 `p50` (interpolated from the cells of §6.1, exact to one cell; the exact median for a field with one cell
 per value), and against the reference of the axis
 (null on the baseline record of the `inputs` axis): `ks` (numeric-like), `tvd` (string / bool), `psi`,
-`otherShare` (string: the share of the group's values counted in `(other)`), `nullShift`, `noiseKs`,
+`otherShare` (string: the share of the group's values counted in `(other)`), `referenceOtherShare` (string:
+the same share of the reference), `nullShift`, `noiseKs`,
 `noisePsi` (§6.3).
 
 The baseline of the `inputs` axis is `baseline`; `segments` and `time` axes take the rows outside the group
@@ -405,8 +406,9 @@ with a dozen rows) the effective sample is smaller and both sizes are too small.
 
 A string field is compared over its counted values plus `(other)` (§6.1). When more than half of either
 side is `(other)` — an identifier, a field of thousands of values — two disjoint sets of values would share
-that one cell and read as nearly identical, so `tvd`, `psi` and the information value are null and the
-group's `otherShare` says why. Whether two sets of keys overlap is a question for §7.
+that one cell and read as nearly identical, so `tvd`, `psi`, the two noise sizes and the information value
+are null, and `otherShare` / `referenceOtherShare` say why: either side can be the one above half (the
+reference of a `segments` / `time` group is the rest of the rows, which no record of its own carries). Whether two sets of keys overlap is a question for §7.
 
 On a `segments` or `time` axis the drift columns of the axis field itself are null: it differs from the
 rows outside its own group by construction.
@@ -424,9 +426,10 @@ keys:
 ### 7.1 Key record
 
 `kind: key`, `key` (the fields joined by `+`), `axis`, `group`, `distinct` / `_lo` / `_hi`, `keyness`
-(distinct / rows, capped at 1), `nullKeys`, — for a single-field key `distinct` is the number its `fields`
-record carries (the value table, else the CPC sketch; the Theta sketch of the key set is kept for the set
-operations of §7.2 and §7.3, and is the estimate only where the field has no other) — and with `unique: true`: `duplicateKeys` and `duplicateRows` —
+(distinct / rows, capped at 1), `nullKeys` — for a single-field key `distinct` is the number its `fields`
+record carries (the value table, else the CPC sketch; a bool counts its two values; the Theta sketch of the
+key set is kept for the set operations of §7.2 and §7.3, and is the estimate only where the field has no
+other) — and with `unique: true`: `duplicateKeys` and `duplicateRows` —
 exact, counted by a shuffle on the key hash (a set sketch cannot tell 146 duplicated rows in a million from
 none). A composite key is the tuple of its fields.
 

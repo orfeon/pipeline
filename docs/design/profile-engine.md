@@ -176,7 +176,8 @@ fields.
   duplicates of each other.)
 - **Against a previous run**: the key's Theta sketch is written into the payload, and intersected with the
   previous payload's in Finalize (dsl §7.3).
-- **`keyness`** is capped at 1 and its bounds come from the Theta bounds; with `unique: true` the exact
+- **`keyness`** is capped at 1 and read off the field's own distinct count (dsl §7.1: the value table, else
+  CPC, Theta only where the field has neither); with `unique: true` the exact
   duplicate count is the statement and `keyness` is derived from it.
 
 ## 6. Finalize, files and degradation
@@ -222,8 +223,8 @@ Log-normal and integer-valued distributions behave the same. Two readings:
 
 - Equal-frequency bins alone remove the artefact (two orders of magnitude at the default accuracy); this is
   what `bins.mode: sketch` gives.
-- The last row is not sketch error: 9/303 = 0.030 is the sampling noise of a 10-bin PSI at that size, and
-  the exact 64-bin value is 0.24. This is the `noisePsi` column.
+- The last row is not sketch error: 9/303 = 0.030 is the expected sampling noise of a 10-bin PSI at that
+  size (its 95% point, 16.9/303 = 0.056, is the `noisePsi` column), and the exact 64-bin value is 0.24.
 
 The counting pass goes one step further for a reason the table does not show: the outputs are stored in
 tables and compared across runs, and a stored number is read as a fact. A KLL sketch draws from a static

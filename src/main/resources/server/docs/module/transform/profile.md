@@ -165,7 +165,7 @@ With `segments`, `time` or `mode: compare`. One record per axis × group × fiel
 `axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference
 input), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`, `p50`,
 and against the reference of the axis: `ks` (numeric fields), `tvd` (string / bool fields), `psi`,
-`otherShare` (string fields), `nullShift`, `noiseKs`, `noisePsi`.
+`otherShare` / `referenceOtherShare` (string fields), `nullShift`, `noiseKs`, `noisePsi`.
 
 The reference is the baseline input on the `inputs` axis (its own record has no drift columns) and the
 rows outside the group on the `segments` and `time` axes. Three things are reported apart because they
@@ -177,8 +177,9 @@ columns for comparing samples, used in no ranking. They assume independent rows;
 (many rows per event) both are too small.
 
 A string field is compared over its 50 most frequent values plus `(other)`. When more than half of
-either side falls in `(other)` — an identifier, a field with thousands of values — `tvd` and `psi` are
-null (in `target`, `tvd` and `iv`), and `otherShare` carries the group's share of `(other)`: two
+either side falls in `(other)` — an identifier, a field with thousands of values — `tvd`, `psi` and
+the two noise sizes are null (in `target`, `tvd` and `iv`), and `otherShare` / `referenceOtherShare`
+carry the share of `(other)` in the group and in its reference, so the side above half is visible: two
 disjoint sets of values would otherwise read as nearly identical. On a `segments` / `time` axis the
 drift columns of the axis field itself are null.
 
@@ -225,8 +226,9 @@ With `compare`. One record per declared pair: `a`, `b`, `countA`, `countB`, `ks`
 ### Keys (`<name>.keys`)
 
 With `keys`. One record per key: `kind` (`key`), `key`, `distinct`, `distinct_lo`, `distinct_hi`,
-`keyness`, `nullKeys`. The distinct count is the one of the field's `fields` record: exact when the
-field has a value table, else an estimate, which cannot tell a handful of duplicated rows from none.
+`keyness`, `nullKeys`. The distinct count is the one of the field's `fields` record where it has one:
+exact when the field has a value table (and for a bool), else an estimate — the CPC sketch, or for a
+timestamp the Theta sketch of the key set — which cannot tell a handful of duplicated rows from none.
 
 ### Summary (`<name>.summary`)
 
