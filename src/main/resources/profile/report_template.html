@@ -1292,12 +1292,12 @@ function targetRateOption(f, baseRate) {
   s.append(el('<h2 class="sec">Sketch parameters (accuracy expansion)</h2>'));
   const sp = M.sketchParameters;
   s.append(el('<table class="data"><thead><tr><th>parameter</th><th>value</th><th>guarantee</th></tr></thead><tbody>'
-    + "<tr><td>KLL k</td><td>" + sp.kllK + "</td><td>" + (sp.kllRankError != null ? "normalized rank error ≈ " + (100 * sp.kllRankError).toFixed(2) + "%" : "") + "</td></tr>"
+    + "<tr><td>KLL k</td><td>" + sp.kllK + (sp.kllLengthK != null ? " (string lengths: " + sp.kllLengthK + ")" : "") + "</td><td>" + (sp.kllRankError != null ? "normalized rank error ≈ " + (100 * sp.kllRankError).toFixed(2) + "%" : "") + "</td></tr>"
     + "<tr><td>CPC lgK</td><td>" + sp.cpcLgK + "</td><td>distinct-count RSE ≈ " + (100 * 0.588 / Math.sqrt(2 ** sp.cpcLgK)).toFixed(2) + "%</td></tr>"
     + "<tr><td>Frequent Items map</td><td>" + sp.fiMaxMapSize + "</td><td>no false negatives above error bound</td></tr>"
     + "<tr><td>exact value table</td><td>" + sp.valueTableLimit + "</td><td>fields with at most this many distinct values are counted exactly</td></tr>"
     + "<tr><td>counting pass</td><td>" + (M.counting && M.counting.pass ? M.counting.cells + " cells / " + M.counting.bins + " bins" : "not run")
-    + "</td><td>group, class and pair statistics from exact counts over fixed edges</td></tr>"
+    + "</td><td>group, class and pair statistics from exact counts over fixed edges (a numeric field with an exact value table: one cell per value)</td></tr>"
     + "<tr><td>Theta lgK</td><td>" + sp.thetaLgK + "</td><td>set-operation estimates with 95% bounds</td></tr>"
     + "<tr><td>sample k (VarOpt)</td><td>" + sp.sampleK + "</td><td>weighted uniform row sample</td></tr>"
     + "</tbody></table>"));
