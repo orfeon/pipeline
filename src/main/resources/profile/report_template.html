@@ -999,10 +999,17 @@ function driftRows(axis) {
       const d = gf.ks != null ? gf.ks : gf.tvd;
       if (d == null && gf.nullShift == null) continue;
       rows.push({path, vs: g.value, kind: gf.ks != null ? "KS" : gf.tvd != null ? "TVD" : "", drift: d, psi: gf.psi,
-        nullShift: gf.nullShift, noiseKs: gf.noiseKs, noisePsi: gf.noisePsi});
+        nullShift: gf.nullShift, noiseKs: gf.noiseKs, noisePsi: gf.noisePsi,
+        otherShare: gf.otherShare, referenceOtherShare: gf.referenceOtherShare});
     }
   }
   return rows;
+}
+// a string field with more than half of a side in "(other)" is not compared: say which side
+function notCompared(r) {
+  if (r.otherShare == null || r.referenceOtherShare == null) return "-";
+  return '<span style="color:var(--muted)" title="not compared: more than half of a side falls in (other), where two disjoint sets of values would read as identical">'
+    + "(other) " + fmtPct(r.otherShare) + " / ref " + fmtPct(r.referenceOtherShare) + "</span>";
 }
 function driftTable(s, axis, ai, title, limit) {
   const rows = driftRows(axis);
@@ -1019,7 +1026,7 @@ function driftTable(s, axis, ai, title, limit) {
   const tbody = table.querySelector("tbody");
   for (const r of shown) {
     const tr = el('<tr class="clickable"><td>' + esc(r.path) + "</td><td>" + esc(String(r.vs)) + '</td><td data-sort="' + (r.drift != null ? r.drift : "") + '">'
-      + (r.drift != null ? r.kind + " " + r.drift.toFixed(4) : "-") + "</td><td>" + (r.kind === "KS" ? fmtStat(r.noiseKs) : "-")
+      + (r.drift != null ? r.kind + " " + r.drift.toFixed(4) : notCompared(r)) + "</td><td>" + (r.kind === "KS" ? fmtStat(r.noiseKs) : "-")
       + "</td><td>" + fmtStat(r.psi) + "</td><td>" + fmtStat(r.noisePsi)
       + '</td><td data-sort="' + (r.nullShift != null ? Math.abs(r.nullShift) : "") + '">' + fmtDelta(r.nullShift) + "</td></tr>");
     tr.onclick = () => { selectGroups(ai, [r.vs]); openDetail(r.path); };

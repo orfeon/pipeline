@@ -584,6 +584,11 @@ public class ProfileRenderer {
         o.addProperty("nullShift", g.nullShift);
         o.addProperty("noiseKs", g.noiseKs);
         o.addProperty("noisePsi", g.noisePsi);
+        if("string".equals(field.type)) {
+            // why a string field has no tvd / psi: more than half of one side is "(other)"
+            o.addProperty("otherShare", g.otherShare);
+            o.addProperty("referenceOtherShare", g.referenceOtherShare);
+        }
         if("bool".equals(field.type)) {
             o.addProperty("trueCount", g.cells[0]);
             o.addProperty("falseCount", g.cells[1]);

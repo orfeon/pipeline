@@ -388,6 +388,12 @@ public class ProfileTransformTest {
         final JsonObject cat0Price = segments.getAsJsonArray("groups").get(0).getAsJsonObject()
                 .getAsJsonObject("fields").getAsJsonObject("price");
         Assertions.assertEquals(overlayAll.size(), cat0Price.getAsJsonArray("hist").size());
+        Assertions.assertFalse(cat0Price.has("otherShare"));
+        // a string field carries both "(other)" shares: the drift table says which side is not comparable
+        final JsonObject cat0Status = segments.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .getAsJsonObject("fields").getAsJsonObject("status");
+        Assertions.assertEquals(0d, cat0Status.get("otherShare").getAsDouble(), 1e-12);
+        Assertions.assertEquals(0d, cat0Status.get("referenceOtherShare").getAsDouble(), 1e-12);
         Assertions.assertEquals("target", comparisons.get(2).getAsJsonObject().get("kind").getAsString());
 
         final JsonObject targetPrice = embedded.getAsJsonObject("target").getAsJsonArray("fields").get(1).getAsJsonObject();
