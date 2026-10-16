@@ -131,7 +131,7 @@ system:
         - subdir/pipeline_3.yaml
 ```
 
-This imports feature simply merges modules defined across multiple config files, so be careful to avoid duplicate names in each config file.
+This imports feature simply merges modules defined across multiple config files, so module names must stay unique across the files: a name declared more than once (by sources, transforms, sinks and actions alike, unless all but one are left out by `ignore` or `context`) is rejected at assembly.
 
 ## Failure
 

@@ -535,14 +535,14 @@ public class MPipeline {
      * used to surface as "No input for modules" (or as a module silently not built).
      */
     private static void checkModuleNames(final Config config) {
-        final Map<String, List<String>> kindsOfName = new java.util.LinkedHashMap<>();
-        final Map<String, List<? extends com.mercari.solution.config.ModuleConfig>> modulesOfKind = new java.util.LinkedHashMap<>();
+        final Map<String, List<String>> kindsOfName = new LinkedHashMap<>();
+        final Map<String, List<? extends ModuleConfig>> modulesOfKind = new LinkedHashMap<>();
         modulesOfKind.put("source", config.getSources());
         modulesOfKind.put("transform", config.getTransforms());
         modulesOfKind.put("sink", config.getSinks());
         modulesOfKind.put("action", config.getActions());
-        for(final Map.Entry<String, List<? extends com.mercari.solution.config.ModuleConfig>> entry : modulesOfKind.entrySet()) {
-            for(final com.mercari.solution.config.ModuleConfig module : entry.getValue()) {
+        for(final Map.Entry<String, List<? extends ModuleConfig>> entry : modulesOfKind.entrySet()) {
+            for(final ModuleConfig module : entry.getValue()) {
                 if(module == null || module.getName() == null || Boolean.TRUE.equals(module.getIgnore())) {
                     continue;
                 }
