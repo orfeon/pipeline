@@ -39,8 +39,12 @@ equal-frequency cells of the whole dataset for a numeric field, the most frequen
 is skipped when nothing needs it: no `segments` / `time` / `mode: compare`, no `target`, no `compare`
 and `bins` not in `outputs`.
 
-A numeric field with at most 1,000 distinct values gets one cell per value instead of the 100 cells:
-its cells are the same on every run, and its KS and group medians are exact.
+A numeric, array-length or timestamp field with at most 1,000 distinct values gets one cell per value
+instead of the 100 cells: its cells are the same on every run, its KS and group medians are exact, and
+its `bins` records say `edgesKind: exactQuantile` (equal-frequency bins whose edges are exact
+percentiles). (The report still draws such a field over at most 100 cells — its own, merged to about
+equal count.) A field whose distinct count is close to 1,000 can fall on either side of the bound from
+one run to the next; its edges then switch between exact and sketched, and `edgesKind` says which.
 
 For the other numeric fields the edges come from a sketch, so two runs over the same data can place
 them slightly differently; the counts are exact for the edges written on each record. KS barely moves
@@ -54,7 +58,7 @@ The observations per field type:
 | numeric | int8/16/32/64, float8/16/32/64, decimal | null rate, min / max / sum / mean / stddev / skewness, quantiles, distinct count, zero / NaN / Inf counts, the exact value table when there are at most 1,000 values |
 | string | string, json, enumeration | null rate, distinct count, frequent values, length distribution, empty / blank / null-sentinel counts |
 | bool | bool | true / false counts, null rate |
-| timestamp | timestamp, datetime, date | min / max, null rate |
+| timestamp | timestamp, datetime, date | min / max, null rate, quantiles (as epoch milliseconds), the exact distinct count when there are at most 1,000 values |
 | array | array | element-count distribution |
 
 `struct (element)` fields are flattened to dot paths up to depth 3. `map`, `bytes` and other
@@ -83,9 +87,9 @@ unsupported types are skipped and listed in the report appendix.
 | time | optional | String or Object | Timestamp field for time buckets. Shorthand `created_at` or longhand `{field: created_at, granularity: day}` (`granularity`: `hour` / `day` / `week` / `month` / `year`, default `month`; UTC buckets, the most recent 60 kept). Each bucket is compared with the rows outside it. |
 | mode | optional | Enum | `union` (default) treats multiple inputs as one dataset. `compare` (requires 2+ inputs) makes each input a group of the `inputs` axis, compared with the baseline input. |
 | baseline | optional | String | With `mode: compare`, the reference input (default: the first input). |
-| compare | optional | Array<Array<String\>\> | Declared comparable numeric field pairs, e.g. `[[list_price, sold_price]]`. Adds the `pairs` output: KS and PSI between the two fields, counted over the cells of the two pooled. |
+| compare | optional | Array<Array<String\>\> | Declared comparable numeric field pairs, e.g. `[[list_price, sold_price]]`. Adds the `pairs` output: KS and PSI between the two fields, counted over the cells of the two pooled (one cell per value of either when both have an exact value table, otherwise equal-frequency cells of the two sketches merged). |
 | target | optional | String or Object | The binary outcome every other field is related to. Shorthand `sold_flag` for a bool field (positive = `true`), or longhand `{field: is_sold, positive: 1}` / `{field: status, positive: sold}` for numeric and string fields (`positive` is required there; any other non-null value is negative, null target rows are left out). Adds the `target` output and the `positives` / `rate` columns of `bins`. |
-| bins | optional | Object | `{count: 10, edges: {<field>: [...]}}`. `count`: the number of equal-frequency bins the cells are merged into (2–100, default 10). `edges`: split points declared for a numeric field instead of the equal-frequency ones — bins are right-closed, the first and the last are open-ended. Declared edges are counted next to the quantile cells: `bins`, PSI and the information value of that field use them, KS and the group median keep the 100-cell grid. |
+| bins | optional | Object | `{count: 10, edges: {<field>: [...]}}`. `count`: the number of equal-frequency bins the cells are merged into (2–100, default 10). `edges`: split points declared for a numeric field instead of the equal-frequency ones — bins are right-closed, the first and the last are open-ended. Declared edges are counted next to the quantile cells: `bins`, PSI and the information value of that field use them, KS and the group median keep the cell grid of the field (the 100 cells, or one per value). |
 | drift | optional | Object | `{axis, exclude: [...]}`. `axis`: the axis whose groups feed the `drift` columns of the default output — `inputs`, `segments:<field>` or `time:<field>`; default the `inputs` axis when `mode: compare` declares one, otherwise none. `exclude`: fields left out of those columns (their statistics are still emitted), e.g. the time field the inputs were split on. The field of the drift axis itself is always left out: it differs from the rows outside its own group by construction. |
 | accuracy | optional | Enum | `low`, `default`, `high`. Sketch sizes: KLL k = 400 / 1600 / 3200 for values (normalized rank error about 0.7% / 0.2% / 0.1%; it sizes the quantiles and the edges of the cells) and 100 / 200 / 800 for string lengths, CPC and Theta lgK = 10 / 12 / 14, frequent-items map 512 / 1024 / 4096. |
 | associations | optional | Object | `{numeric: all}` (default) computes the Pearson correlation of all numeric pairs for the report; `{numeric: none}` disables it. The cost is quadratic in the number of numeric fields. |
@@ -199,13 +203,17 @@ classes appear as `axis: target`.
 `field`, `axis`, `groupName`, `bin`, `lower`, `upper` (numeric fields; epoch milliseconds for a timestamp field; null at an open end of declared
 edges), `value` (categorical bins; `(other)` and `(null)` are bins of their own), `count`, `share`,
 `positives`, `rate`, `rate_lo`, `rate_hi` (whole-dataset bins with `target`: positives among the rows
-with a non-null target, Wilson 95% interval), `edgesKind` (`quantile` / `declared` / `values`), `exact`.
+with a non-null target, Wilson 95% interval), `edgesKind` (`quantile` / `exactQuantile` / `declared` / `values`), `exact`.
 
 ### Target (`<name>.target`)
 
 With `target`. One record per field other than the target: `field`, `type`, `count`, `ks`, `tvd`, `iv`
 (information value over the field's bins, smoothed), `pointBiserial`, `meanPositive`, `meanNegative`,
 `rateWhenNull` (positive rate among the field's null rows), `nullRows`.
+
+The information value grows with the number of bins, so it ranks fields fairly only over the same
+`bins.count`: a field with declared `bins.edges` (three price bands, say) has its own number of bins, and
+its `iv` is not comparable with the `iv` of the other fields.
 
 A strong association is a number, not a verdict; the transform does not flag leaks.
 

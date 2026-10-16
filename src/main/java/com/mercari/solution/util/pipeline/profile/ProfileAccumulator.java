@@ -410,13 +410,9 @@ public class ProfileAccumulator implements Serializable {
             acc.valueTableLimit = params.valueTableLimit;
             acc.valueMaxLength = params.valueMaxLength;
             switch (fieldSpec.profileType) {
-                case NUMERIC, ARRAY_LENGTH -> {
+                case NUMERIC, ARRAY_LENGTH, TIMESTAMP -> {
                     acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
                     acc.numericValues = new java.util.HashMap<>();
-                }
-                case TIMESTAMP -> {
-                    acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
-                    acc.valuesDropped = true;
                 }
                 case STRING -> {
                     acc.kll = KllDoublesSketch.newHeapInstance(params.kllLengthK);
@@ -517,6 +513,7 @@ public class ProfileAccumulator implements Serializable {
                         }
                         count += 1;
                         updateMoments(ms);
+                        countValue(ms);
                         kll.update(ms);
                         updateTheta(ProfileReport.canonicalNumber(ms));
                         return null;
@@ -610,7 +607,7 @@ public class ProfileAccumulator implements Serializable {
             return valuesDropped ? null : stringValues;
         }
 
-        /** The exact value → count table of a numeric / array-length field, or null when the field has none. */
+        /** The exact value → count table of a numeric / array-length / timestamp (epoch millis) field, or null when the field has none. */
         public java.util.Map<Double, Long> getNumericValues() {
             return valuesDropped ? null : numericValues;
         }
