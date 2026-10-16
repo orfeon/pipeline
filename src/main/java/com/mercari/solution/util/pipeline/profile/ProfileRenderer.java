@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -61,6 +62,8 @@ public class ProfileRenderer {
         int groupLimit = Integer.MAX_VALUE;
         boolean overlayCells = true;        // false: group distributions over the bins instead of the cells
         boolean overlayDistributions = true;
+        // field index → cell → drawn cell, for the fields with one cell per value (see drawnCells)
+        final Map<Integer, int[]> drawnCells = new HashMap<>();
     }
 
     public static Rendered render(
@@ -316,10 +319,10 @@ public class ProfileRenderer {
                         numeric.add("quantiles", quantiles);
                         numeric.addProperty("rankError", r.rankError);
                     }
-                    final KllDoublesSketch kll = field.getKll();
-                    if(kll != null && !kll.isEmpty()) {
-                        numeric.add("histogram", buildHistogram(kll, field.min, field.max, detail.histogramBins, field.count));
-                        numeric.add("cdf", buildCdf(kll, field.min, field.max, detail.histogramBins));
+                    final java.util.function.Function<double[], double[]> cdf = cdfOf(field);
+                    if(cdf != null) {
+                        numeric.add("histogram", buildHistogram(cdf, field.min, field.max, detail.histogramBins, field.count));
+                        numeric.add("cdf", buildCdf(cdf, field.min, field.max, detail.histogramBins));
                     }
                     if("exact".equals(r.valuesKind) && config.showValues) {
                         // a discrete numeric field: its values are readable as a table, not as histogram bars
@@ -365,9 +368,9 @@ public class ProfileRenderer {
                 if(r.count > 0) {
                     ts.addProperty("min", Instant.ofEpochMilli(r.min.longValue()).toString());
                     ts.addProperty("max", Instant.ofEpochMilli(r.max.longValue()).toString());
-                    final KllDoublesSketch kll = field.getKll();
-                    if(kll != null && !kll.isEmpty()) {
-                        ts.add("histogram", buildHistogram(kll, field.min, field.max, config.timestampBins, field.count));
+                    final java.util.function.Function<double[], double[]> cdf = cdfOf(field);
+                    if(cdf != null) {
+                        ts.add("histogram", buildHistogram(cdf, field.min, field.max, config.timestampBins, field.count));
                     }
                 }
                 o.add("timestamp", ts);
@@ -381,8 +384,11 @@ public class ProfileRenderer {
         if(r.cells != null && detail.overlayDistributions) {
             final JsonObject overlay = new JsonObject();
             if(r.numericLike()) {
-                overlay.add("edges", toJsonArray(detail.overlayCells ? r.cellEdges : finiteBinEdges(r)));
-                overlay.add("all", toJsonArray(detail.overlayCells ? r.cells : r.bins));
+                final int[] drawn = detail.overlayCells ? drawnCells(r, detail) : null;
+                overlay.add("edges", toJsonArray(!detail.overlayCells ? finiteBinEdges(r)
+                        : drawn == null ? r.cellEdges : drawnEdges(r.cellEdges, drawn)));
+                overlay.add("all", toJsonArray(!detail.overlayCells ? r.bins
+                        : drawn == null ? r.cells : ProfileReport.toBins(r.cells, drawn)));
             } else if("string".equals(r.type)) {
                 // the "(other)" cell is kept out of the overlay: it would dwarf the named values
                 final JsonArray labels = new JsonArray();
@@ -434,6 +440,32 @@ public class ProfileRenderer {
         return values;
     }
 
+    /**
+     * The cells a numeric-like field is drawn over, as cell → drawn cell; null when they are the
+     * field's own cells. A field with one cell per value (up to the 1,000 of its value table) is
+     * drawn over the equal-frequency cells its own merge into — at most {@link ProfileEdges#CELLS},
+     * with its exact percentiles as edges — like any other field: the statistics are read off
+     * the cells, but the payload neither grows tenfold nor lists every value of the field with
+     * its count, which {@code values: hide} keeps out of every file.
+     */
+    private static int[] drawnCells(final ProfileReport.FieldResult r, final Detail detail) {
+        if(!r.valueCells) {
+            return null;
+        }
+        final int[] drawn = detail.drawnCells.computeIfAbsent(r.index, i -> ProfileReport.mergeBins(r.cells, ProfileEdges.CELLS));
+        return ProfileReport.binCount(drawn) == r.cells.length ? null : drawn;
+    }
+
+    /** The edges of the drawn cells: a drawn cell ends where the last cell merged into it ends. */
+    private static double[] drawnEdges(final double[] cellEdges, final int[] drawn) {
+        final double[] edges = new double[ProfileReport.binCount(drawn) + 1];
+        edges[0] = cellEdges[0];
+        for(int c = 0; c < drawn.length; c++) {
+            edges[drawn[c] + 1] = cellEdges[c + 1];
+        }
+        return edges;
+    }
+
     /** The bin edges of a numeric-like field as finite numbers: the open ends of declared edges become the observed range. */
     private static double[] finiteBinEdges(final ProfileReport.FieldResult r) {
         final double min = r.cellEdges[0];
@@ -447,9 +479,46 @@ public class ProfileRenderer {
         return edges;
     }
 
+    /**
+     * The distribution a field's histogram and CDF are drawn from, as split points → the share of the
+     * values at or below each, followed by 1 (the shape of {@link KllDoublesSketch#getCDF}): the value
+     * table when the field has one, so that they agree with the exact quantiles printed next to them,
+     * else the sketch. Null when the field has neither.
+     */
+    static java.util.function.Function<double[], double[]> cdfOf(final ProfileAccumulator.FieldAccumulator field) {
+        final Map<Double, Long> table = field.getNumericValues();
+        if(table != null && !table.isEmpty()) {
+            final double[] values = table.keySet().stream().mapToDouble(Double::doubleValue).sorted().toArray();
+            final long[] cumulative = new long[values.length];
+            long total = 0;
+            for(int i = 0; i < values.length; i++) {
+                total += table.get(values[i]);
+                cumulative[i] = total;
+            }
+            final double n = total;
+            return points -> {
+                final double[] shares = new double[points.length + 1];
+                for(int i = 0; i < points.length; i++) {
+                    // the number of values at or below the point
+                    final int found = java.util.Arrays.binarySearch(values, points[i]);
+                    final int below = found >= 0 ? found + 1 : -found - 1;
+                    shares[i] = below == 0 ? 0d : cumulative[below - 1] / n;
+                }
+                shares[points.length] = 1d;
+                return shares;
+            };
+        }
+        final KllDoublesSketch kll = field.getKll();
+        if(kll == null || kll.isEmpty()) {
+            return null;
+        }
+        return points -> kll.getCDF(points, QuantileSearchCriteria.INCLUSIVE);
+    }
+
     /** Equal-width PMF histogram: {@code edges} has one more entry than {@code counts} (at most bins+1). */
     private static JsonObject buildHistogram(
-            final KllDoublesSketch kll, final double min, final double max, final int bins, final long count) {
+            final java.util.function.Function<double[], double[]> cdf,
+            final double min, final double max, final int bins, final long count) {
 
         final JsonObject histogram = new JsonObject();
         final double[] edges = equalWidthEdges(min, max, bins);
@@ -457,8 +526,13 @@ public class ProfileRenderer {
         if(edges.length < 3) {
             counts.add(count);
         } else {
-            for(final double p : kll.getPMF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE)) {
-                counts.add(Math.round(p * count));
+            // right-closed bins, as the sketch's PMF: the share between two consecutive split points
+            final double[] shares = cdf.apply(interiorPoints(edges));
+            long previous = 0;
+            for(final double share : shares) {
+                final long atOrBelow = Math.round(share * count);
+                counts.add(atOrBelow - previous);
+                previous = atOrBelow;
             }
         }
         histogram.add("edges", toJsonArray(edges));
@@ -467,7 +541,8 @@ public class ProfileRenderer {
     }
 
     /** CDF at up to bins+1 equally spaced points from min to max. */
-    private static JsonObject buildCdf(final KllDoublesSketch kll, final double min, final double max, final int bins) {
+    private static JsonObject buildCdf(
+            final java.util.function.Function<double[], double[]> shares, final double min, final double max, final int bins) {
         final JsonObject cdf = new JsonObject();
         final JsonArray points = new JsonArray();
         final JsonArray ranks = new JsonArray();
@@ -476,7 +551,7 @@ public class ProfileRenderer {
             ranks.add(1.0);
         } else {
             final double[] queryPoints = equalWidthEdges(min, max, bins);
-            final double[] cdfValues = kll.getCDF(queryPoints, QuantileSearchCriteria.INCLUSIVE);
+            final double[] cdfValues = shares.apply(queryPoints);
             for(int i = 0; i < queryPoints.length; i++) {
                 points.add(queryPoints[i]);
                 ranks.add(cdfValues[i]);
@@ -514,7 +589,9 @@ public class ProfileRenderer {
             o.addProperty("falseCount", g.cells[1]);
         } else if(detail.overlayDistributions) {
             if(field.numericLike()) {
-                o.add("hist", toJsonArray(detail.overlayCells ? g.cells : g.bins));
+                final int[] drawn = detail.overlayCells ? drawnCells(field, detail) : null;
+                o.add("hist", toJsonArray(!detail.overlayCells ? g.bins
+                        : drawn == null ? g.cells : ProfileReport.toBins(g.cells, drawn)));
             } else {
                 final JsonArray topK = new JsonArray();
                 for(int c = 0; c < g.cells.length - 1; c++) {
