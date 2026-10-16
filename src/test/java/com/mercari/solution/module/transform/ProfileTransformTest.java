@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -350,11 +351,15 @@ public class ProfileTransformTest {
         Assertions.assertEquals(3, embedded.get("formatVersion").getAsInt());
         Assertions.assertEquals(ROWS, embedded.get("rows").getAsLong());
         Assertions.assertEquals("items profile", embedded.get("title").getAsString());
-        // what the run declares is not suggested as a next step (category is a segment, created_at the time axis)
+        // what the run declares is not suggested as a next step (category is a segment, created_at the time axis);
+        // a segments snippet extends the declaration instead of adding a second `segments` key
+        final List<String> suggested = new ArrayList<>();
         for(final JsonElement suggestion : embedded.getAsJsonArray("suggestions")) {
             final String yaml = suggestion.getAsJsonObject().get("yaml").getAsString();
             Assertions.assertFalse(yaml.equals("segments: [category]") || yaml.startsWith("time:"), yaml);
+            suggested.add(yaml);
         }
+        Assertions.assertTrue(suggested.contains("segments: [category, status]"), suggested.toString());
         Assertions.assertEquals(0, embedded.getAsJsonArray("driftExclude").size());
         Assertions.assertEquals(1, embedded.getAsJsonObject("notableCounts").get("all_null").getAsInt());
         Assertions.assertEquals("run-1", manifest.getAsJsonObject("job").get("runId").getAsString());
@@ -389,11 +394,12 @@ public class ProfileTransformTest {
                 .getAsJsonObject("fields").getAsJsonObject("price");
         Assertions.assertEquals(overlayAll.size(), cat0Price.getAsJsonArray("hist").size());
         Assertions.assertFalse(cat0Price.has("otherShare"));
-        // a string field carries both "(other)" shares: the drift table says which side is not comparable
+        // a compared string field carries no "(other)" shares: they explain only a field that is not compared
         final JsonObject cat0Status = segments.getAsJsonArray("groups").get(0).getAsJsonObject()
                 .getAsJsonObject("fields").getAsJsonObject("status");
-        Assertions.assertEquals(0d, cat0Status.get("otherShare").getAsDouble(), 1e-12);
-        Assertions.assertEquals(0d, cat0Status.get("referenceOtherShare").getAsDouble(), 1e-12);
+        Assertions.assertNotNull(cat0Status.get("tvd"));
+        Assertions.assertFalse(cat0Status.has("otherShare"));
+        Assertions.assertFalse(cat0Status.has("referenceOtherShare"));
         Assertions.assertEquals("target", comparisons.get(2).getAsJsonObject().get("kind").getAsString());
 
         final JsonObject targetPrice = embedded.getAsJsonObject("target").getAsJsonArray("fields").get(1).getAsJsonObject();
@@ -446,6 +452,7 @@ public class ProfileTransformTest {
     @Test
     public void testSameDistributionComparesAsEqual() throws Exception {
         final int rows = 5000;
+        final String payload = outputPath("compare.json");
         final String configJson = """
                 {
                   "sources": [%s, %s],
@@ -458,12 +465,13 @@ public class ProfileTransformTest {
                         "mode": "compare",
                         "baseline": "before",
                         "drift": { "exclude": ["id"] },
+                        "output": { "payload": "%s" },
                         "outputs": []
                       }
                     }
                   ]
                 }
-                """.formatted(sampleSource("before", 1, rows, 0), sampleSource("after", 2, rows, 0.1));
+                """.formatted(sampleSource("before", 1, rows, 0), sampleSource("after", 2, rows, 0.1), payload);
 
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
 
@@ -529,6 +537,13 @@ public class ProfileTransformTest {
         });
 
         pipeline.run();
+
+        // the report's drift tables leave out the excluded fields: the payload names them
+        final JsonObject embedded = JsonParser.parseString(Files.readString(Paths.get(payload)))
+                .getAsJsonObject().getAsJsonObject("payload");
+        final JsonArray driftExclude = embedded.getAsJsonArray("driftExclude");
+        Assertions.assertEquals(1, driftExclude.size());
+        Assertions.assertEquals("id", driftExclude.get(0).getAsString());
     }
 
     @Test

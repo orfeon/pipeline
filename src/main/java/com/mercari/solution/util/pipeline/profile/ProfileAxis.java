@@ -19,6 +19,7 @@ public class ProfileAxis implements Serializable {
 
     public static final String NULL_GROUP = "(null)";
     public static final Set<String> GRANULARITIES = Set.of("hour", "day", "week", "month", "year");
+    public static final int DEFAULT_TOP_K = 20;
 
     /** Separator between axis id and group value in the shuffle key (cannot appear in field names). */
     private static final char KEY_SEPARATOR = 0x1F; // ASCII unit separator
@@ -34,7 +35,7 @@ public class ProfileAxis implements Serializable {
     public int fieldIndex = -1;      // index into ProfileSpec.getFields()
     public String sourceType;
     public List<String> symbols;
-    public int topK = 20;            // segments: max groups kept in the report
+    public int topK = DEFAULT_TOP_K; // segments: max groups kept in the report
     public String granularity;       // time: hour | day | week | month | year
     public List<String> inputNames;  // inputs: union input order (element index → input name)
     public String baseline;          // inputs: reference group for drift metrics

@@ -1006,10 +1006,12 @@ function driftRows(axis) {
   return rows;
 }
 // a string field with more than half of a side in "(other)" is not compared: say which side
-function notCompared(r) {
-  if (r.otherShare == null || r.referenceOtherShare == null) return "-";
+function notCompared(r, reference, referenceLabel) {
+  if (r.otherShare == null || reference == null) return "-";
+  // a share just above the limit would print as 50.0%, next to a title that says "more than half"
+  const share = s => s > 0.5 && (100 * s).toFixed(1) === "50.0" ? ">50.0%" : fmtPct(s);
   return '<span style="color:var(--muted)" title="not compared: more than half of a side falls in (other), where two disjoint sets of values would read as identical">'
-    + "(other) " + fmtPct(r.otherShare) + " / ref " + fmtPct(r.referenceOtherShare) + "</span>";
+    + "(other) " + share(r.otherShare) + " / " + referenceLabel + " " + share(reference) + "</span>";
 }
 function driftTable(s, axis, ai, title, limit) {
   const rows = driftRows(axis);
@@ -1026,7 +1028,7 @@ function driftTable(s, axis, ai, title, limit) {
   const tbody = table.querySelector("tbody");
   for (const r of shown) {
     const tr = el('<tr class="clickable"><td>' + esc(r.path) + "</td><td>" + esc(String(r.vs)) + '</td><td data-sort="' + (r.drift != null ? r.drift : "") + '">'
-      + (r.drift != null ? r.kind + " " + r.drift.toFixed(4) : notCompared(r)) + "</td><td>" + (r.kind === "KS" ? fmtStat(r.noiseKs) : "-")
+      + (r.drift != null ? r.kind + " " + r.drift.toFixed(4) : notCompared(r, r.referenceOtherShare, "ref")) + "</td><td>" + (r.kind === "KS" ? fmtStat(r.noiseKs) : "-")
       + "</td><td>" + fmtStat(r.psi) + "</td><td>" + fmtStat(r.noisePsi)
       + '</td><td data-sort="' + (r.nullShift != null ? Math.abs(r.nullShift) : "") + '">' + fmtDelta(r.nullShift) + "</td></tr>");
     tr.onclick = () => { selectGroups(ai, [r.vs]); openDetail(r.path); };
@@ -1176,7 +1178,7 @@ function targetRateOption(f, baseRate) {
     const ivCell = f.iv == null ? "-" : f.iv.toFixed(3);
     const nullCell = f.nulls ? fmtPct(f.nulls.rate) + ' <span class="n" style="color:var(--muted)">(' + fmtInt(f.nulls.rows) + " nulls)</span>" : "-";
     const tr = el('<tr class="' + (f.positive ? "clickable" : "") + '"><td>' + esc(f.path) + "</td><td>" + esc(f.type)
-      + "</td><td>" + (f.ks != null ? f.ks.toFixed(3) : f.tvd != null ? f.tvd.toFixed(3) : "-") + "</td><td>" + ivCell + "</td><td>" + (f.pointBiserial != null ? f.pointBiserial.toFixed(3) : "-")
+      + "</td><td>" + (f.ks != null ? f.ks.toFixed(3) : f.tvd != null ? f.tvd.toFixed(3) : notCompared(f, f.negativeOtherShare, "negative")) + "</td><td>" + ivCell + "</td><td>" + (f.pointBiserial != null ? f.pointBiserial.toFixed(3) : "-")
       + "</td><td>" + nullCell + "</td><td>" + fmtInt(f.count) + "</td></tr>");
     if (f.positive) tr.onclick = () => showTargetField(f);
     tbody.append(tr);

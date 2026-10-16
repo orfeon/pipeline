@@ -584,8 +584,9 @@ public class ProfileRenderer {
         o.addProperty("nullShift", g.nullShift);
         o.addProperty("noiseKs", g.noiseKs);
         o.addProperty("noisePsi", g.noisePsi);
-        if("string".equals(field.type)) {
-            // why a string field has no tvd / psi: more than half of one side is "(other)"
+        if("string".equals(field.type) && g.tvd == null && g.otherShare != null) {
+            // why a string field has no tvd / psi: more than half of one side is "(other)" (only then:
+            // written for every string field of every group, the shares would add up to megabytes)
             o.addProperty("otherShare", g.otherShare);
             o.addProperty("referenceOtherShare", g.referenceOtherShare);
         }
@@ -719,6 +720,12 @@ public class ProfileRenderer {
                 o.addProperty("meanNegative", f.meanNegative);
             }
             o.addProperty("edgesKind", field.edgesKind);
+            if("string".equals(field.type) && f.tvd == null && f.count > 0
+                    && t.positiveGroup != null && t.negativeGroup != null) {
+                // not compared: more than half of a class falls in "(other)" — the table says which
+                o.addProperty("otherShare", t.positiveGroup.fields[f.index].otherShare);
+                o.addProperty("negativeOtherShare", t.negativeGroup.fields[f.index].otherShare);
+            }
             // both classes observed: the positive rate per bin / category is drawn even where a string field
             // is not compared over its cells (iv null, mostly "(other)") — the rates of its named values are exact
             if(ProfileReport.total(f.positiveBins) > 0 && ProfileReport.total(f.negativeBins) > 0 && detail.overlayDistributions) {
@@ -922,12 +929,16 @@ public class ProfileRenderer {
     private static JsonArray buildSuggestions(
             final ProfileAccumulator accumulator, final ProfileSpec spec, final ProfileReport.Config config) {
 
-        // what the run already declares is not a next step
-        final java.util.Set<String> declaredSegments = new java.util.HashSet<>();
+        // what the run already declares is not a next step; a segments snippet repeats the declared
+        // entries, so that pasting it extends the declaration instead of adding a second `segments` key
+        final List<String> declaredSegments = new ArrayList<>();
+        final List<String> declaredSegmentEntries = new ArrayList<>();
         boolean timeDeclared = false;
         for(final ProfileAxis axis : config.axes) {
             if(ProfileAxis.Kind.segments.equals(axis.kind)) {
                 declaredSegments.add(axis.field);
+                declaredSegmentEntries.add(axis.topK == ProfileAxis.DEFAULT_TOP_K
+                        ? axis.field : "{field: " + axis.field + ", topK: " + axis.topK + "}");
             } else if(ProfileAxis.Kind.time.equals(axis.kind)) {
                 timeDeclared = true;
             }
@@ -981,9 +992,11 @@ public class ProfileRenderer {
         }
         for(int i = 0; i < segmentCandidates.size() && i < 3; i++) {
             final String path = segmentCandidates.get(i);
+            final List<String> entries = new ArrayList<>(declaredSegmentEntries);
+            entries.add(path);
             suggestions.add(suggestion("segments", List.of(path),
                     "low-cardinality categorical field (2-50 distinct values)",
-                    "segments: [" + path + "]"));
+                    "segments: [" + String.join(", ", entries) + "]"));
         }
         if(timestampFields.size() == 1 && !timeDeclared) {
             suggestions.add(suggestion("time", timestampFields,
