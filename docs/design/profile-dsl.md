@@ -146,7 +146,7 @@ Every record of every output starts with the same columns:
 
 | column | type | |
 |---|---|---|
-| `runId` | STRING | `run.id`; by default the id the runner gave the job (the Dataflow job id), and where the runner gives none the job name followed by the instant of the run — two runs of one config never share an id |
+| `runId` | STRING | `run.id`; by default the id the runner gave the job (the Dataflow job id), and where the runner gives none the job name followed by `-yyyyMMdd-HHmmss`, the time the job was built in UTC — fixed once per job, so that every profile module of the job writes the same id (the tables are joined on it), and two runs of one config do not share it |
 | `dataset` | STRING | `run.dataset`, default the module name — *what* was profiled; one history table holds many datasets |
 | `partitionId` | STRING | `run.partition` — *which slice* of the dataset (a logical date, a version label); null when not given |
 | `generatedAt` | TIMESTAMP | one instant per run, shared by all outputs |
@@ -155,9 +155,10 @@ Every record of every output starts with the same columns:
 Appending the outputs of successive runs to one table per output gives the history: the question "in which
 run did this field become entirely null" is one query over the default output.
 
-No column is named with a reserved word of BigQuery or standard SQL: the records are queried as tables, and
+No column is named with a reserved keyword of BigQuery: the records are queried as tables, and
 `SELECT field, nulls FROM …` is a syntax error. Hence `partitionId`, `rowCount`, `nullCount`,
-`distinctCount` and `groupName` rather than the bare words.
+`distinctCount` and `groupName` rather than the bare words. Names that other dialects reserve and BigQuery
+does not (`count`, `min`, `max`, `sum`, `value`, `rank`, `key`, `lower`, `upper`) are kept.
 
 `partitionId` is separate from `generatedAt` because the two differ whenever a slice is backfilled or re-run:
 the history is ordered by `partitionId` when it is given, by `generatedAt` otherwise. A re-run of the same
@@ -461,7 +462,7 @@ Two keys without a common domain are not compared: two unrelated ten-digit ident
 
 ### 7.3 Against a previous run
 
-With `previous` as a file, a key gets `kind: overlap` records against the previous run (`group: previous`):
+With `previous` as a file, a key gets `kind: overlap` records against the previous run (`groupName: previous`):
 the retained share (previous keys still present) and the new share (current keys not seen before). The set
 sketch of every declared key is part of the payload (§10.2) for exactly this purpose, so a payload or report
 file is always enough. A set sketch holds hashes, not values, and is included under `values: hide` too.
@@ -479,7 +480,7 @@ grain, run without `unnest`.
 
 A parent whose array is empty or null yields no row: a row of null child fields would be a child that does
 not exist, and would raise the null rate of every child field. So that such parents do not vanish
-unnoticed, the `summary` counts them: `parents`, `parentsEmpty`, `parentsNull`. `rows` is the number of
+unnoticed, the `summary` counts them: `parents`, `parentsEmpty`, `parentsNull`. `rowCount` is the number of
 child rows.
 
 Without `unnest` an array field is profiled as its element count.

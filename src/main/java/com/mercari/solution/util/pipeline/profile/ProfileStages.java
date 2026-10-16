@@ -48,6 +48,48 @@ public class ProfileStages {
 
     private static final Logger LOG = LoggerFactory.getLogger(ProfileStages.class);
 
+    /** The runner's job id property (Dataflow's worker options declare it), viewed without the runner's classes. */
+    public interface JobIdOptions extends org.apache.beam.sdk.options.PipelineOptions {
+        String getJobId();
+        void setJobId(String jobId);
+    }
+
+    /** The time every profile module of one job names its run by when the runner gives no job id. */
+    public interface RunTimeOptions extends org.apache.beam.sdk.options.PipelineOptions {
+        @org.apache.beam.sdk.options.Hidden
+        String getProfileRunTime();
+        void setProfileRunTime(String profileRunTime);
+    }
+
+    /**
+     * The time of this job as a run id carries it ({@code yyyyMMdd-HHmmss}, UTC): fixed by the first
+     * profile module built in the job and read by the others, so that every profile module of the job
+     * writes one run id, which the history tables are joined on. Called while the pipeline is built;
+     * the options carry the value to the workers.
+     */
+    public static String runTimeOf(final org.apache.beam.sdk.options.PipelineOptions options) {
+        final RunTimeOptions runTime = options.as(RunTimeOptions.class);
+        if(runTime.getProfileRunTime() == null) {
+            runTime.setProfileRunTime(ProfileReport.runIdTime(java.time.Instant.now()));
+        }
+        return runTime.getProfileRunTime();
+    }
+
+    /**
+     * The id the runner gave this job, read off the worker's options by property name: the option
+     * belongs to the runner (Dataflow's {@code jobId}), whose classes are not on every runner's
+     * classpath, and a view of the same property through {@link JobIdOptions} reads it all the same.
+     */
+    static String jobIdOf(final org.apache.beam.sdk.options.PipelineOptions options) {
+        try {
+            final String id = options.as(JobIdOptions.class).getJobId();
+            return id == null || id.isEmpty() ? null : id;
+        } catch (final RuntimeException e) {
+            // a runner whose own jobId property is declared incompatibly: no job id
+            return null;
+        }
+    }
+
     public record Outputs(
             PCollection<MElement> fields,
             PCollection<MElement> groups,
@@ -433,20 +475,6 @@ public class ProfileStages {
             this.summaryTag = summaryTag;
         }
 
-        /**
-         * The id the runner gave this job, read off the worker's options by name: the option belongs to
-         * the runner (Dataflow's {@code jobId}), whose classes are not on every runner's classpath.
-         */
-        private static String jobIdOf(final org.apache.beam.sdk.options.PipelineOptions options) {
-            try {
-                final com.fasterxml.jackson.databind.JsonNode id = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .valueToTree(options).path("options").path("jobId");
-                return id.isTextual() && !id.asText().isEmpty() ? id.asText() : null;
-            } catch (final Throwable e) {
-                return null;
-            }
-        }
-
         @ProcessElement
         public void processElement(final ProcessContext c) throws Exception {
             if(c.element() == null) {
@@ -469,6 +497,10 @@ public class ProfileStages {
             }
             config.jobId = jobIdOf(c.getPipelineOptions());
             final ProfileReport.Result result = ProfileReport.build(accumulator, cells, edges, config, groupTotals);
+            // which source the run id came from: whether a runner exposes its job id to the worker is runner-specific
+            LOG.info("profile transform `{}` run id: {} ({})", config.moduleName, result.runId,
+                    config.runId != null ? "declared" : config.jobId != null ? "the runner's job id"
+                            : "the runner gave no job id: the job name and the time the job was built");
 
             for(final MElement record : ProfileReport.fieldRecords(result, config)) {
                 c.output(record);
