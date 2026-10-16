@@ -266,7 +266,11 @@ public class ProfileRenderer {
                 payload.add("sample", sample);
             }
         }
-        payload.add("suggestions", buildSuggestions(accumulator, spec));
+        payload.add("suggestions", buildSuggestions(accumulator, spec, config));
+        // the fields parameters.drift.exclude keeps out of every drift ranking, the report's tables included
+        final JsonArray driftExclude = new JsonArray();
+        config.driftExclude.stream().sorted().forEach(driftExclude::add);
+        payload.add("driftExclude", driftExclude);
         return payload;
     }
 
@@ -580,6 +584,12 @@ public class ProfileRenderer {
         o.addProperty("nullShift", g.nullShift);
         o.addProperty("noiseKs", g.noiseKs);
         o.addProperty("noisePsi", g.noisePsi);
+        if("string".equals(field.type) && g.tvd == null && g.otherShare != null) {
+            // why a string field has no tvd / psi: more than half of one side is "(other)" (only then:
+            // written for every string field of every group, the shares would add up to megabytes)
+            o.addProperty("otherShare", g.otherShare);
+            o.addProperty("referenceOtherShare", g.referenceOtherShare);
+        }
         if("bool".equals(field.type)) {
             o.addProperty("trueCount", g.cells[0]);
             o.addProperty("falseCount", g.cells[1]);
@@ -710,6 +720,12 @@ public class ProfileRenderer {
                 o.addProperty("meanNegative", f.meanNegative);
             }
             o.addProperty("edgesKind", field.edgesKind);
+            if("string".equals(field.type) && f.tvd == null && f.count > 0
+                    && t.positiveGroup != null && t.negativeGroup != null) {
+                // not compared: more than half of a class falls in "(other)" — the table says which
+                o.addProperty("otherShare", t.positiveGroup.fields[f.index].otherShare);
+                o.addProperty("negativeOtherShare", t.negativeGroup.fields[f.index].otherShare);
+            }
             // both classes observed: the positive rate per bin / category is drawn even where a string field
             // is not compared over its cells (iv null, mostly "(other)") — the rates of its named values are exact
             if(ProfileReport.total(f.positiveBins) > 0 && ProfileReport.total(f.negativeBins) > 0 && detail.overlayDistributions) {
@@ -910,7 +926,24 @@ public class ProfileRenderer {
     }
 
     /** Declarations the run could have used, inferred from names and cardinalities (profile-dsl.md §10.1). */
-    private static JsonArray buildSuggestions(final ProfileAccumulator accumulator, final ProfileSpec spec) {
+    private static JsonArray buildSuggestions(
+            final ProfileAccumulator accumulator, final ProfileSpec spec, final ProfileReport.Config config) {
+
+        // what the run already declares is not a next step; a segments snippet repeats the declared
+        // entries, so that pasting it extends the declaration instead of adding a second `segments` key
+        final List<String> declaredSegments = new ArrayList<>();
+        final List<String> declaredSegmentEntries = new ArrayList<>();
+        boolean timeDeclared = false;
+        for(final ProfileAxis axis : config.axes) {
+            if(ProfileAxis.Kind.segments.equals(axis.kind)) {
+                declaredSegments.add(axis.field);
+                declaredSegmentEntries.add(axis.topK == ProfileAxis.DEFAULT_TOP_K
+                        ? axis.field : "{field: " + axis.field + ", topK: " + axis.topK + "}");
+            } else if(ProfileAxis.Kind.time.equals(axis.kind)) {
+                timeDeclared = true;
+            }
+        }
+
         final JsonArray suggestions = new JsonArray();
         final long rows = accumulator.getRowCount();
         final ProfileSpec.SketchParameters params = spec.getSketchParameters();
@@ -934,7 +967,7 @@ public class ProfileRenderer {
                     if(ProfileSpec.ProfileType.STRING.equals(fieldSpec.profileType)
                             && cpc != null && field.count > 0) {
                         final double distinct = cpc.getEstimate();
-                        if(distinct >= 2 && distinct <= 50) {
+                        if(distinct >= 2 && distinct <= 50 && !declaredSegments.contains(fieldSpec.path)) {
                             segmentCandidates.add(fieldSpec.path);
                         }
                     }
@@ -959,11 +992,13 @@ public class ProfileRenderer {
         }
         for(int i = 0; i < segmentCandidates.size() && i < 3; i++) {
             final String path = segmentCandidates.get(i);
+            final List<String> entries = new ArrayList<>(declaredSegmentEntries);
+            entries.add(path);
             suggestions.add(suggestion("segments", List.of(path),
                     "low-cardinality categorical field (2-50 distinct values)",
-                    "segments: [" + path + "]"));
+                    "segments: [" + String.join(", ", entries) + "]"));
         }
-        if(timestampFields.size() == 1) {
+        if(timestampFields.size() == 1 && !timeDeclared) {
             suggestions.add(suggestion("time", timestampFields,
                     "the only timestamp field in the dataset",
                     "time: " + timestampFields.getFirst()));

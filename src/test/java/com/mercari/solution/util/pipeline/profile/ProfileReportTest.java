@@ -835,6 +835,16 @@ public class ProfileReportTest {
         Assertions.assertNull(code.association);
         Assertions.assertNull(code.associationKind);
         Assertions.assertEquals("tvd", result.fields.get(1).associationKind);
+        // the report says why: the "(other)" share of each class
+        final JsonObject payload = JsonParser.parseString(
+                ProfileRenderer.render(result, passes.accumulator, config(null, null)).payloadJson).getAsJsonObject();
+        final JsonObject codeTarget = payload.getAsJsonObject("target").getAsJsonArray("fields").asList().stream()
+                .map(JsonElement::getAsJsonObject).filter(o -> "code".equals(o.get("path").getAsString())).findFirst().orElseThrow();
+        Assertions.assertTrue(codeTarget.get("otherShare").getAsDouble() > 0.5);
+        Assertions.assertTrue(codeTarget.get("negativeOtherShare").getAsDouble() > 0.5);
+        final JsonObject activeTarget = payload.getAsJsonObject("target").getAsJsonArray("fields").asList().stream()
+                .map(JsonElement::getAsJsonObject).filter(o -> "active".equals(o.get("path").getAsString())).findFirst().orElseThrow();
+        Assertions.assertFalse(activeTarget.has("otherShare"));
 
         // a bool key feeds no sketch: its values are counted
         final ProfileReport.KeyResult key = result.keys.getFirst();
