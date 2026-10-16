@@ -58,6 +58,7 @@ public class ProfileReport {
         public List<String> inputNames = List.of();
         public String runId;
         public String jobId;            // the id the runner gave the job, when the worker knows it
+        public String fallbackRunId;    // the run id where the runner gives no job id, one for the whole job
         public String dataset;
         public String partition;
         public String expandedParametersJson;   // JSON text (JsonObject is not Serializable)
@@ -297,17 +298,28 @@ public class ProfileReport {
 
     /**
      * The run id of a run that declares none: the id the runner gave the job when it has one, else the
-     * job name with the instant of the run, so that two runs of one config never share an id.
+     * job name with the time of the run, so that two runs of one config do not share an id.
      */
-    public static String defaultRunId(final String jobId, final String jobName, final Instant generatedAt) {
+    public static String defaultRunId(final String jobId, final String jobName, final Instant at) {
         if(jobId != null && !jobId.isEmpty()) {
             return jobId;
         }
-        final String time = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
-                .withZone(java.time.ZoneOffset.UTC)
-                .format(generatedAt);
-        return (jobName == null || jobName.isEmpty() ? "profile" : jobName) + "-" + time;
+        return runIdPrefix(jobName) + "-" + runIdTime(at);
     }
+
+    /** The time of a run as a run id carries it: {@code yyyyMMdd-HHmmss} in UTC. */
+    public static String runIdTime(final Instant at) {
+        return RUN_ID_TIME.format(at);
+    }
+
+    /** The part of a {@link #defaultRunId} without a job id that precedes the time: the job name, else {@code profile}. */
+    public static String runIdPrefix(final String jobName) {
+        return jobName == null || jobName.isEmpty() ? "profile" : jobName;
+    }
+
+    private static final java.time.format.DateTimeFormatter RUN_ID_TIME = java.time.format.DateTimeFormatter
+            .ofPattern("yyyyMMdd-HHmmss")
+            .withZone(java.time.ZoneOffset.UTC);
 
     // ---- null sentinels ----
 
@@ -533,7 +545,11 @@ public class ProfileReport {
         final ProfileSpec spec = accumulator.getSpec();
         final Result result = new Result();
         result.generatedAt = Instant.now();
-        result.runId = config.runId != null ? config.runId : defaultRunId(config.jobId, config.jobName, result.generatedAt);
+        // declared, else the runner's job id, else the job's own fallback (one for every profile module of the job)
+        result.runId = config.runId != null ? config.runId
+                : config.jobId != null ? config.jobId
+                : config.fallbackRunId != null ? config.fallbackRunId
+                : defaultRunId(null, config.jobName, result.generatedAt);
         result.rows = accumulator.getRowCount();
         result.errorRows = accumulator.getErrorCount();
 
