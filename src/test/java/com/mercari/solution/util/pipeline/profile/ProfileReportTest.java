@@ -740,6 +740,18 @@ public class ProfileReportTest {
         // else the job name and the instant of the run: two runs of one config do not share an id
         Assertions.assertEquals("daily-20260102-030405", ProfileReport.defaultRunId(null, "daily", at));
         Assertions.assertEquals("profile-20260102-030405", ProfileReport.defaultRunId("", null, at));
+        // the job id is read off the options by property name, also after they were shipped to a worker
+        final org.apache.beam.sdk.options.PipelineOptions options = org.apache.beam.sdk.options.PipelineOptionsFactory.create();
+        Assertions.assertNull(ProfileStages.jobIdOf(options));
+        options.as(ProfileStages.JobIdOptions.class).setJobId("2026-01-01_job");
+        Assertions.assertEquals("2026-01-01_job", ProfileStages.jobIdOf(
+                new org.apache.beam.runners.core.construction.SerializablePipelineOptions(options).get()));
+        // without one, the time of the job is fixed by the first profile module and read by the others
+        final String time = ProfileStages.runTimeOf(options);
+        Assertions.assertTrue(time.matches("\\d{8}-\\d{6}"), time);
+        Assertions.assertEquals(time, ProfileStages.runTimeOf(options));
+        Assertions.assertEquals(time, ProfileStages.runTimeOf(
+                new org.apache.beam.runners.core.construction.SerializablePipelineOptions(options).get()));
 
         // a declared id is written as it is; no column of a record is a reserved word
         final Passes passes = passes(500, 3, null, null);
@@ -750,7 +762,23 @@ public class ProfileReportTest {
         config.jobName = "daily";
         final String generated = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null).runId;
         Assertions.assertTrue(generated.matches("daily-\\d{8}-\\d{6}"), generated);
-        final Set<String> reserved = Set.of("partition", "rows", "nulls", "distinct", "group", "range", "order", "by", "all", "any", "exists", "in", "is", "like", "not", "null", "of", "over", "set", "some", "to", "within");
+        // the job's fallback, when the transform gave one, and the runner's job id before it
+        config.fallbackRunId = "daily-20260102-030405";
+        Assertions.assertEquals("daily-20260102-030405", ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null).runId);
+        config.jobId = "2026-01-01_job";
+        Assertions.assertEquals("2026-01-01_job", ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null).runId);
+        // the reserved keywords of BigQuery (GoogleSQL lexical structure), in full
+        final Set<String> reserved = Set.of(
+                "all", "and", "any", "array", "as", "asc", "assert_rows_modified", "at", "between", "by", "case",
+                "cast", "collate", "contains", "create", "cross", "cube", "current", "default", "define", "desc",
+                "distinct", "else", "end", "enum", "escape", "except", "exclude", "exists", "extract", "false",
+                "fetch", "following", "for", "from", "full", "group", "grouping", "groups", "hash", "having", "if",
+                "ignore", "in", "inner", "intersect", "interval", "into", "is", "join", "lateral", "left", "like",
+                "limit", "lookup", "merge", "natural", "new", "no", "not", "null", "nulls", "of", "on", "or",
+                "order", "outer", "over", "partition", "preceding", "proto", "qualify", "range", "recursive",
+                "respect", "right", "rollup", "rows", "select", "set", "some", "struct", "tablesample", "then",
+                "to", "treat", "true", "unbounded", "union", "unnest", "using", "when", "where", "window", "with",
+                "within");
         for(final Schema schema : List.of(ProfileReport.fieldsSchema(), ProfileReport.groupsSchema(), ProfileReport.valuesSchema(),
                 ProfileReport.binsSchema(), ProfileReport.targetSchema(), ProfileReport.pairsSchema(), ProfileReport.keysSchema(),
                 ProfileReport.summarySchema())) {

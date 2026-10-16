@@ -639,11 +639,26 @@ public class ProfileTransformTest {
                 {
                   "sources": [%s],
                   "transforms": [
-                    { "name": "profile", "module": "profile", "inputs": ["before"] }
+                    { "name": "profile", "module": "profile", "inputs": ["before"] },
+                    { "name": "again", "module": "profile", "inputs": ["before"] }
                   ]
                 }
                 """.formatted(sampleSource("before", 3, 300, 0.2));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+        // the direct runner gives no job id: both profile modules of the job write its one fallback id
+        final org.apache.beam.sdk.values.PCollection<MElement> both = org.apache.beam.sdk.values.PCollectionList
+                .of(outputs.get("profile").getCollection())
+                .and(outputs.get("again").getCollection())
+                .apply("BothProfiles", org.apache.beam.sdk.transforms.Flatten.pCollections());
+        PAssert.that(both).satisfies(records -> {
+            final java.util.Set<String> runIds = new java.util.HashSet<>();
+            for(final MElement record : records) {
+                runIds.add(record.getAsString("runId"));
+            }
+            Assertions.assertEquals(1, runIds.size(), runIds.toString());
+            Assertions.assertTrue(runIds.iterator().next().matches(".+-\\d{8}-\\d{6}"), runIds.toString());
+            return null;
+        });
         PAssert.that(outputs.get("profile").getCollection()).satisfies(records -> {
             final Map<String, MElement> fields = byField(records);
             Assertions.assertEquals(3, fields.size());
