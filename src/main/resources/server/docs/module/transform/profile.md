@@ -82,7 +82,7 @@ unsupported types are skipped and listed in the report appendix.
 | run | optional | Object | `{id, dataset, partition}` — the identity written to every record. `id` defaults to the job name, `dataset` (what was profiled) to the module name, `partition` (which slice: a logical date, a version label) to null. |
 | fields | optional | Object | Field filter: `{include: [...]}` or `{exclude: [...]}` with dot paths for nested fields. |
 | values | optional | Enum | `show` (default) or `hide`. With `hide`, raw values are removed from every output and file: value records and categorical bins carry ranks (`#1`), segment groups become `group #1` (in `groups`, `bins` and `driftVs` alike), `top` is null, and the report has no sample rows and no value table of discrete numeric fields. Statistics (min, max, quantiles, histograms) are not values and stay. |
-| keys | optional | Array<String\> | Fields to treat as identifiers. Adds the `keys` output: distinct count with bounds (Theta sketch), keyness (distinct / rows, capped at 1) and the number of null keys. |
+| keys | optional | Array<String\> | Fields to treat as identifiers. Adds the `keys` output: distinct count with bounds, keyness (distinct / rows, capped at 1) and the number of null keys. |
 | segments | optional | Array<String or Object\> | Fields to compare the dataset by. Shorthand `[category]` or longhand `[{field: category, topK: 30}]` (`topK`: max groups kept, at least 1, default 20, largest first). A field can be listed once. Each group is compared with the rows outside it. |
 | time | optional | String or Object | Timestamp field for time buckets. Shorthand `created_at` or longhand `{field: created_at, granularity: day}` (`granularity`: `hour` / `day` / `week` / `month` / `year`, default `month`; UTC buckets, the most recent 60 kept). Each bucket is compared with the rows outside it. |
 | mode | optional | Enum | `union` (default) treats multiple inputs as one dataset. `compare` (requires 2+ inputs) makes each input a group of the `inputs` axis, compared with the baseline input. |
@@ -133,7 +133,7 @@ One record per profiled field.
 | p01, p05, p25, p50, p75, p95, p99, rankError | FLOAT64 | quantiles and the sketch's normalized rank error |
 | empties, blanks | INT64 | string fields: empty strings; whitespace-only values (full-width space included) |
 | lengthMin, lengthMax, lengthP50 | FLOAT64 | string length |
-| top, topShare | STRING, FLOAT64 | the most frequent value (null with `values: hide`) and its share |
+| top, topShare | STRING, FLOAT64 | the most frequent value (null with `values: hide`) and its share; a lower bound when the values are not exact, null when no value is frequent enough to be certain of |
 | trues, falses | INT64 | bool fields |
 | nullLike, nullLikeRate | INT64, FLOAT64 | string fields: rows whose value is a null sentinel, and the null rate if they were counted as null |
 | notable | ARRAY<STRING\> | notable codes, see below |
@@ -165,14 +165,23 @@ With `segments`, `time` or `mode: compare`. One record per axis × group × fiel
 `axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference
 input), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`, `p50`,
 and against the reference of the axis: `ks` (numeric fields), `tvd` (string / bool fields), `psi`,
-`nullShift`, `noiseKs`, `noisePsi`.
+`otherShare` / `referenceOtherShare` (string fields), `nullShift`, `noiseKs`, `noisePsi`.
 
 The reference is the baseline input on the `inputs` axis (its own record has no drift columns) and the
 rows outside the group on the `segments` and `time` axes. Three things are reported apart because they
 fail apart: the distribution of the non-null values (`ks` / `tvd`, `psi`), the missingness (`nullShift`
 = the group's null rate minus the reference's), and presence. `noiseKs` = 1.36·√(1/n₁ + 1/n₂) and
-`noisePsi` = (bins − 1)(1/n₁ + 1/n₂) are the sizes the statistics reach between two random samples of
-one distribution: reference columns for comparing samples, used in no ranking.
+`noisePsi` = χ²₀.₉₅(bins − 1)·(1/n₁ + 1/n₂) (at ten bins, 16.9·(1/n₁ + 1/n₂)) are the sizes the
+statistics reach between two random samples of one distribution, both at the 95% level: reference
+columns for comparing samples, used in no ranking. They assume independent rows; on clustered data
+(many rows per event) both are too small.
+
+A string field is compared over its 50 most frequent values plus `(other)`. When more than half of
+either side falls in `(other)` — an identifier, a field with thousands of values — `tvd`, `psi` and
+the two noise sizes are null (in `target`, `tvd` and `iv`), and `otherShare` / `referenceOtherShare`
+carry the share of `(other)` in the group and in its reference, so the side above half is visible: two
+disjoint sets of values would otherwise read as nearly identical. On a `segments` / `time` axis the
+drift columns of the axis field itself are null.
 
 `sum` is exact: with `mode: compare`, the row counts and sums of two inputs reconcile as they are.
 
@@ -183,7 +192,9 @@ One record per field × value, for string, bool and low-cardinality numeric fiel
 
 A field with at most 1,000 distinct values, none longer than 256 characters, is tabulated exactly.
 Above that the records are the frequent-items estimate (at most 50); when no value is frequent enough
-to be certain of, they are the candidates with their bounds rather than nothing.
+to be certain of, they are the candidates with their bounds rather than nothing. On a record with
+`exact: false`, `count` and `share` are the lower bound (`count` = `count_lo`): the true count lies
+between `count_lo` and `count_hi`.
 
 ### Bins (`<name>.bins`)
 
@@ -215,8 +226,9 @@ With `compare`. One record per declared pair: `a`, `b`, `countA`, `countB`, `ks`
 ### Keys (`<name>.keys`)
 
 With `keys`. One record per key: `kind` (`key`), `key`, `distinct`, `distinct_lo`, `distinct_hi`,
-`keyness`, `nullKeys`. The distinct count is an estimate: it cannot tell a handful of duplicated rows
-from none.
+`keyness`, `nullKeys`. The distinct count is the one of the field's `fields` record where it has one:
+exact when the field has a value table (and for a bool), else an estimate — the CPC sketch, or for a
+timestamp the Theta sketch of the key set — which cannot tell a handful of duplicated rows from none.
 
 ### Summary (`<name>.summary`)
 

@@ -258,6 +258,7 @@ public class ProfileTransformTest {
                     Assertions.assertTrue(record.getAsDouble("noiseKs") > record.getAsDouble("ks"));
                     Assertions.assertEquals((ROWS - 1) * 1.5 / 2, record.getAsDouble("p50"), ROWS * 1.5 * 0.02);
                     Assertions.assertNull(record.getAsDouble("tvd"));
+                    Assertions.assertNull(record.getAsDouble("referenceOtherShare"));
                 }
                 if("time:created_at".equals(record.getAsString("axis")) && "price".equals(record.getAsString("field"))) {
                     months++;
@@ -267,6 +268,9 @@ public class ProfileTransformTest {
                 if("segments:category".equals(record.getAsString("axis")) && "status".equals(record.getAsString("field"))) {
                     Assertions.assertNotNull(record.getAsDouble("tvd"));
                     Assertions.assertNull(record.getAsDouble("ks"));
+                    // two values, both counted: nothing in "(other)" on either side
+                    Assertions.assertEquals(0d, record.getAsDouble("otherShare"), 1e-12);
+                    Assertions.assertEquals(0d, record.getAsDouble("referenceOtherShare"), 1e-12);
                 }
             }
             Assertions.assertEquals(5, categoryPrice);
@@ -471,7 +475,10 @@ public class ProfileTransformTest {
                             "ks " + record.getAsDouble("ks") + " noise " + record.getAsDouble("noiseKs"));
                     // the values are the same; what moved is how often there is one
                     Assertions.assertEquals(0.1, record.getAsDouble("nullShift"), 0.02);
-                    Assertions.assertEquals(9 * (1d / record.getAsLong("count") + 1d / rows), record.getAsDouble("noisePsi"), 1e-9);
+                    // the 95% point of ten bins: chi-squared 16.919 at nine degrees of freedom
+                    final double sizes = 1d / record.getAsLong("count") + 1d / rows;
+                    Assertions.assertEquals(16.919 * sizes, record.getAsDouble("noisePsi"), 0.03 * sizes);
+                    Assertions.assertTrue(record.getAsDouble("psi") < record.getAsDouble("noisePsi"));
                 }
                 if("category".equals(record.getAsString("field"))) {
                     checked++;
