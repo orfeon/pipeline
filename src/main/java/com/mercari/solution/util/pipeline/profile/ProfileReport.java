@@ -35,6 +35,8 @@ public class ProfileReport {
     public static final String TARGET_NEGATIVE_KEY = "\u001Etarget\u001Fnegative";
 
     public static final String NULL_BIN = "(null)";
+    /** Above this share of "(other)" on either side, a string field is not compared over its cells. */
+    public static final double OTHER_SHARE_LIMIT = 0.5;
 
     private static final double[] QUANTILE_RANKS = { 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99 };
     public static final String[] QUANTILE_NAMES = { "p01", "p05", "p25", "p50", "p75", "p95", "p99" };
@@ -190,6 +192,8 @@ public class ProfileReport {
         public Double ks;
         public Double tvd;
         public Double psi;
+        public Double otherShare;       // string: the share of the group's values counted in "(other)"
+        public Double referenceOtherShare; // string: the same share of the reference the group is compared against
         public Double nullShift;
         public Double noiseKs;
         public Double noisePsi;
@@ -374,9 +378,29 @@ public class ProfileReport {
         return n1 <= 0 || n2 <= 0 ? null : 1.36 * Math.sqrt(1d / n1 + 1d / n2);
     }
 
-    /** The expected PSI between two random samples of one distribution over {@code bins} bins. */
+    /**
+     * The size PSI reaches between two random samples of one distribution over {@code bins} bins
+     * (95%, the level of {@link #noiseKs}): PSI / (1/n1 + 1/n2) is asymptotically chi-squared with
+     * {@code bins - 1} degrees of freedom, whose mean {@code bins - 1} gives the expected PSI.
+     */
     public static Double noisePsi(final int bins, final long n1, final long n2) {
-        return n1 <= 0 || n2 <= 0 || bins < 2 ? null : (bins - 1) * (1d / n1 + 1d / n2);
+        return n1 <= 0 || n2 <= 0 || bins < 2 ? null : chiSquared95(bins - 1) * (1d / n1 + 1d / n2);
+    }
+
+    /**
+     * The 95% point of the chi-squared distribution: exact at one degree of freedom (the square of the
+     * two-sided normal 95% point) and two (-2 ln 0.05), Wilson-Hilferty above (within 0.6% at three, closer above).
+     */
+    static double chiSquared95(final int degrees) {
+        if(degrees == 1) {
+            return 1.959964 * 1.959964;
+        }
+        if(degrees == 2) {
+            return -2d * Math.log(0.05);
+        }
+        final double z = 1.6448536;
+        final double a = 2d / (9d * degrees);
+        return degrees * Math.pow(1 - a + z * Math.sqrt(a), 3);
     }
 
     /**
@@ -521,7 +545,7 @@ public class ProfileReport {
         }
 
         for(final Integer keyIndex : spec.getKeyFieldIndices()) {
-            result.keys.add(buildKey(keyIndex, accumulator));
+            result.keys.add(buildKey(result.fields.get(keyIndex), accumulator));
         }
         return result;
     }
@@ -635,7 +659,9 @@ public class ProfileReport {
                 }
             }
         }
-        if(!r.values.isEmpty() && field.count > 0 && !"numeric".equals(r.type) && !"array".equals(r.type)) {
+        // candidates are not known to be the most frequent values: no top value is named from them
+        if(!r.values.isEmpty() && field.count > 0 && !"numeric".equals(r.type) && !"array".equals(r.type)
+                && !"candidates".equals(r.valuesKind)) {
             r.top = config.showValues ? shorten(r.values.getFirst().value) : null;
             r.topShare = (double) r.values.getFirst().count / field.count;
         }
@@ -708,7 +734,8 @@ public class ProfileReport {
             r.valuesKind = "candidates";
         }
         for(int i = 0; i < rows.length && i < params.topKKeep; i++) {
-            r.values.add(valueRow(rows[i].getItem(), rows[i].getEstimate(), rows[i].getLowerBound(), rows[i].getUpperBound(), false));
+            // the sketch's estimate of a tracked item is its upper bound: the count written is the one that is certain
+            r.values.add(valueRow(rows[i].getItem(), rows[i].getLowerBound(), rows[i].getLowerBound(), rows[i].getUpperBound(), false));
         }
         if(r.values.isEmpty()) {
             r.valuesKind = null;
@@ -859,6 +886,9 @@ public class ProfileReport {
         g.nullRate = observed == 0 ? null : (Double) ((double) g.nulls / observed);
         g.cells = group.cells(field.index, field.cells.length);
         g.bins = groupBins(field, group, g.cells);
+        if("string".equals(field.type) && g.count > 0) {
+            g.otherShare = otherShare(g.cells);
+        }
         if(field.numericLike() && group.hasNumeric(field.index)) {
             g.min = group.min(field.index);
             g.max = group.max(field.index);
@@ -874,6 +904,21 @@ public class ProfileReport {
         return g;
     }
 
+    /** The share of a string field's counted values that fell in the last cell, "(other)". */
+    static double otherShare(final long[] cells) {
+        final long total = total(cells);
+        return total == 0 ? 0d : (double) cells[cells.length - 1] / total;
+    }
+
+    /**
+     * Whether two sides of a string field can be compared over its cells: when most of a side is
+     * "(other)", two disjoint sets of values read as one shared cell and the distance as near zero.
+     */
+    static boolean comparableValues(final FieldResult field, final long[] a, final long[] b) {
+        return !"string".equals(field.type)
+                || (otherShare(a) <= OTHER_SHARE_LIMIT && otherShare(b) <= OTHER_SHARE_LIMIT);
+    }
+
     /** The drift columns of a group field against a reference (profile-dsl.md §6.3). */
     private static void compare(
             final FieldResult field,
@@ -883,7 +928,12 @@ public class ProfileReport {
             final long referenceCount,
             final long referenceNulls) {
 
-        if(g.count > 0 && referenceCount > 0) {
+        // with otherShare, says which side made a string field incomparable (either can be above half)
+        if("string".equals(field.type) && g.count > 0 && referenceCount > 0) {
+            g.referenceOtherShare = otherShare(referenceCells);
+        }
+        // the noise sizes are reference columns for a statistic: none where the field is not compared
+        if(g.count > 0 && referenceCount > 0 && comparableValues(field, g.cells, referenceCells)) {
             if(field.numericLike()) {
                 g.ks = ks(g.cells, referenceCells);
             } else {
@@ -977,7 +1027,8 @@ public class ProfileReport {
             }
             for(final FieldResult field : result.fields) {
                 final GroupField gf = g.fields[field.index];
-                if(gf == null) {
+                // the axis field differs from the rows outside its own group by construction
+                if(gf == null || field.path.equals(axis.field)) {
                     continue;
                 }
                 if(ProfileAxis.Kind.inputs.equals(axis.kind)) {
@@ -1045,10 +1096,11 @@ public class ProfileReport {
             if(p.count > 0 && q.count > 0) {
                 if(field.numericLike()) {
                     f.ks = ks(p.cells, q.cells);
-                } else {
+                    f.iv = psi(p.bins, q.bins);
+                } else if(comparableValues(field, p.cells, q.cells)) {
                     f.tvd = tvd(p.cells, q.cells);
+                    f.iv = psi(p.bins, q.bins);
                 }
-                f.iv = psi(p.bins, q.bins);
                 if(p.mean != null && q.mean != null) {
                     f.meanPositive = p.mean;
                     f.meanNegative = q.mean;
@@ -1066,7 +1118,8 @@ public class ProfileReport {
                     }
                 }
                 field.association = field.numericLike() ? f.ks : f.tvd;
-                field.associationKind = field.numericLike() ? "ks" : "tvd";
+                // a string field not compared over its cells has no association, and no kind of one
+                field.associationKind = field.association == null ? null : field.numericLike() ? "ks" : "tvd";
             }
             t.fields.add(f);
         }
@@ -1153,8 +1206,8 @@ public class ProfileReport {
                 continue;
             }
             for(final FieldResult field : result.fields) {
-                // the axis field differs from the rows outside its own group by construction
-                if(config.driftExclude.contains(field.path) || field.path.equals(driftAxis.field)) {
+                // the axis field itself has no drift columns (buildAxis): nothing to rank
+                if(config.driftExclude.contains(field.path)) {
                     continue;
                 }
                 for(int g = 0; g < axis.groups.size(); g++) {
@@ -1178,19 +1231,36 @@ public class ProfileReport {
         }
     }
 
-    private static KeyResult buildKey(final int index, final ProfileAccumulator accumulator) {
-        final ProfileSpec spec = accumulator.getSpec();
-        final ProfileAccumulator.FieldAccumulator field = accumulator.getField(index);
+    private static KeyResult buildKey(final FieldResult fieldResult, final ProfileAccumulator accumulator) {
+        final ProfileAccumulator.FieldAccumulator field = accumulator.getField(fieldResult.index);
         final KeyResult key = new KeyResult();
-        key.key = spec.getFields().get(index).path;
+        key.key = fieldResult.path;
         key.nullKeys = field.nullCount;
-        final CompactSketch theta = field.thetaResult(spec.getSketchParameters());
-        if(theta != null && field.count > 0) {
-            key.distinct = theta.getEstimate();
-            key.distinctLower = theta.getLowerBound(2);
-            key.distinctUpper = theta.getUpperBound(2);
+        if(field.count == 0) {
+            return key;
+        }
+        if(fieldResult.distinct != null) {
+            // the count the field's own record carries (its value table, else the CPC sketch): the two cannot disagree
+            key.distinct = fieldResult.distinct;
+            key.distinctLower = fieldResult.distinctLower;
+            key.distinctUpper = fieldResult.distinctUpper;
+        } else if(ProfileSpec.ProfileType.BOOL.equals(fieldResult.profileType)) {
+            // a bool feeds no sketch: its values are counted
+            key.distinct = (double) ((field.trueCount > 0 ? 1 : 0) + (field.falseCount > 0 ? 1 : 0));
+            key.distinctLower = key.distinct;
+            key.distinctUpper = key.distinct;
+        } else {
+            // the Theta sketch kept for the key set (a timestamp has no CPC); empty where the type never feeds it
+            final CompactSketch theta = field.thetaResult(accumulator.getSpec().getSketchParameters());
+            if(theta != null && !theta.isEmpty()) {
+                key.distinct = theta.getEstimate();
+                key.distinctLower = theta.getLowerBound(2);
+                key.distinctUpper = theta.getUpperBound(2);
+            }
+        }
+        if(key.distinct != null) {
             // an estimate above the number of keyed rows is sketch error, not more keys than rows
-            key.keyness = Math.min(1d, theta.getEstimate() / field.count);
+            key.keyness = Math.min(1d, key.distinct / field.count);
         }
         return key;
     }
@@ -1276,6 +1346,8 @@ public class ProfileReport {
                 .withField("ks", Schema.FieldType.FLOAT64)
                 .withField("tvd", Schema.FieldType.FLOAT64)
                 .withField("psi", Schema.FieldType.FLOAT64)
+                .withField("otherShare", Schema.FieldType.FLOAT64)
+                .withField("referenceOtherShare", Schema.FieldType.FLOAT64)
                 .withField("nullShift", Schema.FieldType.FLOAT64)
                 .withField("noiseKs", Schema.FieldType.FLOAT64)
                 .withField("noisePsi", Schema.FieldType.FLOAT64)
@@ -1498,6 +1570,8 @@ public class ProfileReport {
                             .withFloat64("ks", gf.ks)
                             .withFloat64("tvd", gf.tvd)
                             .withFloat64("psi", gf.psi)
+                            .withFloat64("otherShare", gf.otherShare)
+                            .withFloat64("referenceOtherShare", gf.referenceOtherShare)
                             .withFloat64("nullShift", gf.nullShift)
                             .withFloat64("noiseKs", gf.noiseKs)
                             .withFloat64("noisePsi", gf.noisePsi)

@@ -224,7 +224,9 @@ of the axis), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, 
 `p50` (interpolated from the cells of §6.1, exact to one cell; the exact median for a field with one cell
 per value), and against the reference of the axis
 (null on the baseline record of the `inputs` axis): `ks` (numeric-like), `tvd` (string / bool), `psi`,
-`nullShift`, `noiseKs`, `noisePsi` (§6.3).
+`otherShare` (string: the share of the group's values counted in `(other)`), `referenceOtherShare` (string:
+the same share of the reference), `nullShift`, `noiseKs`,
+`noisePsi` (§6.3).
 
 The baseline of the `inputs` axis is `baseline`; `segments` and `time` axes take the rows outside the group
 as the reference (each group against the rest), so the drift columns are populated on every axis.
@@ -252,6 +254,12 @@ follows `accuracy` (512 / 1024 / 4096). When the no-false-positive query returns
 evenly over hundreds of distinct values — the records are the no-false-negative candidates with their
 bounds, so the output says "no value is frequent enough to be certain of, the largest is between a and b"
 instead of being empty.
+
+On a record that is not exact, `count` (and `share`) is the lower bound — the count that is certain. The
+frequent-items sketch's own point estimate of a tracked value is its upper bound, which for a field of
+evenly spread values overstates a count of 15 as 1,290. `fields.top` / `topShare` follow: they come from the
+first record, and are null when the records are candidates, which are not known to be the most frequent
+values.
 
 ### 5.5 Bins (`<name>.bins`)
 
@@ -388,10 +396,22 @@ is not promoted to the field record unless asked for. `drift.exclude` removes fi
 construction (the time field the inputs were split on); the field of the drift axis itself is always left
 out for the same reason.
 
-`noiseKs` = 1.36·√(1/n₁ + 1/n₂) and `noisePsi` = (bins − 1)(1/n₁ + 1/n₂) are the sizes the statistic reaches
-between two random samples of one distribution. They are reference columns and take part in no ranking: when
-the two sides are samples (one day against a year) a value below them is not a difference; when the two
-sides are complete populations a difference is a difference whatever its size.
+`noiseKs` = 1.36·√(1/n₁ + 1/n₂) and `noisePsi` = χ²₀.₉₅(bins − 1)·(1/n₁ + 1/n₂) are the sizes the statistic
+reaches between two random samples of one distribution — both at the 95% level, so a field reads the same
+against either (the expected PSI is (bins − 1)(1/n₁ + 1/n₂); at ten bins the 95% point is 1.88 times that).
+They are reference columns and take part in no ranking: when the two sides are samples (one day against a
+year) a value below them is not a difference; when the two sides are complete populations a difference is a
+difference whatever its size. Both assume independent rows: on clustered data (one day of 36 events, each
+with a dozen rows) the effective sample is smaller and both sizes are too small.
+
+A string field is compared over its counted values plus `(other)` (§6.1). When more than half of either
+side is `(other)` — an identifier, a field of thousands of values — two disjoint sets of values would share
+that one cell and read as nearly identical, so `tvd`, `psi`, the two noise sizes and the information value
+are null, and `otherShare` / `referenceOtherShare` say why: either side can be the one above half (the
+reference of a `segments` / `time` group is the rest of the rows, which no record of its own carries). Whether two sets of keys overlap is a question for §7.
+
+On a `segments` or `time` axis the drift columns of the axis field itself are null: it differs from the
+rows outside its own group by construction.
 
 ## 7. Keys
 
@@ -406,7 +426,10 @@ keys:
 ### 7.1 Key record
 
 `kind: key`, `key` (the fields joined by `+`), `axis`, `group`, `distinct` / `_lo` / `_hi`, `keyness`
-(distinct / rows, capped at 1), `nullKeys`, and with `unique: true`: `duplicateKeys` and `duplicateRows` —
+(distinct / rows, capped at 1), `nullKeys` — for a single-field key `distinct` is the number its `fields`
+record carries (the value table, else the CPC sketch; a bool counts its two values; the Theta sketch of the
+key set is kept for the set operations of §7.2 and §7.3, and is the estimate only where the field has no
+other) — and with `unique: true`: `duplicateKeys` and `duplicateRows` —
 exact, counted by a shuffle on the key hash (a set sketch cannot tell 146 duplicated rows in a million from
 none). A composite key is the tuple of its fields.
 
