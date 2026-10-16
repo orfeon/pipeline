@@ -440,7 +440,10 @@ public class ProfileReport {
         for(int i = 0; i < cells.length; i++) {
             if(cells[i] > 0 && cumulative + cells[i] >= rank) {
                 if(valueCells) {
-                    return edges[i + 1];
+                    // the last edge is the field's maximum as it was observed, which may be -0.0:
+                    // the value table, and the quantiles read off it, hold -0.0 and 0.0 as 0.0
+                    final double value = edges[i + 1];
+                    return value == 0d ? 0d : value;
                 }
                 final double lower = Math.max(edges[i], min);
                 final double upper = Math.min(edges[i + 1], max);
@@ -575,15 +578,16 @@ public class ProfileReport {
                             }
                         }
                     }
+                    final Map<Double, Long> table = field.getNumericValues();
                     final KllDoublesSketch kll = field.getKll();
-                    if(kll != null && !kll.isEmpty()) {
+                    // the sketch is only asked when there is no table to read the quantiles off
+                    if(table == null && kll != null && !kll.isEmpty()) {
                         r.quantiles = new Double[QUANTILE_RANKS.length];
                         for(int q = 0; q < QUANTILE_RANKS.length; q++) {
                             r.quantiles[q] = kll.getQuantile(QUANTILE_RANKS[q], QuantileSearchCriteria.INCLUSIVE);
                         }
                         r.rankError = kll.getNormalizedRankError(false);
                     }
-                    final Map<Double, Long> table = field.getNumericValues();
                     if(table != null) {
                         r.distinct = (double) table.size();
                         r.distinctLower = r.distinct;

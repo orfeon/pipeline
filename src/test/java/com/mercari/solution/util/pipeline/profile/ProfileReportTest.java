@@ -1,5 +1,9 @@
 package com.mercari.solution.util.pipeline.profile;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import org.junit.jupiter.api.Assertions;
@@ -113,6 +117,8 @@ public class ProfileReportTest {
         // with one cell per value the median is the value of the cell
         Assertions.assertEquals(1d, ProfileReport.median(new long[] { 4, 6 }, flagEdges, 0, 1, true));
         Assertions.assertEquals(0d, ProfileReport.median(new long[] { 5, 5 }, flagEdges, 0, 1, true));
+        // the field's range may end on -0.0, which the value table (and the quantiles read off it) holds as 0.0
+        Assertions.assertEquals(0d, ProfileReport.median(new long[] { 2, 3 }, new double[] { -1, -1, -0.0 }, -1, -0.0, true));
 
         final double[] interval = ProfileReport.wilson(50, 100);
         Assertions.assertTrue(interval[0] < 0.5 && interval[1] > 0.5);
@@ -477,6 +483,61 @@ public class ProfileReportTest {
         negative.sort(null);
         Assertions.assertEquals(positive.get((positive.size() - 1) / 2), result.target.positiveGroup.fields[qty].p50);
         Assertions.assertEquals(negative.get((negative.size() - 1) / 2), result.target.negativeGroup.fields[qty].p50);
+    }
+
+    @Test
+    public void testReportDrawsValueCellsOverMergedCells() {
+        // level takes 400 values of ten rows each: 400 cells for the statistics, 100 drawn cells of four values each
+        final Schema schema = Schema.builder()
+                .withField("level", Schema.FieldType.INT64)
+                .withField("qty", Schema.FieldType.INT64)
+                .withField("sold", Schema.FieldType.BOOLEAN)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false).withTarget("sold", null);
+        final ProfileAccumulator accumulator = ProfileAccumulator.of(spec);
+        final List<ProfileRow> rows = new ArrayList<>();
+        for(int i = 0; i < 4000; i++) {
+            final ProfileRow row = ProfileRow.of(spec, MElement.builder()
+                    .withInt64("level", (long) (i % 400))
+                    .withInt64("qty", (long) (1 + i % 3))
+                    .withBool("sold", i % 7 < 3)
+                    .build());
+            rows.add(row);
+            accumulator.add(row.values, null);
+        }
+        final Passes passes = secondPass(spec, accumulator, rows, null, null);
+        final ProfileReport.Config config = config(null, null);
+        final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null);
+        Assertions.assertTrue(result.fields.get(0).valueCells);
+        Assertions.assertEquals(400, result.fields.get(0).cells.length);
+
+        final JsonObject payload = JsonParser.parseString(
+                ProfileRenderer.render(result, passes.accumulator, config).payloadJson).getAsJsonObject();
+        final JsonObject level = payload.getAsJsonArray("fields").get(0).getAsJsonObject().getAsJsonObject("overlay");
+        final JsonArray edges = level.getAsJsonArray("edges");
+        final JsonArray all = level.getAsJsonArray("all");
+        Assertions.assertEquals(ProfileEdges.CELLS, all.size());
+        Assertions.assertEquals(ProfileEdges.CELLS + 1, edges.size());
+        Assertions.assertEquals(0d, edges.get(0).getAsDouble());
+        for(int c = 0; c < all.size(); c++) {
+            Assertions.assertEquals(40L, all.get(c).getAsLong());
+            // a drawn cell ends on the last of its four values
+            Assertions.assertEquals(4d * c + 3, edges.get(c + 1).getAsDouble());
+        }
+        // a group is drawn over the same cells, and none of its rows is lost
+        final JsonObject positive = payload.getAsJsonArray("comparisons").get(0).getAsJsonObject()
+                .getAsJsonArray("groups").get(0).getAsJsonObject().getAsJsonObject("fields");
+        final JsonArray hist = positive.getAsJsonObject("level").getAsJsonArray("hist");
+        Assertions.assertEquals(all.size(), hist.size());
+        long drawn = 0;
+        for(final JsonElement count : hist) {
+            drawn += count.getAsLong();
+        }
+        Assertions.assertEquals(result.target.positiveGroup.fields[0].count, drawn);
+        // a field whose values each hold a percent of the rows or more is drawn over its own cells
+        final JsonObject qty = payload.getAsJsonArray("fields").get(1).getAsJsonObject().getAsJsonObject("overlay");
+        Assertions.assertEquals(3, qty.getAsJsonArray("all").size());
+        Assertions.assertEquals(3, positive.getAsJsonObject("qty").getAsJsonArray("hist").size());
     }
 
     @Test

@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -61,6 +62,8 @@ public class ProfileRenderer {
         int groupLimit = Integer.MAX_VALUE;
         boolean overlayCells = true;        // false: group distributions over the bins instead of the cells
         boolean overlayDistributions = true;
+        // field index → cell → drawn cell, for the fields with one cell per value (see drawnCells)
+        final Map<Integer, int[]> drawnCells = new HashMap<>();
     }
 
     public static Rendered render(
@@ -377,8 +380,11 @@ public class ProfileRenderer {
         if(r.cells != null && detail.overlayDistributions) {
             final JsonObject overlay = new JsonObject();
             if(r.numericLike()) {
-                overlay.add("edges", toJsonArray(detail.overlayCells ? r.cellEdges : finiteBinEdges(r)));
-                overlay.add("all", toJsonArray(detail.overlayCells ? r.cells : r.bins));
+                final int[] drawn = detail.overlayCells ? drawnCells(r, detail) : null;
+                overlay.add("edges", toJsonArray(!detail.overlayCells ? finiteBinEdges(r)
+                        : drawn == null ? r.cellEdges : drawnEdges(r.cellEdges, drawn)));
+                overlay.add("all", toJsonArray(!detail.overlayCells ? r.bins
+                        : drawn == null ? r.cells : ProfileReport.toBins(r.cells, drawn)));
             } else if("string".equals(r.type)) {
                 // the "(other)" cell is kept out of the overlay: it would dwarf the named values
                 final JsonArray labels = new JsonArray();
@@ -428,6 +434,32 @@ public class ProfileRenderer {
             values.add(item);
         }
         return values;
+    }
+
+    /**
+     * The cells a numeric-like field is drawn over, as cell → drawn cell; null when they are the
+     * field's own cells. A field with one cell per value (up to the 1,000 of its value table) is
+     * drawn over the equal-frequency cells its own merge into — at most {@link ProfileEdges#CELLS},
+     * with its exact percentiles as edges — like any other field: the statistics are read off
+     * the cells, but the payload neither grows tenfold nor lists every value of the field with
+     * its count, which {@code values: hide} keeps out of every file.
+     */
+    private static int[] drawnCells(final ProfileReport.FieldResult r, final Detail detail) {
+        if(!r.valueCells) {
+            return null;
+        }
+        final int[] drawn = detail.drawnCells.computeIfAbsent(r.index, i -> ProfileReport.mergeBins(r.cells, ProfileEdges.CELLS));
+        return ProfileReport.binCount(drawn) == r.cells.length ? null : drawn;
+    }
+
+    /** The edges of the drawn cells: a drawn cell ends where the last cell merged into it ends. */
+    private static double[] drawnEdges(final double[] cellEdges, final int[] drawn) {
+        final double[] edges = new double[ProfileReport.binCount(drawn) + 1];
+        edges[0] = cellEdges[0];
+        for(int c = 0; c < drawn.length; c++) {
+            edges[drawn[c] + 1] = cellEdges[c + 1];
+        }
+        return edges;
     }
 
     /** The bin edges of a numeric-like field as finite numbers: the open ends of declared edges become the observed range. */
@@ -510,7 +542,9 @@ public class ProfileRenderer {
             o.addProperty("falseCount", g.cells[1]);
         } else if(detail.overlayDistributions) {
             if(field.numericLike()) {
-                o.add("hist", toJsonArray(detail.overlayCells ? g.cells : g.bins));
+                final int[] drawn = detail.overlayCells ? drawnCells(field, detail) : null;
+                o.add("hist", toJsonArray(!detail.overlayCells ? g.bins
+                        : drawn == null ? g.cells : ProfileReport.toBins(g.cells, drawn)));
             } else {
                 final JsonArray topK = new JsonArray();
                 for(int c = 0; c < g.cells.length - 1; c++) {

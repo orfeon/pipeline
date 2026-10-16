@@ -40,7 +40,8 @@ is skipped when nothing needs it: no `segments` / `time` / `mode: compare`, no `
 and `bins` not in `outputs`.
 
 A numeric field with at most 1,000 distinct values gets one cell per value instead of the 100 cells:
-its cells are the same on every run, and its KS and group medians are exact.
+its cells are the same on every run, and its KS and group medians are exact. (The report still draws
+such a field over at most 100 cells — its own, merged to about equal count.)
 
 For the other numeric fields the edges come from a sketch, so two runs over the same data can place
 them slightly differently; the counts are exact for the edges written on each record. KS barely moves
@@ -85,7 +86,7 @@ unsupported types are skipped and listed in the report appendix.
 | baseline | optional | String | With `mode: compare`, the reference input (default: the first input). |
 | compare | optional | Array<Array<String\>\> | Declared comparable numeric field pairs, e.g. `[[list_price, sold_price]]`. Adds the `pairs` output: KS and PSI between the two fields, counted over the cells of the two pooled. |
 | target | optional | String or Object | The binary outcome every other field is related to. Shorthand `sold_flag` for a bool field (positive = `true`), or longhand `{field: is_sold, positive: 1}` / `{field: status, positive: sold}` for numeric and string fields (`positive` is required there; any other non-null value is negative, null target rows are left out). Adds the `target` output and the `positives` / `rate` columns of `bins`. |
-| bins | optional | Object | `{count: 10, edges: {<field>: [...]}}`. `count`: the number of equal-frequency bins the cells are merged into (2–100, default 10). `edges`: split points declared for a numeric field instead of the equal-frequency ones — bins are right-closed, the first and the last are open-ended. Declared edges are counted next to the quantile cells: `bins`, PSI and the information value of that field use them, KS and the group median keep the 100-cell grid. |
+| bins | optional | Object | `{count: 10, edges: {<field>: [...]}}`. `count`: the number of equal-frequency bins the cells are merged into (2–100, default 10). `edges`: split points declared for a numeric field instead of the equal-frequency ones — bins are right-closed, the first and the last are open-ended. Declared edges are counted next to the quantile cells: `bins`, PSI and the information value of that field use them, KS and the group median keep the cell grid of the field (the 100 cells, or one per value). |
 | drift | optional | Object | `{axis, exclude: [...]}`. `axis`: the axis whose groups feed the `drift` columns of the default output — `inputs`, `segments:<field>` or `time:<field>`; default the `inputs` axis when `mode: compare` declares one, otherwise none. `exclude`: fields left out of those columns (their statistics are still emitted), e.g. the time field the inputs were split on. The field of the drift axis itself is always left out: it differs from the rows outside its own group by construction. |
 | accuracy | optional | Enum | `low`, `default`, `high`. Sketch sizes: KLL k = 400 / 1600 / 3200 for values (normalized rank error about 0.7% / 0.2% / 0.1%; it sizes the quantiles and the edges of the cells) and 100 / 200 / 800 for string lengths, CPC and Theta lgK = 10 / 12 / 14, frequent-items map 512 / 1024 / 4096. |
 | associations | optional | Object | `{numeric: all}` (default) computes the Pearson correlation of all numeric pairs for the report; `{numeric: none}` disables it. The cost is quadratic in the number of numeric fields. |
