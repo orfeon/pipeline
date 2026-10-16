@@ -57,7 +57,10 @@ public class ProfileReportTest {
         Assertions.assertEquals(1.36 * Math.sqrt(1d / 303 + 1d / 900000), ProfileReport.noiseKs(303, 900000), 1e-12);
         // the 95% point, as noiseKs: chi-squared with bins - 1 degrees of freedom, 16.919 at 9 (1.88 times the mean)
         Assertions.assertEquals(16.919, ProfileReport.chiSquared95(9), 0.03);
-        Assertions.assertEquals(3.841, ProfileReport.chiSquared95(1), 0.12);
+        // exact at one and two degrees of freedom (a bool field's two bins), Wilson-Hilferty above
+        Assertions.assertEquals(3.8415, ProfileReport.chiSquared95(1), 1e-3);
+        Assertions.assertEquals(5.9915, ProfileReport.chiSquared95(2), 1e-3);
+        Assertions.assertEquals(7.8147, ProfileReport.chiSquared95(3), 0.05);
         Assertions.assertEquals(30.144, ProfileReport.chiSquared95(19), 0.03);
         Assertions.assertEquals(ProfileReport.chiSquared95(9) * (1d / 303 + 1d / 900000), ProfileReport.noisePsi(10, 303, 900000), 1e-12);
         Assertions.assertNull(ProfileReport.noiseKs(0, 10));
@@ -770,6 +773,98 @@ public class ProfileReportTest {
         final ProfileReport.FieldResult numeric = new ProfileReport.FieldResult();
         numeric.type = "numeric";
         Assertions.assertTrue(ProfileReport.comparableValues(numeric, new long[] { 1, 1, 98 }, new long[] { 50, 50, 0 }));
+    }
+
+    @Test
+    public void testIncomparableAssociationAndBoolKey() {
+        final Schema schema = Schema.builder()
+                .withField("code", Schema.FieldType.STRING)
+                .withField("active", Schema.FieldType.BOOLEAN)
+                .withField("sold", Schema.FieldType.BOOLEAN)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, Set.of("active"), "default", false, false).withTarget("sold", null);
+        final ProfileAccumulator accumulator = ProfileAccumulator.of(spec);
+        final List<ProfileRow> rows = new ArrayList<>();
+        final int n = 5000;
+        for(int i = 0; i < n; i++) {
+            final ProfileRow row = ProfileRow.of(spec, MElement.builder()
+                    // 2,500 values of two rows each: nearly every row falls in "(other)"
+                    .withString("code", "c" + (i / 2))
+                    .withBool("active", i % 4 == 0)
+                    .withBool("sold", i % 3 == 0)
+                    .build());
+            rows.add(row);
+            accumulator.add(row.values, null);
+        }
+        final Passes passes = secondPass(spec, accumulator, rows, null, null);
+        final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config(null, null), null);
+
+        // not compared over its cells: no tvd / iv, so no association and no kind of one
+        final ProfileReport.FieldResult code = result.fields.get(0);
+        final ProfileReport.TargetField target = result.target.fields.stream().filter(f -> f.index == 0).findFirst().orElseThrow();
+        Assertions.assertNull(target.tvd);
+        Assertions.assertNull(target.iv);
+        Assertions.assertNull(code.association);
+        Assertions.assertNull(code.associationKind);
+        Assertions.assertEquals("tvd", result.fields.get(1).associationKind);
+
+        // a bool key feeds no sketch: its values are counted
+        final ProfileReport.KeyResult key = result.keys.getFirst();
+        Assertions.assertEquals("active", key.key);
+        Assertions.assertEquals(2d, key.distinct);
+        Assertions.assertEquals(2d, key.distinctLower);
+        Assertions.assertEquals(2d, key.distinctUpper);
+        Assertions.assertEquals(2d / n, key.keyness, 1e-12);
+    }
+
+    @Test
+    public void testReferenceOtherShare() {
+        final Schema schema = Schema.builder()
+                .withField("seg", Schema.FieldType.STRING)
+                .withField("code", Schema.FieldType.STRING)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, Set.of(), "default", false, false);
+        final ProfileAccumulator accumulator = ProfileAccumulator.of(spec);
+        final List<ProfileRow> rows = new ArrayList<>();
+        final List<String> segs = new ArrayList<>();
+        for(int i = 0; i < 2000; i++) {
+            // segment a: two codes of 500 rows each; segment b: 1,000 codes of one row each
+            final String seg = i < 1000 ? "a" : "b";
+            final ProfileRow row = ProfileRow.of(spec, MElement.builder()
+                    .withString("seg", seg)
+                    .withString("code", i < 1000 ? (i % 2 == 0 ? "x" : "y") : "id" + i)
+                    .build());
+            rows.add(row);
+            segs.add(seg);
+            accumulator.add(row.values, null);
+        }
+        final ProfileAxis axis = new ProfileAxis();
+        axis.kind = ProfileAxis.Kind.segments;
+        axis.field = "seg";
+        axis.fieldIndex = 0;
+        final Passes passes = secondPass(spec, accumulator, rows, null, null);
+        for(int i = 0; i < rows.size(); i++) {
+            passes.cells.computeIfAbsent(axis.groupKey(segs.get(i)), k -> ProfileCells.of(spec.getFields().size()))
+                    .add(ProfileCells.locate(spec, passes.edges, rows.get(i), false));
+        }
+        final ProfileReport.Config config = config(null, null);
+        config.axes = List.of(axis);
+        final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null);
+
+        final Map<String, ProfileReport.GroupField> code = new HashMap<>();
+        for(final ProfileReport.GroupResult group : result.axes.getFirst().groups) {
+            code.put(group.value, group.fields[1]);
+        }
+        // a is comparable on its own side, the rest (b) is not: only referenceOtherShare says why tvd is null
+        Assertions.assertEquals(0d, code.get("a").otherShare, 1e-12);
+        Assertions.assertTrue(code.get("a").referenceOtherShare > 0.5, "referenceOtherShare: " + code.get("a").referenceOtherShare);
+        Assertions.assertNull(code.get("a").tvd);
+        Assertions.assertNull(code.get("a").noisePsi);
+        Assertions.assertEquals(code.get("a").referenceOtherShare, code.get("b").otherShare, 1e-12);
+        Assertions.assertEquals(0d, code.get("b").referenceOtherShare, 1e-12);
+        Assertions.assertNull(code.get("b").tvd);
+        // the axis field is not compared, and has no string share against a reference
+        Assertions.assertNull(result.axes.getFirst().groups.getFirst().fields[0].referenceOtherShare);
     }
 
     @Test

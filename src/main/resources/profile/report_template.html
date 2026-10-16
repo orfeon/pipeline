@@ -808,8 +808,8 @@ function openDetail(path) {
     if (f.string.topK && f.string.topK.length && !HIDE) {
       const kind = f.string.topKKind;
       d.append(el('<h2 class="sec">' + (kind === "exact" ? "Values (exact counts, " + fmtInt(f.string.valuesTotal) + " distinct)"
-        : kind === "candidates" ? "Most frequent candidates (no value is frequent enough to be certain of; counts within the bounds, ±" + fmtInt(f.string.maximumError) + ")"
-        : "Top values (estimated counts ±" + fmtInt(f.string.maximumError) + ")") + "</h2>"));
+        : kind === "candidates" ? "Most frequent candidates (no value is frequent enough to be certain of; count = the certain lower bound, the true count up to +" + fmtInt(f.string.maximumError) + ")"
+        : "Top values (count = the certain lower bound, the true count up to +" + fmtInt(f.string.maximumError) + ")") + "</h2>"));
       const table = el('<table class="data"><thead><tr><th>#</th><th>value</th><th>count</th><th>bounds</th></tr></thead><tbody></tbody></table>');
       const tbody = table.querySelector("tbody");
       f.string.topK.forEach((r, i) => tbody.append(el("<tr><td>" + (i + 1) + "</td><td>" + esc(r.value == null ? "#" + (i + 1) : r.value)
@@ -1232,7 +1232,7 @@ function targetRateOption(f, baseRate) {
       + fmtInt(k.distinctLower) + ", " + fmtInt(k.distinctUpper) + "]</td><td>" + fmtPct(k.keyness) + "</td><td>" + fmtInt(k.nullKeys) + "</td></tr>"));
   }
   s.append(makeSortable(table));
-  s.append(el('<p class="samples">keyness ≈ 100%: every row carries a distinct value (candidate unique key) · clearly below 100%: values repeat (a foreign key or a grouping attribute). Distinct counts are Theta-sketch estimates with 95% bounds: an estimate cannot tell a handful of duplicated rows from none.</p>'));
+  s.append(el('<p class="samples">keyness ≈ 100%: every row carries a distinct value (candidate unique key) · clearly below 100%: values repeat (a foreign key or a grouping attribute). Distinct counts are exact for a field with a value table, else sketch estimates with 95% bounds: an estimate cannot tell a handful of duplicated rows from none.</p>'));
 })();
 
 // ---- compare tab (inputs comparison + past report) ----

@@ -258,6 +258,7 @@ public class ProfileTransformTest {
                     Assertions.assertTrue(record.getAsDouble("noiseKs") > record.getAsDouble("ks"));
                     Assertions.assertEquals((ROWS - 1) * 1.5 / 2, record.getAsDouble("p50"), ROWS * 1.5 * 0.02);
                     Assertions.assertNull(record.getAsDouble("tvd"));
+                    Assertions.assertNull(record.getAsDouble("referenceOtherShare"));
                 }
                 if("time:created_at".equals(record.getAsString("axis")) && "price".equals(record.getAsString("field"))) {
                     months++;
@@ -267,6 +268,9 @@ public class ProfileTransformTest {
                 if("segments:category".equals(record.getAsString("axis")) && "status".equals(record.getAsString("field"))) {
                     Assertions.assertNotNull(record.getAsDouble("tvd"));
                     Assertions.assertNull(record.getAsDouble("ks"));
+                    // two values, both counted: nothing in "(other)" on either side
+                    Assertions.assertEquals(0d, record.getAsDouble("otherShare"), 1e-12);
+                    Assertions.assertEquals(0d, record.getAsDouble("referenceOtherShare"), 1e-12);
                 }
             }
             Assertions.assertEquals(5, categoryPrice);

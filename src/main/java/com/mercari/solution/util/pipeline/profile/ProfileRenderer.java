@@ -714,7 +714,9 @@ public class ProfileRenderer {
                 o.addProperty("meanNegative", f.meanNegative);
             }
             o.addProperty("edgesKind", field.edgesKind);
-            if(f.iv != null && detail.overlayDistributions) {
+            // both classes observed: the positive rate per bin / category is drawn even where a string field
+            // is not compared over its cells (iv null, mostly "(other)") — the rates of its named values are exact
+            if(ProfileReport.total(f.positiveBins) > 0 && ProfileReport.total(f.negativeBins) > 0 && detail.overlayDistributions) {
                 if(field.numericLike()) {
                     o.add("edges", toJsonArray(finiteBinEdges(field)));
                 } else {
