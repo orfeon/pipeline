@@ -123,8 +123,9 @@ bucket is profiled.
 ## 4. Pass 2: counting
 
 `ProfileCells` for one group holds, per field, a `long[cells]` and five scalars, and with a target one or
-two more arrays per field. Adding a value is a binary search over at most 99 edges (a hash lookup for a
-categorical field). At 650 fields and 100 cells a group's accumulator is about 0.5 MB without a target and
+two more arrays per field. Adding a value is a binary search over at most 99 edges, 999 for a field with
+one cell per value (a hash lookup for a categorical field). At 650 fields and 100 cells a group's
+accumulator is about 0.5 MB without a target and
 1–1.5 MB with one; a run with 30 groups gathers 15–45 MB on the finalize worker — smaller than the
 per-group sketch sets it replaces, which is why the group sketches are not kept alongside. A field with one
 cell per value can hold up to 1,000 cells (the bound of the value table): the worst case — every field an
@@ -138,7 +139,8 @@ Everything dsl §6 emits is a function of these arrays:
 | `groups.ks` | max cumulative difference over the cells, group against baseline |
 | `groups.psi`, `target.iv` | the same bins as the field's `bins` records, 0.5-per-bin smoothing |
 | `groups.tvd` | the categorical value counts |
-| `groups.p50` | linear interpolation inside the cell that contains the median |
+| `groups.p50` | linear interpolation inside the cell that contains the median; the value of that cell for a field with one cell per value |
+| `pairs.ks`, `pairs.psi` | the pooled cells of the pair: one per value of either field when both have a value table, else from the two sketches merged |
 | `groups.min` / `max` / `mean` / `stddev` | the scalars |
 | `rate` / `targetMean` and their intervals | the per-cell target arrays |
 

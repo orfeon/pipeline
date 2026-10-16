@@ -134,9 +134,16 @@ public class ProfileEdges implements Serializable {
             final int a = indexOfPath.getOrDefault(pairs.get(p)[0], -1);
             final int b = indexOfPath.getOrDefault(pairs.get(p)[1], -1);
             pairFields[p] = new int[] { a, b };
+            final Map<Double, Long> tableA = a < 0 ? null : accumulator.getField(a).getNumericValues();
+            final Map<Double, Long> tableB = b < 0 ? null : accumulator.getField(b).getNumericValues();
             final KllDoublesSketch kllA = a < 0 ? null : accumulator.getField(a).getKll();
             final KllDoublesSketch kllB = b < 0 ? null : accumulator.getField(b).getKll();
-            if(kllA != null && kllB != null && !kllA.isEmpty() && !kllB.isEmpty()) {
+            if(tableA != null && tableB != null && !tableA.isEmpty() && !tableB.isEmpty()) {
+                // both exact: one pooled cell per value of either field (at most twice the table bound)
+                final Map<Double, Long> union = new HashMap<>(tableA);
+                tableB.forEach((value, count) -> union.merge(value, count, Long::sum));
+                pairSplits[p] = valueSplits(union);
+            } else if(kllA != null && kllB != null && !kllA.isEmpty() && !kllB.isEmpty()) {
                 // merge copies: the accumulator's own sketches must stay as they are
                 final KllDoublesSketch pooled = KllDoublesSketch.newHeapInstance(Math.max(kllA.getK(), kllB.getK()));
                 pooled.merge(KllDoublesSketch.heapify(org.apache.datasketches.memory.Memory.wrap(kllA.toByteArray())));

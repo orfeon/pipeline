@@ -320,9 +320,12 @@ fixed ranks).
 
 The transform reads its input twice. The first pass builds the whole-dataset profile (the statistics of
 §5.1) and, from its quantile sketch, the **edges** of every numeric-like field: the 100 equal-frequency
-cells of the whole dataset (fewer where ties collapse edges). A numeric field with an exact value table
-(§5.4, at most 1,000 distinct values) gets **one cell per distinct value** instead: its cells come from no
-sketch, and a statistic read off them is exact rather than resolved to one cell. The second pass counts, exactly, the rows of
+cells of the whole dataset (fewer where ties collapse edges). A numeric, array-length or timestamp field
+with an exact value table (§5.4, at most 1,000 distinct values; a timestamp's table is kept for this and
+for its quantiles, not listed in `values`) gets **one cell per distinct value** instead: its cells come
+from no sketch, and a statistic read off them is exact rather than resolved to one cell. Its merged bins
+say `edgesKind: exactQuantile`. The bound is a cliff: a field near 1,000 distinct values can be tabulated
+in one run and sketched in the next, and its edges switch with it. The second pass counts, exactly, the rows of
 every group and target class in every cell, and for categorical fields in every value of the whole-dataset
 value list: the most frequent 50 values — of the exact table when the field has one, of the frequent items
 otherwise — plus `(other)`. (The `values` output still carries the complete exact table; the cap applies to
@@ -345,8 +348,10 @@ region is resolved on purpose — the price bands above the 99th percentile hold
 the rows and equal-frequency bins fold them into one — and how bins are made to follow a convention the
 data does not know (price bands, age bands). The declared edges are counted *next to* the quantile cells,
 not instead of them: `bins`, PSI and the information value of that field use the declared edges, while KS
-and the group median keep the 100-cell grid, so declaring three price bands does not reduce a KS to three
-points.
+and the group median keep the cell grid of the field (the 100 cells, or one per value), so declaring three
+price bands does not reduce a KS to three points. Its information value is then over its own number of
+bins, and the information value grows with the number of bins: it is comparable between runs of the same
+declaration, not with the information value of the fields on `bins.count` bins.
 
 A declared field pair (§5.12) is counted the same way, each of its two fields over the cells of the two
 pooled. The second pass is skipped altogether when no output needs it (§9.5).
@@ -646,7 +651,11 @@ Two things the report keeps and one that changes shape:
   distribution is now its counts over the equal-frequency cells, so the overlay is drawn as a density
   (count ÷ cell width) on the same value axis. The body of a distribution is resolved more finely than
   before and each tail is one cell wide: an overlay no longer shows structure inside the outer 1% unless
-  `bins.edges` declares edges there. The per-bin target chart changes the same way (10 bins by default,
+  `bins.edges` declares edges there. A field with one cell per value (§6.1) is drawn over the same kind
+  of grid — its cells merged into at most 100 of about equal count, whose edges are its exact percentiles —
+  so the payload does not carry up to 1,000 cells per field and group, nor, with `values: hide`, every
+  value of the field with its count; its statistics are still read off the cells themselves. The per-bin
+  target chart changes the same way (10 bins by default,
   each holding a tenth of the rows, instead of 64 bins most of which held almost none).
 
 ### 10.2 Payload file
