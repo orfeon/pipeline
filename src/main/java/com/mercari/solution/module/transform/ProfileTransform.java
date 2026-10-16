@@ -509,7 +509,10 @@ public class ProfileTransform extends Transform {
         config.jobName = getJobName();
         config.moduleName = getName();
         config.inputNames = new ArrayList<>(inputs.getAllInputs());
-        config.runId = parameters.run != null && parameters.run.id != null ? parameters.run.id : getJobName();
+        // undeclared: resolved where the run happens to the id of the job, else to this fallback, which
+        // every profile module of the job shares (ProfileStages.runTimeOf)
+        config.runId = parameters.run != null ? parameters.run.id : null;
+        config.fallbackRunId = ProfileReport.runIdPrefix(getJobName()) + "-" + ProfileStages.runTimeOf(inputs.getPipeline().getOptions());
         config.dataset = parameters.run != null && parameters.run.dataset != null ? parameters.run.dataset : getName();
         config.partition = parameters.run == null ? null : parameters.run.partition;
         config.axes = axes;
@@ -573,7 +576,8 @@ public class ProfileTransform extends Transform {
             expanded.addProperty("output.payload", config.payloadOutput);
         }
         expanded.addProperty("outputs", String.join(",", parameters.outputs));
-        expanded.addProperty("run.id", config.runId);
+        expanded.addProperty("run.id", config.runId != null ? config.runId
+                : "(the job id; where the runner gives none, " + config.fallbackRunId + ")");
         expanded.addProperty("run.dataset", config.dataset);
         if(config.partition != null) {
             expanded.addProperty("run.partition", config.partition);

@@ -79,7 +79,7 @@ unsupported types are skipped and listed in the report appendix.
 |-----------|----------|------|-------------|
 | output | optional | String or Object | Files the transform writes. A string is the HTML report destination (`gs://...`, any other Beam FileSystems uri such as `s3://...`, or a local path). Object form `{report: ..., payload: ...}`: `payload` writes the report's JSON payload and manifest as one JSON file. Omitted: no file is written (there is no default location). A local path is written on the worker that finalizes the run, so on a distributed runner use a storage uri. |
 | outputs | optional | Array<String\> | The optional record outputs to compute: `bins`, `values`. Default `[bins, values]`. `[]` computes neither (and skips the second pass when nothing else needs it). The other outputs are always produced. |
-| run | optional | Object | `{id, dataset, partition}` — the identity written to every record. `id` defaults to the job name, `dataset` (what was profiled) to the module name, `partition` (which slice: a logical date, a version label) to null. |
+| run | optional | Object | `{id, dataset, partition}` — the identity written to every record (as `runId`, `dataset`, `partitionId`). `id` defaults to the id the runner gave the job (the Dataflow job id; elsewhere the job name followed by `-yyyyMMdd-HHmmss`, the time the job was built in UTC — one id for every profile module of the job, and two runs of one config do not share it), `dataset` (what was profiled) to the module name, `partition` (which slice: a logical date, a version label) to null. |
 | fields | optional | Object | Field filter: `{include: [...]}` or `{exclude: [...]}` with dot paths for nested fields. |
 | values | optional | Enum | `show` (default) or `hide`. With `hide`, raw values are removed from every output and file: value records and categorical bins carry ranks (`#1`), segment groups become `group #1` (in `groups`, `bins` and `driftVs` alike), `top` is null, and the report has no sample rows and no value table of discrete numeric fields. Statistics (min, max, quantiles, histograms) are not values and stay. |
 | keys | optional | Array<String\> | Fields to treat as identifiers. Adds the `keys` output: distinct count with bounds, keyness (distinct / rows, capped at 1) and the number of null keys. |
@@ -106,8 +106,8 @@ Not implemented yet, and rejected rather than ignored: `previous` (changes again
 ## Outputs
 
 Referenced as `<name>` (the default) and `<name>.<output>`. Every record starts with the identity
-columns `runId`, `dataset`, `partition`, `generatedAt` (one instant per run) and `formatVersion` (`2`).
-The natural key of an output is (`dataset`, `partition`, the output's own key columns); of two record
+columns `runId`, `dataset`, `partitionId`, `generatedAt` (one instant per run) and `formatVersion` (`3`).
+The natural key of an output is (`dataset`, `partitionId`, the output's own key columns); of two record
 sets with that key the later `generatedAt` is the current one.
 
 A column `<stat>` with `<stat>_lo` / `<stat>_hi` next to it is an estimate with two-standard-deviation
@@ -123,9 +123,9 @@ One record per profiled field.
 | column | type | description |
 |---|---|---|
 | field, type, sourceType | STRING | dot path, profile type (`numeric` / `string` / `bool` / `timestamp` / `array`), schema type |
-| rows, count, nulls, errors | INT64 | rows of the dataset; non-null readable values; nulls; values that could not be read |
+| rowCount, count, nullCount, errors | INT64 | rows of the dataset; non-null readable values; nulls; values that could not be read |
 | nullRate | FLOAT64 | nulls over the observed values |
-| distinct, distinct_lo, distinct_hi | FLOAT64 | distinct count and its bounds |
+| distinctCount, distinctCount_lo, distinctCount_hi | FLOAT64 | distinct count and its bounds |
 | distinctExact | BOOLEAN | true when the field's value table is complete (the bounds equal the count) |
 | min, max, sum, mean, stddev, skewness | FLOAT64 | numeric and array fields |
 | minTime, maxTime | TIMESTAMP | timestamp fields |
@@ -162,8 +162,8 @@ as non-null.
 
 With `segments`, `time` or `mode: compare`. One record per axis × group × field.
 
-`axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference
-input), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`, `p50`,
+`axis` (`segments:<field>` / `time:<field>` / `inputs`), `groupName`, `baseline` (true for the reference
+input), `field`, `groupRows`, `count`, `nullCount`, `nullRate`, `min`, `max`, `minTime`, `maxTime` (timestamp fields), `sum`, `mean`, `stddev`, `p50`,
 and against the reference of the axis: `ks` (numeric fields), `tvd` (string / bool fields), `psi`,
 `otherShare` / `referenceOtherShare` (string fields), `nullShift`, `noiseKs`, `noisePsi`.
 
@@ -198,10 +198,10 @@ between `count_lo` and `count_hi`.
 
 ### Bins (`<name>.bins`)
 
-One record per field × group × bin. `axis` and `group` are null for the whole dataset; the two target
+One record per field × group × bin. `axis` and `groupName` are null for the whole dataset; the two target
 classes appear as `axis: target`.
 
-`field`, `axis`, `group`, `bin`, `lower`, `upper` (numeric fields; null at an open end of declared
+`field`, `axis`, `groupName`, `bin`, `lower`, `upper` (numeric fields; epoch milliseconds for a timestamp field; null at an open end of declared
 edges), `value` (categorical bins; `(other)` and `(null)` are bins of their own), `count`, `share`,
 `positives`, `rate`, `rate_lo`, `rate_hi` (whole-dataset bins with `target`: positives among the rows
 with a non-null target, Wilson 95% interval), `edgesKind` (`quantile` / `exactQuantile` / `declared` / `values`), `exact`.
@@ -225,14 +225,14 @@ With `compare`. One record per declared pair: `a`, `b`, `countA`, `countB`, `ks`
 
 ### Keys (`<name>.keys`)
 
-With `keys`. One record per key: `kind` (`key`), `key`, `distinct`, `distinct_lo`, `distinct_hi`,
+With `keys`. One record per key: `kind` (`key`), `key`, `distinctCount`, `distinctCount_lo`, `distinctCount_hi`,
 `keyness`, `nullKeys`. The distinct count is the one of the field's `fields` record where it has one:
 exact when the field has a value table (and for a bool), else an estimate — the CPC sketch, or for a
 timestamp the Theta sketch of the key set — which cannot tell a handful of duplicated rows from none.
 
 ### Summary (`<name>.summary`)
 
-One record per run: `rows`, `errorRows`, `fields`, `report` (the uri, null when none was written),
+One record per run: `rowCount`, `errorRows`, `fields`, `report` (the uri, null when none was written),
 `reportBytes`, `payload`, `degradations`, one count per notable code (`allNull`, `nullLikeOnly`,
 `constant`, `highNull`, `nullLikeValue`, `dominantValue`, `skewed`, `uniqueLike`), `targetRate`,
 `targetWarning`. It is emitted after the files are written: a step that should run once the report
@@ -292,7 +292,7 @@ sinks:
 "Since which partition is this field entirely null" is then one query over the table:
 
 ```sql
-SELECT field, MIN(`partition`) AS since
+SELECT field, MIN(partitionId) AS since
 FROM `myproject.quality.profile_fields`
 WHERE dataset = 'items' AND 'all_null' IN UNNEST(notable)
 GROUP BY field

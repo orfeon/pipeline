@@ -146,18 +146,23 @@ Every record of every output starts with the same columns:
 
 | column | type | |
 |---|---|---|
-| `runId` | STRING | `run.id`, default the job name |
+| `runId` | STRING | `run.id`; by default the id the runner gave the job (the Dataflow job id), and where the runner gives none the job name followed by `-yyyyMMdd-HHmmss`, the time the job was built in UTC — fixed once per job, so that every profile module of the job writes the same id (the tables are joined on it), and two runs of one config do not share it |
 | `dataset` | STRING | `run.dataset`, default the module name — *what* was profiled; one history table holds many datasets |
-| `partition` | STRING | `run.partition` — *which slice* of the dataset (a logical date, a version label); null when not given |
+| `partitionId` | STRING | `run.partition` — *which slice* of the dataset (a logical date, a version label); null when not given |
 | `generatedAt` | TIMESTAMP | one instant per run, shared by all outputs |
-| `formatVersion` | INT64 | the version of this contract; starts at `2` so that it cannot be taken for the sink's payload (`1`), which is not read |
+| `formatVersion` | INT64 | the version of this contract; `3`; it started at `2` so that it cannot be taken for the sink's payload (`1`), which is not read, and `3` renamed the columns that were reserved words (below) |
 
 Appending the outputs of successive runs to one table per output gives the history: the question "in which
 run did this field become entirely null" is one query over the default output.
 
-`partition` is separate from `generatedAt` because the two differ whenever a slice is backfilled or re-run:
-the history is ordered by `partition` when it is given, by `generatedAt` otherwise. A re-run of the same
-slice appends a second set of records; the natural key of an output is (`dataset`, `partition`, the
+No column is named with a reserved keyword of BigQuery: the records are queried as tables, and
+`SELECT field, nulls FROM …` is a syntax error. Hence `partitionId`, `rowCount`, `nullCount`,
+`distinctCount` and `groupName` rather than the bare words. Names that other dialects reserve and BigQuery
+does not (`count`, `min`, `max`, `sum`, `value`, `rank`, `key`, `lower`, `upper`) are kept.
+
+`partitionId` is separate from `generatedAt` because the two differ whenever a slice is backfilled or re-run:
+the history is ordered by `partitionId` when it is given, by `generatedAt` otherwise. A re-run of the same
+slice appends a second set of records; the natural key of an output is (`dataset`, `partitionId`, the
 output's own key columns), and of two record sets with that key the later `generatedAt` is the current
 one. A consumer that wants one record set per slice upserts on that key or reads the latest.
 
@@ -168,7 +173,7 @@ is the record's `rankError`, and the statistics read off the cell grid of §6.1 
 are exact functions of exact counts but resolved to one cell.
 
 The identity columns and the shape of a `checks` record (§9.2) are meant to be shared with the evaluation
-transform, not owned by this one: a history table keyed by (`dataset`, `partition`) and a notification
+transform, not owned by this one: a history table keyed by (`dataset`, `partitionId`) and a notification
 driven by `checks` should serve a data profile and a prediction evaluation of the same slice alike.
 Adopting them in the evaluation transform's `summary` and its designed-but-unbuilt reporting layer
 (evaluation-dsl.md §11) is a proposal for that document, outside this one.
@@ -181,8 +186,8 @@ Referenced as `<name>` (the default) and `<name>.<output>`.
 
 One record per profiled field.
 
-`field`, `type` (`numeric` / `string` / `bool` / `timestamp` / `array`), `sourceType`, `rows`, `count`
-(non-null, readable), `nulls`, `nullRate`, `errors`, `distinct` / `_lo` / `_hi`, `distinctExact` (true when
+`field`, `type` (`numeric` / `string` / `bool` / `timestamp` / `array`), `sourceType`, `rowCount`, `count`
+(non-null, readable), `nullCount`, `nullRate`, `errors`, `distinctCount` / `_lo` / `_hi`, `distinctExact` (true when
 the value table of §5.4 is complete, in which case the bounds equal the estimate);
 numeric-like: `min`, `max`, `sum`, `mean`, `stddev`, `skewness`, `zeros`, `nans`, `infs`, `p01`, `p05`, `p25`,
 `p50`, `p75`, `p95`, `p99`, `rankError` (the quantile sketch's normalized rank error; 0 when the quantiles
@@ -219,8 +224,8 @@ converted: the profile still counts such a value as non-null.
 
 Present with `segments`, `time` or `mode: compare`. One record per axis × group × field.
 
-`axis` (`segments:<field>` / `time:<field>` / `inputs`), `group`, `baseline` (true for the reference group
-of the axis), `field`, `groupRows`, `count`, `nulls`, `nullRate`, `min`, `max`, `sum`, `mean`, `stddev`,
+`axis` (`segments:<field>` / `time:<field>` / `inputs`), `groupName`, `baseline` (true for the reference group
+of the axis), `field`, `groupRows`, `count`, `nullCount`, `nullRate`, `min`, `max`, `minTime`, `maxTime` (timestamp fields, whose `min` / `max` are null), `sum`, `mean`, `stddev`,
 `p50` (interpolated from the cells of §6.1, exact to one cell; the exact median for a field with one cell
 per value), and against the reference of the axis
 (null on the baseline record of the `inputs` axis): `ks` (numeric-like), `tvd` (string / bool), `psi`,
@@ -263,10 +268,11 @@ values.
 
 ### 5.5 Bins (`<name>.bins`)
 
-One record per field × group × bin; `axis` and `group` are null for the whole dataset, and the two target
+One record per field × group × bin; `axis` and `groupName` are null for the whole dataset, and the two target
 classes appear as `axis: target`.
 
-`field`, `axis`, `group`, `bin`, `lower`, `upper` (numeric-like) or `value` (categorical; `(other)` and
+`field`, `axis`, `groupName`, `bin`, `lower`, `upper` (numeric-like; epoch milliseconds for a timestamp field,
+`TIMESTAMP_MILLIS(CAST(lower AS INT64))` in BigQuery) or `value` (categorical; `(other)` and
 `(null)` are bins of their own), `count`, `share`, and with a target: `positives`, `rate`, `rate_lo`,
 `rate_hi` (binary) or `targetMean`, `targetSe` (numeric), `edgesKind` (`quantile` / `declared` /
 `values`), `exact` (false only under `bins.mode: sketch`).
@@ -290,7 +296,7 @@ Present with `expectations` (§9.2). One record per rule × matched field.
 
 ### 5.10 Summary (`<name>.summary`)
 
-One record per run, complete enough that a later step can act without reading the other outputs: `rows`, `errorRows`, `fields`, `report` (the uri, null when none was written), `reportBytes`,
+One record per run, complete enough that a later step can act without reading the other outputs: `rowCount`, `errorRows`, `fields`, `report` (the uri, null when none was written), `reportBytes`,
 `degradations` (ARRAY<STRING\>, §10.3), one count per notable code (`allNull`, `constant`, …), one count
 per change kind, `checks`, `checksFailed`, `checksFailedWarn`, `checksFailedError` (§9.2), and with `time`:
 `latest` (the largest value of the time field), `freshnessSeconds` (`generatedAt` − `latest`),
@@ -425,8 +431,8 @@ keys:
 
 ### 7.1 Key record
 
-`kind: key`, `key` (the fields joined by `+`), `axis`, `group`, `distinct` / `_lo` / `_hi`, `keyness`
-(distinct / rows, capped at 1), `nullKeys` — for a single-field key `distinct` is the number its `fields`
+`kind: key`, `key` (the fields joined by `+`), `axis`, `groupName`, `distinctCount` / `_lo` / `_hi`, `keyness`
+(distinct / rows, capped at 1), `nullKeys` — for a single-field key `distinctCount` is the number its `fields`
 record carries (the value table, else the CPC sketch; a bool counts its two values; the Theta sketch of the
 key set is kept for the set operations of §7.2 and §7.3, and is the estimate only where the field has no
 other) — and with `unique: true`: `duplicateKeys` and `duplicateRows` —
@@ -434,16 +440,16 @@ exact, counted by a shuffle on the key hash (a set sketch cannot tell 146 duplic
 none). A composite key is the tuple of its fields.
 
 - **Uniqueness is a property of one input.** With `mode: compare` there is one key record per input
-  (`axis: inputs`, `group` the input) and duplicates are counted within each input; a key present in two
+  (`axis: inputs`, `groupName` the input) and duplicates are counted within each input; a key present in two
   inputs is not a duplicate — that is the overlap of §7.2, and in a migration check it is the expected
-  result. With `mode: union` the inputs are one dataset and there is one record (`axis`, `group` null).
+  result. With `mode: union` the inputs are one dataset and there is one record (`axis`, `groupName` null).
 - **A null key is not a key.** A row whose key is null — any field of a composite key — is counted in
-  `nullKeys` and takes no part in `distinct`, `duplicateKeys`, `duplicateRows` or an overlap. Whether null
+  `nullKeys` and takes no part in `distinctCount`, `duplicateKeys`, `duplicateRows` or an overlap. Whether null
   keys are acceptable is an expectation on `nullKeys` or on the fields' `nullRate`.
 
 ### 7.2 Overlap record
 
-`kind: overlap`, `key`, `otherKey`, `axis`, `group`, `otherGroup`, `intersection` / `_lo` / `_hi`,
+`kind: overlap`, `key`, `otherKey`, `axis`, `groupName`, `otherGroup`, `intersection` / `_lo` / `_hi`,
 `containment` (the share of `key` found in `otherKey`).
 
 Overlaps are emitted only where they mean something:
@@ -456,7 +462,7 @@ Two keys without a common domain are not compared: two unrelated ten-digit ident
 
 ### 7.3 Against a previous run
 
-With `previous` as a file, a key gets `kind: overlap` records against the previous run (`group: previous`):
+With `previous` as a file, a key gets `kind: overlap` records against the previous run (`groupName: previous`):
 the retained share (previous keys still present) and the new share (current keys not seen before). The set
 sketch of every declared key is part of the payload (§10.2) for exactly this purpose, so a payload or report
 file is always enough. A set sketch holds hashes, not values, and is included under `values: hide` too.
@@ -474,7 +480,7 @@ grain, run without `unnest`.
 
 A parent whose array is empty or null yields no row: a row of null child fields would be a child that does
 not exist, and would raise the null rate of every child field. So that such parents do not vanish
-unnoticed, the `summary` counts them: `parents`, `parentsEmpty`, `parentsNull`. `rows` is the number of
+unnoticed, the `summary` counts them: `parents`, `parentsEmpty`, `parentsNull`. `rowCount` is the number of
 child rows.
 
 Without `unnest` an array field is profiled as its element count.
@@ -510,7 +516,7 @@ baseline or by declared bands, per split and per prediction set (§1.2).
 
 `previous` names the run to diff against: the `payload` or `report` file of that run (written by this
 transform — a file of the sink, format version 1, is rejected when it is read), or `{input: <name>}` — a collection holding the default output of earlier runs, of which the
-latest run of the same `dataset` before this one is taken, in the order of §4 (`partition` when given,
+latest run of the same `dataset` before this one is taken, in the order of §4 (`partitionId` when given,
 `generatedAt` otherwise; typically a `bigquery` source over the history table).
 
 `changes` records: `field`, `change`, `previous`, `current`, `detail`.
@@ -560,7 +566,7 @@ expectations:
 
 Three kinds of rule:
 
-- **Aggregate rules** bound a statistic of the default output (`nullRate`, `nullLikeRate`, `distinct`,
+- **Aggregate rules** bound a statistic of the default output (`nullRate`, `nullLikeRate`, `distinctCount`,
   `range`, `notConstant`), of a key (`unique`), of a pair (`ks`, `psi`), of the changes (`count` per kind)
   or of the run (`freshness`, `rowCount`, `buckets`). `fields` takes names and globs.
 - **Row rules** state a condition every row should satisfy. `rows` is a filter condition in the shared
@@ -608,9 +614,9 @@ second pass (§9.5).
 One previous run cannot tell a change from the ordinary variation of a quantity that moves every day — a
 daily row count above all. `previous: {input: <name>, window: 28}` takes, instead of the latest run alone,
 the latest 28 runs of the same `dataset` before this one (ordered as in §4), and `same: weekday` restricts
-them to the runs whose `partition` (or `generatedAt`) falls on the same day of the week.
+them to the runs whose `partitionId` (or `generatedAt`) falls on the same day of the week.
 
-For the dataset's row count and for each field's `nullRate`, `distinct`, `mean` and `sum`, the run then
+For the dataset's row count and for each field's `nullRate`, `distinctCount`, `mean` and `sum`, the run then
 reports where the current value stands among those runs: `changes` records of kind `deviation` with
 `historyRuns`, `historyMedian`, `historyMad` and `deviation` = (current − median) / (1.4826 · MAD), listed
 when |deviation| exceeds 3 (a parameter, `previous.thresholds.deviation`). A quantity that did not vary in
@@ -712,11 +718,11 @@ depth (listed in the manifest).
 ## 13. Stages
 
 1. **The transform and the counting pass — implemented.** `fields`, `groups`, `values`, `bins`, `pairs`,
-   `target` (binary), `summary`; the full record identity of §4 (`dataset`, `partition`); §5.2 notable codes
+   `target` (binary), `summary`; the full record identity of §4 (`dataset`, `partitionId`); §5.2 notable codes
    and null sentinels; `sum`; §6 with declared edges and `drift.axis` / `drift.exclude`; the report and the
    payload file written by the transform; the sink, its examples and its reference page removed. Also in
    this stage, carried over from the sink: `keys` as a list of field names with the `kind: key` records
-   (`distinct` with bounds, capped `keyness`, `nullKeys`) — no `unique`, composite keys, domains or overlaps.
+   (`distinctCount` with bounds, capped `keyness`, `nullKeys`) — no `unique`, composite keys, domains or overlaps.
 2. **Runs and declarations.** `previous` and `changes`; `expectations` and `checks` with all three rule
    kinds, severity and metadata (§9.2); freshness and missing buckets (§9.3) with `time.groups`; keys with
    `unique`, composite keys, `domain` and input overlaps, and the key set sketches in the payload (§10.2);

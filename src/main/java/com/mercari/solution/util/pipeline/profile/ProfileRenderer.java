@@ -1011,13 +1011,15 @@ public class ProfileRenderer {
 
         final JsonObject generator = new JsonObject();
         generator.addProperty("name", "mercari-pipeline profile transform");
+        // the build that computed the records: the git revision stamped at build time, absent outside a checkout
+        generator.addProperty("revision", com.mercari.solution.util.BuildInfo.revision());
         generator.addProperty("sketchLibrary", "org.apache.datasketches:datasketches-java:6.2.0");
         manifest.add("generator", generator);
 
         final JsonObject job = new JsonObject();
         job.addProperty("jobName", config.jobName);
         job.addProperty("moduleName", config.moduleName);
-        job.addProperty("runId", config.runId);
+        job.addProperty("runId", result.runId);
         job.addProperty("dataset", config.dataset);
         job.addProperty("partition", config.partition);
         final JsonArray inputs = new JsonArray();

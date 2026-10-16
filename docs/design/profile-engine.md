@@ -194,7 +194,7 @@ restricted to the file forms). In Finalize it is read in full for the changes an
 
 With `previous.window` the side input holds the field records of the last N runs of the dataset instead of
 one: N × fields records (28 × 650 ≈ 18,000), reduced in Finalize to a median and a MAD per field and
-quantity. Selecting those runs (same `dataset`, before this run's `partition` / `generatedAt`, optionally
+quantity. Selecting those runs (same `dataset`, before this run's `partitionId` / `generatedAt`, optionally
 the same weekday) is done by the transform from the collection it is given, so the source may simply read
 the recent part of the history table.
 
