@@ -140,6 +140,7 @@ Everything dsl §6 emits is a function of these arrays:
 | `groups.psi`, `target.iv` | the same bins as the field's `bins` records, 0.5-per-bin smoothing |
 | `groups.tvd` | the categorical value counts |
 | `groups.p50` | linear interpolation inside the cell that contains the median; the value of that cell for a field with one cell per value |
+| `pairs.ks`, `pairs.psi` | the pooled cells of the pair: one per value of either field when both have a value table, else from the two sketches merged |
 | `groups.min` / `max` / `mean` / `stddev` | the scalars |
 | `rate` / `targetMean` and their intervals | the per-cell target arrays |
 

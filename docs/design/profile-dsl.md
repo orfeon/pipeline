@@ -313,9 +313,12 @@ fixed ranks).
 
 The transform reads its input twice. The first pass builds the whole-dataset profile (the statistics of
 §5.1) and, from its quantile sketch, the **edges** of every numeric-like field: the 100 equal-frequency
-cells of the whole dataset (fewer where ties collapse edges). A numeric field with an exact value table
-(§5.4, at most 1,000 distinct values) gets **one cell per distinct value** instead: its cells come from no
-sketch, and a statistic read off them is exact rather than resolved to one cell. The second pass counts, exactly, the rows of
+cells of the whole dataset (fewer where ties collapse edges). A numeric, array-length or timestamp field
+with an exact value table (§5.4, at most 1,000 distinct values; a timestamp's table is kept for this and
+for its quantiles, not listed in `values`) gets **one cell per distinct value** instead: its cells come
+from no sketch, and a statistic read off them is exact rather than resolved to one cell. Its merged bins
+say `edgesKind: exactQuantile`. The bound is a cliff: a field near 1,000 distinct values can be tabulated
+in one run and sketched in the next, and its edges switch with it. The second pass counts, exactly, the rows of
 every group and target class in every cell, and for categorical fields in every value of the whole-dataset
 value list: the most frequent 50 values — of the exact table when the field has one, of the frequent items
 otherwise — plus `(other)`. (The `values` output still carries the complete exact table; the cap applies to
@@ -339,7 +342,9 @@ the rows and equal-frequency bins fold them into one — and how bins are made t
 data does not know (price bands, age bands). The declared edges are counted *next to* the quantile cells,
 not instead of them: `bins`, PSI and the information value of that field use the declared edges, while KS
 and the group median keep the cell grid of the field (the 100 cells, or one per value), so declaring three
-price bands does not reduce a KS to three points.
+price bands does not reduce a KS to three points. Its information value is then over its own number of
+bins, and the information value grows with the number of bins: it is comparable between runs of the same
+declaration, not with the information value of the fields on `bins.count` bins.
 
 A declared field pair (§5.12) is counted the same way, each of its two fields over the cells of the two
 pooled. The second pass is skipped altogether when no output needs it (§9.5).

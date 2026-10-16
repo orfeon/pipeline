@@ -457,6 +457,8 @@ public class ProfileReportTest {
         final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config(null, null), null);
         final ProfileReport.FieldResult field = result.fields.get(qty);
         Assertions.assertArrayEquals(new double[] { 1, 1, 2, 3 }, field.cellEdges);
+        // its bins say that their edges are exact
+        Assertions.assertEquals("exactQuantile", field.edgesKind);
 
         // the quantiles of the field are read off the table
         final List<Double> all = new ArrayList<>();
@@ -538,6 +540,85 @@ public class ProfileReportTest {
         final JsonObject qty = payload.getAsJsonArray("fields").get(1).getAsJsonObject().getAsJsonObject("overlay");
         Assertions.assertEquals(3, qty.getAsJsonArray("all").size());
         Assertions.assertEquals(3, positive.getAsJsonObject("qty").getAsJsonArray("hist").size());
+    }
+
+    @Test
+    public void testExactWhereTheTableAllows() {
+        // day takes 30 dates; a and b are compared as a pair, each with a value table
+        final Schema schema = Schema.builder()
+                .withField("day", Schema.FieldType.TIMESTAMP)
+                .withField("a", Schema.FieldType.INT64)
+                .withField("b", Schema.FieldType.INT64)
+                .withField("sold", Schema.FieldType.BOOLEAN)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false).withTarget("sold", null);
+        final ProfileAccumulator accumulator = ProfileAccumulator.of(spec);
+        final List<ProfileRow> rows = new ArrayList<>();
+        final java.time.Instant start = java.time.Instant.parse("2026-01-01T00:00:00Z");
+        final long[] a = new long[3000];
+        final long[] b = new long[3000];
+        for(int i = 0; i < 3000; i++) {
+            a[i] = i % 7;
+            b[i] = (i * 3L) % 11;
+            final ProfileRow row = ProfileRow.of(spec, MElement.builder()
+                    .withTimestamp("day", start.plus(java.time.Duration.ofDays(i % 30)))
+                    .withInt64("a", a[i])
+                    .withInt64("b", b[i])
+                    .withBool("sold", i % 5 < 2)
+                    .build());
+            rows.add(row);
+            accumulator.add(row.values, null);
+        }
+        final List<String[]> pairs = List.<String[]>of(new String[] { "a", "b" });
+        final Passes passes = secondPass(spec, accumulator, rows, null, pairs);
+        final ProfileReport.Config config = config(null, pairs);
+        final ProfileReport.Result result = ProfileReport.build(passes.accumulator, passes.cells, passes.edges, config, null);
+
+        // a timestamp field with a table: one cell per date, exact quantiles, its values not listed
+        Assertions.assertTrue(passes.edges.hasValueCells(0));
+        Assertions.assertEquals(29, passes.edges.getSplits(0).length);
+        final ProfileReport.FieldResult day = result.fields.get(0);
+        Assertions.assertEquals("exactQuantile", day.edgesKind);
+        Assertions.assertEquals(0d, day.rankError);
+        Assertions.assertEquals(30d, day.distinct);
+        Assertions.assertTrue(day.distinctExact);
+        Assertions.assertEquals((double) start.plus(java.time.Duration.ofDays(14)).toEpochMilli(), day.quantiles[3]);
+        Assertions.assertNull(day.valuesKind);
+        Assertions.assertTrue(day.values.isEmpty());
+
+        // the pair: one pooled cell per value of either field, so its KS is the exact one
+        Assertions.assertArrayEquals(new double[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, passes.edges.getPairSplits(0));
+        double ks = 0;
+        for(int x = 0; x <= 10; x++) {
+            final int value = x;
+            final double shareA = (double) Arrays.stream(a).filter(v -> v <= value).count() / a.length;
+            final double shareB = (double) Arrays.stream(b).filter(v -> v <= value).count() / b.length;
+            ks = Math.max(ks, Math.abs(shareA - shareB));
+        }
+        Assertions.assertEquals(ks, result.pairs.getFirst().ks, 1e-12);
+
+        // the histogram of a field with a table is its exact counts over right-closed equal-width bins
+        final JsonObject payload = JsonParser.parseString(
+                ProfileRenderer.render(result, passes.accumulator, config).payloadJson).getAsJsonObject();
+        final JsonObject histogram = payload.getAsJsonArray("fields").get(1).getAsJsonObject()
+                .getAsJsonObject("numeric").getAsJsonObject("histogram");
+        final JsonArray edges = histogram.getAsJsonArray("edges");
+        final JsonArray counts = histogram.getAsJsonArray("counts");
+        Assertions.assertEquals(edges.size() - 1, counts.size());
+        for(int j = 0; j < counts.size(); j++) {
+            final double lower = j == 0 ? Double.NEGATIVE_INFINITY : edges.get(j).getAsDouble();
+            final double upper = j == counts.size() - 1 ? Double.POSITIVE_INFINITY : edges.get(j + 1).getAsDouble();
+            final long expected = Arrays.stream(a).filter(v -> v > lower && v <= upper).count();
+            Assertions.assertEquals(expected, counts.get(j).getAsLong(), "bin " + j);
+        }
+        final JsonObject cdf = payload.getAsJsonArray("fields").get(1).getAsJsonObject()
+                .getAsJsonObject("numeric").getAsJsonObject("cdf");
+        final JsonArray points = cdf.getAsJsonArray("points");
+        for(int i = 0; i < points.size(); i++) {
+            final double point = points.get(i).getAsDouble();
+            Assertions.assertEquals((double) Arrays.stream(a).filter(v -> v <= point).count() / a.length,
+                    cdf.getAsJsonArray("ranks").get(i).getAsDouble(), 1e-12);
+        }
     }
 
     @Test

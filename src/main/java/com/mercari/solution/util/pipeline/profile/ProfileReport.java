@@ -170,7 +170,7 @@ public class ProfileReport {
         public Double[] binUpper;
         public String[] binLabels;      // categorical bins
         public long[] bins;             // whole-dataset counts per bin
-        public String edgesKind;        // quantile | declared | values
+        public String edgesKind;        // quantile | exactQuantile | declared | values
 
         public boolean numericLike() {
             return !"string".equals(type) && !"bool".equals(type);
@@ -593,15 +593,18 @@ public class ProfileReport {
                         r.distinctLower = r.distinct;
                         r.distinctUpper = r.distinct;
                         r.distinctExact = true;
-                        r.valuesKind = "exact";
                         r.quantiles = exactQuantiles(table, QUANTILE_RANKS);
                         r.rankError = 0d;
-                        table.entrySet().stream()
-                                .sorted((a, b) -> {
-                                    final int c = Long.compare(b.getValue(), a.getValue());
-                                    return c != 0 ? c : Double.compare(a.getKey(), b.getKey());
-                                })
-                                .forEach(e -> r.values.add(valueRow(canonicalNumber(e.getKey()), e.getValue(), e.getValue(), e.getValue(), true)));
+                        // a timestamp's table gives its cells and quantiles; its values are not listed as epoch millis
+                        if(numeric) {
+                            r.valuesKind = "exact";
+                            table.entrySet().stream()
+                                    .sorted((a, b) -> {
+                                        final int c = Long.compare(b.getValue(), a.getValue());
+                                        return c != 0 ? c : Double.compare(a.getKey(), b.getKey());
+                                    })
+                                    .forEach(e -> r.values.add(valueRow(canonicalNumber(e.getKey()), e.getValue(), e.getValue(), e.getValue(), true)));
+                        }
                     }
                 }
             }
@@ -808,7 +811,8 @@ public class ProfileReport {
                     r.binUpper[b] = b == declared.length ? null : (Double) declared[b];
                 }
             } else {
-                r.edgesKind = "quantile";
+                // over one cell per value the merged bins end on exact percentiles: the same edges on every run
+                r.edgesKind = r.valueCells ? "exactQuantile" : "quantile";
                 r.binOfCell = mergeBins(r.cells, config.binsCount);
                 r.bins = toBins(r.cells, r.binOfCell);
                 r.binLower = new Double[r.bins.length];
