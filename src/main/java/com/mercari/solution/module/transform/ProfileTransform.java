@@ -56,7 +56,7 @@ public class ProfileTransform extends Transform {
         private Run run;
         private FieldsFilter fields;
         private String values;           // show | hide
-        private List<String> keys;
+        private JsonElement keys;        // array of field names (the {fields, unique, domain} form is stage 2)
         private JsonElement target;      // field name or {field:, positive:} — the binary outcome every field is related to
         private JsonElement segments;    // array of field names or [{field:, topK:}]
         private JsonElement time;        // field name or {field:, granularity:}
@@ -211,6 +211,121 @@ public class ProfileTransform extends Transform {
             if(fanout != null && fanout < 1) {
                 errorMessages.add("parameters.fanout must be positive");
             }
+            if(keys != null && !keys.isJsonNull()) {
+                if(!keys.isJsonArray()) {
+                    errorMessages.add("parameters.keys must be an array of field names");
+                } else {
+                    for(final JsonElement key : keys.getAsJsonArray()) {
+                        if(key.isJsonObject()) {
+                            errorMessages.add("parameters.keys object form ({fields, unique, domain}: composite keys, exact duplicate counts) is not implemented yet (docs/design/profile-dsl.md §13); list field names: " + key);
+                        } else if(!key.isJsonPrimitive()) {
+                            errorMessages.add("parameters.keys entries must be field names: " + key);
+                        }
+                    }
+                }
+            }
+            if(!errorMessages.isEmpty()) {
+                throw new IllegalModuleException(String.join(", ", errorMessages));
+            }
+        }
+
+        private List<String> keyFields() {
+            if(keys == null || keys.isJsonNull()) {
+                return null;
+            }
+            final List<String> fields = new ArrayList<>();
+            for(final JsonElement key : keys.getAsJsonArray()) {
+                fields.add(key.getAsString());
+            }
+            return fields;
+        }
+
+        /** Whether {@code path} is {@code ancestor} itself or a field nested in it. */
+        private static boolean within(final String path, final String ancestor) {
+            return path.equals(ancestor) || path.startsWith(ancestor + ".");
+        }
+
+        /**
+         * Why a field of the input schema is not among the profiled fields of {@code spec}, or null when the
+         * schema does not have it. {@code unfiltered} is the spec of the whole schema.
+         */
+        private static String notProfiledReason(final ProfileSpec spec, final ProfileSpec unfiltered, final String path) {
+            // excluded (itself or a struct that holds it), nested too deep, or of an unsupported type
+            for(final ProfileSpec.SkippedField skipped : spec.getSkipped()) {
+                if(within(path, skipped.path)) {
+                    return skipped.reason;
+                }
+            }
+            // the include filter drops a field without recording it
+            for(final ProfileSpec.FieldSpec field : unfiltered.getFields()) {
+                if(field.path.equals(path)) {
+                    return "not selected by parameters.fields.include";
+                }
+            }
+            for(final ProfileSpec.SkippedField skipped : unfiltered.getSkipped()) {
+                if(within(path, skipped.path)) {
+                    return skipped.reason;
+                }
+            }
+            return null;
+        }
+
+        /** A field a parameter names that the profile does not carry: why, when the schema has it. */
+        private static String missing(
+                final ProfileSpec spec, final ProfileSpec unfiltered, final String parameter, final String path) {
+            final String reason = notProfiledReason(spec, unfiltered, path);
+            return reason == null
+                    ? parameter + " field not found in input schema: " + path
+                    : parameter + " field is in the input schema but not profiled (" + reason + "): " + path;
+        }
+
+        /**
+         * Whether a `fields` entry names a field of the schema, a struct that holds one, or a field of a
+         * struct nested too deep to be walked (the schema has it; it is not profiled either way).
+         */
+        private static boolean inSchema(final ProfileSpec unfiltered, final String path) {
+            for(final ProfileSpec.FieldSpec field : unfiltered.getFields()) {
+                if(within(field.path, path)) {
+                    return true;
+                }
+            }
+            for(final ProfileSpec.SkippedField skipped : unfiltered.getSkipped()) {
+                if(within(skipped.path, path)
+                        || (Schema.Type.element.name().equals(skipped.sourceType) && within(path, skipped.path))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * A name the schema does not have is a typo: silently profiling the rest hides it. Checked against
+         * the spec of the whole schema, since a name can be right and still be absent from a filtered one.
+         */
+        private void validateFieldNames(final ProfileSpec unfiltered) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(fields != null) {
+                for(final String path : fields.include == null ? List.<String>of() : fields.include) {
+                    if(!inSchema(unfiltered, path)) {
+                        errorMessages.add("parameters.fields.include field not found in input schema: " + path);
+                    }
+                }
+                for(final String path : fields.exclude == null ? List.<String>of() : fields.exclude) {
+                    if(!inSchema(unfiltered, path)) {
+                        errorMessages.add("parameters.fields.exclude field not found in input schema: " + path);
+                    }
+                }
+            }
+            if(drift != null && drift.exclude != null) {
+                for(final String path : drift.exclude) {
+                    // the drift columns are left out by exact field path: a struct path would leave out nothing
+                    if(unfiltered.getFields().stream().anyMatch(f -> f.path.startsWith(path + "."))) {
+                        errorMessages.add("parameters.drift.exclude takes field paths, not a struct (list its fields): " + path);
+                    } else if(!inSchema(unfiltered, path)) {
+                        errorMessages.add("parameters.drift.exclude field not found in input schema: " + path);
+                    }
+                }
+            }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(String.join(", ", errorMessages));
             }
@@ -249,7 +364,7 @@ public class ProfileTransform extends Transform {
         }
 
         /** Declares the target on the spec from the shorthand (field name) or {field, positive} form. */
-        private void applyTarget(final ProfileSpec spec) {
+        private void applyTarget(final ProfileSpec spec, final ProfileSpec unfiltered) {
             if(target == null) {
                 return;
             }
@@ -266,6 +381,9 @@ public class ProfileTransform extends Transform {
                     positive = p.isBoolean() ? (Object) p.getAsBoolean() : p.getAsString();
                 }
             }
+            if(spec.getFields().stream().noneMatch(f -> f.path.equals(field))) {
+                throw new IllegalModuleException(missing(spec, unfiltered, "parameters.target", field));
+            }
             try {
                 spec.withTarget(field, positive);
             } catch (final IllegalArgumentException e) {
@@ -274,7 +392,7 @@ public class ProfileTransform extends Transform {
         }
 
         /** Expands segments/time shorthand into comparison axes, validated against the resolved spec. */
-        private List<ProfileAxis> parseAxes(final ProfileSpec spec) {
+        private List<ProfileAxis> parseAxes(final ProfileSpec spec, final ProfileSpec unfiltered) {
             final List<ProfileAxis> axes = new ArrayList<>();
             final List<String> errorMessages = new ArrayList<>();
             if(segments != null) {
@@ -349,7 +467,7 @@ public class ProfileTransform extends Transform {
                     }
                 }
                 if(axis.fieldIndex < 0) {
-                    errorMessages.add("parameters." + axis.kind + " field not found in input schema: " + axis.field);
+                    errorMessages.add(missing(spec, unfiltered, "parameters." + axis.kind, axis.field));
                 }
             }
             if(!errorMessages.isEmpty()) {
@@ -359,7 +477,7 @@ public class ProfileTransform extends Transform {
         }
 
         /** The declared split points per field: sorted, strictly increasing, on numeric-like fields only. */
-        private Map<String, double[]> parseDeclaredEdges(final ProfileSpec spec) {
+        private Map<String, double[]> parseDeclaredEdges(final ProfileSpec spec, final ProfileSpec unfiltered) {
             final Map<String, double[]> declared = new HashMap<>();
             if(bins == null || bins.edges == null) {
                 return declared;
@@ -370,7 +488,7 @@ public class ProfileTransform extends Transform {
                 final ProfileSpec.FieldSpec fieldSpec = spec.getFields().stream()
                         .filter(f -> f.path.equals(path)).findFirst().orElse(null);
                 if(fieldSpec == null) {
-                    errorMessages.add("parameters.bins.edges field not found in input schema: " + path);
+                    errorMessages.add(missing(spec, unfiltered, "parameters.bins.edges", path));
                     continue;
                 }
                 if(!Set.of(ProfileSpec.ProfileType.NUMERIC, ProfileSpec.ProfileType.ARRAY_LENGTH).contains(fieldSpec.profileType)) {
@@ -441,11 +559,15 @@ public class ProfileTransform extends Transform {
         final boolean showValues = "show".equals(parameters.values);
         final boolean sampleEnabled = showValues
                 && (parameters.sample == null || !Boolean.FALSE.equals(parameters.sample.enabled));
+        final List<String> keyFields = parameters.keyFields();
+        // the spec of the whole schema: the names a parameter may use, and why a named field is not profiled
+        final ProfileSpec unfiltered = ProfileSpec.of(inputSchema, null, null, null, parameters.accuracy, false, false);
+        parameters.validateFieldNames(unfiltered);
         final ProfileSpec spec = ProfileSpec.of(
                 inputSchema,
                 parameters.fields == null || parameters.fields.include == null ? null : new HashSet<>(parameters.fields.include),
                 parameters.fields == null || parameters.fields.exclude == null ? null : new HashSet<>(parameters.fields.exclude),
-                parameters.keys == null ? null : new HashSet<>(parameters.keys),
+                keyFields == null ? null : new HashSet<>(keyFields),
                 parameters.accuracy,
                 sampleEnabled,
                 "all".equals(parameters.associations.numeric));
@@ -455,15 +577,15 @@ public class ProfileTransform extends Transform {
         if(spec.getFields().isEmpty()) {
             throw new IllegalModuleException("profile transform has no profilable fields for input schema: " + inputSchema);
         }
-        if(parameters.keys != null) {
-            for(final String key : parameters.keys) {
+        if(keyFields != null) {
+            for(final String key : keyFields) {
                 if(spec.getFields().stream().noneMatch(f -> f.path.equals(key))) {
-                    throw new IllegalModuleException("parameters.keys field not found in the profiled fields: " + key);
+                    throw new IllegalModuleException(Parameters.missing(spec, unfiltered, "parameters.keys", key));
                 }
             }
         }
-        parameters.applyTarget(spec);
-        final List<ProfileAxis> axes = parameters.parseAxes(spec);
+        parameters.applyTarget(spec, unfiltered);
+        final List<ProfileAxis> axes = parameters.parseAxes(spec, unfiltered);
 
         // compare mode: the union inputs become a comparison axis with a fixed baseline
         if("compare".equals(parameters.mode)) {
@@ -491,7 +613,7 @@ public class ProfileTransform extends Transform {
                     final ProfileSpec.FieldSpec fieldSpec = spec.getFields().stream()
                             .filter(f -> f.path.equals(path)).findFirst().orElse(null);
                     if(fieldSpec == null) {
-                        throw new IllegalModuleException("parameters.compare field not found in input schema: " + path);
+                        throw new IllegalModuleException(Parameters.missing(spec, unfiltered, "parameters.compare", path));
                     }
                     if(!ProfileSpec.ProfileType.NUMERIC.equals(fieldSpec.profileType)) {
                         throw new IllegalModuleException("parameters.compare fields must be numeric: " + path);
@@ -517,7 +639,7 @@ public class ProfileTransform extends Transform {
         config.partition = parameters.run == null ? null : parameters.run.partition;
         config.axes = axes;
         config.comparePairs = comparePairs;
-        config.declaredEdges = parameters.parseDeclaredEdges(spec);
+        config.declaredEdges = parameters.parseDeclaredEdges(spec, unfiltered);
         if(parameters.bins != null && parameters.bins.count != null) {
             config.binsCount = parameters.bins.count;
         }
@@ -537,7 +659,7 @@ public class ProfileTransform extends Transform {
         config.payloadOutput = parameters.outputOf("payload");
         // the second pass runs only when something reads it (profile-dsl.md §9.5)
         config.countingPass = !axes.isEmpty() || spec.getTarget() != null || !comparePairs.isEmpty() || config.outputBins;
-        config.expandedParametersJson = buildExpandedParameters(parameters, spec, config).toString();
+        config.expandedParametersJson = buildExpandedParameters(parameters, keyFields, spec, config).toString();
 
         for(final String path : new String[] { config.reportOutput, config.payloadOutput }) {
             if(path != null && !ResourceUtil.isStorageUri(path)
@@ -566,7 +688,8 @@ public class ProfileTransform extends Transform {
 
     /** The expanded (defaults applied) configuration recorded in the manifest. */
     private static JsonObject buildExpandedParameters(
-            final Parameters parameters, final ProfileSpec spec, final ProfileReport.Config config) {
+            final Parameters parameters, final List<String> keyFields,
+            final ProfileSpec spec, final ProfileReport.Config config) {
 
         final JsonObject expanded = new JsonObject();
         if(config.reportOutput != null) {
@@ -594,8 +717,8 @@ public class ProfileTransform extends Transform {
             expanded.addProperty("bins.edges", parameters.bins.edges.toString());
         }
         expanded.addProperty("countingPass", config.countingPass);
-        if(parameters.keys != null && !parameters.keys.isEmpty()) {
-            expanded.addProperty("keys", String.join(",", parameters.keys));
+        if(keyFields != null && !keyFields.isEmpty()) {
+            expanded.addProperty("keys", String.join(",", keyFields));
         }
         if(spec.getTarget() != null) {
             expanded.addProperty("target", spec.getTarget().path);
