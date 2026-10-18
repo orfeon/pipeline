@@ -229,7 +229,8 @@
             "json",
             "text",
             "bytes",
-            "none"
+            "none",
+            "html"
           ],
           "default": "json"
         },
@@ -240,6 +241,66 @@
         "itemsPath": {
           "type": "string",
           "description": "JSON pointer to the array to fan out (/items, / for a top-level array)"
+        },
+        "itemsSelector": {
+          "type": "string",
+          "description": "format html: CSS selector of the item elements; each match becomes one record"
+        },
+        "baseUri": {
+          "type": "string",
+          "description": "format html: base URI for resolving relative links (default: the request URL)"
+        },
+        "fields": {
+          "type": "array",
+          "description": "Output fields scraped from each html item (selector) and/or rendered from a template (value)",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "selector": {
+                "type": "string",
+                "description": "format html: CSS selector under each item (select scrape parameters apply)"
+              },
+              "value": {
+                "type": "string",
+                "description": "Template rendered per output record"
+              },
+              "type": {
+                "type": "string",
+                "default": "string"
+              },
+              "attribute": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              },
+              "group": {
+                "type": "integer"
+              },
+              "trim": {
+                "type": "boolean"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "nullable",
+                  "repeated"
+                ]
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
         },
         "success": {
           "type": "object",
@@ -375,6 +436,10 @@
         "foreach": {
           "type": "string",
           "description": "With input: JSON pointer into the parent's raw response; run once per array element"
+        },
+        "when": {
+          "$ref": "#/$defs/filter",
+          "description": "With input: run only for the parent records (foreach: items) that match"
         }
       },
       "required": [
