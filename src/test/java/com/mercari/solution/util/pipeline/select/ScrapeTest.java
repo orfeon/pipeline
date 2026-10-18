@@ -32,6 +32,7 @@ public class ScrapeTest {
               <div class="date">2024-03-01</div>
               <div class="time">12:34:56</div>
               <div class="b64">aGVsbG8=</div>
+              <div class="ts">2024-03-01T12:34:56Z</div>
             </body></html>
             """;
 
@@ -174,6 +175,12 @@ public class ScrapeTest {
                 "{ \"name\": \"s\", \"func\": \"scrape\", \"field\": \"html\", \"selector\": \"div.time\", \"type\": \"time\" }",
                 inputFields());
         Assertions.assertEquals((12L * 3600 + 34 * 60 + 56) * 1_000_000L, timeScrape.apply(input(), TIMESTAMP));
+
+        // TIMESTAMP values are epoch micros
+        final SelectFunction timestampScrape = create(
+                "{ \"name\": \"s\", \"func\": \"scrape\", \"field\": \"html\", \"selector\": \"div.ts\", \"type\": \"timestamp\" }",
+                inputFields());
+        Assertions.assertEquals(java.time.Instant.parse("2024-03-01T12:34:56Z").toEpochMilli() * 1000L, timestampScrape.apply(input(), TIMESTAMP));
 
         final SelectFunction bytesScrape = create(
                 "{ \"name\": \"s\", \"func\": \"scrape\", \"field\": \"html\", \"selector\": \"div.b64\", \"type\": \"bytes\" }",

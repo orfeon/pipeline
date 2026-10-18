@@ -316,8 +316,11 @@ public class HttpSource extends Source {
         html
     }
 
-    private static final List<String> RAW_FIELD_NAMES = List.of(
-            "name", "url", "method", "statusCode", "headers", "body", "blob", "payload", "attempts", "durationMs", "timestamp");
+    /** Types a {@code value} (template) field can be converted to (see RequestDoFn.toFieldValue). */
+    private static final Set<Schema.Type> VALUE_FIELD_TYPES = EnumSet.of(
+            Schema.Type.string, Schema.Type.json, Schema.Type.uuid, Schema.Type.bool,
+            Schema.Type.int32, Schema.Type.int64, Schema.Type.float32, Schema.Type.float64,
+            Schema.Type.date, Schema.Type.time, Schema.Type.timestamp, Schema.Type.bytes);
 
     public static class Response implements Serializable {
         private Format format;
@@ -351,6 +354,13 @@ public class HttpSource extends Source {
             } else if(itemsSelector != null || baseUri != null) {
                 errorMessages.add(prefix + ".itemsSelector / baseUri require format html");
             }
+            if(itemsSelector != null) {
+                try {
+                    org.jsoup.select.QueryParser.parse(itemsSelector);
+                } catch (final RuntimeException e) {
+                    errorMessages.add(prefix + ".itemsSelector is illegal: " + e.getMessage());
+                }
+            }
             if(fields != null) {
                 errorMessages.addAll(validateFields(prefix));
             }
@@ -367,19 +377,11 @@ public class HttpSource extends Source {
                 errorMessages.add(prefix + ".fields must be a non-empty array");
                 return errorMessages;
             }
-            // names the fields are added to: the schema's (json), the raw record's (untyped) or none (html)
+            // names the fields are added to: the raw record's (untyped) or none (html: the fields make
+            // up the whole record). Collisions with response.schema are checked once it is parsed (setDefaults).
             final Set<String> names = new HashSet<>();
-            if(isHtml()) {
-                // fields make up the whole record
-            } else if(schema != null && schema.isJsonObject() && schema.getAsJsonObject().has("fields")
-                    && schema.getAsJsonObject().get("fields").isJsonArray()) {
-                for(final JsonElement f : schema.getAsJsonObject().getAsJsonArray("fields")) {
-                    if(f.isJsonObject() && f.getAsJsonObject().has("name")) {
-                        names.add(f.getAsJsonObject().get("name").getAsString());
-                    }
-                }
-            } else if(schema == null) {
-                names.addAll(RAW_FIELD_NAMES);
+            if(!isHtml() && schema == null) {
+                createRawSchema().getFields().forEach(f -> names.add(f.getName()));
             }
             final JsonArray array = fields.getAsJsonArray();
             for(int i = 0; i < array.size(); i++) {
@@ -406,7 +408,7 @@ public class HttpSource extends Source {
                         errorMessages.add(fieldPrefix + ".selector requires format html");
                     }
                     try {
-                        Scrape.of(name, field, null, false);
+                        Scrape.of(name, field, null, false).validate();
                     } catch (final RuntimeException e) {
                         errorMessages.add(fieldPrefix + " is illegal: " + e.getMessage());
                     }
@@ -415,7 +417,10 @@ public class HttpSource extends Source {
                         errorMessages.add(fieldPrefix + ".value must be a string (template)");
                     }
                     try {
-                        Schema.FieldType.type(field.has("type") ? field.get("type").getAsString() : "string");
+                        final Schema.Type type = Schema.FieldType.type(field.has("type") ? field.get("type").getAsString() : "string").getType();
+                        if(!VALUE_FIELD_TYPES.contains(type)) {
+                            errorMessages.add(fieldPrefix + ".type " + type + " is not supported for a value field: " + VALUE_FIELD_TYPES);
+                        }
                     } catch (final RuntimeException e) {
                         errorMessages.add(fieldPrefix + ".type is illegal for a value field: " + e.getMessage());
                     }
@@ -453,6 +458,13 @@ public class HttpSource extends Source {
                     }
                 }
                 fields = null;
+            }
+            if(schema_ != null) {
+                for(final ResponseField field : fields_) {
+                    if(schema_.hasField(field.name())) {
+                        throw new IllegalModuleException("response.fields name collides with a response.schema field: " + field.name());
+                    }
+                }
             }
         }
 
@@ -631,6 +643,20 @@ public class HttpSource extends Source {
                 }
                 it.remove();
 
+                if(request.whenJson != null && request.foreach == null) {
+                    // when sees only the parent record's fields: an unknown one is always null and would skip every request silently
+                    final List<String> unknown = new ArrayList<>();
+                    for(final String variable : Filter.parse(request.whenJson).getRequiredVariables()) {
+                        final int dot = variable.indexOf('.');
+                        if(!parentSchema.hasField(dot < 0 ? variable : variable.substring(0, dot))) {
+                            unknown.add(variable);
+                        }
+                    }
+                    if(!unknown.isEmpty()) {
+                        throw new IllegalModuleException("parameters.requests " + request.name + ".when refers to fields that are not in the output of " + request.input + ": " + unknown);
+                    }
+                }
+
                 final Schema outputSchema = request.outputSchema();
                 final String eventTimeField = timestampAttribute != null && outputSchema.hasField(timestampAttribute) ? timestampAttribute : null;
                 final TupleTag<MElement> outputTag = new TupleTag<>() {};
@@ -706,6 +732,7 @@ public class HttpSource extends Source {
         private final Schema inputSchema;
         private final Schema outputSchema;
         private final String eventTimeField;
+        private final Schema.Type eventTimeType;
         private final TupleTag<BadRecord> failureTag;
         private final boolean failFast;
         private final Map<String, Logging> logging;
@@ -738,6 +765,7 @@ public class HttpSource extends Source {
             this.inputSchema = inputSchema;
             this.outputSchema = outputSchema;
             this.eventTimeField = eventTimeField;
+            this.eventTimeType = eventTimeField == null ? null : outputSchema.getField(eventTimeField).getFieldType().getType();
             this.failureTag = failureTag;
             this.failFast = failFast;
             this.logging = Logging.map(loggings);
@@ -831,11 +859,12 @@ public class HttpSource extends Source {
                 } else {
                     list.add(items);
                 }
+                final Map<String, Object> parentValues = whenCondition == null ? null : input.asStandardMap(inputSchema);
                 for(final JsonElement item : list) {
                     final Map<String, Object> itemValues = item.isJsonObject() ? JsonToMapConverter.convert(item) : Map.of();
                     final Object itemVar = item.isJsonObject() ? itemValues : toVar(item);
                     if(whenCondition != null) {
-                        final Map<String, Object> whenValues = input.asStandardMap(inputSchema);
+                        final Map<String, Object> whenValues = new HashMap<>(parentValues);
                         whenValues.putAll(itemValues);
                         whenValues.put("__item", itemVar);
                         if(!Filter.filter(whenCondition, whenValues)) {
@@ -928,7 +957,7 @@ public class HttpSource extends Source {
                         LOG.warn("{}: skipped non-object response row: {}", request.name, row);
                         continue;
                     }
-                    final Map<String, Object> map = new HashMap<>(JsonToElementConverter.convert(request.response.schema_.getFields(), row.getAsJsonObject()));
+                    final Map<String, Object> map = JsonToElementConverter.convert(request.response.schema_.getFields(), row.getAsJsonObject());
                     output(c, map, templateValues);
                 }
             } else {
@@ -998,7 +1027,7 @@ public class HttpSource extends Source {
             if(eventTimeField == null || !(map.get(eventTimeField) instanceof Number number)) {
                 return null;
             }
-            return switch (outputSchema.getField(eventTimeField).getFieldType().getType()) {
+            return switch (eventTimeType) {
                 case timestamp -> Instant.ofEpochMilli(Math.floorDiv(number.longValue(), 1000L));
                 case date -> Instant.ofEpochMilli(number.longValue() * 86_400_000L);
                 default -> null;

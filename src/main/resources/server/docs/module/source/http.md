@@ -57,7 +57,7 @@ Typical uses:
 | loop      | optional | [Loop](#loop-parameters) | Pagination. |
 | input     | optional | String | Name of the parent request. This request runs once **per record** of the parent's output, in parallel across workers. |
 | foreach   | optional | String | With `input`: JSON pointer into the parent's **raw** response (`/data/items`); this request runs once per element of that array, with the element's fields as template variables (`__item` holds the element). Lets the parent stay an untyped archive while children fan out over its items. |
-| when      | optional | [Filter](../common/filter.md) | With `input`: run this request only for the parent records (with `foreach`: the items) that match, e.g. `"file IS NOT NULL"`. Evaluated on the parent record's fields (plus the item's fields and `__item` with `foreach`); skipped records produce no output and no failure. |
+| when      | optional | [Filter](../common/filter.md) | With `input`: run this request only for the parent records (with `foreach`: the items) that match, e.g. `"file IS NOT NULL"`. Evaluated on the parent record's fields (plus the item's fields and `__item` with `foreach`); skipped records produce no output and no failure. Without `foreach`, the fields it refers to must be output fields of the parent (checked at assembly). |
 | rate      | optional | [Rate](#rate-parameters) | Per-worker rate limit for this request (useful for `input` / `foreach` fan-out). |
 
 ### Response parameters
@@ -80,7 +80,7 @@ Each entry of `response.fields` has a `name` and exactly one of `selector` or `v
 | parameter | optional | type | description |
 |-----------|----------|------|-------------|
 | name      | required | String | Output field name. It must not collide with the `schema` fields or, for raw records, the [raw output fields](#raw-output-schema). |
-| selector  | selective | String | `format: html` only. CSS selector evaluated **under each item element** (`td:nth-of-type(2)`, `td.title a[href]`). The remaining parameters are those of the select [scrape](../transform/select.md#scrape) function: `type` (default `string`), `attribute` (e.g. `href`, or `abs:href` for an absolute URL), `pattern` / `group`, `trim`, `mode: repeated` (every match) and nested `fields` (a struct). An item without a match yields `null`. |
+| selector  | selective | String | `format: html` only. CSS selector evaluated **under each item element** (`td:nth-of-type(2)`, `td.title a[href]`). The remaining parameters are those of the select [scrape](../transform/select.md#scrape) function: `type` (default `string`), `attribute` (e.g. `href`, or `abs:href` for an absolute URL), `pattern` / `group`, `trim`, `mode: repeated` (every match; a match whose `pattern` does not match is dropped) and nested `fields` (a struct). An item without a match yields `null`. |
 | value     | selective | String | FreeMarker template rendered **per output record**, converted to `type`. It sees the request's template values — the parent record's fields, the `foreach` item, `utils.*` — plus the current loop variables (`${page}`) and `__url` (the rendered request URL), overlaid with the record's own fields (scraped, `schema` or raw fields) and the `value` fields declared before it. Record fields are standard values: `date` / `time` / `timestamp` render as ISO-8601 (`2026-10-16`, `20:00`, …) and can be formatted with `utils.datetime` (`${utils.datetime.formatTime(time, 'HH:mm:ss')}`); a null field must be guarded (`${time!''}`, `<#if time??>…</#if>`). Use it to keep the request context (`page`, a date argument, a parent key) on the records, or to combine fields (a date and a time into a `timestamp` for `timestampAttribute`). |
 | type      | optional | String | Output type (default `string`): `string`, `int64`, `float64`, `bool`, `date`, `time`, `timestamp`, … For `value`, an empty result becomes `null` except for `string`. |
 
@@ -282,7 +282,7 @@ sources:
             until: { key: body, op: "not match", value: 'class="next"' }
           response:
             format: html
-            itemsSelector: "#list tr"
+            itemsSelector: "#list tr:has(td)"              # data rows only (a header row would yield a null time)
             fields:
               - { name: date, type: date, value: "${args.date}" }
               - { name: time, type: time, selector: "td:nth-of-type(1)" }

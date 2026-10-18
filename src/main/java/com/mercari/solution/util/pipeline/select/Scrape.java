@@ -199,17 +199,40 @@ public class Scrape implements SelectFunction {
     }
 
     /**
+     * Checks the selectors and patterns of this definition and its nested {@code fields}, so that a
+     * malformed one is reported at assembly time instead of failing at runtime.
+     */
+    public void validate() {
+        org.jsoup.select.QueryParser.parse(selector);
+        if(patternText != null) {
+            Pattern.compile(patternText);
+        }
+        for(final Scrape child : fields) {
+            child.validate();
+        }
+    }
+
+    /**
      * Extracts this definition's value from the elements under {@code parent} that match the
-     * selector (all matches for {@code mode: repeated}, otherwise the first match). Used for the
-     * nested {@code fields} of a struct scrape and by the http source's {@code format: html}
-     * response, where each item element is the parent.
+     * selector, like the top-level select function: all non-null matches for {@code mode: repeated},
+     * otherwise the first match. Used by the http source's {@code format: html} response, where each
+     * item element is the parent.
      */
     public Object extractFrom(final Element parent) {
+        return extractFrom(parent, true);
+    }
+
+    // skipNulls: drop matches that yield null (pattern mismatch) from repeated values; nested
+    // struct fields keep them
+    private Object extractFrom(final Element parent, final boolean skipNulls) {
         final Elements elements = parent.select(selector);
         if("repeated".equalsIgnoreCase(mode)) {
             final List<Object> values = new ArrayList<>();
             for(final Element element : elements) {
-                values.add(extract(element, this));
+                final Object value = extract(element, this);
+                if(value != null || !skipNulls) {
+                    values.add(value);
+                }
             }
             return values;
         } else if(elements.isEmpty()) {
@@ -233,26 +256,7 @@ public class Scrape implements SelectFunction {
         if(baseUri != null) {
             document.setBaseUri(baseUri);
         }
-        final Elements elements = document.select(selector);
-        if("repeated".equalsIgnoreCase(mode)) {
-            final List<Object> outputs = new ArrayList<>();
-            if(elements.isEmpty()) {
-                return outputs;
-            }
-            for(final Element element : elements) {
-                final Object output = extract(element, this);
-                if(output != null) {
-                    outputs.add(output);
-                }
-            }
-            return outputs;
-        } else {
-            if(elements.isEmpty()) {
-                return null;
-            }
-            final Element element = elements.get(0);
-            return extract(element, this);
-        }
+        return extractFrom(document);
     }
 
     private static Object extract(final Element element, final Scrape scrape) {
@@ -260,7 +264,7 @@ public class Scrape implements SelectFunction {
         if(Schema.Type.element.equals(scrape.outputFieldType.getType())) {
             final Map<String, Object> values = new HashMap<>();
             for(final Scrape field : scrape.fields) {
-                values.put(field.getName(), field.extractFrom(element));
+                values.put(field.getName(), field.extractFrom(element, false));
             }
             return values;
         }
@@ -294,6 +298,7 @@ public class Scrape implements SelectFunction {
 
         final Object output = switch (scrape.outputFieldType.getType()) {
             case string -> scrape.trim ? text.trim() : text;
+            case json -> text.trim();
             case uuid -> UUID.fromString(text.trim()).toString();
             case bool -> Boolean.parseBoolean(text.trim());
             case int32 -> Integer.parseInt(text.trim().replaceAll(",", ""));
@@ -303,6 +308,7 @@ public class Scrape implements SelectFunction {
             case bytes -> Base64.getDecoder().decode(text.getBytes(StandardCharsets.UTF_8));
             case date -> Long.valueOf(DateTimeUtil.toLocalDate(text.trim()).toEpochDay()).intValue();
             case time -> DateTimeUtil.toLocalTime(text.trim()).toNanoOfDay() / 1000L;
+            case timestamp -> DateTimeUtil.toEpochMicroSecond(text.trim());
             case enumeration -> scrape.outputFieldType.getSymbolIndex(text.trim());
             default -> throw new IllegalArgumentException("Not supported type: " + scrape.outputFieldType.getType());
         };

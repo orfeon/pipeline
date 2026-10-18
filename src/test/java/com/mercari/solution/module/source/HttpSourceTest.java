@@ -900,6 +900,47 @@ public class HttpSourceTest {
                           foreach: /items
                           target: { url: https://example.com/b/${id} }
                 """);
+        // a value field type the template result cannot be converted to, and a malformed selector
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      target: { url: https://example.com/a }
+                      response: { fields: [ { name: n, type: int16, value: "1" } ] }
+                """);
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      target: { url: https://example.com/a }
+                      response: { format: html, itemsSelector: "tr[", fields: [ { name: t, selector: td } ] }
+                """);
+        // a value field must not collide with a response.schema field
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      target: { url: https://example.com/a }
+                      response: { schema: { fields: [ { name: id, type: string } ] }, fields: [ { name: id, value: x } ] }
+                """);
+        // when must refer to the parent's output fields
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      requests:
+                        - name: x
+                          target: { url: https://example.com/a }
+                          response: { format: html, fields: [ { name: id, selector: td } ] }
+                        - name: y
+                          input: x
+                          when: "idd IS NOT NULL"
+                          target: { url: https://example.com/b/${id} }
+                """);
     }
 
     private void assertInvalid(final String configYaml) {
