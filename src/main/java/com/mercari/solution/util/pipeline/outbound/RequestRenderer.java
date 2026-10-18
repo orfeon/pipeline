@@ -312,6 +312,9 @@ public class RequestRenderer implements Serializable {
         for(final Map.Entry<String, Template> entry : paramTemplates.entrySet()) {
             params.put(entry.getKey(), TemplateUtil.executeStrictTemplate(entry.getValue(), values));
         }
+        if(Boolean.TRUE.equals(target.omitEmptyParams)) {
+            params.values().removeIf(value -> value == null || value.isEmpty());
+        }
         if(!params.isEmpty()) {
             url = url + (url.contains("?") ? "&" : "?") + AuthProvider.formEncode(params);
         }

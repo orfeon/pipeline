@@ -66,6 +66,16 @@ public class HttpTransport implements AutoCloseable {
                 followRedirects = "normal";
             }
         }
+
+        /** A copy with other allowed hosts (null: any host). */
+        public Parameters withAllowedHosts(final List<String> hosts) {
+            final Parameters copy = new Parameters();
+            copy.version = version;
+            copy.followRedirects = followRedirects;
+            copy.proxy = proxy;
+            copy.allowedHosts = hosts;
+            return copy;
+        }
     }
 
     public static class TimeoutParameters implements Serializable {

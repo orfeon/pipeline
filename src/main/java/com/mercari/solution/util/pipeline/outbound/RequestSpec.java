@@ -54,6 +54,8 @@ public final class RequestSpec {
         public Map<String, String> params;
         public Map<String, String> headers;
         public AuthProvider.Parameters auth;
+        // drop params whose rendered value is empty (default false; the http source defaults to true)
+        public Boolean omitEmptyParams;
 
         public List<String> validate(final String prefix, final Schema inputSchema, final boolean allowedHostsGiven) {
             final List<String> errorMessages = new ArrayList<>();

@@ -72,6 +72,9 @@ public class HttpSource extends Source {
         private HttpTransport.Parameters http;
         private Polling polling;
 
+        // allowedHosts derived from the auth requests' urls (not configured): pins only requests with auth
+        private boolean allowedHostsDerived;
+
         private void validate(final String moduleName) {
             final List<String> errorMessages = new ArrayList<>();
             if(requests == null || requests.isEmpty()) {
@@ -188,6 +191,7 @@ public class HttpSource extends Source {
                     }
                 }
                 http.allowedHosts = hosts;
+                allowedHostsDerived = true;
             }
         }
     }
@@ -256,6 +260,9 @@ public class HttpSource extends Source {
         private void setDefaults(final String moduleName, final AuthProvider.Parameters defaultAuth) {
             if(name == null) {
                 name = moduleName;
+            }
+            if(target.omitEmptyParams == null) {
+                target.omitEmptyParams = true;   // e.g. a pagination cursor that is empty on the first page
             }
             if(target.method == null) {
                 target.method = "GET";
@@ -761,7 +768,10 @@ public class HttpSource extends Source {
             this.moduleName = moduleName;
             this.request = request;
             this.timeout = parameters.timeout;
-            this.http = parameters.http;
+            // a request without auth sends no credentials: the derived host pinning does not apply to it
+            // (e.g. a signed download URL on another host); configured allowedHosts apply to every request
+            this.http = parameters.allowedHostsDerived && request.target.auth.isNone()
+                    ? parameters.http.withAllowedHosts(null) : parameters.http;
             this.inputSchema = inputSchema;
             this.outputSchema = outputSchema;
             this.eventTimeField = eventTimeField;

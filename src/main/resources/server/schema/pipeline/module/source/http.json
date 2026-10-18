@@ -139,6 +139,11 @@
             "type": "string"
           }
         },
+        "omitEmptyParams": {
+          "type": "boolean",
+          "description": "Leave out params whose rendered value is empty (e.g. a pagination cursor on the first page)",
+          "default": true
+        },
         "headers": {
           "type": "object",
           "additionalProperties": {
