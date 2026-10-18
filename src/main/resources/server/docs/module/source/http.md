@@ -43,7 +43,7 @@ Typical uses:
 | rate      | optional | [Rate](#rate-parameters) | Single-request form. |
 | auth      | optional | [Auth](../sink/http.md#auth-parameters) | Default authentication for every request (`target.auth` of a request overrides it). |
 | timeout   | optional | [Timeout](../sink/http.md#timeout-parameters) | Connect / per-attempt request timeouts. |
-| http      | optional | [Http](../sink/http.md#http-parameters) | HTTP client options. Requests with auth are pinned to the hosts of their configured urls; set `allowedHosts` when a url host is a template. Requests without auth (`target.auth: { type: none }`, e.g. a signed download URL on another host) are not pinned, unless `allowedHosts` is set explicitly, which applies to every request. |
+| http      | optional | [Http](../sink/http.md#http-parameters) | HTTP client options. Requests with auth, or with an `Authorization` / `Proxy-Authorization` / `Cookie` / `X-Api-Key` header in `target.headers`, are pinned to the hosts of those requests' configured urls; set `allowedHosts` when a url host is a template. Requests without auth or such a header (`target.auth: { type: none }`, e.g. a signed download URL on another host) are not pinned, unless `allowedHosts` is set explicitly, which applies to every request. |
 | polling   | optional | [Polling](#polling-parameters) | Streaming only: repeat the root requests periodically. |
 
 ### Request parameters

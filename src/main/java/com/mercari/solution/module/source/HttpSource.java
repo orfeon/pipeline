@@ -72,8 +72,9 @@ public class HttpSource extends Source {
         private HttpTransport.Parameters http;
         private Polling polling;
 
-        // allowedHosts derived from the auth requests' urls (not configured): pins only requests with auth
-        private boolean allowedHostsDerived;
+        // allowedHosts derived from the credential-bearing requests' urls (not configured): pins only those requests.
+        // transient: set in setDefaults, never read from the config
+        private transient boolean allowedHostsDerived;
 
         private void validate(final String moduleName) {
             final List<String> errorMessages = new ArrayList<>();
@@ -179,9 +180,12 @@ public class HttpSource extends Source {
                 request.setDefaults(moduleName, auth);
             }
             if(http.allowedHosts == null && requests.stream().anyMatch(r -> !r.target.auth.isNone())) {
-                // pin auth headers to the configured hosts
+                // pin credentials to the configured hosts of the requests that send them
                 final List<String> hosts = new ArrayList<>();
                 for(final Request request : requests) {
+                    if(!request.sendsCredentials()) {
+                        continue;
+                    }
                     final String origin = RequestSpec.staticOrigin(request.target.url);
                     if(origin != null) {
                         final String host = java.net.URI.create(origin).getHost();
@@ -195,6 +199,9 @@ public class HttpSource extends Source {
             }
         }
     }
+
+    /** Headers that carry credentials: a request setting one in target.headers is pinned like a request with auth. */
+    private static final Set<String> CREDENTIAL_HEADERS = Set.of("authorization", "proxy-authorization", "cookie", "x-api-key");
 
     public static class Request implements Serializable {
 
@@ -295,6 +302,12 @@ public class HttpSource extends Source {
 
         public String getName() {
             return name;
+        }
+
+        /** Whether the request sends credentials: auth, or a credential header given in target.headers. */
+        private boolean sendsCredentials() {
+            return !target.auth.isNone()
+                    || target.headers.keySet().stream().anyMatch(k -> CREDENTIAL_HEADERS.contains(k.toLowerCase()));
         }
 
         public boolean isTyped() {
@@ -768,9 +781,9 @@ public class HttpSource extends Source {
             this.moduleName = moduleName;
             this.request = request;
             this.timeout = parameters.timeout;
-            // a request without auth sends no credentials: the derived host pinning does not apply to it
-            // (e.g. a signed download URL on another host); configured allowedHosts apply to every request
-            this.http = parameters.allowedHostsDerived && request.target.auth.isNone()
+            // a request without auth or credential headers sends no credentials: the derived host pinning does not
+            // apply to it (e.g. a signed download URL on another host); configured allowedHosts apply to every request
+            this.http = parameters.allowedHostsDerived && !request.sendsCredentials()
                     ? parameters.http.withAllowedHosts(null) : parameters.http;
             this.inputSchema = inputSchema;
             this.outputSchema = outputSchema;

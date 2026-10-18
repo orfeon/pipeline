@@ -67,12 +67,9 @@ public class HttpTransport implements AutoCloseable {
             }
         }
 
-        /** A copy with other allowed hosts (null: any host). */
+        /** A copy with other allowed hosts (null: any host); every other option is kept. */
         public Parameters withAllowedHosts(final List<String> hosts) {
-            final Parameters copy = new Parameters();
-            copy.version = version;
-            copy.followRedirects = followRedirects;
-            copy.proxy = proxy;
+            final Parameters copy = org.apache.beam.sdk.util.SerializableUtils.clone(this);
             copy.allowedHosts = hosts;
             return copy;
         }

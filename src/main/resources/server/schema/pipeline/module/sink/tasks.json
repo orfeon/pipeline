@@ -31,6 +31,7 @@
             "url": { "type": "string", "description": "Target URL (template on record fields)" },
             "method": { "type": "string", "enum": ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "default": "POST" },
             "params": { "type": "object", "description": "Query parameters (values are templates)", "additionalProperties": { "type": "string" } },
+            "omitEmptyParams": { "type": "boolean", "description": "Leave out params whose rendered value is empty", "default": false },
             "headers": { "type": "object", "description": "Request headers (values are templates)", "additionalProperties": { "type": "string" } },
             "auth": {
               "type": "object",

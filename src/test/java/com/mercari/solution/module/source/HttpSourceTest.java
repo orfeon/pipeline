@@ -778,7 +778,22 @@ public class HttpSourceTest {
                           input: list
                           target: { url: "${url}", auth: { type: none } }
                           response: { format: bytes }
-                """.formatted(url("/keyed"), url("/keyed"), url("/keyed"));
+                  - name: headerPinned
+                    module: http
+                    failFast: false
+                    parameters:
+                      auth: { type: apiKey, name: X-Api-Key, value: k }
+                      requests:
+                        - name: list
+                          target: { url: %s, params: { a: "4" } }
+                          response:
+                            itemsPath: /items
+                            schema: { fields: [ { name: url, type: string } ] }
+                        - name: download
+                          input: list
+                          target: { url: "${url}", auth: { type: none }, headers: { Authorization: "Bearer secret" } }
+                          response: { format: bytes }
+                """.formatted(url("/keyed"), url("/keyed"), url("/keyed"), url("/keyed"));
         final Config config = Config.load(configYaml);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
         PAssert.that(outputs.get("signed.download").getCollection()).satisfies(elements -> {
@@ -791,11 +806,13 @@ public class HttpSourceTest {
         });
         // configured allowedHosts still apply to requests without auth
         PAssert.that(outputs.get("pinned.download").getCollection()).empty();
+        // a request carrying a credential header is pinned like a request with auth
+        PAssert.that(outputs.get("headerPinned.download").getCollection()).empty();
         pipeline.run();
 
         final Set<String> queries = new TreeSet<>();
         received("keyed").forEach(r -> queries.add(r.query()));
-        Assertions.assertEquals(Set.of("a=1", "a=2&fixed=", "a=3"), queries);
+        Assertions.assertEquals(Set.of("a=1", "a=2&fixed=", "a=3", "a=4"), queries);
         final List<Received> plain = received("plain");
         Assertions.assertEquals(2, plain.size());
         Assertions.assertTrue(plain.stream().noneMatch(r -> r.headers().keySet().stream().anyMatch(k -> k.equalsIgnoreCase("X-Api-Key"))));
