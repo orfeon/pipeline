@@ -193,6 +193,30 @@ public class Scrape implements SelectFunction {
         if(patternText != null) {
             this.pattern = Pattern.compile(patternText);
         }
+        for(final Scrape child : fields) {
+            child.setup();
+        }
+    }
+
+    /**
+     * Extracts this definition's value from the elements under {@code parent} that match the
+     * selector (all matches for {@code mode: repeated}, otherwise the first match). Used for the
+     * nested {@code fields} of a struct scrape and by the http source's {@code format: html}
+     * response, where each item element is the parent.
+     */
+    public Object extractFrom(final Element parent) {
+        final Elements elements = parent.select(selector);
+        if("repeated".equalsIgnoreCase(mode)) {
+            final List<Object> values = new ArrayList<>();
+            for(final Element element : elements) {
+                values.add(extract(element, this));
+            }
+            return values;
+        } else if(elements.isEmpty()) {
+            return null;
+        } else {
+            return extract(elements.get(0), this);
+        }
     }
 
     @Override
@@ -236,23 +260,7 @@ public class Scrape implements SelectFunction {
         if(Schema.Type.element.equals(scrape.outputFieldType.getType())) {
             final Map<String, Object> values = new HashMap<>();
             for(final Scrape field : scrape.fields) {
-                final Elements childElements = element.select(field.selector);
-                if("repeated".equalsIgnoreCase(field.mode)) {
-                    final List<Object> childValues = new ArrayList<>();
-                    for(final Element childElement : childElements) {
-                        final Object childValue = extract(childElement, field);
-                        childValues.add(childValue);
-                    }
-                    values.put(field.getName(), childValues);
-                } else {
-                    final Object childValue;
-                    if(childElements.isEmpty()) {
-                        childValue = null;
-                    } else {
-                        childValue = extract(childElements.get(0), field);
-                    }
-                    values.put(field.getName(), childValue);
-                }
+                values.put(field.getName(), field.extractFrom(element));
             }
             return values;
         }

@@ -141,6 +141,13 @@ public class ScrapeTest {
                 "{ \"name\": \"s\", \"func\": \"scrape\", \"field\": \"html\", \"selector\": \"span.price\", \"pattern\": \"([0-9,]+)\", \"group\": 5 }",
                 inputFields());
         Assertions.assertNull(badGroup.apply(input(), TIMESTAMP));
+
+        // pattern of a nested field (compiled by the parent's setup)
+        final SelectFunction nested = create(
+                "{ \"name\": \"s\", \"func\": \"scrape\", \"field\": \"html\", \"selector\": \"body\", \"fields\": ["
+                        + "{ \"name\": \"price\", \"selector\": \"span.price\", \"pattern\": \"price: ([0-9,]+)\", \"group\": 1, \"type\": \"int64\" } ] }",
+                inputFields());
+        Assertions.assertEquals(1234L, ((Map<?, ?>) nested.apply(input(), TIMESTAMP)).get("price"));
     }
 
     @Test

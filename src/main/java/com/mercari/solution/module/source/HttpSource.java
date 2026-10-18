@@ -1,7 +1,9 @@
 package com.mercari.solution.module.source;
 
 import com.google.common.util.concurrent.RateLimiter;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
@@ -10,6 +12,7 @@ import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.outbound.*;
+import com.mercari.solution.util.pipeline.select.Scrape;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;
 import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 import freemarker.template.Template;
@@ -21,10 +24,16 @@ import org.apache.beam.sdk.values.*;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.Serializable;
+import java.io.UncheckedIOException;
 import java.util.*;
 
 /**
@@ -33,7 +42,9 @@ import java.util.*;
  * <p>A request definition mirrors the http sink: {@code target} (url / method / params / headers /
  * auth), {@code body} and {@code response} (format / schema / success / retry) are the shared
  * {@link RequestSpec} / {@link ResponsePolicy} blocks. A source adds {@code response.itemsPath}
- * (array fan-out into records), {@code loop} (pagination), {@code input} (+ {@code foreach}) for
+ * (array fan-out into records), {@code format: html} with {@code itemsSelector} / {@code fields}
+ * (pages scraped into typed records with {@link Scrape} definitions), template-valued
+ * {@code fields}, {@code loop} (pagination), {@code input} (+ {@code foreach}, {@code when}) for
  * chaining one request per parent record (or per item of the parent's response), {@code rate}
  * and, in streaming mode, {@code polling}. A single request may be written directly under
  * {@code parameters}; several requests go under {@code requests}.
@@ -117,8 +128,8 @@ public class HttpSource extends Source {
                     final Request parent = byName.get(request.input);
                     if(parent == null) {
                         errorMessages.add("parameters.requests[" + i + "].input refers to an unknown request: " + request.input);
-                    } else if(request.foreach != null && parent.response != null && parent.response.schema != null) {
-                        errorMessages.add("parameters.requests[" + i + "].foreach requires an untyped parent (" + request.input + " has response.schema); use the parent's fields directly instead");
+                    } else if(request.foreach != null && parent.response != null && (parent.response.schema != null || parent.response.isHtml())) {
+                        errorMessages.add("parameters.requests[" + i + "].foreach requires an untyped parent (" + request.input + " has response.schema or format html); use the parent's fields directly instead");
                     }
                 }
                 if(byName.size() == requests.size() && hasCycle(requests)) {
@@ -190,7 +201,10 @@ public class HttpSource extends Source {
         private Loop loop;
         private String input;
         private String foreach;
+        private JsonElement when;
         private Rate rate;
+
+        private String whenJson;
 
         private List<String> validate(final String prefix, final boolean allowedHostsGiven, final AuthProvider.Parameters defaultAuth) {
             final List<String> errorMessages = new ArrayList<>();
@@ -221,6 +235,16 @@ public class HttpSource extends Source {
                 }
                 if(!foreach.startsWith("/")) {
                     errorMessages.add(prefix + ".foreach must be a JSON pointer starting with / but: " + foreach);
+                }
+            }
+            if(when != null) {
+                if(input == null) {
+                    errorMessages.add(prefix + ".when requires input (it is evaluated on each parent record or foreach item)");
+                }
+                try {
+                    Filter.parse(when.toString());
+                } catch (final RuntimeException e) {
+                    errorMessages.add(prefix + ".when is illegal: " + e.getMessage());
                 }
             }
             if(rate != null) {
@@ -256,6 +280,10 @@ public class HttpSource extends Source {
                 loop = new Loop();
             }
             loop.setDefaults();
+            if(when != null) {
+                whenJson = when.toString();
+                when = null;
+            }
         }
 
         public String getName() {
@@ -263,23 +291,47 @@ public class HttpSource extends Source {
         }
 
         public boolean isTyped() {
-            return response.schema_ != null;
+            return response.schema_ != null || response.isHtml();
         }
 
         public Schema outputSchema() {
-            return isTyped() ? response.schema_ : createRawSchema();
+            if(response.fields_.isEmpty()) {
+                return isTyped() ? response.schema_ : createRawSchema();
+            }
+            final Schema.Builder builder = response.isHtml() ? Schema.builder()
+                    : Schema.builder(response.schema_ != null ? response.schema_ : createRawSchema());
+            for(final ResponseField field : response.fields_) {
+                builder.withField(Schema.Field.of(field.name(), field.fieldType()));
+            }
+            return builder.build();
         }
     }
 
+    /** Response formats of the source: the {@link ResponsePolicy.Format}s plus {@code html} (scraped into typed records). */
+    public enum Format {
+        json,
+        text,
+        bytes,
+        none,
+        html
+    }
+
+    private static final List<String> RAW_FIELD_NAMES = List.of(
+            "name", "url", "method", "statusCode", "headers", "body", "blob", "payload", "attempts", "durationMs", "timestamp");
+
     public static class Response implements Serializable {
-        private ResponsePolicy.Format format;
+        private Format format;
         private JsonElement schema;
         private String itemsPath;
+        private String itemsSelector;
+        private String baseUri;
+        private JsonElement fields;
         private ResponsePolicy.Success success;
         private ResponsePolicy.Retry retry;
 
         private ResponsePolicy.Parameters policy;   // built in setDefaults
         private Schema schema_;
+        private List<ResponseField> fields_;
 
         private List<String> validate(final String prefix) {
             final List<String> errorMessages = new ArrayList<>();
@@ -289,8 +341,18 @@ public class HttpSource extends Source {
             if(itemsPath != null && !itemsPath.startsWith("/")) {
                 errorMessages.add(prefix + ".itemsPath must be a JSON pointer starting with / but: " + itemsPath);
             }
-            if((itemsPath != null || schema != null) && format != null && !ResponsePolicy.Format.json.equals(format)) {
-                errorMessages.add(prefix + ".itemsPath / schema require format json");
+            if((itemsPath != null || schema != null) && format != null && !Format.json.equals(format)) {
+                errorMessages.add(prefix + ".itemsPath / schema require format json (format html takes itemsSelector and fields)");
+            }
+            if(isHtml()) {
+                if(fields == null) {
+                    errorMessages.add(prefix + ".fields is required with format html");
+                }
+            } else if(itemsSelector != null || baseUri != null) {
+                errorMessages.add(prefix + ".itemsSelector / baseUri require format html");
+            }
+            if(fields != null) {
+                errorMessages.addAll(validateFields(prefix));
             }
             final ResponsePolicy.Parameters p = new ResponsePolicy.Parameters();
             p.success = success;
@@ -299,9 +361,77 @@ public class HttpSource extends Source {
             return errorMessages;
         }
 
+        private List<String> validateFields(final String prefix) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(!fields.isJsonArray() || fields.getAsJsonArray().isEmpty()) {
+                errorMessages.add(prefix + ".fields must be a non-empty array");
+                return errorMessages;
+            }
+            // names the fields are added to: the schema's (json), the raw record's (untyped) or none (html)
+            final Set<String> names = new HashSet<>();
+            if(isHtml()) {
+                // fields make up the whole record
+            } else if(schema != null && schema.isJsonObject() && schema.getAsJsonObject().has("fields")
+                    && schema.getAsJsonObject().get("fields").isJsonArray()) {
+                for(final JsonElement f : schema.getAsJsonObject().getAsJsonArray("fields")) {
+                    if(f.isJsonObject() && f.getAsJsonObject().has("name")) {
+                        names.add(f.getAsJsonObject().get("name").getAsString());
+                    }
+                }
+            } else if(schema == null) {
+                names.addAll(RAW_FIELD_NAMES);
+            }
+            final JsonArray array = fields.getAsJsonArray();
+            for(int i = 0; i < array.size(); i++) {
+                final String fieldPrefix = prefix + ".fields[" + i + "]";
+                if(!array.get(i).isJsonObject()) {
+                    errorMessages.add(fieldPrefix + " must be an object");
+                    continue;
+                }
+                final JsonObject field = array.get(i).getAsJsonObject();
+                if(!field.has("name") || field.get("name").isJsonNull()) {
+                    errorMessages.add(fieldPrefix + ".name is required");
+                    continue;
+                }
+                final String name = field.get("name").getAsString();
+                if(!names.add(name)) {
+                    errorMessages.add(fieldPrefix + ".name is duplicated (or collides with an output field): " + name);
+                }
+                final boolean hasSelector = field.has("selector");
+                final boolean hasValue = field.has("value");
+                if(hasSelector == hasValue) {
+                    errorMessages.add(fieldPrefix + " requires exactly one of selector (scraped from the html item) or value (template)");
+                } else if(hasSelector) {
+                    if(!isHtml()) {
+                        errorMessages.add(fieldPrefix + ".selector requires format html");
+                    }
+                    try {
+                        Scrape.of(name, field, null, false);
+                    } catch (final RuntimeException e) {
+                        errorMessages.add(fieldPrefix + " is illegal: " + e.getMessage());
+                    }
+                } else {
+                    if(!field.get("value").isJsonPrimitive()) {
+                        errorMessages.add(fieldPrefix + ".value must be a string (template)");
+                    }
+                    try {
+                        Schema.FieldType.type(field.has("type") ? field.get("type").getAsString() : "string");
+                    } catch (final RuntimeException e) {
+                        errorMessages.add(fieldPrefix + ".type is illegal for a value field: " + e.getMessage());
+                    }
+                }
+            }
+            return errorMessages;
+        }
+
         private void setDefaults() {
             policy = new ResponsePolicy.Parameters();
-            policy.format = format == null ? ResponsePolicy.Format.json : format;
+            policy.format = switch (format == null ? Format.json : format) {
+                case json -> ResponsePolicy.Format.json;
+                case text, html -> ResponsePolicy.Format.text;
+                case bytes -> ResponsePolicy.Format.bytes;
+                case none -> ResponsePolicy.Format.none;
+            };
             policy.success = success;
             policy.retry = retry;
             policy.setDefaults();
@@ -309,8 +439,35 @@ public class HttpSource extends Source {
                 schema_ = Schema.parse(schema.getAsJsonObject());
                 schema = null;
             }
+            fields_ = new ArrayList<>();
+            if(fields != null) {
+                for(final JsonElement element : fields.getAsJsonArray()) {
+                    final JsonObject field = element.getAsJsonObject();
+                    final String name = field.get("name").getAsString();
+                    if(field.has("selector")) {
+                        final Scrape scrape = Scrape.of(name, field, null, false);
+                        fields_.add(new ResponseField(name, scrape, null, scrape.getOutputFieldType()));
+                    } else {
+                        final String type = field.has("type") ? field.get("type").getAsString() : "string";
+                        fields_.add(new ResponseField(name, null, field.get("value").getAsString(), Schema.FieldType.type(type)));
+                    }
+                }
+                fields = null;
+            }
+        }
+
+        private boolean isHtml() {
+            return Format.html.equals(format);
         }
     }
+
+    /**
+     * One entry of {@code response.fields}: scraped from each html item ({@code selector}, a
+     * {@link Scrape} definition) or rendered per record from a template ({@code value}) against the
+     * request context — the parent record / foreach item, loop variables and {@code __url} — and the
+     * record's own fields.
+     */
+    public record ResponseField(String name, Scrape scrape, String value, Schema.FieldType fieldType) implements Serializable {}
 
     /** Pagination: repeat the request until {@code until} holds, computing the next variables from each response. */
     public static class Loop implements Serializable {
@@ -414,10 +571,35 @@ public class HttpSource extends Source {
                     .apply("Seed", ParDo.of(new SeedDoFn()))
                     .setCoder(ElementCoder.of(seedSchema));
         } else {
+            // batch: records are stamped with the execution time instead of the minimum timestamp
             seed = begin
                     .apply("Seed", Create.of(0L).withCoder(VarLongCoder.of()))
-                    .apply("ToElement", ParDo.of(new SeedDoFn()))
+                    .apply("ToElement", ParDo.of(new SeedDoFn(true)))
                     .setCoder(ElementCoder.of(seedSchema));
+        }
+
+        // timestampAttribute: the event time of every request whose output has that field
+        final String timestampAttribute = getTimestampAttribute();
+        if(timestampAttribute != null) {
+            final List<String> errorMessages = new ArrayList<>();
+            boolean found = false;
+            for(final Request request : parameters.requests) {
+                final Schema schema = request.outputSchema();
+                if(!schema.hasField(timestampAttribute)) {
+                    continue;
+                }
+                found = true;
+                final Schema.Type type = schema.getField(timestampAttribute).getFieldType().getType();
+                if(!Schema.Type.timestamp.equals(type) && !Schema.Type.date.equals(type)) {
+                    errorMessages.add("timestampAttribute " + timestampAttribute + " of request " + request.name + " must be timestamp or date type but: " + type);
+                }
+            }
+            if(!found) {
+                errorMessages.add("timestampAttribute " + timestampAttribute + " is not an output field of any request");
+            }
+            if(!errorMessages.isEmpty()) {
+                throw new IllegalModuleException(errorMessages);
+            }
         }
 
         final Map<String, PCollection<MElement>> outputs = new LinkedHashMap<>();
@@ -450,11 +632,12 @@ public class HttpSource extends Source {
                 it.remove();
 
                 final Schema outputSchema = request.outputSchema();
+                final String eventTimeField = timestampAttribute != null && outputSchema.hasField(timestampAttribute) ? timestampAttribute : null;
                 final TupleTag<MElement> outputTag = new TupleTag<>() {};
                 final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
                 final PCollectionTuple tuple = parent
                         .apply("Request_" + request.name, ParDo
-                                .of(new RequestDoFn(getName(), request, parameters, parentSchema, outputSchema, failureTag, getFailFast(), getLoggings()))
+                                .of(new RequestDoFn(getName(), request, parameters, parentSchema, outputSchema, eventTimeField, failureTag, getFailFast(), getLoggings()))
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 final PCollection<MElement> output = tuple.get(outputTag).setCoder(ElementCoder.of(outputSchema));
                 outputs.put(request.name, output);
@@ -472,9 +655,25 @@ public class HttpSource extends Source {
     }
 
     private static class SeedDoFn extends DoFn<Long, MElement> {
+
+        private final boolean stampNow;
+
+        SeedDoFn() {
+            this(false);
+        }
+
+        SeedDoFn(final boolean stampNow) {
+            this.stampNow = stampNow;
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            c.output(MElement.createDummyElement(Instant.now()));
+            final Instant now = Instant.now();
+            if(stampNow) {
+                c.outputWithTimestamp(MElement.createDummyElement(now), now);
+            } else {
+                c.output(MElement.createDummyElement(now));
+            }
         }
     }
 
@@ -498,11 +697,15 @@ public class HttpSource extends Source {
     /** Executes one request definition for each input element (seed, parent record, or parent item), with pagination. */
     private static class RequestDoFn extends DoFn<MElement, MElement> {
 
+        private static final java.util.regex.Pattern CHARSET = java.util.regex.Pattern.compile("charset=\"?([^;\"\\s]+)",java.util.regex.Pattern.CASE_INSENSITIVE);
+
         private final String moduleName;
         private final Request request;
         private final HttpTransport.TimeoutParameters timeout;
         private final HttpTransport.Parameters http;
+        private final Schema inputSchema;
         private final Schema outputSchema;
+        private final String eventTimeField;
         private final TupleTag<BadRecord> failureTag;
         private final boolean failFast;
         private final Map<String, Logging> logging;
@@ -514,6 +717,8 @@ public class HttpSource extends Source {
         private transient Map<String, Template> nextTemplates;
         private transient Map<String, Object> initialVars;
         private transient RateLimiter rateLimiter;
+        private transient Filter.ConditionNode whenCondition;
+        private transient Map<String, Template> valueTemplates;
 
         RequestDoFn(
                 final String moduleName,
@@ -521,6 +726,7 @@ public class HttpSource extends Source {
                 final Parameters parameters,
                 final Schema inputSchema,
                 final Schema outputSchema,
+                final String eventTimeField,
                 final TupleTag<BadRecord> failureTag,
                 final boolean failFast,
                 final List<Logging> loggings) {
@@ -529,11 +735,18 @@ public class HttpSource extends Source {
             this.request = request;
             this.timeout = parameters.timeout;
             this.http = parameters.http;
+            this.inputSchema = inputSchema;
             this.outputSchema = outputSchema;
+            this.eventTimeField = eventTimeField;
             this.failureTag = failureTag;
             this.failFast = failFast;
             this.logging = Logging.map(loggings);
             final List<String> extraTexts = new ArrayList<>(request.loop.next.values());
+            for(final ResponseField field : request.response.fields_) {
+                if(field.value() != null) {
+                    extraTexts.add(field.value());
+                }
+            }
             final Set<String> dynamicVars = new HashSet<>(request.loop.varsJson.keySet());
             dynamicVars.addAll(request.loop.next.keySet());
             if(request.foreach != null) {
@@ -564,6 +777,15 @@ public class HttpSource extends Source {
                 initialVars.put(entry.getKey(), toVar(JsonUtil.fromJson(entry.getValue())));
             }
             this.rateLimiter = request.rate == null ? null : RateLimiter.create(request.rate.permitsPerSecond());
+            this.whenCondition = request.whenJson == null ? null : Filter.parse(request.whenJson);
+            this.valueTemplates = new LinkedHashMap<>();
+            for(final ResponseField field : request.response.fields_) {
+                if(field.scrape() != null) {
+                    field.scrape().setup();
+                } else {
+                    valueTemplates.put(field.name(), TemplateUtil.createStrictTemplate(moduleName + "." + request.name + ".fields." + field.name(), field.value()));
+                }
+            }
         }
 
         @Teardown
@@ -571,6 +793,12 @@ public class HttpSource extends Source {
             if(transport != null) {
                 transport.close();
             }
+        }
+
+        // timestampAttribute values (e.g. a publication time) may precede the parent's timestamp
+        @Override
+        public Duration getAllowedTimestampSkew() {
+            return Duration.millis(Long.MAX_VALUE);
         }
 
         @ProcessElement
@@ -584,6 +812,9 @@ public class HttpSource extends Source {
             }
             try {
                 if(request.foreach == null) {
+                    if(whenCondition != null && !Filter.filter(whenCondition, input.asStandardMap(inputSchema))) {
+                        return;
+                    }
                     execute(c, input, renderer.createTemplateValues(input));
                     return;
                 }
@@ -601,14 +832,19 @@ public class HttpSource extends Source {
                     list.add(items);
                 }
                 for(final JsonElement item : list) {
-                    final Map<String, Object> values = renderer.createTemplateValues(input);
-                    if(item.isJsonObject()) {
-                        final Map<String, Object> itemValues = JsonToMapConverter.convert(item);
-                        values.putAll(itemValues);
-                        values.put("__item", itemValues);
-                    } else {
-                        values.put("__item", toVar(item));
+                    final Map<String, Object> itemValues = item.isJsonObject() ? JsonToMapConverter.convert(item) : Map.of();
+                    final Object itemVar = item.isJsonObject() ? itemValues : toVar(item);
+                    if(whenCondition != null) {
+                        final Map<String, Object> whenValues = input.asStandardMap(inputSchema);
+                        whenValues.putAll(itemValues);
+                        whenValues.put("__item", itemVar);
+                        if(!Filter.filter(whenCondition, whenValues)) {
+                            continue;
+                        }
                     }
+                    final Map<String, Object> values = renderer.createTemplateValues(input);
+                    values.putAll(itemValues);
+                    values.put("__item", itemVar);
                     execute(c, input, values);
                 }
             } catch (final Throwable e) {
@@ -631,7 +867,7 @@ public class HttpSource extends Source {
                 if(!result.succeeded()) {
                     throw new IllegalStateException("request " + request.name + " " + outbound.method() + " " + outbound.url() + " failed: " + result.error());
                 }
-                emit(c, outbound, result);
+                emit(c, outbound, result, values);
                 if(untilCondition == null || iteration >= request.loop.maxIterations) {
                     break;
                 }
@@ -647,7 +883,30 @@ public class HttpSource extends Source {
             }
         }
 
-        private void emit(final ProcessContext c, final OutboundRequest outbound, final SyncCaller.Result result) {
+        private void emit(final ProcessContext c, final OutboundRequest outbound, final SyncCaller.Result result, final Map<String, Object> values) {
+            final Instant responseTime = Instant.now();
+            final Map<String, Object> templateValues;
+            if(valueTemplates.isEmpty()) {
+                templateValues = null;
+            } else {
+                templateValues = new HashMap<>(values);
+                templateValues.put("__url", outbound.url());
+            }
+            if(request.response.isHtml()) {
+                final Document document = parseHtml(outbound, result);
+                final List<org.jsoup.nodes.Element> items = request.response.itemsSelector == null
+                        ? List.of(document) : document.select(request.response.itemsSelector);
+                for(final org.jsoup.nodes.Element item : items) {
+                    final Map<String, Object> map = new HashMap<>();
+                    for(final ResponseField field : request.response.fields_) {
+                        if(field.scrape() != null) {
+                            map.put(field.name(), field.scrape().extractFrom(item));
+                        }
+                    }
+                    output(c, map, templateValues);
+                }
+                return;
+            }
             final ResponsePolicy.Parsed parsed = result.parsed();
             final JsonElement json = parsed.values().get("json") instanceof JsonElement e ? e : null;
             final List<JsonElement> rows = new ArrayList<>();
@@ -663,17 +922,14 @@ public class HttpSource extends Source {
             } else {
                 rows.add(json);
             }
-            final Instant timestamp = c.timestamp();
             if(request.isTyped()) {
                 for(final JsonElement row : rows) {
                     if(row == null || !row.isJsonObject()) {
                         LOG.warn("{}: skipped non-object response row: {}", request.name, row);
                         continue;
                     }
-                    final Map<String, Object> map = JsonToElementConverter.convert(outputSchema.getFields(), row.getAsJsonObject());
-                    final MElement output = MElement.of(map, timestamp);
-                    Logging.log(LOG, logging, "output", output);
-                    c.output(output);
+                    final Map<String, Object> map = new HashMap<>(JsonToElementConverter.convert(request.response.schema_.getFields(), row.getAsJsonObject()));
+                    output(c, map, templateValues);
                 }
             } else {
                 for(final JsonElement row : rows) {
@@ -688,12 +944,114 @@ public class HttpSource extends Source {
                     map.put("payload", row == null || row.isJsonNull() ? null : row.toString());
                     map.put("attempts", result.attempts());
                     map.put("durationMs", result.response().durationMs());
-                    map.put("timestamp", timestamp.getMillis() * 1000L);
-                    final MElement output = MElement.of(map, timestamp);
-                    Logging.log(LOG, logging, "output", output);
-                    c.output(output);
+                    map.put("timestamp", responseTime.getMillis() * 1000L);
+                    output(c, map, templateValues);
                 }
             }
+        }
+
+        /** Adds the value fields to one record and outputs it, stamped with eventTimeField when it is set. */
+        private void output(final ProcessContext c, final Map<String, Object> map, final Map<String, Object> templateValues) {
+            if(templateValues != null) {
+                renderValueFields(map, templateValues);
+            }
+            final Instant eventTime = eventTime(map);
+            final MElement output = MElement.of(map, eventTime == null ? c.timestamp() : eventTime);
+            Logging.log(LOG, logging, "output", output);
+            if(eventTime == null) {
+                c.output(output);
+            } else {
+                c.outputWithTimestamp(output, eventTime);
+            }
+        }
+
+        /**
+         * Renders the {@code value} fields of one record, in order. A template sees the request values
+         * (parent record / foreach item, loop variables, {@code __url}) overlaid with the record's own
+         * fields (scraped, JSON or raw) and the value fields rendered before it, as standard values.
+         */
+        private void renderValueFields(final Map<String, Object> map, final Map<String, Object> templateValues) {
+            final Map<String, Object> rowValues = new HashMap<>(templateValues);
+            for(final Map.Entry<String, Object> entry : map.entrySet()) {
+                rowValues.put(entry.getKey(), standardValue(entry.getKey(), entry.getValue()));
+            }
+            for(final ResponseField field : request.response.fields_) {
+                final Template template = valueTemplates.get(field.name());
+                if(template == null) {
+                    continue;
+                }
+                final Object value = toFieldValue(field.fieldType(), TemplateUtil.executeStrictTemplate(template, rowValues));
+                map.put(field.name(), value);
+                rowValues.put(field.name(), standardValue(field.name(), value));
+            }
+        }
+
+        private Object standardValue(final String name, final Object primitiveValue) {
+            if(primitiveValue == null || !outputSchema.hasField(name)) {
+                return primitiveValue;
+            }
+            return MElement.getAsStandardValue(outputSchema.getField(name).getFieldType(), primitiveValue);
+        }
+
+        /** The record's eventTimeField value as an instant (timestamp: epoch micros, date: epoch days at UTC midnight), or null. */
+        private Instant eventTime(final Map<String, Object> map) {
+            if(eventTimeField == null || !(map.get(eventTimeField) instanceof Number number)) {
+                return null;
+            }
+            return switch (outputSchema.getField(eventTimeField).getFieldType().getType()) {
+                case timestamp -> Instant.ofEpochMilli(Math.floorDiv(number.longValue(), 1000L));
+                case date -> Instant.ofEpochMilli(number.longValue() * 86_400_000L);
+                default -> null;
+            };
+        }
+
+        private static Object toFieldValue(final Schema.FieldType fieldType, final String text) {
+            if(text == null) {
+                return null;
+            }
+            if(Schema.Type.string.equals(fieldType.getType())) {
+                return text;
+            }
+            if(text.isBlank()) {
+                return null;
+            }
+            return JsonToMapConverter.getAsPrimitiveValue(fieldType, new JsonPrimitive(text.trim()));
+        }
+
+        /** Parses the body as html with the charset of the Content-Type header (else the document's meta / BOM, default UTF-8). */
+        private Document parseHtml(final OutboundRequest outbound, final SyncCaller.Result result) {
+            final String baseUri = request.response.baseUri == null ? outbound.url() : request.response.baseUri;
+            final byte[] body = result.response().body();
+            if(body == null) {
+                return Jsoup.parse("", baseUri);
+            }
+            try(final InputStream in = new ByteArrayInputStream(body)) {
+                return Jsoup.parse(in, charset(result.response().headers()), baseUri);
+            } catch (final IOException e) {
+                throw new UncheckedIOException("failed to parse html response of " + outbound.url(), e);
+            }
+        }
+
+        private static String charset(final Map<String, List<String>> headers) {
+            for(final Map.Entry<String, List<String>> entry : headers.entrySet()) {
+                if(entry.getKey() == null || !entry.getKey().equalsIgnoreCase("Content-Type") || entry.getValue() == null) {
+                    continue;
+                }
+                for(final String value : entry.getValue()) {
+                    final java.util.regex.Matcher matcher = CHARSET.matcher(value);
+                    if(matcher.find()) {
+                        final String name = matcher.group(1);
+                        try {
+                            if(java.nio.charset.Charset.isSupported(name)) {
+                                return name;
+                            }
+                        } catch (final IllegalArgumentException e) {
+                            // illegal charset name: fall back to detection
+                        }
+                    }
+                }
+            }
+            return null;
         }
 
         /** Response variables for loop until / next: statusCode, headers (first values), body, payload. */

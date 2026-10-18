@@ -1,8 +1,8 @@
 ---
 type: Source Module
 title: HTTP Source Module
-description: Fetches records from HTTP/REST APIs. A request is described with the same target / body / response blocks as the http sink — FreeMarker templates for url / params / headers / body, authentication providers (basic, bearer, apiKey, OAuth2 client credentials / JWT bearer with token caching, GCP OIDC / OAuth), declarative success / retry classification with Retry-After aware backoff — plus source-specific parts, typed output records from JSON responses (response.schema) with array fan-out (response.itemsPath), pagination loops (page numbers, cursors from body or headers), request chaining (one request per parent record, or per item of a parent's response with foreach, executed in parallel), per-request rate limiting and periodic polling in streaming mode. Untyped requests emit raw response records (status, headers, body, payload).
-tags: [source, http, rest, api, pagination, polling, oauth2, batch, streaming]
+description: Fetches records from HTTP/REST APIs. A request is described with the same target / body / response blocks as the http sink — FreeMarker templates for url / params / headers / body, authentication providers (basic, bearer, apiKey, OAuth2 client credentials / JWT bearer with token caching, GCP OIDC / OAuth), declarative success / retry classification with Retry-After aware backoff — plus source-specific parts, typed output records from JSON responses (response.schema) with array fan-out (response.itemsPath) or from HTML pages scraped with CSS selectors (format html, itemsSelector, fields), template-valued extra fields (loop variables, parent fields, __url), pagination loops (page numbers, cursors from body or headers), request chaining (one request per parent record, or per item of a parent's response with foreach, filtered with when, executed in parallel), per-request rate limiting and periodic polling in streaming mode. Untyped requests emit raw response records (status, headers, body, payload).
+tags: [source, http, rest, api, html, scrape, pagination, polling, oauth2, batch, streaming]
 timestamp: 2026-08-22T00:00:00Z
 ---
 
@@ -16,6 +16,7 @@ Typical uses:
 
 - Pull a paginated REST collection into the pipeline as typed records (`itemsPath` + `schema` + `loop`).
 - List → detail: fetch a list, then one detail request per item in parallel (`input`, or `foreach` over the raw parent response).
+- Scrape a paginated HTML listing into typed records (`format: html` + `itemsSelector` + `fields`) and download the files it links to (`input` + `when` + `format: bytes`, written by the [files sink](../sink/files.md)).
 - Poll an API every N minutes in a streaming pipeline (`polling`).
 - Archive raw API pages (untyped records with `body` / `payload`) to storage.
 
@@ -27,6 +28,7 @@ Typical uses:
 | module       | required | String | Specified `http` |
 | failFast     | optional | Boolean | Fail the pipeline on the first failed request (default true in batch, false in streaming). With `false`, failed requests are routed to `failureSinks` (the seed or the parent record that triggered them). |
 | failureSinks | optional | Array<String\> | Steps that receive failed records. |
+| timestampAttribute | optional | String | Output field whose value becomes the records' event time (timestamp or date type; a date is midnight UTC). Applies to every request whose output has the field (scraped, JSON or a `value` template field); other requests keep the [default event time](#event-time). A record with a null value keeps the default too. |
 | parameters   | required | Map<String,Object\> | Specify the following individual parameters |
 
 ## HTTP source module parameters
@@ -55,17 +57,34 @@ Typical uses:
 | loop      | optional | [Loop](#loop-parameters) | Pagination. |
 | input     | optional | String | Name of the parent request. This request runs once **per record** of the parent's output, in parallel across workers. |
 | foreach   | optional | String | With `input`: JSON pointer into the parent's **raw** response (`/data/items`); this request runs once per element of that array, with the element's fields as template variables (`__item` holds the element). Lets the parent stay an untyped archive while children fan out over its items. |
+| when      | optional | [Filter](../common/filter.md) | With `input`: run this request only for the parent records (with `foreach`: the items) that match, e.g. `"file IS NOT NULL"`. Evaluated on the parent record's fields (plus the item's fields and `__item` with `foreach`); skipped records produce no output and no failure. |
 | rate      | optional | [Rate](#rate-parameters) | Per-worker rate limit for this request (useful for `input` / `foreach` fan-out). |
 
 ### Response parameters
 
 | parameter | optional | type | description |
 |-----------|----------|------|-------------|
-| format    | optional | Enum | `json` (default), `text`, `bytes`, `none`. |
-| schema    | optional | [Schema](../common/schema.md) | Emit **typed records**: the JSON object (or each element of `itemsPath`) is converted to this schema. Without `schema`, [raw records](#raw-output-schema) are emitted. |
+| format    | optional | Enum | `json` (default), `text`, `bytes`, `none`, `html`. `html` emits typed records scraped from the page (requires `fields`). |
+| schema    | optional | [Schema](../common/schema.md) | Emit **typed records**: the JSON object (or each element of `itemsPath`) is converted to this schema. Without `schema` (and without `format: html`), [raw records](#raw-output-schema) are emitted. |
 | itemsPath | optional | String | JSON pointer to an array in the response (`/items`, `/data/results`, `/` for a top-level array); each element becomes one record. Without it, the whole response is one record. |
+| itemsSelector | optional | String | `format: html`: CSS selector of the item elements (`table#list tr`); each match becomes one record. Without it, the whole page is one record. |
+| baseUri   | optional | String | `format: html`: base URI for resolving relative links (`attribute: "abs:href"`). Default: the request URL. |
+| fields    | optional | Array<[Field](#response-fields)\> | Output fields scraped from each html item (`selector`), and/or template fields (`value`) added to any record type (typed json, html or raw). |
 | success   | optional | [Success](../sink/http.md#success--retry-conditions) | Success status codes / condition (default: 2xx). |
 | retry     | optional | [Retry](../sink/http.md#success--retry-conditions) | Retry policy (default: 408/425/429/5xx and connection errors, 5 attempts, Retry-After honored). A request that still fails is routed to `failureSinks` / fails the pipeline. |
+
+### Response fields
+
+Each entry of `response.fields` has a `name` and exactly one of `selector` or `value`.
+
+| parameter | optional | type | description |
+|-----------|----------|------|-------------|
+| name      | required | String | Output field name. It must not collide with the `schema` fields or, for raw records, the [raw output fields](#raw-output-schema). |
+| selector  | selective | String | `format: html` only. CSS selector evaluated **under each item element** (`td:nth-of-type(2)`, `td.title a[href]`). The remaining parameters are those of the select [scrape](../transform/select.md#scrape) function: `type` (default `string`), `attribute` (e.g. `href`, or `abs:href` for an absolute URL), `pattern` / `group`, `trim`, `mode: repeated` (every match) and nested `fields` (a struct). An item without a match yields `null`. |
+| value     | selective | String | FreeMarker template rendered **per output record**, converted to `type`. It sees the request's template values — the parent record's fields, the `foreach` item, `utils.*` — plus the current loop variables (`${page}`) and `__url` (the rendered request URL), overlaid with the record's own fields (scraped, `schema` or raw fields) and the `value` fields declared before it. Record fields are standard values: `date` / `time` / `timestamp` render as ISO-8601 (`2026-10-16`, `20:00`, …) and can be formatted with `utils.datetime` (`${utils.datetime.formatTime(time, 'HH:mm:ss')}`); a null field must be guarded (`${time!''}`, `<#if time??>…</#if>`). Use it to keep the request context (`page`, a date argument, a parent key) on the records, or to combine fields (a date and a time into a `timestamp` for `timestampAttribute`). |
+| type      | optional | String | Output type (default `string`): `string`, `int64`, `float64`, `bool`, `date`, `time`, `timestamp`, … For `value`, an empty result becomes `null` except for `string`. |
+
+The html body is decoded with the charset of the `Content-Type` header, else the page's `<meta charset>` / BOM (default UTF-8). The loop's `until` / `next` still see `body` as UTF-8 text.
 
 ### Loop parameters
 
@@ -98,7 +117,18 @@ The request is repeated until `until` holds. After each response the `next` temp
 
 ### Typed output
 
-With `response.schema`, each record has exactly the schema's fields, converted from the JSON object (nested objects → structs, arrays → repeated fields, per the [schema](../common/schema.md) conventions).
+With `response.schema`, each record has the schema's fields, converted from the JSON object (nested objects → structs, arrays → repeated fields, per the [schema](../common/schema.md) conventions), followed by the `value` fields of `response.fields`.
+
+With `format: html`, each record has exactly the `response.fields`, in order.
+
+Raw records get the `value` fields of `response.fields` appended. Raw outputs with the same extra fields still share one schema.
+
+### Event time
+
+- Batch: records are stamped with the execution time (the time the source starts).
+- Streaming with `polling`: the time of the poll tick.
+- Chained requests (`input`) inherit the event time of their parent record.
+- `timestampAttribute` overrides it with a field of the record (e.g. a publication time scraped from the page). The value may be earlier than the parent's event time; in streaming such records can be late for downstream windows.
 
 ### Raw output schema
 
@@ -116,7 +146,7 @@ Without `response.schema`:
 | payload    | JSON   | Parsed JSON text — the whole response, or one `itemsPath` element per record. |
 | attempts   | INT32  | Attempts made. |
 | durationMs | INT64  | Duration of the last attempt. |
-| timestamp  | TIMESTAMP | Time of the response. |
+| timestamp  | TIMESTAMP | Time the response was received. |
 
 ## Examples
 
@@ -227,6 +257,71 @@ sinks:
       format: avro
 ```
 
+### Scrape a paginated HTML listing and download the linked files
+
+The listing page `list_<page>.html` shows a "next" link (`class="next"`) on every page but the last.
+Each table row becomes a typed record. The relative links are downloaded only where they exist
+(`when`), and the files sink writes each download as one file.
+
+```yaml
+system:
+  args:
+    date: "${utils.datetime.formatDate(utils.datetime.currentDate('Asia/Tokyo', -1), 'yyyy-MM-dd')}"
+sources:
+  - name: notices
+    module: http
+    timestampAttribute: publishedAt                # event time of the list records (and their downloads)
+    parameters:
+      requests:
+        - name: list
+          target:
+            url: "https://www.example.com/notices/${args.date}/list_${page?c?left_pad(3, '0')}.html"
+          loop:
+            vars: { page: 1 }
+            next: { page: "${page + 1}" }
+            until: { key: body, op: "not match", value: 'class="next"' }
+          response:
+            format: html
+            itemsSelector: "#list tr"
+            fields:
+              - { name: date, type: date, value: "${args.date}" }
+              - { name: time, type: time, selector: "td:nth-of-type(1)" }
+              - { name: code, type: string, selector: "td:nth-of-type(2)" }
+              - { name: title, type: string, selector: "td:nth-of-type(3)", trim: true }
+              - { name: pdfFile, selector: "td:nth-of-type(3) a[href]", attribute: href }
+              - { name: attachmentFile, selector: "td:nth-of-type(4) a[href]", attribute: href }
+              - { name: publishedAt, type: timestamp, value: "${date}T${utils.datetime.formatTime(time, 'HH:mm:ss')}+09:00" }
+        - name: pdf
+          input: list
+          when: "pdfFile IS NOT NULL"
+          target: { url: "https://www.example.com/notices/files/${pdfFile}" }
+          rate: { count: 5 }
+          response:
+            format: bytes
+            fields:
+              - { name: file, value: "${pdfFile}" }
+        - name: attachment
+          input: list
+          when: "attachmentFile IS NOT NULL"
+          target: { url: "https://www.example.com/notices/files/${attachmentFile}" }
+          rate: { count: 5 }
+          response:
+            format: bytes
+            fields:
+              - { name: file, value: "${attachmentFile}" }
+sinks:
+  - name: table
+    module: bigquery
+    inputs: [notices.list]
+    parameters: { table: "proj:ds.notices", writeDisposition: WRITE_APPEND, createDisposition: CREATE_IF_NEEDED }
+  - name: files
+    module: files
+    inputs: [notices.pdf, notices.attachment]      # same raw schema (+ file)
+    parameters:
+      output: "gs://bucket/notices/${args.date}/${file}"
+      content: { field: blob }
+```
+
 ### Cursor pagination from a response header
 
 ```yaml
@@ -262,4 +357,6 @@ sources:
 - Templates referencing neither record fields nor loop variables (e.g. secret headers) are rendered once per worker; `foreach` requests render every template per item.
 - Beam may re-run a bundle: requests are re-sent. Only read (idempotent) endpoints belong in a source.
 - Chained requests run in parallel; pagination within one request is sequential by nature.
+- Loop variables are numbers: format them with FreeMarker built-ins in templates (`${page?c?left_pad(3, '0')}` → `001`).
+- An html `until` on `body` should match the *next* link specifically: a pager usually links to the previous page too, so a pattern that only looks for any page link never stops (the loop then runs into the first missing page, which fails the request).
 - Tokens obtained in `system.args` at config load time (e.g. via `utils.oauth.*`) are fixed for the whole run; prefer `auth` so tokens are refreshed before expiry and once after a 401.
