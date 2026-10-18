@@ -70,6 +70,7 @@ public class RequestRenderer implements Serializable {
     private transient String staticUrl;
     private transient Map<String, Template> paramTemplates;
     private transient Map<String, String> staticParams;
+    private transient boolean omitEmptyParams;
     private transient Map<String, Template> headerTemplates;
     private transient Map<String, Template> bodyHeaderTemplates;
     private transient Map<String, String> staticHeaders;
@@ -187,13 +188,17 @@ public class RequestRenderer implements Serializable {
         } else {
             this.staticUrl = render(name + ".url", target.url, staticValues);
         }
+        this.omitEmptyParams = Boolean.TRUE.equals(target.omitEmptyParams);
         this.paramTemplates = new LinkedHashMap<>();
         this.staticParams = new LinkedHashMap<>();
         for(final Map.Entry<String, String> entry : target.params.entrySet()) {
             if(TemplateUtil.isTemplateText(entry.getValue()) && !isStatic(entry.getValue())) {
                 paramTemplates.put(entry.getKey(), TemplateUtil.createStrictTemplate(name + ".param." + entry.getKey(), entry.getValue()));
             } else {
-                staticParams.put(entry.getKey(), render(name + ".param." + entry.getKey(), entry.getValue(), staticValues));
+                final String value = render(name + ".param." + entry.getKey(), entry.getValue(), staticValues);
+                if(!omitEmptyParams || (value != null && !value.isEmpty())) {
+                    staticParams.put(entry.getKey(), value);
+                }
             }
         }
         this.headerTemplates = new HashMap<>();
@@ -310,7 +315,10 @@ public class RequestRenderer implements Serializable {
         String url = urlTemplate != null ? TemplateUtil.executeStrictTemplate(urlTemplate, values) : staticUrl;
         final Map<String, String> params = new LinkedHashMap<>(staticParams);
         for(final Map.Entry<String, Template> entry : paramTemplates.entrySet()) {
-            params.put(entry.getKey(), TemplateUtil.executeStrictTemplate(entry.getValue(), values));
+            final String value = TemplateUtil.executeStrictTemplate(entry.getValue(), values);
+            if(!omitEmptyParams || (value != null && !value.isEmpty())) {
+                params.put(entry.getKey(), value);
+            }
         }
         if(!params.isEmpty()) {
             url = url + (url.contains("?") ? "&" : "?") + AuthProvider.formEncode(params);

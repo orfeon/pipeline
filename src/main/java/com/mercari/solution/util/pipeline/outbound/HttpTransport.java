@@ -66,6 +66,13 @@ public class HttpTransport implements AutoCloseable {
                 followRedirects = "normal";
             }
         }
+
+        /** A copy with other allowed hosts (null: any host); every other option is kept. */
+        public Parameters withAllowedHosts(final List<String> hosts) {
+            final Parameters copy = org.apache.beam.sdk.util.SerializableUtils.clone(this);
+            copy.allowedHosts = hosts;
+            return copy;
+        }
     }
 
     public static class TimeoutParameters implements Serializable {

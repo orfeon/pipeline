@@ -101,15 +101,18 @@ public class HttpSourceTest {
             respond(exchange, 200, body.toString());
         });
         // cursor pagination via header: X-Next-Cursor until absent
-        server.createContext("/cursor", exchange -> {
-            final Received r = record("cursor", exchange);
-            final String cursor = r.query() == null ? "" : r.query().replace("cursor=", "");
-            final int n = cursor.isEmpty() ? 0 : Integer.parseInt(cursor);
-            if(n < 2) {
-                exchange.getResponseHeaders().add("X-Next-Cursor", String.valueOf(n + 1));
-            }
-            respond(exchange, 200, "[{\"v\":" + n + "}]");
-        });
+        // (a second path for tests running in parallel: received calls are counted per path)
+        for(final String name : List.of("cursor", "cursor2")) {
+            server.createContext("/" + name, exchange -> {
+                final Received r = record(name, exchange);
+                final String cursor = r.query() == null ? "" : r.query().replace("cursor=", "");
+                final int n = cursor.isEmpty() ? 0 : Integer.parseInt(cursor);
+                if(n < 2) {
+                    exchange.getResponseHeaders().add("X-Next-Cursor", String.valueOf(n + 1));
+                }
+                respond(exchange, 200, "[{\"v\":" + n + "}]");
+            });
+        }
         // flaky: first call 503, then 200
         server.createContext("/flaky", exchange -> {
             record("flaky", exchange);
@@ -167,6 +170,19 @@ public class HttpSourceTest {
             record("sjis", exchange);
             respondBytes(exchange, "text/html; charset=Shift_JIS",
                     "<html><body><h1>開示情報</h1></body></html>".getBytes(java.nio.charset.Charset.forName("Shift_JIS")));
+        });
+        // api-key protected list of signed urls on another host (localhost instead of 127.0.0.1)
+        server.createContext("/keyed", exchange -> {
+            record("keyed", exchange);
+            if(!"k".equals(exchange.getRequestHeaders().getFirst("X-Api-Key"))) {
+                respond(exchange, 401, "{}");
+                return;
+            }
+            respond(exchange, 200, "{\"items\":[{\"url\":\"http://localhost:" + port + "/plain/a\"},{\"url\":\"http://localhost:" + port + "/plain/b\"}]}");
+        });
+        server.createContext("/plain", exchange -> {
+            record("plain", exchange);
+            respondBytes(exchange, "application/octet-stream", exchange.getRequestURI().getPath().getBytes(StandardCharsets.UTF_8));
         });
         // POST search: echoes the JSON body it received
         server.createContext("/search", exchange -> {
@@ -628,7 +644,7 @@ public class HttpSourceTest {
                     parameters:
                       output: "%s/${file}"
                       content: { field: blob }
-                """.formatted(url("/site"), url("/site"), url("/sjis"), url("/cursor"), dir);
+                """.formatted(url("/site"), url("/site"), url("/sjis"), url("/cursor2"), dir);
         final long startMicros = System.currentTimeMillis() * 1000L;
         final Config config = Config.load(configYaml);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
@@ -712,6 +728,94 @@ public class HttpSourceTest {
                 "files/1.pdf", "content-of-1.pdf", "files/2.pdf", "content-of-2.pdf",
                 "files/4.pdf", "content-of-4.pdf", "files/5.pdf", "content-of-5.pdf",
                 "files/2.zip", "content-of-2.zip", "files/4.zip", "content-of-4.zip"), written);
+    }
+
+    /** Empty params are omitted (unless omitEmptyParams: false); derived host pinning applies only to requests with auth. */
+    @Test
+    public void testOmitEmptyParamsAndRequestsWithoutAuth() throws Exception {
+        final String configYaml = """
+                sources:
+                  - name: signed
+                    module: http
+                    parameters:
+                      auth: { type: apiKey, name: X-Api-Key, value: k }
+                      requests:
+                        - name: list
+                          target:
+                            url: %s
+                            params: { a: "1", token: "${token}", fixed: "" }
+                          loop:
+                            vars: { token: "" }
+                            until: { key: statusCode, op: "=", value: 200 }
+                          response:
+                            itemsPath: /items
+                            schema: { fields: [ { name: url, type: string } ] }
+                        - name: download
+                          input: list
+                          target: { url: "${url}", auth: { type: none } }
+                          response: { format: bytes }
+                  - name: kept
+                    module: http
+                    parameters:
+                      auth: { type: apiKey, name: X-Api-Key, value: k }
+                      target:
+                        url: %s
+                        params: { a: "2", fixed: "" }
+                        omitEmptyParams: false
+                  - name: pinned
+                    module: http
+                    failFast: false
+                    parameters:
+                      auth: { type: apiKey, name: X-Api-Key, value: k }
+                      http: { allowedHosts: [127.0.0.1] }
+                      requests:
+                        - name: list
+                          target: { url: %s, params: { a: "3" } }
+                          response:
+                            itemsPath: /items
+                            schema: { fields: [ { name: url, type: string } ] }
+                        - name: download
+                          input: list
+                          target: { url: "${url}", auth: { type: none } }
+                          response: { format: bytes }
+                  - name: headerPinned
+                    module: http
+                    failFast: false
+                    parameters:
+                      auth: { type: apiKey, name: X-Api-Key, value: k }
+                      requests:
+                        - name: list
+                          target: { url: %s, params: { a: "4" } }
+                          response:
+                            itemsPath: /items
+                            schema: { fields: [ { name: url, type: string } ] }
+                        - name: download
+                          input: list
+                          target: { url: "${url}", auth: { type: none }, headers: { Authorization: "Bearer secret" } }
+                          response: { format: bytes }
+                """.formatted(url("/keyed"), url("/keyed"), url("/keyed"), url("/keyed"));
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        PAssert.that(outputs.get("signed.download").getCollection()).satisfies(elements -> {
+            final Set<String> blobs = new TreeSet<>();
+            for(final MElement e : elements) {
+                blobs.add(StandardCharsets.UTF_8.decode(((java.nio.ByteBuffer) e.getPrimitiveValue("blob")).duplicate()).toString());
+            }
+            Assertions.assertEquals(Set.of("/plain/a", "/plain/b"), blobs);
+            return null;
+        });
+        // configured allowedHosts still apply to requests without auth
+        PAssert.that(outputs.get("pinned.download").getCollection()).empty();
+        // a request carrying a credential header is pinned like a request with auth
+        PAssert.that(outputs.get("headerPinned.download").getCollection()).empty();
+        pipeline.run();
+
+        final Set<String> queries = new TreeSet<>();
+        received("keyed").forEach(r -> queries.add(r.query()));
+        Assertions.assertEquals(Set.of("a=1", "a=2&fixed=", "a=3", "a=4"), queries);
+        final List<Received> plain = received("plain");
+        Assertions.assertEquals(2, plain.size());
+        Assertions.assertTrue(plain.stream().noneMatch(r -> r.headers().keySet().stream().anyMatch(k -> k.equalsIgnoreCase("X-Api-Key"))));
     }
 
     /** publishedAt of the html test rows: 2026-10-16 (8 + code):30 JST in epoch micros. */

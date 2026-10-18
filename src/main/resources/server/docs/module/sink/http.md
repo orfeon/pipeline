@@ -63,6 +63,7 @@ The `target` / `body` / `batch` parameters are the same as the tasks sink's: mov
 | url       | required | String              | Endpoint URL. Supports templates on record fields (`https://api.example.com/users/${id?url}`). |
 | method    | optional | String              | HTTP method (`POST`, `PUT`, `PATCH`, `DELETE`, `GET`, …). Default `POST`. |
 | params    | optional | Map<String,String\> | Query parameters appended to the URL (values are templates, URL-encoded). |
+| omitEmptyParams | optional | Boolean | Leave out the params whose rendered value is empty (e.g. a pagination cursor that is empty on the first page). Default `false`; the [http source](../source/http.md) defaults to `true`. |
 | headers   | optional | Map<String,String\> | Request headers (values are templates). `Content-Type` defaults from `body.format`. A header referencing `__body` is rendered after the body is serialized (signature headers, see [Templates](#templates)). |
 | auth      | optional | [Auth](#auth-parameters) | Authentication provider. Default `none`. |
 

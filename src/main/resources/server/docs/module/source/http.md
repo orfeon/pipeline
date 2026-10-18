@@ -43,7 +43,7 @@ Typical uses:
 | rate      | optional | [Rate](#rate-parameters) | Single-request form. |
 | auth      | optional | [Auth](../sink/http.md#auth-parameters) | Default authentication for every request (`target.auth` of a request overrides it). |
 | timeout   | optional | [Timeout](../sink/http.md#timeout-parameters) | Connect / per-attempt request timeouts. |
-| http      | optional | [Http](../sink/http.md#http-parameters) | HTTP client options. With auth, requests are pinned to the hosts of the configured urls; set `allowedHosts` when a url host is a template. |
+| http      | optional | [Http](../sink/http.md#http-parameters) | HTTP client options. Requests with auth, or with an `Authorization` / `Proxy-Authorization` / `Cookie` / `X-Api-Key` header in `target.headers`, are pinned to the hosts of those requests' configured urls; set `allowedHosts` when a url host is a template. Requests without auth or such a header (`target.auth: { type: none }`, e.g. a signed download URL on another host) are not pinned, unless `allowedHosts` is set explicitly, which applies to every request. |
 | polling   | optional | [Polling](#polling-parameters) | Streaming only: repeat the root requests periodically. |
 
 ### Request parameters
@@ -51,7 +51,7 @@ Typical uses:
 | parameter | optional | type | description |
 |-----------|----------|------|-------------|
 | name      | optional | String | Request name — required with several requests (used by `input` and as the output tag `<step>.<name>`). Defaults to the step name. |
-| target    | required | [Target](../sink/http.md#target-parameters) | `url` (template), `method` (default `GET`), `params`, `headers`, `auth`. Root requests see `utils.*` and `__timestamp`; chained requests see the parent record's fields (`${id}`), `foreach` requests the item's fields. Loop variables are available everywhere (`${page}`). |
+| target    | required | [Target](../sink/http.md#target-parameters) | `url` (template), `method` (default `GET`), `params`, `headers`, `auth`, `omitEmptyParams` (default `true` in the source: a param that renders empty, such as `pagination_key: "${pagination_key}"` on the first page, is left out). Root requests see `utils.*` and `__timestamp`; chained requests see the parent record's fields (`${id}`), `foreach` requests the item's fields. Loop variables are available everywhere (`${page}`). |
 | body      | optional | [Body](../sink/http.md#body-parameters) | Request body. `template` (FreeMarker), or for chained requests `json` / `ndjson` / `form` / `multipart` of the parent record. Default: no body. |
 | response  | optional | [Response](#response-parameters) | How the response becomes records; success / retry classification. |
 | loop      | optional | [Loop](#loop-parameters) | Pagination. |

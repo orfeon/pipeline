@@ -58,6 +58,7 @@ If you only need fire-and-forget fan-out without scheduling, rate limiting or na
 | url       | required | String             | Target URL. Template on record fields, e.g. `https://api.example.com/users/${user_id}` (use `${field?url}` to percent-encode). |
 | method    | optional | Enum               | `POST` (default), `GET`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`. The body is not sent for `GET`/`HEAD`. |
 | params    | optional | Map<String,String\> | Query parameters appended to the URL (values are templates, URL-encoded). |
+| omitEmptyParams | optional | Boolean | Leave out the params whose rendered value is empty. Default `false`. |
 | headers   | optional | Map<String,String\> | Request headers. Values are templates. Headers that reference no record field (e.g. an API key via `${utils.secrets.get("projects/p/secrets/s/versions/latest")}`) are rendered once per worker. A header referencing `__body` is rendered after the body (signature headers). |
 | auth      | optional | Auth               | Token attached by Cloud Tasks when dispatching. |
 
