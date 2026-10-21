@@ -139,7 +139,7 @@ variable.
 | `row` | none | stateless `ParDo` (`RowStageDoFn`) | row |
 | `context` | context keys | `KeyDoFn` → `GroupByKey` → in-group evaluation (`ContextStageDoFn`) | context |
 | `sequence` / `population` | entity keys / keySet keys | `SortKeyDoFn` → `GroupByKey` → per-key time-ordered replay (`KeyedHistoryDoFn` over `KeyedSpillSorter`) | sequence, expanding encoding |
-| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize, quantileTransform, svd, smooth) |
+| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize, quantileTransform, svd, smooth, copula) |
 | `groupBy` | context keys | the finalize (`Finalize_Group` + `GroupedFinalizeDoFn`) | `output.groupBy` |
 
 - Stages form a **linear chain** in the baseline design (each stage receives the row with every field
@@ -486,7 +486,7 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   entity's keys or the row identity), and apply subtracts the row's own fold from the totals (n ≤ 0 →
   "no statistics"). λ comes from the totals.
 - **Static-fit blocks** (`StaticFitBlock<M>`: `FmSpec` for factorization, `DiscretizeSpec` for
-  discretize, `QuantileTransformSpec` for quantileTransform, `SvdSpec` for svd, `SmoothSpec` for smooth, `JointSpec` for
+  discretize, `QuantileTransformSpec` for quantileTransform, `SvdSpec` for svd, `SmoothSpec` for smooth, `CopulaSpec` for copula, `JointSpec` for
   `estimator: joint`): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
@@ -631,6 +631,7 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 `type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
+`type: copula` (Gaussian copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
 `validate --expand`, `estimator: joint` (static / fold / forward), the conjugate families (`family`,
 with the Dirichlet-Multinomial shrinkage of `distribution`), the general sequence form with `lti` dynamics. Everything else is parsed and rejected with a
@@ -1233,7 +1234,7 @@ Families (`Summary.Summaries`, plus the two that live with their model class):
 | `COUNTS` | value → count | yes | distribution | encoding `distribution` |
 | `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
 | `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
-| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3) |
+| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3); `type: copula` fits (the vector of normal scores, §9.6.3) |
 | `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
 
 Conventions every family follows: population moments (the `std` convention) and null — never NaN — when a
@@ -1338,7 +1339,7 @@ recorded in §9.2). A block that fits an empty input too (quantileTransform: n =
 empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
 have no summary state, discretize gathers the same values as the quantile transform and can join its family.
 
-**One fit geometry, four types: `ForwardFitBlock`.** svd, quantileTransform, smooth and spectralEmbedding differ only
+**One fit geometry, five types: `ForwardFitBlock`.** svd, quantileTransform, smooth, copula and spectralEmbedding differ only
 in what a row contributes, how a state becomes a model and which columns it fills; the geometry around that is the
 same for all of them, so it is declared once. A `ForwardFitBlock<T, S, M>` (a `SummaryFitBlock` whose model is
 `ForwardModel<M>` = total + byBlock + observed) asks for `artifact()`, `forward()`, `predictOffsetMillis()` and
@@ -1350,7 +1351,7 @@ is keyed by. `loud` is the whole-input fit, which reports what it fitted; a per-
 empty or short window at a leave point is normal. Two hooks cover the exceptions: `adopt(model)` (quantileTransform
 takes the config's clip, not the artifact's) and `prepare` / `extractionViews` (below).
 
-**One JSON artifact, four types: `FitArtifact.Json`.** The same four persist their model as
+**One JSON artifact, five types: `FitArtifact.Json`.** The same five persist their model as
 `<planHash>/<block>.<extension>.json` — the manifest header plus the model's own members. `FitArtifact.Json<T>`
 holds the path, the existence check, the write and the read with its "nothing was fitted" warning; a model class
 implements `FitArtifact.Model` (`isEmpty` / `describe` / `toJson`) and declares one constant naming the extension,
@@ -1384,6 +1385,21 @@ knots must exist before the one pass over the rows, so the range is declared (qu
 (PAVA is not a sum of contributions — it would gather per-key (x, n, Σy) like the quantile transform's values), `rff`,
 several smooth terms in one block (one λ per term makes REML a multi-dimensional search) and category-varying curves
 (spec §5.6, the tensor with a key lattice — `joint` territory).
+
+**The same family a third time: `type: copula`.** A Gaussian copula's correlation is the correlation of the normal
+scores, and the correlation is read from the moments of the score vector — so `CopulaSpec` contributes the row's
+scores (complete vectors only) to `Svd.SUMMARY` under the family name `Moments`, and `Copula.fit` turns the merged
+moments into the standardisation (mean, sd), the correlation, the OAS intensity (`(1 − 2/p) tr R² + p²` over
+`(n + 1 − 2/p)(tr R² − p)`, Chen et al. eq. 23 with `tr Σ = p`) and an eigenvalue floor (`SymmetricEigen`, then the
+unit diagonal restored). The marginals are not engine code either: `expandCopula` builds one synthetic
+`quantileTransform` block per input (as `expandCompress` builds an svd) under the copula's fit geometry, so the
+scheduler gives them a fit stage ahead of the copula's, and under `forward` the copula reads the walk-forward
+scores — a row whose scores are still null contributes nothing. A readout is a function of `R` and of which inputs
+the row has: `Copula` solves the conditional system per (input, observed mask) — β kept per input index, so two
+readouts with different `given` sets cannot collide — and the joint system (precision, log det) per mask, both
+cached in transient maps on the model; a missing score is marginalised out (the sub-matrix of `R`). The model has
+no gauge, so `alignTo` is the identity and forward re-fits are continuous by construction. Masks are `int` bits,
+hence at most 31 inputs (`copula.inputs`).
 
 **The sequence-of-values types need no engine of their own.** `transitionStats` and `spectralEmbedding` were deferred
 as "needing the per-entity value sequence before the fit". That sequence is a `lag`: `FeaturePlanCompiler.sequencePath`

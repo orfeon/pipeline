@@ -153,10 +153,12 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    memory cost in the docs (discretize: 8 bytes per row). Before writing a family, check whether the fit is a
    function of one that exists: `SmoothSpec` needs (XᵀX, Xᵀy, yᵀy), which are the second moments of the vector
    `[basis(x), y]`, so it contributes that vector to `Svd.SUMMARY` under the family name `Moments` and shares the
-   svd blocks' Combine — no new state, coder or merge law to test. A target-consuming block lists the target in
+   svd blocks' Combine — no new state, coder or merge law to test (`CopulaSpec` does the same with the vector of normal
+   scores). A target-consuming block lists the target in
    `fitInputs()` and passes it to `forwardCoordinates` (its availability is the forward lag).
    **When the type is a composition of blocks that exist**, write no engine code at all: build the synthetic
-   `FeatureDef`s and call their expanders (`expandCompress` → `expandSvd`; `sequencePath` → `expandSequence` for the
+   `FeatureDef`s and call their expanders (`expandCompress` → `expandSvd`; `expandCopula` → `expandQuantileTransform` per
+   input for the marginals, under the block's own fit minus `align`; `sequencePath` → `expandSequence` for the
    lag path; `expandTransitionStats` → `expandEncoding` with a `naming` template that gives the columns the type's
    own names). Pin the equivalence in an e2e test — the sugar and the explicit blocks side by side, value for value.
 6. Docs: a `### <Type> (population, type: <type>)` section in `feature.md` (example, fit semantics,

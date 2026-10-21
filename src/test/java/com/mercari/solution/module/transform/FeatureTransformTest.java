@@ -4346,4 +4346,154 @@ public class FeatureTransformTest {
         assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", RATING_BLOCKS + "      output:\n"), 6,
                 List.of("Wave1_FanIn"), List.of());
     }
+
+    /** The readouts the copula tests compare: {@code cop} with expanded marginals, {@code cop_s} over the explicit scores {@code zp} / {@code zq}. */
+    private static String copulaConfig(final String fit, final String dir) {
+        final String blocks = """
+                    - name: cop
+                      scope: population
+                      type: copula
+                      inputs: [start_price, quantity]
+                      shrink: none
+                      outputs: [conditional, conditionalProb, jointRank, logDensity]
+                      fit: {%1$sartifact: {uri: "%2$s"}}
+                    - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal, clip: 0.001, fit: {%1$s}}
+                    - {name: zq, scope: population, type: quantileTransform, input: quantity, distribution: normal, clip: 0.001, fit: {%1$s}}
+                    - name: cop_s
+                      scope: population
+                      type: copula
+                      inputs: [zp, zq]
+                      marginals: scores
+                      shrink: none
+                      outputs: [conditional, conditionalProb, jointRank, logDensity]
+                      fit: {%1$s}
+                    - name: cop_oas
+                      scope: population
+                      type: copula
+                      inputs: [start_price, quantity]
+                      fit: {%1$sartifact: {uri: "%2$s"}}
+                """.formatted(fit, dir);
+        return FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    /**
+     * The Gaussian copula of two scores by hand: standardised with the mean and the (n − 1) standard deviation of the
+     * fitted rows, ρ their correlation; returns {conditional of a given b, conditional of b given a, jointRank, logDensity}
+     * at (za, zb). For two inputs the χ²(2) CDF is 1 − exp(−q / 2).
+     */
+    private static double[] copulaByHand(final double[] a, final double[] b, final double za, final double zb) {
+        final int n = a.length;
+        double ma = 0, mb = 0;
+        for (int i = 0; i < n; i++) {
+            ma += a[i] / n;
+            mb += b[i] / n;
+        }
+        double saa = 0, sbb = 0, sab = 0;
+        for (int i = 0; i < n; i++) {
+            saa += (a[i] - ma) * (a[i] - ma) / (n - 1);
+            sbb += (b[i] - mb) * (b[i] - mb) / (n - 1);
+            sab += (a[i] - ma) * (b[i] - mb) / (n - 1);
+        }
+        final double rho = sab / Math.sqrt(saa * sbb);
+        final double x = (za - ma) / Math.sqrt(saa), y = (zb - mb) / Math.sqrt(sbb);
+        final double q = (x * x - 2 * rho * x * y + y * y) / (1 - rho * rho);
+        return new double[]{(x - rho * y) / Math.sqrt(1 - rho * rho), (y - rho * x) / Math.sqrt(1 - rho * rho),
+                1 - Math.exp(-q / 2), -0.5 * Math.log(1 - rho * rho) - 0.5 * (q - x * x - y * y)};
+    }
+
+    private static void assertCopula(final MElement row, final String prefix, final String a, final String b, final double[] expected) {
+        if (expected == null) {
+            for (final String column : List.of("_cond_" + a, "_cond_" + b, "_condprob_" + a, "_jointrank", "_logdensity")) {
+                Assertions.assertNull(row.getPrimitiveValue(prefix + column), () -> prefix + column + " " + row);
+            }
+            return;
+        }
+        Assertions.assertEquals(expected[0], row.getAsDouble(prefix + "_cond_" + a), 1e-9, row::toString);
+        Assertions.assertEquals(expected[1], row.getAsDouble(prefix + "_cond_" + b), 1e-9, row::toString);
+        Assertions.assertEquals(com.mercari.solution.util.domain.math.NormalDistribution.cdf(expected[0]), row.getAsDouble(prefix + "_condprob_" + a), 1e-9, row::toString);
+        Assertions.assertEquals(expected[2], row.getAsDouble(prefix + "_jointrank"), 1e-9, row::toString);
+        Assertions.assertEquals(expected[3], row.getAsDouble(prefix + "_logdensity"), 1e-9, row::toString);
+    }
+
+    /**
+     * copula over (start_price, quantity) — quantity has mass points (1 three times, 2 twice) — with {@code shrink: none}:
+     * the readouts equal the two-input formulas over the explicit normal scores zp / zq (the same quantile transforms the
+     * block expands); the block over the explicit scores ({@code marginals: scores}) reads the same values; the default
+     * OAS shrinkage fits and says how much it shrank; the artifact holds the correlation.
+     */
+    @Test
+    public void testCopula() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + copulaConfig("", dir)));
+        final Schema schema = outputs.get("features").getSchema();
+        for (final String column : List.of("f_cop_cond_start_price", "f_cop_cond_quantity", "f_cop_condprob_start_price", "f_cop_condprob_quantity",
+                "f_cop_jointrank", "f_cop_logdensity", "f_cop_oas_cond_start_price", "f_cop_oas_cond_quantity")) {
+            Assertions.assertNotNull(schema.getField(column), column);
+        }
+        // the expanded marginals are intermediate
+        Assertions.assertNull(schema.getField("f_cop_z_start_price"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final List<MElement> list = new ArrayList<>();
+            for (final MElement row : rows) list.add(row);
+            Assertions.assertEquals(6, list.size());
+            final double[] a = list.stream().mapToDouble(r -> r.getAsDouble("f_zp")).toArray();
+            final double[] b = list.stream().mapToDouble(r -> r.getAsDouble("f_zq")).toArray();
+            for (final MElement row : list) {
+                final double[] expected = copulaByHand(a, b, row.getAsDouble("f_zp"), row.getAsDouble("f_zq"));
+                assertCopula(row, "f_cop", "start_price", "quantity", expected);
+                assertCopula(row, "f_cop_s", "zp", "zq", expected);
+                Assertions.assertNotNull(row.getPrimitiveValue("f_cop_oas_cond_start_price"), row::toString);
+            }
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject cop = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop.copula.json").toPath())).getAsJsonObject();
+        Assertions.assertEquals(6, cop.get("n").getAsLong());
+        Assertions.assertEquals(2, cop.get("dimension").getAsInt());
+        Assertions.assertEquals("none", cop.get("shrinkMethod").getAsString());
+        Assertions.assertTrue(new java.io.File(dirs[0], "cop_z_start_price.quantiles.json").exists(), "the expanded marginals keep their own artifacts");
+        final com.google.gson.JsonObject oas = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop_oas.copula.json").toPath())).getAsJsonObject();
+        Assertions.assertEquals("oas", oas.get("shrinkMethod").getAsString());
+        final double shrinkage = oas.get("shrinkage").getAsDouble();
+        Assertions.assertTrue(shrinkage > 0 && shrinkage <= 1, "oas shrinkage " + shrinkage);
+        final double rho = cop.getAsJsonArray("correlation").get(0).getAsJsonArray().get(1).getAsDouble();
+        Assertions.assertEquals((1 - shrinkage) * rho, oas.getAsJsonArray("correlation").get(0).getAsJsonArray().get(1).getAsDouble(), 1e-12);
+    }
+
+    /**
+     * copula under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874). The marginals walk
+     * forward too, so A's scores are null (no earlier block) and A's rows take no part in any copula fit: C reads blocks
+     * 2869–2871, where only B has scores (one row: below the default fit.minRows 3 = inputs + 1), and D reads B's and C's
+     * walk-forward scores — the formulas over exactly those three rows.
+     */
+    @Test
+    public void testCopulaForwardFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + copulaConfig("mode: forward, blocks: {size: P7D}, ", dir)));
+        Assertions.assertEquals("forward", outputs.get("features").getSchema().getField("f_cop_jointrank").getOptions().get("feature.coord.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_zp"), "the marginals have no earlier block for A");
+            for (final String key : List.of("A/s1", "A/s2", "B/s1", "C/s1", "C/s2")) {
+                assertCopula(byKey.get(key), "f_cop", "start_price", "quantity", null);
+                assertCopula(byKey.get(key), "f_cop_s", "zp", "zq", null);
+            }
+            final List<MElement> fitted = List.of(byKey.get("B/s1"), byKey.get("C/s1"), byKey.get("C/s2"));
+            final double[] a = fitted.stream().mapToDouble(r -> r.getAsDouble("f_zp")).toArray();
+            final double[] b = fitted.stream().mapToDouble(r -> r.getAsDouble("f_zq")).toArray();
+            final MElement d = byKey.get("D/s1");
+            final double[] expected = copulaByHand(a, b, d.getAsDouble("f_zp"), d.getAsDouble("f_zq"));
+            assertCopula(d, "f_cop", "start_price", "quantity", expected);
+            assertCopula(d, "f_cop_s", "zp", "zq", expected);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(dirs[0], "cop.copula.json").exists(), "the whole-input correlation is persisted for a static serving run");
+    }
 }
