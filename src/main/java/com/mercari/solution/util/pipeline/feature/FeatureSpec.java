@@ -1587,6 +1587,10 @@ public class FeatureSpec implements Serializable {
      */
     private static void parseCopula(final JsonObject o, final FeatureDef def) {
         def.copulaFamily = Json.string(o, "family");
+        // the quantileTransform spelling at the top level would otherwise be dropped and the defaults used in silence
+        for (final String key : List.of("bins", "clip", "distribution")) {
+            if (o.has(key) && !o.get(key).isJsonNull()) def.copulaUnknown.add(key + " (the marginals take marginals: {bins, clip})");
+        }
         if (o.has("marginals") && !o.get("marginals").isJsonNull()) {
             final JsonElement m = o.get("marginals");
             if (m.isJsonPrimitive() && "scores".equals(m.getAsString())) {
@@ -1654,7 +1658,8 @@ public class FeatureSpec implements Serializable {
                 }
             }
             for (final String key : out.keySet()) {
-                if (!List.of(kind, "given", "as").contains(key)) def.copulaUnknown.add("outputs." + key);
+                // both conditional kinds in one entry are reported once, above
+                if (!CopulaOutput.CONDITIONAL_KINDS.contains(key) && !List.of("given", "as").contains(key)) def.copulaUnknown.add("outputs." + key);
             }
             def.copulaOutputs.add(new CopulaOutput(kind, out.get(kind).getAsString(), given, Json.string(out, "as")));
         }

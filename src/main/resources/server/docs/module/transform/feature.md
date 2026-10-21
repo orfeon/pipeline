@@ -1314,7 +1314,7 @@ input.
 Diagnostics: `copula.inputs` (fewer than two, more than 31, repeated or non-numeric inputs), `copula.family`,
 `copula.shrink`, `copula.eigenFloor`, `copula.marginals` (bins / clip out of range: error; scores that are not
 normal-score columns: warning; the expanded marginal blocks: info), `copula.outputs`, `copula.given`,
-`copula.parameters` (an unknown key, or an output in another shape), `copula.fit.mode`, `copula.fit.align`.
+`copula.parameters` (an unknown key in `marginals`, a top-level `bins` / `clip` / `distribution`, or an output in another shape), `copula.fit.mode`, `copula.fit.align`.
 
 ### Sequences of values (population, types: transitionStats, spectralEmbedding)
 

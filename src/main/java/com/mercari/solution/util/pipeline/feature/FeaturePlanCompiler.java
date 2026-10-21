@@ -3514,6 +3514,11 @@ public final class FeaturePlanCompiler {
             }
             refs.add(ref);
         }
+        // two spellings of one column (zp, blk.zp) are one input: R would be singular and the readouts repeated
+        if (refs.stream().map(Ref::canonical).distinct().count() != refs.size()) {
+            diagnostics.error("copula.inputs", loc, "copula inputs must be distinct columns: " + inputs + " name one column twice");
+            return;
+        }
         // shrink / eigenFloor: what keeps R⁻¹ finite with few rows or strongly related inputs
         String shrink = Copula.OAS;
         if (def.shrink != null && !Copula.OAS.equals(def.shrink) && !Copula.NONE.equals(def.shrink)) {
@@ -3537,7 +3542,6 @@ public final class FeaturePlanCompiler {
         final int bins = def.marginalBins == null ? QuantileTransform.DEFAULT_BINS : def.marginalBins;
         final double clip = def.marginalClip == null ? Copula.DEFAULT_MARGINAL_CLIP : def.marginalClip;
         if (def.marginalsScores) {
-            if (def.marginalBins != null || def.marginalClip != null) diagnostics.warning("copula.marginals", loc, "marginals: scores takes no bins / clip");
             for (int i = 0; i < inputs.size(); i++) {
                 final OutputColumn column = refs.get(i).column();
                 if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))) {
@@ -3618,8 +3622,11 @@ public final class FeaturePlanCompiler {
             }
             readouts.add(new String[]{name, o.kind(), of, given});
         }
+        final int errorsBefore = diagnostics.get(Diagnostics.Level.error).size();
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "copula", "the correlation is fitted", "the correlation of the normal scores solved from their moments", true);
         warnAlignIgnored(def, "copula");
+        // a fit error stops here: the marginals would re-parse the same fit and report it again under blocks never declared
+        if (diagnostics.get(Diagnostics.Level.error).size() > errorsBefore) valid = false;
         if (!valid) return;
 
         // the score columns the block fits: the synthetic marginals, under the block's fit geometry (fit.align is the
@@ -3630,9 +3637,11 @@ public final class FeaturePlanCompiler {
         } else {
             final JsonObject marginalFit = parseJsonObject(def.fitJson);
             if (marginalFit != null) marginalFit.remove("align");
-            for (final String input : inputs) {
+            for (int i = 0; i < inputs.size(); i++) {
+                final String input = inputs.get(i);
                 final FeatureDef marginal = new FeatureDef();
-                marginal.name = def.name + "_z_" + displayName(input);
+                // named by the canonical column, which is unique: two inputs s.mean / t.mean share a display name
+                marginal.name = def.name + "_z_" + refs.get(i).canonical().replace('.', '_');
                 marginal.scope = Scope.population;
                 marginal.type = "quantileTransform";
                 marginal.input = input;
@@ -3677,7 +3686,9 @@ public final class FeaturePlanCompiler {
             c.fitted = true;
             c.coordinates.put("fit", forward ? "forward" : "static");
             if (forward) {
-                forwardCoordinates(c, null, scores, def, fitSpec);
+                // the lag of the inputs, as for the marginals: a past row's score is known once its input is (the
+                // score column's own availability is floored at computeAt, which would delay the blocks further)
+                forwardCoordinates(c, null, inputs, def, fitSpec);
                 c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
             }
             c.coordinates.put("fields", fields);

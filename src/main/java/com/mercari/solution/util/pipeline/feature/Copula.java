@@ -47,6 +47,12 @@ public final class Copula implements Serializable, FitArtifact.Model {
     public static final double DEFAULT_MARGINAL_CLIP = 0.001;
     /** The observed-input masks are bits of an int. */
     public static final int MAX_INPUTS = 31;
+    /**
+     * The solved systems kept per cache (conditional: per input and mask; joint: per mask). A few inputs have a handful
+     * of masks; many sparse inputs could have millions, each holding up to a d × d matrix, so past the bound a system
+     * is solved for the row and not kept.
+     */
+    static final int MAX_CACHED_SYSTEMS = 4096;
 
     public final int dimension;
     public final long n;
@@ -130,10 +136,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
             for (int j = 0; j < d; j++) if (i != j) r[i][j] *= 1 - rho;
         }
         final int floored = floor(r, eigenFloor);
-        if (loud) {
-            LOG.info("copula: fitted the correlation of {} scores over {} rows (shrinkage {} = {}{})", d, m.n, method, rho,
-                    floored == 0 ? "" : ", " + floored + " eigenvalue(s) raised to the floor " + eigenFloor);
-        }
+        // the fitted model is reported by its block (CopulaSpec#fit, with the block name) through describe()
         return new Copula(d, m.n, mean, sd, r, rho, method, floored);
     }
 
@@ -177,7 +180,8 @@ public final class Copula implements Serializable, FitArtifact.Model {
 
     @Override
     public String describe() {
-        return "dimension " + dimension + ", shrinkage " + shrinkMethod + " = " + shrinkage + ", n=" + n;
+        return "dimension " + dimension + ", shrinkage " + shrinkMethod + " = " + shrinkage + ", n=" + n
+                + (floored == 0 ? "" : ", " + floored + " eigenvalue(s) raised to the floor");
     }
 
     /** The standardised score of input i, or NaN when the score is missing. */
@@ -201,7 +205,14 @@ public final class Copula implements Serializable, FitArtifact.Model {
             if (!Double.isNaN(zs[k])) mask |= 1 << given[k];
         }
         // the observed conditioning set alone decides the system — whichever readout lists it — so β is kept per input
-        final Conditional c = conditionals().computeIfAbsent(((long) j << 32) | (mask & 0xffffffffL), key -> solveConditional(j, key.intValue()));
+        final Map<Long, Conditional> cache = conditionals();
+        final long key = ((long) j << 32) | (mask & 0xffffffffL);
+        Conditional c = cache.get(key);
+        if (c == null) {
+            c = solveConditional(j, mask);
+            // the masks are up to 2^31: beyond the bound a system is solved per row instead of kept
+            if (cache.size() < MAX_CACHED_SYSTEMS) cache.putIfAbsent(key, c);
+        }
         double predicted = 0;
         for (int k = 0; k < given.length; k++) if ((mask & (1 << given[k])) != 0) predicted += c.beta[given[k]] * zs[k];
         return (zj - predicted) / c.sd;
@@ -215,20 +226,31 @@ public final class Copula implements Serializable, FitArtifact.Model {
 
     /** The χ²(k) CDF of {@code zᵀ R⁻¹ z} over the k observed inputs, or null with none observed / nothing fitted. */
     public Double jointRank(final Double[] scores) {
-        final double[] q = quadratic(scores);
-        if (q == null) return null;
-        return 1 - StatMath.chiSquareUpperTail(q[0], (int) q[2]);
+        return jointRankOf(quadratic(scores));
     }
 
     /** {@code log c(u)} over the observed inputs, or null with none observed / nothing fitted. */
     public Double logDensity(final Double[] scores) {
-        final double[] q = quadratic(scores);
+        return logDensityOf(quadratic(scores));
+    }
+
+    /** {@link #jointRank} from a row's {@link #quadratic} (null = none observed / nothing fitted). */
+    static Double jointRankOf(final double[] q) {
+        if (q == null) return null;
+        return 1 - StatMath.chiSquareUpperTail(q[0], (int) q[2]);
+    }
+
+    /** {@link #logDensity} from a row's {@link #quadratic} (null = none observed / nothing fitted). */
+    static Double logDensityOf(final double[] q) {
         if (q == null) return null;
         return -0.5 * q[3] - 0.5 * (q[0] - q[1]);
     }
 
-    /** {zᵀ R_OO⁻¹ z, zᵀ z, |O|, log det R_OO} over the observed inputs O, or null. */
-    private double[] quadratic(final Double[] scores) {
+    /**
+     * {zᵀ R_OO⁻¹ z, zᵀ z, |O|, log det R_OO} over the observed inputs O, or null — what {@link #jointRank} and
+     * {@link #logDensity} read, so a row computes it once for both.
+     */
+    double[] quadratic(final Double[] scores) {
         if (isEmpty()) return null;
         final double[] z = new double[dimension];
         int mask = 0;
@@ -237,7 +259,12 @@ public final class Copula implements Serializable, FitArtifact.Model {
             if (!Double.isNaN(z[i])) mask |= 1 << i;
         }
         if (mask == 0) return null;
-        final Joint joint = joints().computeIfAbsent(mask, this::solveJoint);
+        final Map<Integer, Joint> cache = joints();
+        Joint joint = cache.get(mask);
+        if (joint == null) {
+            joint = solveJoint(mask);
+            if (cache.size() < MAX_CACHED_SYSTEMS) cache.putIfAbsent(mask, joint);
+        }
         final int k = joint.index.length;
         double form = 0, squares = 0;
         for (int a = 0; a < k; a++) {

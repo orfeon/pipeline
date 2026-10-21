@@ -345,7 +345,7 @@ public final class FeatureStages {
 
     /**
      * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
-     * static-fit population types (factorization, discretize, quantileTransform, svd, smooth, spectralEmbedding)
+     * static-fit population types (factorization, discretize, quantileTransform, svd, smooth, copula, spectralEmbedding)
      * and the joint estimator models of an encoding block: a new type is added here and nowhere else.
      */
     static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
@@ -1106,7 +1106,7 @@ public final class FeatureStages {
 
     /**
      * A {@link SummaryFitBlock} whose model is solved from the state and persisted as its own JSON artifact — every
-     * population type outside the encoding lattice (svd, quantileTransform, smooth, spectralEmbedding). They differ
+     * population type outside the encoding lattice (svd, quantileTransform, smooth, copula, spectralEmbedding). They differ
      * only in what a row contributes, how a state becomes a model and which columns it fills; the fit geometry is the
      * same for all of them and lives here: the whole-input fit plus one per change point under {@code forward}, the
      * artifact written once, and the lookup a row does ({@link #modelFor}).
@@ -2126,12 +2126,20 @@ public final class FeatureStages {
             final Copula copula = modelFor(model, values);
             final Double[] scores = new Double[fields.size()];
             if (copula != null) for (int i = 0; i < scores.length; i++) scores[i] = FeatureValues.toDouble(values.get(fields.get(i)));
+            // jointRank and logDensity read the same quadratic form: solved once per row
+            double[] quadratic = null;
+            boolean solved = false;
             for (int i = 0; i < kinds.length; i++) {
+                final boolean joint = "jointRank".equals(kinds[i]) || "logDensity".equals(kinds[i]);
+                if (copula != null && joint && !solved) {
+                    quadratic = copula.quadratic(scores);
+                    solved = true;
+                }
                 final Double value = copula == null ? null : switch (kinds[i]) {
                     case "conditional" -> copula.conditional(scores, of[i], given[i]);
                     case "conditionalProb" -> copula.conditionalProb(scores, of[i], given[i]);
-                    case "jointRank" -> copula.jointRank(scores);
-                    case "logDensity" -> copula.logDensity(scores);
+                    case "jointRank" -> Copula.jointRankOf(quadratic);
+                    case "logDensity" -> Copula.logDensityOf(quadratic);
                     default -> throw new IllegalStateException("unknown copula output " + kinds[i]);
                 };
                 values.put(columns.get(i).getCanonicalName(), value);

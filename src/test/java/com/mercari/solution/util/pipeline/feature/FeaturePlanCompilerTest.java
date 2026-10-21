@@ -4639,7 +4639,17 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, as: x}, {conditional: start_price, as: x}]"))), "copula.outputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, given: [quantity]}]"))), "copula.given"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, given: []}]"))), "copula.given"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "copula.fit.mode"));
+        final FeaturePlan fold = compile(SOURCES, withEncoding(block.replace("fit: {artifact", "fit: {mode: fold, artifact")));
+        Assertions.assertTrue(hasCode(fold, "copula.fit.mode"));
+        // reported once, for the copula, not again for every expanded marginal
+        Assertions.assertFalse(hasCode(fold, "quantileTransform.fit.mode"), fold::describe);
+        // the quantileTransform spelling at the top level is not silently dropped
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        bins: 20"))), "copula.parameters"));
+        // one column spelled two ways is one input
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding("""
+                  - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal}
+                  - {name: cop, scope: population, type: copula, inputs: [zp, zp.zp], marginals: scores}
+            """)), "copula.inputs"));
     }
 
     /**
