@@ -478,10 +478,12 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * The {@code diagnose} report of a fitted model over the moments of its rows' {@link #diagnoseVector}s. Per pair:
      * the share of rows beyond the threshold in one input that are beyond it in the other too (the two directions
      * pooled: co-exceedances over the mean exceedance count), above {@code tail} and below {@code 1 − tail}, next to the
-     * share the fitted Gaussian copula implies at those thresholds — the scores standardised as the model does, the
-     * correlation the model uses — with its binomial standard error. A Gaussian copula has no tail dependence, but at a
-     * finite threshold its share is far from 0 (ρ = 0.5 at 0.95: about 0.24), which is what the observed share is held
-     * against. Per input with a point-mass flag: the share of rows on a mass; per pair of them: how often both are,
+     * share a Gaussian copula implies at the same exceedance rates — its thresholds placed where the observed share of
+     * rows beyond them falls, so only the dependence is compared, not the marginals' shape — with the scores' sample
+     * correlation (the shrunk one the readouts use is reported beside it as {@code rhoModel}) and its binomial standard
+     * error. A Gaussian copula has no tail dependence, but at a finite threshold its share is far from 0 (ρ = 0.5 at
+     * 0.95: about 0.24), which is what the observed share is held against. Per input with a point-mass flag: the share
+     * of rows on a mass; per pair of them: how often both are,
      * against the product of the shares (what independent masses would give).
      */
     public static Report diagnose(final Svd.Moments m, final int d, final Copula model, final double tail, final int[][] pairs,
@@ -496,27 +498,33 @@ public final class Copula implements Serializable, FitArtifact.Model {
             return new Report(json, warnings, lines);
         }
         final double n = m.n;
-        final double upper = NormalDistribution.inverseNormal(tail);
         final JsonArray tails = new JsonArray();
         int flagged = 0;
         for (final int[] pair : pairs) {
             final int a = pair[0], b = pair[1];
-            final double rho = model.correlation[a][b];
+            // the sample correlation, not the shrunk one the readouts use: the question is whether the Gaussian family
+            // misses joint extremes, and shrinkage alone would otherwise read as missing tail dependence
+            final double rho = sampleCorrelation(m, a, b);
             final JsonObject entry = new JsonObject();
             entry.addProperty("a", names.get(a));
             entry.addProperty("b", names.get(b));
             entry.addProperty("rho", rho);
+            entry.addProperty("rhoModel", model.correlation[a][b]);
             for (final boolean high : new boolean[]{true, false}) {
                 final int offset = high ? d : 2 * d;
                 final double na = count(m, offset + a), nb = count(m, offset + b), nab = cross(m, offset + a, offset + b);
                 // the thresholds in the model's standardised units, mirrored for the lower tail (the orthant is symmetric)
-                final double ta = (upper - (high ? 1 : -1) * model.mean[a]) / model.sd[a];
-                final double tb = (upper - (high ? 1 : -1) * model.mean[b]) / model.sd[b];
-                final double pa = NormalDistribution.cdf(-ta), pb = NormalDistribution.cdf(-tb);
-                // both thresholds beyond the reach of Φ (scores with almost no spread): the model gives the tail no
-                // probability - 0, not 0 / 0 (a NaN would land in the artifact as a bare token strict JSON readers reject)
-                final double marginal = (pa + pb) / 2;
-                final double implied = marginal > 0 ? upperOrthant(ta, tb, rho) / marginal : 0d;
+                // the copula's thresholds at the observed exceedance rates (mirrored for the lower tail: the orthant is
+                // symmetric), so a marginal that is not quite normal - ties at the top, a score column with its own
+                // shape - is not read as dependence. No row beyond in one input: none together, 0 (not 0 / 0 - a NaN
+                // would land in the artifact as a bare token strict JSON readers reject)
+                final double implied;
+                if (na > 0 && nb > 0) {
+                    final double pa = Math.min(na / n, 1 - 1e-12), pb = Math.min(nb / n, 1 - 1e-12);
+                    implied = upperOrthant(NormalDistribution.inverseNormal(1 - pa), NormalDistribution.inverseNormal(1 - pb), rho) / ((pa + pb) / 2);
+                } else {
+                    implied = 0d;
+                }
                 final double exceeding = (na + nb) / 2;
                 final JsonObject side = new JsonObject();
                 side.addProperty("rows", exceeding);
@@ -577,6 +585,16 @@ public final class Copula implements Serializable, FitArtifact.Model {
     /** Σ x_k over the rows (an indicator's count), from the anchored sums. */
     private static double count(final Svd.Moments m, final int k) {
         return Math.rint(m.sum[k] + m.n * m.shift[k]);
+    }
+
+    /** The sample correlation of scores {@code a} and {@code b} (no shrinkage, no eigenvalue floor), from the anchored sums. */
+    static double sampleCorrelation(final Svd.Moments m, final int a, final int b) {
+        final int dim = m.dimension;
+        final double n = m.n;
+        final double cab = m.products[a * dim + b] - m.sum[a] * m.sum[b] / n;
+        final double caa = m.products[a * dim + a] - m.sum[a] * m.sum[a] / n;
+        final double cbb = m.products[b * dim + b] - m.sum[b] * m.sum[b] / n;
+        return Math.max(-1d, Math.min(1d, cab / Math.sqrt(caa * cbb)));
     }
 
     /** Σ x_k x_l over the rows (two indicators' joint count), from the anchored sums. */

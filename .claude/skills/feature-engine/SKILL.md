@@ -129,7 +129,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   `expandCopula`, a fit stage ahead; `diagnose` adds no family either: the row vector becomes `[z, 1(z > t), 1(z < −t), mass]`
   (`Copula.diagnoseVector`), `Copula.head` copies the scores' block back out — bit-identical readouts, pinned by
   `testCopulaDiagnose` — and `Copula.diagnose` turns the indicator moments into the report (observed joint-tail share vs
-  `upperOrthant` at the same finite threshold, mass co-occurrence); the `mass` flag is the hidden `<marginal>__mass` column
+  `upperOrthant` at the observed exceedance rates with the sample correlation `Copula.sampleCorrelation` — dependence
+  only, neither shrinkage nor the marginals' shape — mass co-occurrence); the `mass` flag is the hidden `<marginal>__mass` column
   (`QuantileTransform.onMassPoint`, coordinate `output: mass`) filled by its score's `QuantileTransformSpec` — skip it in
   any code that enumerates quantileTransform columns as blocks), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
   values — the `PairCounts` summary, sorted maps so nothing depends on arrival order — → PPMI → `Svd.jacobi` →

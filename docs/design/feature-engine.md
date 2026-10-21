@@ -1408,10 +1408,15 @@ family: every count it needs is a second moment of indicators. Under `diagnose` 
 run of tied knots), so the same `Moments` hold the co-exceedance and co-occurrence counts (`Σ x_k x_l` recovered from
 the anchored sums), the correlation is read from the scores' block (`Copula.head`: copied, so the readouts are bit for
 bit those without `diagnose`), and the whole-input fit compares each pair's observed joint-tail share with the
-Gaussian copula's at the same finite threshold (`upperOrthant`, Simpson over φ(x) Φ̄((b − ρx)/√(1 − ρ²)); the
-thresholds in the model's standardised units) and its binomial standard error. The report rides on the model
-(`Copula.diagnostics`, JSON text) to the artifact and the log. The flag column belongs to its marginal's block — one
-fit stage, filled by the score's `QuantileTransformSpec`, never a block of its own.
+Gaussian copula's at a finite threshold (`upperOrthant`, Simpson over φ(x) Φ̄((b − ρx)/√(1 − ρ²))) and its binomial
+standard error. Only the dependence is compared: the orthant's thresholds are placed at the observed exceedance rates
+(`Φ⁻¹(1 − n_a / n)`, so ties or a score column's own shape do not read as dependence) and ρ is the scores' sample
+correlation (`Copula.sampleCorrelation`; the shrunk, floored one the readouts use is reported as `rhoModel`, so
+shrinkage does not read as missing tail dependence). The report rides on the model (`Copula.diagnostics`, JSON text)
+to the artifact and the log — written by the run that fits, not repeated by one that loads the artifact. `diagnose`
+is in the plan hash like every spec key (a serving config keeps it — free on load — or pins `fit.artifact.id`). The
+flag column belongs to its marginal's block — one fit stage, filled by the score's `QuantileTransformSpec`, never a
+block of its own.
 
 **The sequence-of-values types need no engine of their own.** `transitionStats` and `spectralEmbedding` were deferred
 as "needing the per-entity value sequence before the fit". That sequence is a `lag`: `FeaturePlanCompiler.sequencePath`

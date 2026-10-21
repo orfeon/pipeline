@@ -1007,7 +1007,8 @@ families (one exchangeable parameter cannot express mixed-sign dependence among 
 family (its fit iterates over the rows instead of solving their moments — rejected with `copula.family`), vine
 constructions and Monte Carlo readouts (aggregates of a simulated portfolio are not row features). What the
 Gaussian family cannot see is reported instead of modelled: `diagnose` compares each pair's observed joint-tail share
-beyond a quantile with the share the fitted copula implies at that finite threshold, and counts how often the inputs'
+beyond a quantile with the share a Gaussian copula implies at that finite threshold (the sample correlation at the
+observed exceedance rates: the dependence alone, not shrinkage or the marginals' shape), and counts how often the inputs'
 point masses (ties) occur together — the evidence a `t` family, a tail feature or a randomised treatment of ties would
 need before it is built.
 

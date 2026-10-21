@@ -253,6 +253,37 @@ public class CopulaTest {
         }
     }
 
+    /**
+     * Gaussian scores are not flagged for what is not tail dependence: a heavily shrunk model (the implied share comes
+     * from the sample correlation, the model's one is reported beside it) and a marginal whose top 8% is one tied
+     * score (the thresholds sit at the observed exceedance rates, not at the nominal 5%).
+     */
+    @Test
+    public void testDiagnoseIgnoresShrinkageAndMarginalShape() {
+        final double[][] r = {{1, 0.5}, {0.5, 1}};
+        final java.util.List<String> names = java.util.List.of("a", "b");
+        final double[][] z = normalScores(draws(r, 20_000, 27));
+        final Svd.Moments m = diagnoseMoments(z, null, 0.95);
+        final Copula shrunk = Copula.fit(Copula.head(m, 2), "0.3", Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula.Report report = Copula.diagnose(m, 2, shrunk, 0.95, new int[][]{{0, 1}}, new boolean[2], names);
+        final com.google.gson.JsonObject pair = report.json().getAsJsonArray("pairs").get(0).getAsJsonObject();
+        Assertions.assertEquals(Copula.sampleCorrelation(m, 0, 1), pair.get("rho").getAsDouble());
+        Assertions.assertEquals(shrunk.correlation[0][1], pair.get("rhoModel").getAsDouble());
+        Assertions.assertEquals(0.7 * pair.get("rho").getAsDouble(), pair.get("rhoModel").getAsDouble(), 1e-6);
+        Assertions.assertEquals(0, report.json().get("flagged").getAsInt(), report::toString);
+
+        final double pile = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.92);
+        final double tied = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.96);
+        for (final double[] row : z) if (row[0] > pile) row[0] = tied;
+        final Svd.Moments piled = diagnoseMoments(z, null, 0.95);
+        final Copula model = Copula.fit(Copula.head(piled, 2), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula.Report shaped = Copula.diagnose(piled, 2, model, 0.95, new int[][]{{0, 1}}, new boolean[2], names);
+        final com.google.gson.JsonObject upper = shaped.json().getAsJsonArray("pairs").get(0).getAsJsonObject().getAsJsonObject("upper");
+        Assertions.assertEquals(1300, upper.get("rows").getAsDouble(), 2, "8% of the rows beyond in a, 5% in b");
+        Assertions.assertTrue(Math.abs(upper.get("observed").getAsDouble() - upper.get("implied").getAsDouble()) < 3 * upper.get("se").getAsDouble(), shaped::toString);
+        Assertions.assertEquals(0, shaped.json().get("flagged").getAsInt(), shaped::toString);
+    }
+
     /** Point masses that occur together are reported against the product of their shares; independent ones are not flagged. */
     @Test
     public void testDiagnosePointMasses() {
