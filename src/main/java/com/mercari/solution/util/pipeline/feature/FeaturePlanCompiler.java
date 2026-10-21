@@ -3473,7 +3473,7 @@ public final class FeaturePlanCompiler {
             diagnostics.error("copula.parameters", loc, "not understood: " + def.copulaUnknown
                     + " (family: gaussian; marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
                     + " outputs: [jointRank | logDensity | conditional | conditionalProb | {conditional | conditionalProb: <input>, given: [...], as: <name>}"
-                    + " | {jointRank | logDensity: true, as: <name>}])");
+                    + " | {jointRank | logDensity: true, as: <name>}]; diagnose: true | {tail: <probability>, pairs: all | [[<input>, <input>], ...]})");
             valid = false;
         }
         final String family = def.copulaFamily == null ? Copula.GAUSSIAN : def.copulaFamily;
@@ -3545,7 +3545,8 @@ public final class FeaturePlanCompiler {
         if (def.marginalsScores) {
             for (int i = 0; i < inputs.size(); i++) {
                 final OutputColumn column = refs.get(i).column();
-                if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))) {
+                if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))
+                        || QuantileTransform.MASS.equals(column.coordinates.get("output"))) {
                     diagnostics.warning("copula.marginals", loc, "marginals: scores reads '" + inputs.get(i) + "' as a normal score, but it is not a quantileTransform"
                             + " column with distribution: normal - the copula assumes N(0, 1) scores (it standardises them, but not their shape)");
                 }
@@ -3623,6 +3624,32 @@ public final class FeaturePlanCompiler {
             }
             readouts.add(new String[]{name, o.kind(), of, given});
         }
+        // diagnose: the tail threshold and the pairs the report covers (every pair unless listed)
+        final double tail = def.diagnoseTail == null ? Copula.DEFAULT_DIAGNOSE_TAIL : def.diagnoseTail;
+        final List<String> diagnosePairs = new ArrayList<>();
+        if (def.diagnose) {
+            if (!(tail > 0.5 && tail < 1)) {
+                diagnostics.error("copula.diagnose", loc, "diagnose.tail must be a probability in (0.5, 1) - the upper threshold, its mirror 1 - tail the lower one: " + tail);
+                valid = false;
+            }
+            if (def.diagnosePairs == null) {
+                for (int a = 0; a < inputs.size(); a++) for (int b = a + 1; b < inputs.size(); b++) diagnosePairs.add(a + "-" + b);
+            } else if (def.diagnosePairs.isEmpty()) {
+                diagnostics.error("copula.diagnose", loc, "diagnose.pairs must list at least one pair (omit it for every pair)");
+                valid = false;
+            } else {
+                for (final List<String> pair : def.diagnosePairs) {
+                    final int a = inputs.indexOf(pair.get(0)), b = inputs.indexOf(pair.get(1));
+                    if (a < 0 || b < 0 || a == b) {
+                        diagnostics.error("copula.diagnose", loc, "diagnose.pairs " + pair + " must name two different inputs (inputs: " + inputs + ")");
+                        valid = false;
+                        continue;
+                    }
+                    final String key = Math.min(a, b) + "-" + Math.max(a, b);
+                    if (!diagnosePairs.contains(key)) diagnosePairs.add(key);
+                }
+            }
+        }
         final int errorsBefore = diagnostics.get(Diagnostics.Level.error).size();
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "copula", "the correlation is fitted", "the correlation of the normal scores solved from their moments", true);
         warnAlignIgnored(def, "copula");
@@ -3633,8 +3660,13 @@ public final class FeaturePlanCompiler {
         // the score columns the block fits: the synthetic marginals, under the block's fit geometry (fit.align is the
         // copula's to warn about, and it has no gauge)
         final List<String> scores = new ArrayList<>();
+        // the point-mass flag of every score under diagnose ("" = none: a score not produced by an expanded marginal)
+        final List<String> massFields = new ArrayList<>();
         if (def.marginalsScores) {
-            for (final String input : inputs) scores.add(canonicalOf(input));
+            for (final String input : inputs) {
+                scores.add(canonicalOf(input));
+                massFields.add("");
+            }
         } else {
             final JsonObject marginalFit = parseJsonObject(def.fitJson);
             if (marginalFit != null) marginalFit.remove("align");
@@ -3651,11 +3683,13 @@ public final class FeaturePlanCompiler {
                 marginal.clip = clip;
                 marginal.fitJson = marginalFit == null ? null : marginalFit.toString();
                 marginal.validFor = def.validFor;
+                marginal.massOutput = def.diagnose;
                 expandQuantileTransform(marginal, computeAt);
                 final OutputColumn column = columnsByCanonical.get(marginal.name);
                 if (column == null) return; // reported by the quantile transform
                 column.intermediate = true;
                 scores.add(column.canonicalName);
+                massFields.add(def.diagnose ? column.coordinates.get("massColumn") : "");
             }
             diagnostics.info("copula.marginals", loc, "the marginals are " + inputs.size() + " quantileTransform blocks " + def.name + "_z_<input> (normal scores, "
                     + bins + " intervals, clip " + clip + ", intermediate) under the block's fit");
@@ -3681,6 +3715,15 @@ public final class FeaturePlanCompiler {
                     + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the correlation (static-fit caveat): fit.mode forward reads the earlier time blocks only" : ""));
         }
 
+        if (def.diagnose) {
+            final long withMass = massFields.stream().filter(f -> !f.isEmpty()).count();
+            diagnostics.info("copula.diagnose", loc, "the whole-input fit reports, for " + diagnosePairs.size() + " pair(s), the share of rows beyond the " + tail
+                    + " quantile of one input that are beyond it in the other too (and the mirror below " + (1 - tail) + ") against what the fitted Gaussian copula"
+                    + " implies at that threshold - it has no tail dependence, so a share far above it says the model underestimates joint extremes - and, for the "
+                    + withMass + " input(s) with an expanded marginal, how often their point masses (ties of at least 1 / bins of the rows) occur together;"
+                    + " in the run log" + (fitSpec.artifactUri == null ? "" : " and the artifact") + ". The fit state grows to the moments of " + 4 * inputs.size()
+                    + " numbers per row; the readouts do not change");
+        }
         final String fields = String.join(",", scores);
         for (final String[] r : readouts) {
             final OutputColumn c = newColumn(def.name, Scope.population, "copula", r[0], Schema.FieldType.FLOAT64, computeAt);
@@ -3698,6 +3741,13 @@ public final class FeaturePlanCompiler {
             if (r[3] != null) c.coordinates.put("given", r[3]);
             c.coordinates.put("shrink", shrink);
             c.coordinates.put("eigenFloor", Double.toString(eigenFloor));
+            if (def.diagnose) {
+                c.coordinates.put("diagnoseTail", Double.toString(tail));
+                c.coordinates.put("diagnosePairs", String.join(",", diagnosePairs));
+                c.coordinates.put("massFields", String.join(",", massFields));
+                c.coordinates.put("inputNames", String.join(",", refs.stream().map(Ref::canonical).toList()));
+                for (final String m : massFields) if (!m.isEmpty()) addPastInput(c, m);
+            }
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
             if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
@@ -3778,10 +3828,24 @@ public final class FeaturePlanCompiler {
         if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
         if (fitSpec.refit) c.coordinates.put("refit", "true");
         if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
+        if (def.massOutput) c.coordinates.put("massColumn", def.name + "__mass");
         addSelfInput(c, input);
         addPastInput(c, input);
         finishStaticFitted(c, def);
         register(c);
+        if (def.massOutput) {
+            // the hidden point-mass flag beside the score: same block (one fit stage, filled by the score's spec), same availability
+            final OutputColumn mass = newColumn(def.name, Scope.population, "quantileTransform", def.name + "__mass", Schema.FieldType.FLOAT64, computeAt);
+            mass.fitted = true;
+            mass.intermediate = true;
+            mass.coordinates.putAll(c.coordinates);
+            mass.coordinates.remove("massColumn");
+            mass.coordinates.put("output", QuantileTransform.MASS);
+            addSelfInput(mass, input);
+            addPastInput(mass, input);
+            finishStaticFitted(mass, def);
+            register(mass);
+        }
     }
 
     /**

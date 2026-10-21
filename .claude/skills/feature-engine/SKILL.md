@@ -126,7 +126,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   system is cached per (input, observed mask) with β kept PER INPUT INDEX — keyed by the observed set alone, two readouts
   with different `given` lists share an entry, so β must not be indexed by position in `given` (the first version was, and
   collided); `<block>.copula.json`; the marginals are synthetic `quantileTransform` blocks `<name>_z_<input>` built by
-  `expandCopula`, a fit stage ahead), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
+  `expandCopula`, a fit stage ahead; `diagnose` adds no family either: the row vector becomes `[z, 1(z > t), 1(z < −t), mass]`
+  (`Copula.diagnoseVector`), `Copula.head` copies the scores' block back out — bit-identical readouts, pinned by
+  `testCopulaDiagnose` — and `Copula.diagnose` turns the indicator moments into the report (observed joint-tail share vs
+  `upperOrthant` at the same finite threshold, mass co-occurrence); the `mass` flag is the hidden `<marginal>__mass` column
+  (`QuantileTransform.onMassPoint`, coordinate `output: mass`) filled by its score's `QuantileTransformSpec` — skip it in
+  any code that enumerates quantileTransform columns as blocks), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
   values — the `PairCounts` summary, sorted maps so nothing depends on arrival order — → PPMI → `Svd.jacobi` →
   coordinates `sqrt(|λ|) · v` by decreasing |λ|, vocabulary capped by co-occurrence mass; `<block>.spectral.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for

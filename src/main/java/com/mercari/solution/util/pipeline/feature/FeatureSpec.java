@@ -432,6 +432,17 @@ public class FeatureSpec implements Serializable {
         public List<CopulaOutput> copulaOutputs = new ArrayList<>();
         /** copula: what was not understood (unknown keys, an output in another shape). */
         public List<String> copulaUnknown = new ArrayList<>();
+        /** copula: {@code diagnose} declared ({@code true} or an object). */
+        public boolean diagnose;
+        /** copula: {@code diagnose.tail} (null = the default). */
+        public Double diagnoseTail;
+        /** copula: {@code diagnose.pairs} as written (null = every pair). */
+        public List<List<String>> diagnosePairs;
+        /**
+         * quantileTransform, internal (never parsed): also emit the hidden point-mass flag {@code <name>__mass} — set on the
+         * marginals a copula with {@code diagnose} expands.
+         */
+        public boolean massOutput;
         // spectralEmbedding / transitionStats: the values an entity takes one after another ({@code rank} shared with svd)
         /** {@code sequenceOf.entity} / {@code sequenceOf.field}. */
         public String sequenceEntity;
@@ -1620,6 +1631,37 @@ public class FeatureSpec implements Serializable {
         if (o.has("shrink") && !o.get("shrink").isJsonNull()) {
             if (o.get("shrink").isJsonPrimitive()) def.shrink = o.get("shrink").getAsString();
             else def.copulaUnknown.add("shrink " + o.get("shrink"));
+        }
+        if (o.has("diagnose") && !o.get("diagnose").isJsonNull()) {
+            final JsonElement d = o.get("diagnose");
+            if (d.isJsonPrimitive() && d.getAsJsonPrimitive().isBoolean()) {
+                def.diagnose = d.getAsBoolean();
+            } else if (d.isJsonObject()) {
+                def.diagnose = true;
+                final JsonObject diagnose = d.getAsJsonObject();
+                for (final String key : diagnose.keySet()) {
+                    final JsonElement v = diagnose.get(key);
+                    switch (key) {
+                        case "tail" -> {
+                            if (v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber()) def.diagnoseTail = v.getAsDouble();
+                            else def.copulaUnknown.add("diagnose.tail " + v);
+                        }
+                        case "pairs" -> {
+                            if (v.isJsonPrimitive() && "all".equals(v.getAsString())) continue;
+                            def.diagnosePairs = new ArrayList<>();
+                            for (final JsonElement pair : arrayOf(v)) {
+                                final List<String> names = new ArrayList<>();
+                                if (pair.isJsonArray()) for (final JsonElement name : pair.getAsJsonArray()) if (name.isJsonPrimitive()) names.add(name.getAsString());
+                                if (names.size() != 2 || !pair.isJsonArray() || pair.getAsJsonArray().size() != 2) def.copulaUnknown.add("diagnose.pairs " + pair + " (a pair is [<input>, <input>])");
+                                else def.diagnosePairs.add(names);
+                            }
+                        }
+                        default -> def.copulaUnknown.add("diagnose." + key);
+                    }
+                }
+            } else {
+                def.copulaUnknown.add("diagnose " + d);
+            }
         }
         if (o.has("eigenFloor") && !o.get("eigenFloor").isJsonNull()) {
             final JsonElement v = o.get("eigenFloor");

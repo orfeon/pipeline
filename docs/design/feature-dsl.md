@@ -1005,7 +1005,11 @@ outcome among the inputs shapes the fit (forward lag, static-fit caveat) while a
 the row stays a feature, and one that does is a margin-free normalised label. Left out by design: Archimedean
 families (one exchangeable parameter cannot express mixed-sign dependence among three or more inputs), the `t`
 family (its fit iterates over the rows instead of solving their moments — rejected with `copula.family`), vine
-constructions and Monte Carlo readouts (aggregates of a simulated portfolio are not row features).
+constructions and Monte Carlo readouts (aggregates of a simulated portfolio are not row features). What the
+Gaussian family cannot see is reported instead of modelled: `diagnose` compares each pair's observed joint-tail share
+beyond a quantile with the share the fitted copula implies at that finite threshold, and counts how often the inputs'
+point masses (ties) occur together — the evidence a `t` family, a tail feature or a randomised treatment of ties would
+need before it is built.
 
 Every population definition carries fit metadata (top-level defaults + per-block overrides).
 `mode: expanding` computes statistics from data up to each row's time (the generalisation of ordered

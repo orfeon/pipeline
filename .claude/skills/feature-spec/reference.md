@@ -326,8 +326,13 @@ a readout that does not list it — such a readout is a feature (use `fit.mode: 
 training row's own outcome); one that reads it is an outcome (`availability.violation`, or a normalised label under
 `output.roles.label`). Under `forward` the marginals walk forward with the copula and a row whose scores are still
 null (the marginals' warm-up) takes no part in the copula fit; `fit.window` forgets, `fit.align` is ignored. No tail
-dependence (Gaussian): joint extremes beyond what the overall correlation implies are invisible. Artifact
-`<block>.copula.json` (means, sds, shrinkage, correlation), plus one `<name>_z_<input>.quantiles.json` per marginal.
+dependence (Gaussian): joint extremes beyond what the overall correlation implies are invisible — `diagnose: true` (or
+`{tail: 0.95, pairs: [[a, b], ...]}`) says whether that matters: per pair, the share of rows beyond the tail quantile in
+one input that are beyond it in the other too (and below `1 − tail`), against the Gaussian copula's share at that
+threshold (not 0) ± its standard error — more than 2 se above it is a warning in the run log; and, for expanded
+marginals, point masses (ties of ≥ 1 / bins of the rows) per input and how often two occur together. Readouts do not
+change; the report is in the log and in the artifact's `diagnostics`. Artifact `<block>.copula.json` (means, sds,
+shrinkage, correlation, `diagnostics`), plus one `<name>_z_<input>.quantiles.json` per marginal.
 
 ### `type: smooth` (static, or forward per time block)
 

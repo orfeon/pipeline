@@ -1656,7 +1656,8 @@ public final class FeatureStages {
      * themselves ({@link QuantileTransform#VALUES}, exact), gathered per time block — one block for a static fit.
      */
     record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
-                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<Double, QuantileTransform.Values, QuantileTransform> {
+                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis, long minRows,
+                                 String massColumn) implements ForwardFitBlock<Double, QuantileTransform.Values, QuantileTransform> {
         @Override
         public FitArtifact.Json<QuantileTransform> artifact() {
             return QuantileTransform.ARTIFACT;
@@ -1726,7 +1727,10 @@ public final class FeatureStages {
         @Override
         public void apply(final ForwardModel<QuantileTransform> model, final Map<String, Object> values) {
             final QuantileTransform q = modelFor(model, values);
-            values.put(column, q == null ? null : q.transform(FeatureValues.toDouble(values.get(field))));
+            final Double v = FeatureValues.toDouble(values.get(field));
+            values.put(column, q == null ? null : q.transform(v));
+            // the hidden point-mass flag of a copula's marginal (its diagnose counts the spikes the scores carry)
+            if (massColumn != null) values.put(massColumn, q == null ? null : q.onMassPoint(v));
         }
     }
 
@@ -1735,13 +1739,16 @@ public final class FeatureStages {
         for (final OutputColumn c : stageColumns) {
             if (!"quantileTransform".equals(c.getOperator())) continue;
             final Map<String, String> k = c.getCoordinates();
+            // the point-mass flag is filled by its score column's block, not fitted again
+            if (QuantileTransform.MASS.equals(k.get("output"))) continue;
             final Forward forward = Forward.of(c);
             specs.add(new QuantileTransformSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
                     Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
                     k.getOrDefault("distribution", QuantileTransform.UNIFORM),
                     Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")),
+                    k.get("massColumn")));
         }
         return specs;
     }
@@ -2055,11 +2062,26 @@ public final class FeatureStages {
      * One copula block of a fit stage (all its readout columns), rebuilt from the columns' coordinates. A row contributes
      * its vector of normal scores — complete rows only, as an svd's vectors — to the vector moments, the family of the
      * svd blocks (the stage's one {@code _FitMoments_Combine} serves them all), and the correlation is solved from them on
-     * one worker. {@code kinds[i]} / {@code of[i]} / {@code given[i]} say what {@code columns.get(i)} reads.
+     * one worker. {@code kinds[i]} / {@code of[i]} / {@code given[i]} say what {@code columns.get(i)} reads. Under
+     * {@code diagnose} the vector carries tail and point-mass indicators behind the scores ({@link Copula#diagnoseVector}):
+     * the correlation is read from the scores' block of the moments, the report from the rest.
      */
     record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String artifactUri, boolean refit,
                       List<OutputColumn> columns, String[] kinds, int[] of, int[][] given,
-                      Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Copula> {
+                      Forward forward, long predictOffsetMillis, long minRows, Diagnose diagnose) implements ForwardFitBlock<double[], Svd.Moments, Copula> {
+
+        /**
+         * {@code diagnose}: the tail probability and its score threshold, the pairs reported (input indices), the point-mass
+         * flag of every input (null = none) and the inputs' names for the report.
+         */
+        record Diagnose(double tail, double upper, int[][] pairs, List<String> massFields, List<String> names) implements Serializable {
+            boolean[] hasMass() {
+                final boolean[] has = new boolean[massFields.size()];
+                for (int i = 0; i < has.length; i++) has[i] = massFields.get(i) != null;
+                return has;
+            }
+        }
+
         @Override
         public FitArtifact.Json<Copula> artifact() {
             return Copula.ARTIFACT;
@@ -2067,7 +2089,10 @@ public final class FeatureStages {
 
         @Override
         public List<String> fitInputs() {
-            return fields;
+            if (diagnose == null) return fields;
+            final List<String> inputs = new ArrayList<>(fields);
+            for (final String m : diagnose.massFields()) if (m != null) inputs.add(m);
+            return inputs;
         }
 
         @Override
@@ -2090,7 +2115,10 @@ public final class FeatureStages {
             return SerializableCoder.of(double[].class);
         }
 
-        /** The row's scores, or null when one is missing (the fit is complete-case; a readout marginalises a missing score out). */
+        /**
+         * The row's scores (under {@code diagnose} followed by their indicators), or null when one is missing (the fit is
+         * complete-case; a readout marginalises a missing score out).
+         */
         @Override
         public KV<Long, double[]> contribution(final Map<String, Object> row) {
             final double[] z = new double[fields.size()];
@@ -2100,7 +2128,14 @@ public final class FeatureStages {
                 z[i] = v;
             }
             final Long timeBlock = timeBlock(row);
-            return timeBlock == null ? null : KV.of(timeBlock, z);
+            if (timeBlock == null) return null;
+            if (diagnose == null) return KV.of(timeBlock, z);
+            final Double[] mass = new Double[z.length];
+            for (int i = 0; i < z.length; i++) {
+                final String m = diagnose.massFields().get(i);
+                if (m != null) mass[i] = FeatureValues.toDouble(row.get(m));
+            }
+            return KV.of(timeBlock, Copula.diagnoseVector(z, mass, diagnose.upper()));
         }
 
         /** An input without a single complete score vector has no correlation: no model (every readout is null) and no artifact. */
@@ -2116,7 +2151,8 @@ public final class FeatureStages {
 
         @Override
         public Copula fit(final Svd.Moments m, final boolean loud) {
-            final Copula fitted = Copula.fit(m, shrink, eigenFloor, loud);
+            final Copula plain = Copula.fit(diagnose == null ? m : Copula.head(m, fields.size()), shrink, eigenFloor, loud);
+            final Copula fitted = loud && diagnose != null ? withReport(this, m, plain) : plain;
             if (loud) LOG.info("copula {}: {}", block, fitted.describe());
             return fitted;
         }
@@ -2147,6 +2183,21 @@ public final class FeatureStages {
         }
     }
 
+    /** The whole-input fit's {@code diagnose} report: logged (findings as warnings) and attached for the artifact. */
+    private static Copula withReport(final CopulaSpec spec, final Svd.Moments m, final Copula fitted) {
+        final CopulaSpec.Diagnose diagnose = spec.diagnose();
+        final Copula.Report report = Copula.diagnose(m, spec.fields().size(), fitted, diagnose.tail(), diagnose.pairs(), diagnose.hasMass(), diagnose.names());
+        for (final String w : report.warnings()) LOG.warn("copula {} diagnose: {}", spec.block(), w);
+        // every finding is a warning; the unremarkable pairs are listed while there are few of them (all are in the artifact)
+        if (report.lines().size() <= 50) {
+            for (final String line : report.lines()) LOG.info("copula {} diagnose: {}", spec.block(), line);
+        }
+        LOG.info("copula {} diagnose: {} of {} pair(s) have a joint tail beyond the Gaussian copula's at {} ({} finding(s) in all, {} unremarkable line(s){})",
+                spec.block(), report.json().get("flagged") == null ? 0 : report.json().get("flagged").getAsInt(), diagnose.pairs().length, diagnose.tail(),
+                report.warnings().size(), report.lines().size(), report.lines().size() <= 50 ? "" : ", not logged");
+        return fitted.withDiagnostics(report.json().toString());
+    }
+
     static List<CopulaSpec> copulaSpecs(final List<OutputColumn> stageColumns) {
         final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
         for (final OutputColumn c : stageColumns) {
@@ -2166,10 +2217,22 @@ public final class FeatureStages {
                 final String g = ki.get("given");
                 given[i] = g == null || g.isEmpty() ? new int[0] : Arrays.stream(g.split(",")).mapToInt(Integer::parseInt).toArray();
             }
+            CopulaSpec.Diagnose diagnose = null;
+            if (k.containsKey("diagnoseTail")) {
+                final double tail = Double.parseDouble(k.get("diagnoseTail"));
+                final int[][] pairs = Arrays.stream(k.get("diagnosePairs").split(","))
+                        .map(pair -> Arrays.stream(pair.split("-")).mapToInt(Integer::parseInt).toArray()).toArray(int[][]::new);
+                // "" = no flag for that input (a score not produced by an expanded marginal): kept positional
+                final List<String> massFields = new ArrayList<>();
+                for (final String m : k.get("massFields").split(",", -1)) massFields.add(m.isEmpty() ? null : m);
+                diagnose = new CopulaSpec.Diagnose(tail, com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(tail), pairs,
+                        massFields, List.of(k.get("inputNames").split(",")));
+            }
             specs.add(new CopulaSpec(e.getKey(), List.of(k.get("fields").split(",")), k.getOrDefault("shrink", Copula.OAS),
                     Double.parseDouble(k.getOrDefault("eigenFloor", Double.toString(Copula.DEFAULT_EIGEN_FLOOR))),
                     k.get("artifactUri"), "true".equals(k.get("refit")), cs, kinds, of, given,
-                    Forward.of(cs.get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
+                    Forward.of(cs.get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")),
+                    diagnose));
         }
         return specs;
     }

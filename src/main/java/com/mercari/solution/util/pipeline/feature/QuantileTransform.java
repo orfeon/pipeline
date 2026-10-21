@@ -34,6 +34,8 @@ public final class QuantileTransform implements Serializable, FitArtifact.Model 
     public static final int DEFAULT_BINS = 100;
     public static final String UNIFORM = "uniform";
     public static final String NORMAL = "normal";
+    /** The {@code output} coordinate of the hidden point-mass flag a copula's marginal emits beside its score. */
+    public static final String MASS = "mass";
     /** Default probability clamp of the normal score (the transform never returns ±∞). */
     public static final double DEFAULT_CLIP = 1e-6;
 
@@ -203,6 +205,24 @@ public final class QuantileTransform implements Serializable, FitArtifact.Model 
         // knots[first - 1] < v < knots[first]
         final int i = first - 1;
         return (i + (v - knots[i]) / (knots[i + 1] - knots[i])) / bins;
+    }
+
+    /**
+     * 1 when the value sits on a point mass the fit resolves — a run of two or more tied knots, i.e. at least one
+     * {@code 1 / bins} of the fitted rows share it (a zero-inflated field's zeros) — 0 otherwise, null for a missing value
+     * or an empty fit. Such rows all read one score (the middle of the run), the spike a copula's diagnostics count.
+     */
+    public Double onMassPoint(final Double v) {
+        if (v == null || v.isNaN() || isEmpty()) return null;
+        final int bins = bins();
+        if (v < knots[0] || v > knots[bins]) return 0d;
+        int lo = 0, hi = bins;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (knots[mid] < v) lo = mid + 1;
+            else hi = mid;
+        }
+        return knots[lo] == v && lo + 1 <= bins && knots[lo + 1] == v ? 1d : 0d;
     }
 
     /** Inverse of the standard normal CDF on (0, 1) — the shared {@link NormalDistribution#inverseNormal}. */

@@ -1401,6 +1401,18 @@ cached in transient maps on the model; a missing score is marginalised out (the 
 no gauge, so `alignTo` is the identity and forward re-fits are continuous by construction. Masks are `int` bits,
 hence at most 31 inputs (`copula.inputs`).
 
+`diagnose` asks whether the Gaussian assumption holds where it matters, without a second pass and without a new
+family: every count it needs is a second moment of indicators. Under `diagnose` a row contributes
+`[z, 1(z > t), 1(z < −t), mass]` (4d numbers, `Copula.diagnoseVector`; `t = Φ⁻¹(tail)`, `mass` the hidden flag
+`<marginal>__mass` that an expanded marginal emits beside its score from `QuantileTransform.onMassPoint` — a value on a
+run of tied knots), so the same `Moments` hold the co-exceedance and co-occurrence counts (`Σ x_k x_l` recovered from
+the anchored sums), the correlation is read from the scores' block (`Copula.head`: copied, so the readouts are bit for
+bit those without `diagnose`), and the whole-input fit compares each pair's observed joint-tail share with the
+Gaussian copula's at the same finite threshold (`upperOrthant`, Simpson over φ(x) Φ̄((b − ρx)/√(1 − ρ²)); the
+thresholds in the model's standardised units) and its binomial standard error. The report rides on the model
+(`Copula.diagnostics`, JSON text) to the artifact and the log. The flag column belongs to its marginal's block — one
+fit stage, filled by the score's `QuantileTransformSpec`, never a block of its own.
+
 **The sequence-of-values types need no engine of their own.** `transitionStats` and `spectralEmbedding` were deferred
 as "needing the per-entity value sequence before the fit". That sequence is a `lag`: `FeaturePlanCompiler.sequencePath`
 expands a synthetic sequence block under the population block's name (as `expandCompress` builds a synthetic svd
