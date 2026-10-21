@@ -232,14 +232,17 @@ public final class Copula implements Serializable, FitArtifact.Model {
     /**
      * The conditional mean of input {@code j}'s score given the observed inputs among {@code given}, in the score's own
      * units ({@code mean_j + sd_j r_jS R_SS⁻¹ z_S}: the Gaussian copula regression of j on S), or null when nothing was
-     * fitted. It does not read j, so it is defined whether or not j is observed; with none of {@code given} observed it
-     * is j's mean score.
+     * fitted. It does not read j, so it is defined whether or not j is observed. With none of {@code given} observed it
+     * is null, not j's mean score: the mean carries nothing about the row and would read like a row whose inputs put j
+     * exactly at the average (as {@link #jointRank} is null with nothing observed).
      */
     public Double expected(final Double[] scores, final int j, final int[] given) {
         if (isEmpty()) return null;
         final double[] zs = new double[given.length];
         final Conditional c = system(scores, j, given, zs);
-        return mean[j] + sd[j] * predicted(c, given, zs);
+        boolean observed = false;
+        for (final double z : zs) observed |= !Double.isNaN(z);
+        return observed ? mean[j] + sd[j] * predicted(c, given, zs) : null;
     }
 
     /**

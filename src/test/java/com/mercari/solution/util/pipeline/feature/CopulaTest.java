@@ -91,8 +91,10 @@ public class CopulaTest {
         final double rho = c.correlation[0][2];
         Assertions.assertEquals(c.mean[0] + c.sd[0] * rho * (0.7 - c.mean[2]) / c.sd[2], c.expected(boxed(0.4, Double.NaN, 0.7), 0, new int[]{1, 2}), 1e-12);
         Assertions.assertEquals(c.expected(boxed(0.4, -1.1, 0.7), 0, new int[]{2}), c.expected(boxed(0.4, Double.NaN, 0.7), 0, new int[]{1, 2}), 1e-12);
-        // nothing of S observed: the mean score; nothing fitted: null
-        Assertions.assertEquals(c.mean[0], c.expected(new Double[3], 0, new int[]{1, 2}), 1e-15);
+        // nothing of S observed: null (the mean score would read like an average row), whether or not j is; nothing fitted: null
+        Assertions.assertNull(c.expected(new Double[3], 0, new int[]{1, 2}));
+        Assertions.assertNull(c.expected(boxed(0.4, Double.NaN, Double.NaN), 0, new int[]{1, 2}));
+        Assertions.assertNotNull(c.expected(boxed(Double.NaN, Double.NaN, 0.7), 0, new int[]{1, 2}));
         Assertions.assertNull(Copula.fit(new Svd.Moments(), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false).expected(boxed(0, 1, 2), 0, new int[]{1, 2}));
     }
 
