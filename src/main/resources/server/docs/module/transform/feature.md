@@ -1238,6 +1238,7 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
       - conditional                    # price_rel_cond_<input> for every input
       - {conditional: start_price, given: [quantity]}         # price_rel_cond_start_price_given_quantity
       - {conditionalProb: current_bid_t10, as: bid_given_rest} # Φ of the conditional position
+      - {expected: current_bid_t10, given: [start_price, quantity]} # price_rel_expected_current_bid_t10_given_start_price_quantity
       - jointRank                      # price_rel_jointrank
       - logDensity                     # price_rel_logdensity
       # - {jointRank: true, as: atypical} # a joint readout under a name of its own
@@ -1257,6 +1258,7 @@ are ranks, and under `forward` every output stays calibrated as the inputs drift
 | `conditional` (bare) | `<name>_cond_<input>` per input | the input's position given **all** the other inputs |
 | `{conditional: x, given: [a, b]}` | `<name>_cond_x_given_a_b` | `(z_x − r_xS R_SS⁻¹ z_S) / sqrt(1 − r_xS R_SS⁻¹ r_Sx)` over S = the `given` inputs — standard normal under the model: 0 = where the others put it, +2 = two standard deviations higher than they imply |
 | `conditionalProb` (bare or `{conditionalProb: x, given}`) | `<name>_condprob_…` | `Φ` of the conditional position: the conditional copula `C(u_x \| u_S)` in (0, 1). For a tree model prefer `conditional` — a probability squeezes the tails near 0 and 1 |
+| `expected` (bare or `{expected: x, given}`) | `<name>_expected_…` | the conditional mean of x's normal score given S, in the score's units: `m_x + s_x r_xS R_SS⁻¹ z_S` (`m_x`, `s_x` = the score's fitted mean and standard deviation, ≈ 0 and 1) — the Gaussian copula regression of x on S, "where the others put it". It does not read x, so it is defined when x is missing — and an outcome's expected score given pre-event inputs is a feature (below). In score units, not x's own: for a tree model the conditional median or any quantile of x in its own units is a monotone function of it, so it carries the same information |
 | `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects). The lower tail is computed directly, so a row near the centre reads a small probability with its digits, not 0 |
 | `logDensity` | `<name>_logdensity` | `log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z`: what the dependence alone makes of the combination — positive when it is more common than independent inputs would make it, negative when the inputs disagree with how they usually move together. Unlike `jointRank` it ignores how extreme each input is on its own |
 
@@ -1287,14 +1289,18 @@ input.
 - **Missing inputs at read time** are marginalised out: the Gaussian copula of the observed inputs is the one with
   the sub-matrix of `R`, so a `conditional` conditions on the observed part of `given`, and `jointRank` /
   `logDensity` run over the observed inputs (k = how many there are). A `conditional` whose own input is missing
-  reads null; with none of `given` observed it reads the input's own standardised score. The solved systems depend
+  reads null; with none of `given` observed it reads the input's own standardised score (and `expected` its mean
+  score). The solved systems depend
   only on which inputs a row has and are cached per pattern, so a row costs a few dot products.
 - **Availability.** A readout reads on the row only the scores it is computed from (the input and its `given` for
-  `conditional`, every input for `jointRank` / `logDensity`), and the fit reads every score of the past rows. An
+  `conditional`, the `given` alone for `expected`, every input for `jointRank` / `logDensity`), and the fit reads every
+  score of the past rows. An
   outcome among the inputs therefore shapes the fit — a static fit says so (`fit.mode.static` info, the static-fit
   caveat: each training row's own outcome is one of the rows behind `R`; with d² parameters this is far milder than
   a per-key encoding, but only `forward` is leak-free) and a forward fit's readable blocks are delayed by the
-  outcome's settlement and ingestion lag — while a readout that does not read it on the row is a feature. A readout
+  outcome's settlement and ingestion lag — while a readout that does not read it on the row is a feature:
+  `{expected: final_price, given: [start_price, quantity]}` is the outcome's expected score from what is known
+  before the event (a Gaussian copula regression of the outcome, a baseline for a model). A readout
   that does read it (`{conditional: final_price}`) is an outcome itself: an `availability.violation` as a feature,
   or a margin-free normalised label when declared as `output.roles.label` (how far above what its attributes imply
   the item sold).

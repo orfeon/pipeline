@@ -67,6 +67,35 @@ public class CopulaTest {
         Assertions.assertEquals((z0 - rho * z1) / Math.sqrt(1 - rho * rho), c.conditional(boxed(row), 0, new int[]{1}), 1e-9);
     }
 
+    /**
+     * expected = the fitted value of that regression in the score's own units: score − expected = sd · s · conditional.
+     * It does not read its own input (defined with it missing), and a missing conditioning score is marginalised out.
+     */
+    @Test
+    public void testExpectedIsTheRegressionFittedValue() {
+        final double[][] x = draws(R, 500, 4);
+        final Copula c = Copula.fit(moments(x), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+        final double[][] rss = {{c.correlation[1][1], c.correlation[1][2]}, {c.correlation[2][1], c.correlation[2][2]}};
+        final double[] beta = MatrixOps.solve(rss, new double[]{c.correlation[1][0], c.correlation[2][0]});
+        final double s = Math.sqrt(1 - beta[0] * c.correlation[1][0] - beta[1] * c.correlation[2][0]);
+        for (int t = 0; t < 20; t++) {
+            final double z1 = (x[t][1] - c.mean[1]) / c.sd[1], z2 = (x[t][2] - c.mean[2]) / c.sd[2];
+            final double fitted = c.mean[0] + c.sd[0] * (beta[0] * z1 + beta[1] * z2);
+            final Double[] row = boxed(x[t]);
+            Assertions.assertEquals(fitted, c.expected(row, 0, new int[]{1, 2}), 1e-9);
+            Assertions.assertEquals(x[t][0] - fitted, c.sd[0] * s * c.conditional(row, 0, new int[]{1, 2}), 1e-9);
+            // its own score is not read
+            Assertions.assertEquals(fitted, c.expected(boxed(Double.NaN, x[t][1], x[t][2]), 0, new int[]{1, 2}), 1e-12);
+        }
+        // a missing conditioning score: the regression on the observed one alone
+        final double rho = c.correlation[0][2];
+        Assertions.assertEquals(c.mean[0] + c.sd[0] * rho * (0.7 - c.mean[2]) / c.sd[2], c.expected(boxed(0.4, Double.NaN, 0.7), 0, new int[]{1, 2}), 1e-12);
+        Assertions.assertEquals(c.expected(boxed(0.4, -1.1, 0.7), 0, new int[]{2}), c.expected(boxed(0.4, Double.NaN, 0.7), 0, new int[]{1, 2}), 1e-12);
+        // nothing of S observed: the mean score; nothing fitted: null
+        Assertions.assertEquals(c.mean[0], c.expected(new Double[3], 0, new int[]{1, 2}), 1e-15);
+        Assertions.assertNull(Copula.fit(new Svd.Moments(), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false).expected(boxed(0, 1, 2), 0, new int[]{1, 2}));
+    }
+
     /** A missing score is marginalised out: the readouts equal those that never listed it. */
     @Test
     public void testMissingScoresAreMarginalisedOut() {

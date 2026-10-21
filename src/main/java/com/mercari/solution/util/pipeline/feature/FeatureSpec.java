@@ -281,11 +281,12 @@ public class FeatureSpec implements Serializable {
     }
 
     /**
-     * One copula readout: {@code conditional} / {@code conditionalProb} of input {@code of} given {@code given} (null =
-     * every other input), or {@code jointRank} / {@code logDensity} over every input ({@code of} and {@code given} null).
+     * One copula readout: {@code conditional} / {@code conditionalProb} / {@code expected} of input {@code of} given
+     * {@code given} (null = every other input), or {@code jointRank} / {@code logDensity} over every input ({@code of}
+     * and {@code given} null).
      */
     public record CopulaOutput(String kind, String of, List<String> given, String as) implements Serializable {
-        public static final List<String> CONDITIONAL_KINDS = List.of("conditional", "conditionalProb");
+        public static final List<String> CONDITIONAL_KINDS = List.of("conditional", "conditionalProb", "expected");
         public static final List<String> JOINT_KINDS = List.of("jointRank", "logDensity");
     }
 
@@ -1592,8 +1593,9 @@ public class FeatureSpec implements Serializable {
     /**
      * The keys of a {@code type: copula} block: {@code family}, {@code marginals} ({@code scores} or {@code {bins, clip}}),
      * {@code shrink} ({@code oas} | {@code none} | a number), {@code eigenFloor} and the readouts under {@code outputs} —
-     * a bare {@code jointRank} / {@code logDensity} / {@code conditional} / {@code conditionalProb} (the last two: every
-     * input given the others), {@code {conditional | conditionalProb: <input>, given: [...], as: <name>}} or
+     * a bare {@code jointRank} / {@code logDensity} / {@code conditional} / {@code conditionalProb} / {@code expected}
+     * (the last three: every input given the others), {@code {conditional | conditionalProb | expected: <input>, given:
+     * [...], as: <name>}} or
      * {@code {jointRank | logDensity: true, as: <name>}}. Anything in
      * another shape lands in {@code copulaUnknown}, which the compiler reports.
      */
@@ -1696,7 +1698,7 @@ public class FeatureSpec implements Serializable {
             String kind = null;
             for (final String k : CopulaOutput.CONDITIONAL_KINDS) {
                 if (out.has(k)) {
-                    if (kind != null) def.copulaUnknown.add("outputs " + out + " (one of conditional / conditionalProb per entry)");
+                    if (kind != null) def.copulaUnknown.add("outputs " + out + " (one of conditional / conditionalProb / expected per entry)");
                     kind = k;
                 }
             }

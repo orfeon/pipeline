@@ -4762,6 +4762,22 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan label = compile(SOURCES, withEncoding(reads).replace("output:\n", "output:\n  roles: {label: price_surprise}\n"));
         Assertions.assertFalse(label.getDiagnostics().hasErrors(), label::describe);
         Assertions.assertEquals(OutputColumn.Status.label, column(label, "price_surprise").getStatus());
+        // expected does not read its own input on the row: the outcome's expected score given pre-event inputs is a feature
+        final FeaturePlan expected = compile(SOURCES, withEncoding(block.replace("{conditional: start_price, given: [quantity]}",
+                "{expected: final_price, given: [quantity]}, {expected: final_price, as: price_expected}")));
+        Assertions.assertFalse(expected.getDiagnostics().hasErrors(), expected::describe);
+        final OutputColumn outcomeExpected = column(expected, "cop_expected_final_price_given_quantity");
+        Assertions.assertEquals("expected", outcomeExpected.getCoordinates().get("output"));
+        Assertions.assertEquals("2", outcomeExpected.getCoordinates().get("of"));
+        Assertions.assertEquals("1", outcomeExpected.getCoordinates().get("given"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, outcomeExpected.getStatus(), expected::describe);
+        Assertions.assertTrue(outcomeExpected.getPastInputs().contains("cop_z_final_price"), expected::describe);
+        Assertions.assertEquals("0,1", column(expected, "price_expected").getCoordinates().get("given"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(expected, "price_expected").getStatus(), expected::describe);
+        // bare: every input given the others - the other inputs' expected read the outcome on the row
+        final FeaturePlan bare = compile(SOURCES, withEncoding(block.replace("{conditional: start_price, given: [quantity]}", "expected")));
+        Assertions.assertTrue(hasCode(bare, "availability.violation"), bare::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(bare, "cop_expected_final_price").getStatus(), bare::describe);
 
         // forward: the copula and its marginals walk forward together, the outcome's lag delays the readable blocks
         final FeaturePlan forward = compile(SOURCES, withEncoding(block.replace("    outputs:", "    fit: {mode: forward, blocks: {size: P7D}, align: procrustes}\n        outputs:")));

@@ -3462,9 +3462,11 @@ public final class FeaturePlanCompiler {
      * synthetic {@code quantileTransform} blocks ({@code <name>_z_<input>}, intermediate, normal scores) under the block's
      * own fit geometry — or, with {@code marginals: scores}, the inputs are taken as normal scores already — and the
      * block fits the correlation of the score vectors from their moments (the svd family). One FLOAT64 column per
-     * readout ({@link Copula}): {@code conditional} / {@code conditionalProb} of an input given others, {@code jointRank},
-     * {@code logDensity}. A readout reads on the row only the scores it is computed from, so its availability is theirs;
-     * the fit reads every score from the past rows (an outcome input delays a forward fit like a target).
+     * readout ({@link Copula}): {@code conditional} / {@code conditionalProb} of an input given others, {@code expected}
+     * (its conditional mean score), {@code jointRank}, {@code logDensity}. A readout reads on the row only the scores it is
+     * computed from — {@code expected} not even its own input's, so an outcome's expected score given pre-event inputs is
+     * a feature — and its availability is theirs; the fit reads every score from the past rows (an outcome input delays a
+     * forward fit like a target).
      */
     private void expandCopula(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
@@ -3472,7 +3474,7 @@ public final class FeaturePlanCompiler {
         if (!def.copulaUnknown.isEmpty()) {
             diagnostics.error("copula.parameters", loc, "not understood: " + def.copulaUnknown
                     + " (family: gaussian; marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
-                    + " outputs: [jointRank | logDensity | conditional | conditionalProb | {conditional | conditionalProb: <input>, given: [...], as: <name>}"
+                    + " outputs: [jointRank | logDensity | conditional | conditionalProb | expected | {conditional | conditionalProb | expected: <input>, given: [...], as: <name>}"
                     + " | {jointRank | logDensity: true, as: <name>}]; diagnose: true | {tail: <probability>, pairs: all | [[<input>, <input>], ...]})");
             valid = false;
         }
@@ -3615,7 +3617,11 @@ public final class FeaturePlanCompiler {
                 if (o.as() != null) {
                     name = o.as();
                 } else {
-                    final String segment = "conditional".equals(o.kind()) ? "_cond_" : "_condprob_";
+                    final String segment = switch (o.kind()) {
+                        case "conditional" -> "_cond_";
+                        case "conditionalProb" -> "_condprob_";
+                        default -> "_expected_";
+                    };
                     name = def.name + segment + displayName(o.of())
                             + (o.given() == null ? "" : "_given_" + String.join("_", o.given().stream().map(FeaturePlanCompiler::displayName).toList()));
                 }
@@ -3760,11 +3766,12 @@ public final class FeaturePlanCompiler {
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
             if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
-            // the row side reads the scores the readout is computed from; the fit reads every score of past rows
+            // the row side reads the scores the readout is computed from (expected: the conditioning ones alone); the fit
+            // reads every score of past rows
             if (r[2] == null) {
                 for (final String s : scores) addSelfInput(c, s);
             } else {
-                addSelfInput(c, scores.get(Integer.parseInt(r[2])));
+                if (!"expected".equals(r[1])) addSelfInput(c, scores.get(Integer.parseInt(r[2])));
                 if (!r[3].isEmpty()) for (final String i : r[3].split(",")) addSelfInput(c, scores.get(Integer.parseInt(i)));
             }
             for (final String s : scores) addPastInput(c, s);
