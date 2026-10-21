@@ -311,7 +311,8 @@ shrinkage scale:
     `(#{u_x < 1 − q and u_y < 1 − q} − #{u_x > q and u_y > q}) / n` — positive when the two series fall together
     more often than they rise together, negative for the reverse. Its expectation is 0 for any elliptical
     dependence (normal, t), so it measures an asymmetry no correlation can, without assuming a family. It is null
-    while a corner holds fewer than 5 pairs in expectation (`(1 − q) · n < 5`: 20 events at the default `q`);
+    while a corner holds fewer than 5 pairs in expectation (`(1 − q) · n < 5` over the window's n pairs: 20 at
+    the default `q`, so a `maxEvents` window shorter than that — plus the `lag` — never yields a value);
     a declared `q` other than the default is in the column name (`_quadrantAsymmetry0p9`).
 
   All three are null with fewer than two pairs or a constant series, and combine with `lag`. Tail dependence

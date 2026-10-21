@@ -275,7 +275,10 @@ public final class OperatorCatalog {
      */
     public static final List<String> FUTURE_OPS = List.of("aggregate", "lag", "ewma", "sinceEvent", "countMatch", "runLength", "regression", "barrier");
 
-    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
+    /**
+     * The funcs of the sequence {@code regression} op: the readouts of the {@link Summary.Regression} family, then the
+     * rank funcs of {@link RankDependence} (no family: scan only).
+     */
     public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2",
             RankDependence.SPEARMAN, RankDependence.KENDALL, RankDependence.QUADRANT_ASYMMETRY);
 

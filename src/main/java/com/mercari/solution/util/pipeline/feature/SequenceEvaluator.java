@@ -505,7 +505,8 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.against = c.coordinates.get("against");
         plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
-        plan.q = Double.parseDouble(c.coordinates.getOrDefault("q", Double.toString(RankDependence.DEFAULT_Q)));
+        final String q = c.coordinates.get("q");
+        plan.q = q == null ? RankDependence.DEFAULT_Q : Double.parseDouble(q);
         if ("fracdiff".equals(c.operator)) {
             plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
         }

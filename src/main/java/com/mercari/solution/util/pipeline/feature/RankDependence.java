@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.feature;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Rank statistics of the dependence between two series over one window — the {@code regression} funcs
@@ -21,7 +22,8 @@ import java.util.Arrays;
  *
  * Every statistic is null with fewer than two pairs or when a series is constant over them; {@code quadrantAsymmetry}
  * is also null while a corner holds fewer than {@link #MIN_TAIL} pairs in expectation ({@code (1 − q) n < MIN_TAIL}),
- * where it is noise.
+ * where it is noise. The values are finite (the evaluator drops a pair with a missing one); ties are numeric equality,
+ * so {@code -0.0} and {@code 0.0} tie.
  */
 public final class RankDependence {
 
@@ -29,10 +31,15 @@ public final class RankDependence {
     public static final String KENDALL = "kendall";
     public static final String QUADRANT_ASYMMETRY = "quadrantAsymmetry";
     /** The regression funcs computed here (scan-only). */
-    public static final java.util.List<String> FUNCS = java.util.List.of(SPEARMAN, KENDALL, QUADRANT_ASYMMETRY);
+    public static final List<String> FUNCS = List.of(SPEARMAN, KENDALL, QUADRANT_ASYMMETRY);
     public static final double DEFAULT_Q = 0.75;
     /** quadrantAsymmetry is null while {@code (1 − q) n} is below this: a corner of a few pairs is noise. */
     public static final int MIN_TAIL = 5;
+    /**
+     * The slack of the comparisons against {@code (1 − q)}: a decimal q is not exact in binary ({@code 1 − 0.9} is
+     * {@code 0.0999…98}), so a product that equals a whole number or a rank would otherwise round to either side.
+     */
+    private static final double EPSILON = 1e-9;
 
     private RankDependence() {
     }
@@ -65,33 +72,19 @@ public final class RankDependence {
 
     public static Double kendall(final double[] x, final double[] y, final int n) {
         if (n < 2) return null;
-        final Integer[] order = new Integer[n];
-        for (int i = 0; i < n; i++) order[i] = i;
-        Arrays.sort(order, (a, b) -> {
-            final int c = Double.compare(x[a], x[b]);
-            return c != 0 ? c : Double.compare(y[a], y[b]);
-        });
-        final double[] ys = new double[n];
-        for (int i = 0; i < n; i++) ys[i] = y[order[i]];
+        // τ reads the order alone: each pair as (rank of x, rank of y) packed into one primitive key, sorted by x then y
+        // (no boxed index sort per row; ranks tie by numeric equality, -0.0 with 0.0 included)
+        final int[] rx = lowerRanks(x, n), ry = lowerRanks(y, n);
+        final long[] keys = new long[n];
+        for (int i = 0; i < n; i++) keys[i] = (long) rx[i] * n + ry[i];
+        Arrays.sort(keys);
         final long pairs = (long) n * (n - 1) / 2;
-        // ties in x, and joint ties in (x, y): runs of the sorted order
-        long tiesX = 0, tiesXY = 0;
-        for (int i = 0; i < n; ) {
-            int j = i;
-            while (j + 1 < n && x[order[j + 1]] == x[order[i]]) j++;
-            final long t = j - i + 1;
-            tiesX += t * (t - 1) / 2;
-            for (int k = i; k <= j; ) {
-                int l = k;
-                while (l + 1 <= j && ys[l + 1] == ys[k]) l++;
-                final long u = l - k + 1;
-                tiesXY += u * (u - 1) / 2;
-                k = l + 1;
-            }
-            i = j + 1;
-        }
+        // ties in x (runs of the x rank), and joint ties in (x, y) (runs of the whole key)
+        final long tiesX = tiedPairs(keys, n, true), tiesXY = tiedPairs(keys, n, false);
+        final int[] ys = new int[n];
+        for (int i = 0; i < n; i++) ys[i] = (int) (keys[i] % n);
         // the exchanges a stable merge sort by y needs = the discordant pairs (pairs tied in x are already in y order)
-        final long swaps = mergeSort(ys, new double[n], 0, n);
+        final long swaps = mergeSort(ys, new int[n], 0, n);
         long tiesY = 0;
         for (int i = 0; i < n; ) {
             int j = i;
@@ -106,32 +99,73 @@ public final class RankDependence {
     }
 
     public static Double quadrantAsymmetry(final double[] x, final double[] y, final int n, final double q) {
-        if (n < 2 || (1 - q) * n < MIN_TAIL) return null;
+        if (n < 2 || (1 - q) * n < MIN_TAIL - EPSILON) return null;
         final double[] rx = midRanks(x, n), ry = midRanks(y, n);
         if (constant(rx, n) || constant(ry, n)) return null;
+        // u < 1 − q ⇔ rank < (1 − q)(n + 1), and u > q ⇔ (n + 1) − rank < (1 − q)(n + 1): one threshold for both
+        // corners, so they mirror each other exactly (comparing u with 1 − q and with q apart rounds the two corners
+        // differently, e.g. at q = 0.7, and reads an asymmetry into a perfectly symmetric window)
+        final double corner = (1 - q) * (n + 1) - EPSILON;
         long lower = 0, upper = 0;
         for (int i = 0; i < n; i++) {
-            final double ux = rx[i] / (n + 1), uy = ry[i] / (n + 1);
-            if (ux < 1 - q && uy < 1 - q) lower++;
-            if (ux > q && uy > q) upper++;
+            if (rx[i] < corner && ry[i] < corner) lower++;
+            if (n + 1 - rx[i] < corner && n + 1 - ry[i] < corner) upper++;
         }
         return (double) (lower - upper) / n;
     }
 
     /** The mid-ranks (1-based; ties share the mean of their ranks) of the first {@code n} values. */
     static double[] midRanks(final double[] v, final int n) {
-        final Integer[] order = new Integer[n];
-        for (int i = 0; i < n; i++) order[i] = i;
-        Arrays.sort(order, (a, b) -> Double.compare(v[a], v[b]));
+        final double[] sorted = Arrays.copyOf(v, n);
+        Arrays.sort(sorted);
         final double[] ranks = new double[n];
-        for (int i = 0; i < n; ) {
+        // a value's ties occupy the ranks below + 1 .. notAbove
+        for (int i = 0; i < n; i++) ranks[i] = (below(sorted, v[i]) + notAbove(sorted, v[i]) + 1) / 2d;
+        return ranks;
+    }
+
+    /** Each of the first {@code n} values' count of values strictly below it (0-based; ties share it). */
+    private static int[] lowerRanks(final double[] v, final int n) {
+        final double[] sorted = Arrays.copyOf(v, n);
+        Arrays.sort(sorted);
+        final int[] ranks = new int[n];
+        for (int i = 0; i < n; i++) ranks[i] = below(sorted, v[i]);
+        return ranks;
+    }
+
+    /** The number of {@code sorted} values numerically below {@code value} ({@code <}: -0.0 is not below 0.0). */
+    private static int below(final double[] sorted, final double value) {
+        int lo = 0, hi = sorted.length;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (sorted[mid] < value) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    /** The number of {@code sorted} values numerically at most {@code value}. */
+    private static int notAbove(final double[] sorted, final double value) {
+        int lo = 0, hi = sorted.length;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (sorted[mid] <= value) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    /** The tied pairs of the sorted {@code (x rank) · n + (y rank)} keys: in x alone, or in both. */
+    private static long tiedPairs(final long[] keys, final int n, final boolean xOnly) {
+        long ties = 0;
+        for (int i = 0; i < keys.length; ) {
             int j = i;
-            while (j + 1 < n && v[order[j + 1]] == v[order[i]]) j++;
-            final double rank = (i + j) / 2d + 1;
-            for (int k = i; k <= j; k++) ranks[order[k]] = rank;
+            while (j + 1 < keys.length && (xOnly ? keys[j + 1] / n == keys[i] / n : keys[j + 1] == keys[i])) j++;
+            final long t = j - i + 1;
+            ties += t * (t - 1) / 2;
             i = j + 1;
         }
-        return ranks;
+        return ties;
     }
 
     private static boolean constant(final double[] ranks, final int n) {
@@ -140,7 +174,7 @@ public final class RankDependence {
     }
 
     /** Sorts {@code v[from, to)} ascending, returning the number of exchanges of a bubble sort (strict inversions). */
-    private static long mergeSort(final double[] v, final double[] buffer, final int from, final int to) {
+    private static long mergeSort(final int[] v, final int[] buffer, final int from, final int to) {
         if (to - from < 2) return 0;
         final int mid = (from + to) >>> 1;
         long swaps = mergeSort(v, buffer, from, mid) + mergeSort(v, buffer, mid, to);

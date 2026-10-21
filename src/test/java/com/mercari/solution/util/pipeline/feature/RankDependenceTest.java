@@ -60,6 +60,12 @@ public class RankDependenceTest {
         // the closed cases: perfect agreement, reversal
         Assertions.assertEquals(1.0, RankDependence.kendall(new double[]{1, 2, 3, 4}, new double[]{10, 20, 30, 40}, 4), 1e-15);
         Assertions.assertEquals(-1.0, RankDependence.kendall(new double[]{1, 2, 3, 4}, new double[]{4, 3, 2, 1}, 4), 1e-15);
+        // -0.0 and 0.0 tie (numeric equality), in x and in y: one concordant, one discordant pair, one tie
+        final double[] zx = {-0.0, 0.0, 1}, zy = {5, 1, 3};
+        Assertions.assertEquals(kendallBruteForce(zx, zy, 3), RankDependence.kendall(zx, zy, 3), 1e-12);
+        Assertions.assertEquals(0.0, RankDependence.kendall(zx, zy, 3), 1e-12);
+        Assertions.assertEquals(kendallBruteForce(zy, zx, 3), RankDependence.kendall(zy, zx, 3), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1.5, 1.5, 3}, RankDependence.midRanks(zx, 3));
     }
 
     /** Spearman = Pearson over the mid-ranks; invariant under a monotone transform of either series. */
@@ -111,6 +117,19 @@ public class RankDependenceTest {
         // (1 − q) n below MIN_TAIL: null (q = 0.8 over 20 pairs puts four in a corner)
         Assertions.assertNull(RankDependence.quadrantAsymmetry(x, y, n, 0.8));
         Assertions.assertNotNull(RankDependence.quadrantAsymmetry(x, y, n, 0.75));
+        // at MIN_TAIL exactly, though 1 − q rounds below the decimal (1 − 0.9 = 0.0999…98, 1 − 0.8 = 0.1999…96)
+        final double[] fifty = new double[50];
+        for (int i = 0; i < 50; i++) fifty[i] = i;
+        Assertions.assertNotNull(RankDependence.quadrantAsymmetry(fifty, fifty, 50, 0.9));
+        Assertions.assertNotNull(RankDependence.quadrantAsymmetry(fifty, fifty, 25, 0.8));
+        Assertions.assertNull(RankDependence.quadrantAsymmetry(fifty, fifty, 49, 0.9));
+        // the corners mirror each other whatever q rounds to: a window in perfect agreement is symmetric
+        for (final double q : new double[]{0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95}) {
+            for (int m = 2; m <= 50; m++) {
+                final Double value = RankDependence.quadrantAsymmetry(fifty, fifty, m, q);
+                if (value != null) Assertions.assertEquals(0.0, value, 1e-15, "q " + q + ", n " + m);
+            }
+        }
         // Gaussian pairs: elliptical, so near 0
         final Random random = new Random(2);
         final int m = 20_000;
