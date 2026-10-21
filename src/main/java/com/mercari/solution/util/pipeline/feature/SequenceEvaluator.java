@@ -60,6 +60,8 @@ public class SequenceEvaluator implements Serializable {
         /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
         String against;
         int lag;
+        /** regression quadrantAsymmetry: the corners' quantile ({@link RankDependence#quadrantAsymmetry}). */
+        double q;
         /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
         double[] fracdiffWeights;
         /** barrier: the relative moves that touch the upper / lower barrier (±∞ when not declared). */
@@ -503,6 +505,7 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.against = c.coordinates.get("against");
         plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
+        plan.q = Double.parseDouble(c.coordinates.getOrDefault("q", Double.toString(RankDependence.DEFAULT_Q)));
         if ("fracdiff".equals(c.operator)) {
             plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
         }
@@ -781,6 +784,20 @@ public class SequenceEvaluator implements Serializable {
                 return aggregate(plan.func, window, field, c);
             }
             case "regression" -> {
+                if (RankDependence.FUNCS.contains(plan.func)) {
+                    // ranks of the window's pairs (no family: an entering event re-ranks every other); same pairing
+                    // as below, `against` as x and `field` as y
+                    final int size = Math.max(0, window.size() - plan.lag);
+                    final double[] x = new double[size], y = new double[size];
+                    int n = 0;
+                    for (int i = plan.lag; i < window.size(); i++) {
+                        final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(field));
+                        if (pair == null) continue;
+                        x[n] = pair[0];
+                        y[n++] = pair[1];
+                    }
+                    return RankDependence.of(plan.func, x, y, n, plan.q);
+                }
                 // the same family as the incremental path, folded over the window; under a lag the field of event
                 // i is paired with `against` of event i − lag, both inside the window
                 final Summary<Summary.Regression.State> family = Summary.Summaries.REGRESSION;

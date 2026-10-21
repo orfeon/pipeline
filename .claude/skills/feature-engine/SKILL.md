@@ -227,7 +227,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   distribution), `ORDER` (`OrderStatistics`: quantiles), `SHAPE` (anchored power sums to order four: skew /
   kurt), `REGRESSION` (anchored cross moments of a pair
   `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
-  events and is therefore scan-only). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
+  events and is therefore scan-only, and its rank funcs spearman / kendall / quadrantAsymmetry (`RankDependence`,
+  `q` coordinate on the last) have no family at all: `OperatorCatalog.summary` returns null for them, so they take
+  the scan path and re-rank the window per row — keep any new rank statistic there, not in `REGRESSION`). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
   (`lift` + `summarize.dynamics`, `lti`: exponential = Laguerre, fourier, legendre) and of `ewma` (order-0
   exponential sugar): parameterised per column from the coordinates (`Dynamics.spec`), a vector state shared by a
   channel's component columns through the `stateKey` coordinate (= `ColumnPlan.stateKey`, the `KeyState` key), a

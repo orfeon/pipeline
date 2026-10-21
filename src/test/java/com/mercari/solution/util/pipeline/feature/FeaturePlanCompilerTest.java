@@ -324,6 +324,25 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4, k: 10", "k: 10")), "sequence.fracdiff.d"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4", "d: 2.5")), "sequence.fracdiff.d"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("k: 10}", "k: 1}")), "sequence.fracdiff.k"));
+
+        // the rank funcs: scan-only (no summary family), q on quadrantAsymmetry alone and in its name when declared
+        final FeaturePlan ranks = compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [spearman, kendall, quadrantAsymmetry]}"
+                + "\n      - {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 0.9}"));
+        Assertions.assertFalse(ranks.getDiagnostics().hasErrors(), ranks::describe);
+        final OutputColumn kendall = column(ranks, "recent_365d_final_price_vs_start_price_kendall");
+        Assertions.assertEquals("kendall", kendall.getCoordinates().get("func"));
+        Assertions.assertNull(kendall.getCoordinates().get("q"));
+        Assertions.assertNull(new SequenceEvaluator(List.of(kendall)).summaryOf(kendall), "scan-only");
+        Assertions.assertNotNull(new SequenceEvaluator(List.of(beta)).summaryOf(beta), "the moment funcs stay incremental");
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(kendall), "bounded by maxAge");
+        Assertions.assertNotNull(column(ranks, "recent_n5_final_price_vs_start_price_spearman"));
+        Assertions.assertEquals("0.75", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry").getCoordinates().get("q"));
+        Assertions.assertEquals("0.9", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry0p9").getCoordinates().get("q"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 0.4}")), "sequence.regression.q"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 1}")), "sequence.regression.q"));
+        final FeaturePlan unread = compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [kendall], q: 0.9}"));
+        Assertions.assertFalse(unread.getDiagnostics().hasErrors(), unread::describe);
+        Assertions.assertTrue(hasCode(unread, "sequence.regression.q"), "q without quadrantAsymmetry: a warning");
     }
 
     /**

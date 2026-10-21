@@ -651,7 +651,7 @@ premise of the availability propagation rule (§6.1).
     - {type: delta, field: start_price, k: 1}
     - {type: trend, field: start_price, k: 5}             # regression slope
     - {type: regression, field: final_price, against: start_price,
-       funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2; lag: k pairs field with `against` k events earlier
+       funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2 | spearman | kendall | quadrantAsymmetry (q: 0.75); lag: k pairs field with `against` k events earlier
     - {type: fracdiff, field: start_price, d: 0.4, k: 20} # (1 − B)^d truncated to k terms (stationary, memory kept)
     - {type: ewma, field: start_price, halflife: [2, 5, 10],
        decayBy: events}                                   # events | time
@@ -738,7 +738,7 @@ may be left unbounded:
 | `rating` (the entity rated from its contests: `context` = the contest, `field` = the outcome) | incrementally, one contest — the rows of a context group at one event time — at a time, over a **pool** of entities: the stage key is the global key, or the field of a reduced `$self` equality filter; no other window exists | one rating per player of the pool — per **member** when the op rates teams (`with: [<entity>, ...]`: the row is the block's entity plus other entities of the same row, its strength their sum, a contest's change shared among them by their part of the team's variance; readouts per member — `mu` / `sigma` / `count` / `delta` / `deviation` (net of the prior) / `z` (standardised within the member's pool of rated players, whose moments the state keeps) — and for the team: `mu` / `sigma` / `count` (the contests this very team ran) / `deviation`) —; the rows the window shift still holds back |
 | `lag`, `delta`, `trend`, `fracdiff` without a `filter` | by re-reading a fixed tail | k (k + 1) events |
 | any op under `maxEvents`, without a `filter` | by re-reading | `maxEvents` events |
-| series readouts, `first / last`, lagged `regression`, `weightBy`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
+| series readouts, `first / last`, lagged `regression` and its rank funcs (`spearman` / `kendall` / `quadrantAsymmetry`), `weightBy`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
 
 **Several windows (`windows`)**: `windows` is a list, an expandable field expanded as the product
 `windows × fields × funcs` (`× halflife` for ewma; positional under `combine: zip`; counts towards
