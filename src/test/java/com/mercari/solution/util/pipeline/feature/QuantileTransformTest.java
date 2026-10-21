@@ -80,6 +80,27 @@ public class QuantileTransformTest {
         Assertions.assertTrue(q.transform(0.999) < q.transform(1.0) && q.transform(1.0) < q.transform(1.001));
     }
 
+    /** onMassPoint: 1 on a run of tied knots (a mass of at least 1 / bins), 0 on a single knot or between knots, null when missing. */
+    @Test
+    public void testOnMassPoint() {
+        // 60 % zeros → knots 0 ×6, 0.4, 1.3, 2.2, 3.1, 4
+        final double[] values = {0, 0, 0, 0, 0, 0, 1, 2, 3, 4};
+        final QuantileTransform q = QuantileTransform.fit(values, values.length, 10, QuantileTransform.NORMAL);
+        Assertions.assertEquals(1d, q.onMassPoint(0.0));
+        Assertions.assertEquals(0d, q.onMassPoint(2.0), "between knots");
+        Assertions.assertEquals(0d, q.onMassPoint(4.0), "the maximum is a single knot");
+        Assertions.assertEquals(0d, q.onMassPoint(-1.0), "below the fitted range");
+        Assertions.assertEquals(0d, q.onMassPoint(9.0), "above the fitted range");
+        Assertions.assertNull(q.onMassPoint(null));
+        Assertions.assertNull(q.onMassPoint(Double.NaN));
+        // the tied run in the middle of the other test's distribution
+        final double[] middle = {0, 1, 1, 1, 2, 1, 1, 0, 2, 1};
+        final QuantileTransform m = QuantileTransform.fit(middle, middle.length, 4, QuantileTransform.UNIFORM);
+        Assertions.assertEquals(1d, m.onMassPoint(1.0));
+        Assertions.assertEquals(0d, m.onMassPoint(1.5));
+        Assertions.assertNull(QuantileTransform.fit(new double[0], 0, 4, QuantileTransform.NORMAL).onMassPoint(1.0), "an empty fit");
+    }
+
     @Test
     public void testMassPointAtTheMinimumReadsTheMiddleOfItsRun() {
         // a zero-inflated count: 60 % zeros → knots 0 ×6, 0.4, 1.3, 2.2, 3.1, 4

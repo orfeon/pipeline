@@ -171,6 +171,167 @@ public class CopulaTest {
         Assertions.assertTrue(Copula.fromJson(Copula.empty(3, 1).toJson()).isEmpty());
     }
 
+    /** P(X > a, Y > b): independence is the product, ρ → 1 the larger threshold, and ρ = 0.5 at the 0.95 quantile ≈ 0.244 × 0.05. */
+    @Test
+    public void testUpperOrthant() {
+        final double t = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.95);
+        Assertions.assertEquals(0.05 * 0.05, Copula.upperOrthant(t, t, 0), 1e-9);
+        final double a = 0.3, b = -0.4;
+        Assertions.assertEquals(com.mercari.solution.util.domain.math.NormalDistribution.cdf(-a) * com.mercari.solution.util.domain.math.NormalDistribution.cdf(-b),
+                Copula.upperOrthant(a, b, 0), 1e-9);
+        Assertions.assertEquals(0.244, Copula.upperOrthant(t, t, 0.5) / 0.05, 1e-3);
+        Assertions.assertEquals(0.392, Copula.upperOrthant(t, t, 0.7) / 0.05, 1e-3);
+        Assertions.assertEquals(0.05, Copula.upperOrthant(t, t, 1), 1e-9);
+        // the orthant grows with the correlation
+        Assertions.assertTrue(Copula.upperOrthant(t, t, 0.2) < Copula.upperOrthant(t, t, 0.6));
+        // a threshold far below the mean (a score column that is not centred): X > a is almost sure, the orthant is P(Y > b)
+        Assertions.assertEquals(0.05, Copula.upperOrthant(-10, t, 0.5), 1e-9);
+        Assertions.assertEquals(0, Copula.upperOrthant(40, t, 0.5), 1e-300);
+    }
+
+    /** Ranks → normal scores, the way a quantile transform with a knot per value scores a column. */
+    private static double[][] normalScores(final double[][] x) {
+        final int n = x.length, d = x[0].length;
+        final double[][] z = new double[n][d];
+        for (int i = 0; i < d; i++) {
+            final int col = i;
+            final Integer[] order = new Integer[n];
+            for (int t = 0; t < n; t++) order[t] = t;
+            java.util.Arrays.sort(order, java.util.Comparator.comparingDouble(t -> x[t][col]));
+            for (int r = 0; r < n; r++) z[order[r]][i] = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal((r + 1d) / (n + 1));
+        }
+        return z;
+    }
+
+    private static Svd.Moments diagnoseMoments(final double[][] z, final Double[][] mass, final double tail) {
+        final double upper = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(tail);
+        final Svd.Moments m = new Svd.Moments();
+        for (int t = 0; t < z.length; t++) m.add(Copula.diagnoseVector(z[t], mass == null ? new Double[z[t].length] : mass[t], upper));
+        return m;
+    }
+
+    /**
+     * Gaussian scores: the observed joint-tail shares sit within the standard error of the implied ones, nothing is
+     * flagged. A t(3) scale mixture with the same correlation has tail dependence: both tails are flagged.
+     */
+    @Test
+    public void testDiagnoseFlagsTailDependence() {
+        final double[][] r = {{1, 0.5}, {0.5, 1}};
+        final int n = 20_000;
+        final double[][] gaussian = draws(r, n, 21);
+        final double[][] mixture = draws(r, n, 22);
+        final Random random = new Random(23);
+        for (final double[] row : mixture) {
+            double chi2 = 0;
+            for (int k = 0; k < 3; k++) {
+                final double g = random.nextGaussian();
+                chi2 += g * g;
+            }
+            final double scale = Math.sqrt(3 / chi2);
+            for (int i = 0; i < row.length; i++) row[i] *= scale;
+        }
+        final java.util.List<String> names = java.util.List.of("a", "b");
+        final int[][] pairs = {{0, 1}};
+        final boolean[] noMass = {false, false};
+        for (final boolean dependent : new boolean[]{false, true}) {
+            final Svd.Moments m = diagnoseMoments(normalScores(dependent ? mixture : gaussian), null, 0.95);
+            final Copula model = Copula.fit(Copula.head(m, 2), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+            final Copula.Report report = Copula.diagnose(m, 2, model, 0.95, pairs, noMass, names);
+            final com.google.gson.JsonObject upper = report.json().getAsJsonArray("pairs").get(0).getAsJsonObject().getAsJsonObject("upper");
+            final double observed = upper.get("observed").getAsDouble(), implied = upper.get("implied").getAsDouble(), se = upper.get("se").getAsDouble();
+            Assertions.assertEquals(1000, upper.get("rows").getAsDouble(), 2, "5% of 20000 rows beyond the 0.95 score");
+            if (dependent) {
+                Assertions.assertTrue(observed - implied > 2 * se, report::toString);
+                Assertions.assertEquals(2, report.json().get("flagged").getAsInt(), report::toString);
+                Assertions.assertEquals(2, report.warnings().size(), report::toString);
+            } else {
+                Assertions.assertTrue(Math.abs(observed - implied) < 3 * se, report::toString);
+                Assertions.assertEquals(0, report.json().get("flagged").getAsInt(), report::toString);
+                Assertions.assertTrue(report.warnings().isEmpty(), report::toString);
+                Assertions.assertEquals(2, report.lines().size(), report::toString);
+            }
+        }
+    }
+
+    /**
+     * Gaussian scores are not flagged for what is not tail dependence: a heavily shrunk model (the implied share comes
+     * from the sample correlation, the model's one is reported beside it) and a marginal whose top 8% is one tied
+     * score (the thresholds sit at the observed exceedance rates, not at the nominal 5%).
+     */
+    @Test
+    public void testDiagnoseIgnoresShrinkageAndMarginalShape() {
+        final double[][] r = {{1, 0.5}, {0.5, 1}};
+        final java.util.List<String> names = java.util.List.of("a", "b");
+        final double[][] z = normalScores(draws(r, 20_000, 27));
+        final Svd.Moments m = diagnoseMoments(z, null, 0.95);
+        final Copula shrunk = Copula.fit(Copula.head(m, 2), "0.3", Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula.Report report = Copula.diagnose(m, 2, shrunk, 0.95, new int[][]{{0, 1}}, new boolean[2], names);
+        final com.google.gson.JsonObject pair = report.json().getAsJsonArray("pairs").get(0).getAsJsonObject();
+        Assertions.assertEquals(Copula.sampleCorrelation(m, 0, 1), pair.get("rho").getAsDouble());
+        Assertions.assertEquals(shrunk.correlation[0][1], pair.get("rhoModel").getAsDouble());
+        Assertions.assertEquals(0.7 * pair.get("rho").getAsDouble(), pair.get("rhoModel").getAsDouble(), 1e-6);
+        Assertions.assertEquals(0, report.json().get("flagged").getAsInt(), report::toString);
+
+        final double pile = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.92);
+        final double tied = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.96);
+        for (final double[] row : z) if (row[0] > pile) row[0] = tied;
+        final Svd.Moments piled = diagnoseMoments(z, null, 0.95);
+        final Copula model = Copula.fit(Copula.head(piled, 2), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula.Report shaped = Copula.diagnose(piled, 2, model, 0.95, new int[][]{{0, 1}}, new boolean[2], names);
+        final com.google.gson.JsonObject upper = shaped.json().getAsJsonArray("pairs").get(0).getAsJsonObject().getAsJsonObject("upper");
+        Assertions.assertEquals(1300, upper.get("rows").getAsDouble(), 2, "8% of the rows beyond in a, 5% in b");
+        Assertions.assertTrue(Math.abs(upper.get("observed").getAsDouble() - upper.get("implied").getAsDouble()) < 3 * upper.get("se").getAsDouble(), shaped::toString);
+        Assertions.assertEquals(0, shaped.json().get("flagged").getAsInt(), shaped::toString);
+    }
+
+    /** Point masses that occur together are reported against the product of their shares; independent ones are not flagged. */
+    @Test
+    public void testDiagnosePointMasses() {
+        final double[][] z = draws(new double[][]{{1, 0.3, 0}, {0.3, 1, 0}, {0, 0, 1}}, 4000, 24);
+        final Double[][] mass = new Double[z.length][3];
+        final Random random = new Random(25);
+        for (int t = 0; t < z.length; t++) {
+            final boolean together = t % 10 < 3;                   // inputs 0 and 1: on their mass in the same 30% of rows
+            mass[t][0] = together ? 1d : 0d;
+            mass[t][1] = together ? 1d : 0d;
+            mass[t][2] = random.nextDouble() < 0.3 ? 1d : 0d;      // input 2: as often, independently
+        }
+        final Svd.Moments m = diagnoseMoments(z, mass, 0.95);
+        final Copula model = Copula.fit(Copula.head(m, 3), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula.Report report = Copula.diagnose(m, 3, model, 0.95, new int[][]{{0, 1}, {0, 2}}, new boolean[]{true, true, true}, java.util.List.of("x", "y", "w"));
+        final com.google.gson.JsonObject masses = report.json().getAsJsonObject("mass");
+        Assertions.assertEquals(0.3, masses.getAsJsonObject("shares").get("x").getAsDouble(), 1e-9);
+        final com.google.gson.JsonObject xy = masses.getAsJsonArray("pairs").get(0).getAsJsonObject();
+        Assertions.assertEquals(0.3, xy.get("both").getAsDouble(), 1e-9);
+        Assertions.assertEquals(0.09, xy.get("independent").getAsDouble(), 1e-9);
+        Assertions.assertEquals(1, report.warnings().stream().filter(w -> w.contains("point masses")).count(), report::toString);
+        final com.google.gson.JsonObject xw = masses.getAsJsonArray("pairs").get(1).getAsJsonObject();
+        Assertions.assertEquals(0.09, xw.get("both").getAsDouble(), 0.02);
+        // an input without a flag has no share and no pair
+        final Copula.Report partial = Copula.diagnose(m, 3, model, 0.95, new int[][]{{0, 1}}, new boolean[]{true, false, true}, java.util.List.of("x", "y", "w"));
+        Assertions.assertFalse(partial.json().getAsJsonObject("mass").getAsJsonObject("shares").has("y"));
+        Assertions.assertEquals(0, partial.json().getAsJsonObject("mass").getAsJsonArray("pairs").size());
+    }
+
+    /** The scores' block of the diagnose moments is the plain score moments: the same correlation, bit for bit, and n. */
+    @Test
+    public void testDiagnoseVectorKeepsTheScoreMoments() {
+        final double[][] z = draws(R, 500, 26);
+        final Svd.Moments diagnosed = diagnoseMoments(z, null, 0.9);
+        Assertions.assertEquals(12, diagnosed.dimension);
+        final Svd.Moments head = Copula.head(diagnosed, 3);
+        final Copula plain = Copula.fit(moments(z), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, false);
+        final Copula fromHead = Copula.fit(head, Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, false);
+        Assertions.assertEquals(plain.n, fromHead.n);
+        for (int i = 0; i < 3; i++) Assertions.assertArrayEquals(plain.correlation[i], fromHead.correlation[i]);
+        Assertions.assertEquals(plain.shrinkage, fromHead.shrinkage);
+        // the report travels with the model to the artifact and back
+        final Copula withReport = fromHead.withDiagnostics(Copula.diagnose(diagnosed, 3, fromHead, 0.9, new int[][]{{0, 1}}, new boolean[3], java.util.List.of("p", "q", "r")).json().toString());
+        final Copula back = Copula.fromJson(withReport.toJson());
+        Assertions.assertEquals(withReport.diagnostics, back.diagnostics);
+        Assertions.assertNull(Copula.fromJson(plain.toJson()).diagnostics);
+    }
+
     /** A model fitted on merged per-block moments equals the one fitted on all the rows at once (what a forward change point reads). */
     @Test
     public void testBlockSeriesMergeEqualsOneFit() {

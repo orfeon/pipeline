@@ -3,12 +3,16 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.mercari.solution.util.domain.math.NormalDistribution;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -53,6 +57,13 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * is solved for the row and not kept.
      */
     static final int MAX_CACHED_SYSTEMS = 4096;
+    /** {@code diagnose.tail}: the upper threshold of the tail report (its mirror 1 − tail is the lower one). */
+    public static final double DEFAULT_DIAGNOSE_TAIL = 0.95;
+    /** A pair is flagged when its observed joint-tail share exceeds the implied one by more than this many standard errors. */
+    static final double FLAG_STANDARD_ERRORS = 2;
+    /** {@link #upperOrthant} integrates over [max(a, −range), range]: the normal density is negligible beyond it. */
+    private static final double ORTHANT_RANGE = 9d;
+    private static final double SQRT_2PI = Math.sqrt(2 * Math.PI);
 
     public final int dimension;
     public final long n;
@@ -67,12 +78,19 @@ public final class Copula implements Serializable, FitArtifact.Model {
     public final String shrinkMethod;
     /** Eigenvalues raised to the floor. */
     public final int floored;
+    /** The {@code diagnose} report of a whole-input fit as JSON text ({@link #diagnose}), or null. */
+    public final String diagnostics;
 
     private transient volatile Map<Long, Conditional> conditionals;
     private transient volatile Map<Integer, Joint> joints;
 
     Copula(final int dimension, final long n, final double[] mean, final double[] sd, final double[][] correlation,
            final double shrinkage, final String shrinkMethod, final int floored) {
+        this(dimension, n, mean, sd, correlation, shrinkage, shrinkMethod, floored, null);
+    }
+
+    Copula(final int dimension, final long n, final double[] mean, final double[] sd, final double[][] correlation,
+           final double shrinkage, final String shrinkMethod, final int floored, final String diagnostics) {
         this.dimension = dimension;
         this.n = n;
         this.mean = mean;
@@ -81,6 +99,12 @@ public final class Copula implements Serializable, FitArtifact.Model {
         this.shrinkage = shrinkage;
         this.shrinkMethod = shrinkMethod;
         this.floored = floored;
+        this.diagnostics = diagnostics;
+    }
+
+    /** The same model with a {@code diagnose} report attached (it travels to the artifact; the readouts ignore it). */
+    public Copula withDiagnostics(final String report) {
+        return new Copula(dimension, n, mean, sd, correlation, shrinkage, shrinkMethod, floored, report);
     }
 
     static Copula empty(final int dimension, final long n) {
@@ -385,6 +409,201 @@ public final class Copula implements Serializable, FitArtifact.Model {
     private record Joint(int[] index, double[][] precision, double logDet) {}
 
     // ------------------------------------------------------------------------------------------
+    // diagnose
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * The first {@code d} coordinates of vector moments — the scores of a {@code diagnose} vector, whose remaining
+     * coordinates are indicators. The sums are copied, not recomputed, so the correlation is the one the plain score
+     * vector gives.
+     */
+    static Svd.Moments head(final Svd.Moments m, final int d) {
+        final Svd.Moments head = new Svd.Moments();
+        head.skipped = m.skipped;
+        head.mismatched = m.mismatched;
+        if (m.n == 0) return head;
+        final int full = m.dimension;
+        head.dimension = d;
+        head.n = m.n;
+        head.shift = java.util.Arrays.copyOf(m.shift, d);
+        head.sum = java.util.Arrays.copyOf(m.sum, d);
+        head.products = new double[d * d];
+        for (int i = 0; i < d; i++) System.arraycopy(m.products, i * full, head.products, i * d, d);
+        return head;
+    }
+
+    /**
+     * The row's {@code diagnose} vector: the scores, then 1 / 0 for a score above the upper threshold, below the lower one
+     * and on a point mass ({@code mass[i]} null = no flag for that input: 0). Null when a score is missing — the fit is
+     * complete-case, and the indicators must count the rows the correlation is fitted on.
+     */
+    static double[] diagnoseVector(final double[] scores, final Double[] mass, final double upper) {
+        final int d = scores.length;
+        final double[] x = new double[4 * d];
+        for (int i = 0; i < d; i++) {
+            x[i] = scores[i];
+            x[d + i] = scores[i] > upper ? 1 : 0;
+            x[2 * d + i] = scores[i] < -upper ? 1 : 0;
+            x[3 * d + i] = mass[i] != null && mass[i] > 0.5 ? 1 : 0;
+        }
+        return x;
+    }
+
+    /**
+     * P(X > a, Y > b) for standard normals with correlation rho (Simpson over x of φ(x) P(Y > b | x)). The range is
+     * {@code [max(a, −9), 9]}: φ is negligible beyond ±9 (Φ(−9) ≈ 1e-19), so a threshold far below the mean (a score
+     * column that is not centred) still integrates the whole upper range instead of a fixed width above {@code a}.
+     */
+    static double upperOrthant(final double a, final double b, final double rho) {
+        if (rho > 1 - 1e-9) return NormalDistribution.cdf(-Math.max(a, b));
+        if (rho < -1 + 1e-9) return Math.max(0, NormalDistribution.cdf(-a) - NormalDistribution.cdf(b));
+        final double lo = Math.max(a, -ORTHANT_RANGE);
+        if (lo >= ORTHANT_RANGE) return 0d;
+        final double s = Math.sqrt(1 - rho * rho);
+        final int steps = 4000;
+        final double h = (ORTHANT_RANGE - lo) / steps;
+        double sum = 0;
+        for (int k = 0; k <= steps; k++) {
+            final double x = lo + k * h;
+            final double f = Math.exp(-0.5 * x * x) * NormalDistribution.cdf(-(b - rho * x) / s);
+            sum += (k == 0 || k == steps ? 1 : k % 2 == 1 ? 4 : 2) * f;
+        }
+        return sum * h / 3 / SQRT_2PI;
+    }
+
+    /** What {@link #diagnose} found: the JSON report and the log lines (findings to warn about, the rest to inform). */
+    public record Report(JsonObject json, List<String> warnings, List<String> lines) {}
+
+    /**
+     * The {@code diagnose} report of a fitted model over the moments of its rows' {@link #diagnoseVector}s. Per pair:
+     * the share of rows beyond the threshold in one input that are beyond it in the other too (the two directions
+     * pooled: co-exceedances over the mean exceedance count), above {@code tail} and below {@code 1 − tail}, next to the
+     * share a Gaussian copula implies at the same exceedance rates — its thresholds placed where the observed share of
+     * rows beyond them falls, so only the dependence is compared, not the marginals' shape — with the scores' sample
+     * correlation (the shrunk one the readouts use is reported beside it as {@code rhoModel}) and its binomial standard
+     * error. A Gaussian copula has no tail dependence, but at a finite threshold its share is far from 0 (ρ = 0.5 at
+     * 0.95: about 0.24), which is what the observed share is held against. Per input with a point-mass flag: the share
+     * of rows on a mass; per pair of them: how often both are,
+     * against the product of the shares (what independent masses would give).
+     */
+    public static Report diagnose(final Svd.Moments m, final int d, final Copula model, final double tail, final int[][] pairs,
+                                  final boolean[] hasMass, final List<String> names) {
+        final JsonObject json = new JsonObject();
+        final List<String> warnings = new ArrayList<>();
+        final List<String> lines = new ArrayList<>();
+        json.addProperty("tail", tail);
+        json.addProperty("rows", m.n);
+        if (model.isEmpty() || m.n == 0 || m.dimension != 4 * d) {
+            json.addProperty("skipped", "nothing fitted");
+            return new Report(json, warnings, lines);
+        }
+        final double n = m.n;
+        final JsonArray tails = new JsonArray();
+        int flagged = 0;
+        for (final int[] pair : pairs) {
+            final int a = pair[0], b = pair[1];
+            // the sample correlation, not the shrunk one the readouts use: the question is whether the Gaussian family
+            // misses joint extremes, and shrinkage alone would otherwise read as missing tail dependence
+            final double rho = sampleCorrelation(m, a, b);
+            final JsonObject entry = new JsonObject();
+            entry.addProperty("a", names.get(a));
+            entry.addProperty("b", names.get(b));
+            entry.addProperty("rho", rho);
+            entry.addProperty("rhoModel", model.correlation[a][b]);
+            for (final boolean high : new boolean[]{true, false}) {
+                final int offset = high ? d : 2 * d;
+                final double na = count(m, offset + a), nb = count(m, offset + b), nab = cross(m, offset + a, offset + b);
+                // the thresholds in the model's standardised units, mirrored for the lower tail (the orthant is symmetric)
+                // the copula's thresholds at the observed exceedance rates (mirrored for the lower tail: the orthant is
+                // symmetric), so a marginal that is not quite normal - ties at the top, a score column with its own
+                // shape - is not read as dependence. No row beyond in one input: none together, 0 (not 0 / 0 - a NaN
+                // would land in the artifact as a bare token strict JSON readers reject)
+                final double implied;
+                if (na > 0 && nb > 0) {
+                    final double pa = Math.min(na / n, 1 - 1e-12), pb = Math.min(nb / n, 1 - 1e-12);
+                    implied = upperOrthant(NormalDistribution.inverseNormal(1 - pa), NormalDistribution.inverseNormal(1 - pb), rho) / ((pa + pb) / 2);
+                } else {
+                    implied = 0d;
+                }
+                final double exceeding = (na + nb) / 2;
+                final JsonObject side = new JsonObject();
+                side.addProperty("rows", exceeding);
+                side.addProperty("together", nab);
+                side.addProperty("implied", implied);
+                if (exceeding > 0) {
+                    final double observed = nab / exceeding;
+                    final double se = Math.sqrt(implied * (1 - implied) / exceeding);
+                    side.addProperty("observed", observed);
+                    side.addProperty("excess", observed - implied);
+                    side.addProperty("se", se);
+                    final String line = String.format(Locale.ROOT, "(%s, %s) %s tail: %.3f of the rows beyond the threshold in one are beyond it in the other too, the Gaussian copula implies %.3f +- %.3f (rho %.3f, %d rows beyond)",
+                            names.get(a), names.get(b), high ? "upper" : "lower", observed, implied, se, rho, Math.round(exceeding));
+                    if (observed - implied > FLAG_STANDARD_ERRORS * se && nab >= 5) {
+                        flagged++;
+                        warnings.add(line + ": joint extremes are more frequent than the model's dependence allows (no tail dependence) - a t copula, or a tail feature, would see them");
+                    } else {
+                        lines.add(line);
+                    }
+                }
+                entry.add(high ? "upper" : "lower", side);
+            }
+            tails.add(entry);
+        }
+        json.add("pairs", tails);
+        json.addProperty("flagged", flagged);
+        // point masses: per input with a flag, per pair of them
+        final JsonObject mass = new JsonObject();
+        final JsonObject shares = new JsonObject();
+        for (int i = 0; i < d; i++) if (hasMass[i]) shares.addProperty(names.get(i), count(m, 3 * d + i) / n);
+        mass.add("shares", shares);
+        final JsonArray together = new JsonArray();
+        for (final int[] pair : pairs) {
+            final int a = pair[0], b = pair[1];
+            if (!hasMass[a] || !hasMass[b]) continue;
+            final double sa = count(m, 3 * d + a) / n, sb = count(m, 3 * d + b) / n;
+            if (sa == 0 || sb == 0) continue;
+            final double both = cross(m, 3 * d + a, 3 * d + b) / n;
+            final JsonObject entry = new JsonObject();
+            entry.addProperty("a", names.get(a));
+            entry.addProperty("b", names.get(b));
+            entry.addProperty("both", both);
+            entry.addProperty("independent", sa * sb);
+            together.add(entry);
+            final String line = String.format(Locale.ROOT, "(%s, %s) point masses: both on a mass in %.3f of the rows, %.3f if independent (shares %.3f / %.3f)",
+                    names.get(a), names.get(b), both, sa * sb, sa, sb);
+            if (both >= 0.01 && both > 2 * sa * sb) {
+                warnings.add(line + ": tied values that occur together put a spike into the scores the correlation is fitted on and narrow the conditional spread around it");
+            } else {
+                lines.add(line);
+            }
+        }
+        mass.add("pairs", together);
+        json.add("mass", mass);
+        return new Report(json, warnings, lines);
+    }
+
+    /** Σ x_k over the rows (an indicator's count), from the anchored sums. */
+    private static double count(final Svd.Moments m, final int k) {
+        return Math.rint(m.sum[k] + m.n * m.shift[k]);
+    }
+
+    /** The sample correlation of scores {@code a} and {@code b} (no shrinkage, no eigenvalue floor), from the anchored sums. */
+    static double sampleCorrelation(final Svd.Moments m, final int a, final int b) {
+        final int dim = m.dimension;
+        final double n = m.n;
+        final double cab = m.products[a * dim + b] - m.sum[a] * m.sum[b] / n;
+        final double caa = m.products[a * dim + a] - m.sum[a] * m.sum[a] / n;
+        final double cbb = m.products[b * dim + b] - m.sum[b] * m.sum[b] / n;
+        return Math.max(-1d, Math.min(1d, cab / Math.sqrt(caa * cbb)));
+    }
+
+    /** Σ x_k x_l over the rows (two indicators' joint count), from the anchored sums. */
+    private static double cross(final Svd.Moments m, final int k, final int l) {
+        final double rk = m.sum[k] + m.n * m.shift[k], rl = m.sum[l] + m.n * m.shift[l];
+        return Math.rint(m.products[k * m.dimension + l] + m.shift[k] * rl + m.shift[l] * rk - m.n * m.shift[k] * m.shift[l]);
+    }
+
+    // ------------------------------------------------------------------------------------------
     // artifact
     // ------------------------------------------------------------------------------------------
 
@@ -405,6 +624,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
         final JsonArray rows = new JsonArray();
         for (final double[] row : correlation) rows.add(array(row));
         json.add("correlation", rows);
+        if (diagnostics != null) json.add("diagnostics", JsonParser.parseString(diagnostics));
         return json;
     }
 
@@ -428,7 +648,8 @@ public final class Copula implements Serializable, FitArtifact.Model {
         final double[][] correlation = new double[rows.size()][];
         for (int i = 0; i < correlation.length; i++) correlation[i] = doubles(rows.get(i));
         return new Copula(json.get("dimension").getAsInt(), n.getAsLong(), doubles(json.get("mean")), doubles(json.get("sd")), correlation,
-                json.get("shrinkage").getAsDouble(), json.get("shrinkMethod").getAsString(), json.get("floored").getAsInt());
+                json.get("shrinkage").getAsDouble(), json.get("shrinkMethod").getAsString(), json.get("floored").getAsInt(),
+                json.has("diagnostics") && json.get("diagnostics").isJsonObject() ? json.get("diagnostics").toString() : null);
     }
 
 }

@@ -4463,6 +4463,67 @@ public class FeatureTransformTest {
     }
 
     /**
+     * diagnose on a copula over (start_price, quantity): the readouts equal those of the same block without it (the report
+     * rides behind the scores in the moments), and the artifact holds the report. Of the six rows one is beyond the 0.95
+     * score in each input (B's price, C/s1's quantity, the fitted maxima) and they are different rows; quantity's 1 and 2
+     * are point masses of its marginal (tied knots), 4 is a single knot — five rows of six — while the prices are distinct.
+     */
+    @Test
+    public void testCopulaDiagnose() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: cop
+                      scope: population
+                      type: copula
+                      inputs: [start_price, quantity]
+                      shrink: none
+                      outputs: [conditional, jointRank, logDensity]
+                      diagnose: true
+                      fit: {artifact: {uri: "%s"}}
+                    - name: cop_plain
+                      scope: population
+                      type: copula
+                      inputs: [start_price, quantity]
+                      shrink: none
+                      outputs: [conditional, jointRank, logDensity]
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        Assertions.assertNull(outputs.get("features").getSchema().getField("f_cop_z_quantity__mass"), "the flags are intermediate");
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                for (final String readout : List.of("_cond_start_price", "_cond_quantity", "_jointrank", "_logdensity")) {
+                    Assertions.assertEquals(row.getAsDouble("f_cop_plain" + readout), row.getAsDouble("f_cop" + readout), readout + " " + row);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject report = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop.copula.json").toPath()))
+                .getAsJsonObject().getAsJsonObject("diagnostics");
+        Assertions.assertNotNull(report);
+        Assertions.assertEquals(0.95, report.get("tail").getAsDouble());
+        Assertions.assertEquals(6, report.get("rows").getAsLong());
+        Assertions.assertEquals(0, report.get("flagged").getAsInt());
+        final com.google.gson.JsonObject pair = report.getAsJsonArray("pairs").get(0).getAsJsonObject();
+        Assertions.assertEquals("start_price", pair.get("a").getAsString());
+        Assertions.assertEquals("quantity", pair.get("b").getAsString());
+        final com.google.gson.JsonObject upper = pair.getAsJsonObject("upper");
+        Assertions.assertEquals(1, upper.get("rows").getAsDouble());
+        Assertions.assertEquals(0, upper.get("together").getAsDouble());
+        Assertions.assertEquals(0, upper.get("observed").getAsDouble());
+        final com.google.gson.JsonObject shares = report.getAsJsonObject("mass").getAsJsonObject("shares");
+        Assertions.assertEquals(0, shares.get("start_price").getAsDouble());
+        Assertions.assertEquals(5.0 / 6, shares.get("quantity").getAsDouble(), 1e-12);
+        Assertions.assertEquals(0, report.getAsJsonObject("mass").getAsJsonArray("pairs").size(), "a pair needs a mass on both sides");
+    }
+
+    /**
      * copula under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874). The marginals walk
      * forward too, so A's scores are null (no earlier block) and A's rows take no part in any copula fit: C reads blocks
      * 2869–2871, where only B has scores (one row: below the default fit.minRows 3 = inputs + 1), and D reads B's and C's

@@ -1233,6 +1233,7 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
     marginals: {bins: 100, clip: 0.001} # quantile transforms expanded per input (the defaults); or: marginals: scores
     shrink: oas                        # oas (default) | none | a number in [0, 1): R <- (1 - λ) R + λ I
     eigenFloor: 1.0e-6                 # the smallest eigenvalue R keeps (default 1e-6)
+    diagnose: {tail: 0.95, pairs: all} # optional: does the Gaussian copula see the joint extremes and the ties? (below)
     outputs:                           # default: [conditional] = every input given the others
       - conditional                    # price_rel_cond_<input> for every input
       - {conditional: start_price, given: [quantity]}         # price_rel_cond_start_price_given_quantity
@@ -1310,13 +1311,40 @@ input.
 - **What a Gaussian copula cannot see.** It has no tail dependence: two inputs that crash together more often than
   their overall correlation implies look like any other pair with that correlation. `conditional` is linear in the
   scores (a rank-space regression), so a relation that is not monotone is invisible to it.
+- **`diagnose`** (`true`, or `{tail, pairs}`; off by default) reports, from the whole-input fit, whether that matters for
+  your inputs. For every pair (or the `pairs: [[a, b], ...]` listed), it counts the rows beyond the `tail` quantile
+  (default `0.95`) of one input that are beyond it in the other too — and the mirror below `1 − tail` — and holds the
+  share against what a Gaussian copula implies **at that threshold** (not 0: with ρ = 0.5 at 0.95 it is about 0.24),
+  with its binomial standard error. Only the dependence is compared: the implied share uses the scores' sample
+  correlation (not the shrunk one the readouts use — shrinkage alone would look like missing tail dependence) and is
+  taken at the exceedance rates actually observed (an input whose top 8% is one tied value is held against a
+  copula with 8% beyond, not 5%). A share more than two standard errors above it (and at least five
+  joint rows) is logged as a warning: joint extremes are more frequent than the model's dependence allows — a tail
+  feature, or a t copula, would see them. For the inputs whose marginals the block expands it also counts **point
+  masses** — values sitting on a run of tied knots, a mass of at least `1 / bins` of the rows (a zero-inflated count's
+  zeros) — and, per pair, how often both inputs are on one, against the product of their shares: masses that occur
+  together put a spike into the scores the correlation is fitted on and narrow the conditional spread around it
+  (warned when both are on a mass in at least 1% of the rows and more than twice as often as independence).
+  Inputs taken with `marginals: scores` have no mass flags. The report is in the run log (every finding as a warning,
+  the other pairs as info while there are at most 50 lines) and in the artifact under `diagnostics` (per pair `rho`
+  (sample) and `rhoModel` (as fitted), and per tail `rows` beyond, `together`, `observed`, `implied`, `excess`, `se`;
+  `mass.shares` / `mass.pairs`). The readouts do not change — the indicators ride behind the scores in the same
+  moments, which grow to `(4d)²` numbers per time block. Only the whole-input fit is reported, also under `forward`,
+  and only by the run that fits it: a run that loads the artifact does not repeat the report — read `diagnostics`
+  from `<block>.copula.json`.
+- **`diagnose` and serving.** `diagnose` is part of the spec, so it is in the plan hash like every other key: a serving
+  config that drops it looks in another artifact directory — a streaming run fails with *requires an existing
+  artifact*, a batch run fits again on its own input. Keep `diagnose` in the serving config — a run that loads the artifact does no fit, so it costs
+  nothing there — or pin the version with `fit.artifact.id` (an artifact written with `diagnose` reads the same
+  without it).
 - **Cost.** The state is d² numbers per time block; the fit inverts at most a d × d matrix per change point; a row is
   a few dot products per readout. `fold` / `expanding` are rejected (`copula.fit.mode`).
 
 Diagnostics: `copula.inputs` (fewer than two, more than 31, repeated or non-numeric inputs), `copula.family`,
 `copula.shrink`, `copula.eigenFloor`, `copula.marginals` (bins / clip out of range: error; scores that are not
 normal-score columns: warning; the expanded marginal blocks: info), `copula.outputs`, `copula.given`,
-`copula.parameters` (an unknown key in `marginals`, a top-level `bins` / `clip` / `distribution`, or an output in another shape), `copula.fit.mode`, `copula.fit.align`.
+`copula.parameters` (an unknown key in `marginals`, a top-level `bins` / `clip` / `distribution`, or an output in another shape), `copula.diagnose` (a `tail` outside (0.5, 1) or at / beyond `1 − marginals.clip` (the expanded scores are capped there), a pair that is not two different inputs,
+an empty `pairs`: error; what the report covers: info), `copula.fit.mode`, `copula.fit.align`.
 
 ### Sequences of values (population, types: transitionStats, spectralEmbedding)
 

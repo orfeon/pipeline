@@ -4664,6 +4664,81 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * diagnose: the expanded marginals emit a hidden point-mass flag beside their score (one block, one fit stage), the
+     * readouts carry the report's coordinates and read the flags through the fit; a block over its own scores has no flags.
+     */
+    @Test
+    public void testCopulaDiagnose() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(COPULA_BLOCK.replace("type: copula", "type: copula\n        diagnose: {tail: 0.9, pairs: [[quantity, start_price]]}")));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "copula.diagnose"), plan::describe);
+        final OutputColumn mass = column(plan, "cop_z_quantity__mass");
+        Assertions.assertEquals("quantileTransform", mass.getOperator());
+        Assertions.assertEquals("mass", mass.getCoordinates().get("output"));
+        Assertions.assertTrue(mass.isIntermediate());
+        Assertions.assertEquals("cop_z_quantity__mass", column(plan, "cop_z_quantity").getCoordinates().get("massColumn"));
+        final FeaturePlan.Stage marginals = plan.getStages().stream().filter(s -> s.columnNames().contains("cop_z_quantity")).findFirst().orElseThrow();
+        Assertions.assertTrue(marginals.columnNames().contains("cop_z_quantity__mass"), plan::describe);
+        // the flag is filled by its score's spec, not fitted as a block of its own
+        Assertions.assertEquals(3, FeatureStages.quantileTransformSpecs(plan.getColumns()).size());
+        Assertions.assertEquals("cop_z_quantity__mass", FeatureStages.quantileTransformSpecs(plan.getColumns()).stream()
+                .filter(q -> q.column().equals("cop_z_quantity")).findFirst().orElseThrow().massColumn());
+        final Map<String, String> k = column(plan, "cop_cond_start_price").getCoordinates();
+        Assertions.assertEquals("0.9", k.get("diagnoseTail"));
+        Assertions.assertEquals("0-1", k.get("diagnosePairs"), "a pair is ordered by input index");
+        Assertions.assertEquals("cop_z_start_price__mass,cop_z_quantity__mass,cop_z_current_bid_t10__mass", k.get("massFields"));
+        Assertions.assertEquals("start_price,quantity,current_bid_t10", k.get("inputNames"));
+        Assertions.assertTrue(column(plan, "cop_cond_start_price").getPastInputs().contains("cop_z_quantity__mass"));
+        final FeatureStages.CopulaSpec spec = FeatureStages.copulaSpecs(plan.getColumns()).get(0);
+        Assertions.assertEquals(List.of("cop_z_start_price", "cop_z_quantity", "cop_z_current_bid_t10", "cop_z_start_price__mass", "cop_z_quantity__mass",
+                "cop_z_current_bid_t10__mass"), spec.fitInputs());
+        Assertions.assertNotEquals(compile(SOURCES, withEncoding(COPULA_BLOCK)).getHash(), plan.getHash(), "diagnose changes the artifact, so the hash");
+        // every pair by default; diagnose: true
+        final FeaturePlan all = compile(SOURCES, withEncoding(COPULA_BLOCK.replace("type: copula", "type: copula\n        diagnose: true")));
+        Assertions.assertFalse(all.getDiagnostics().hasErrors(), all::describe);
+        Assertions.assertEquals("0-1,0-2,1-2", column(all, "cop_cond_start_price").getCoordinates().get("diagnosePairs"));
+        Assertions.assertEquals("0.95", column(all, "cop_cond_start_price").getCoordinates().get("diagnoseTail"));
+        // without diagnose: no flag column, no report coordinates
+        final FeaturePlan off = compile(SOURCES, withEncoding(COPULA_BLOCK));
+        Assertions.assertNull(off.getColumn("cop_z_quantity__mass"));
+        Assertions.assertNull(column(off, "cop_cond_start_price").getCoordinates().get("diagnoseTail"));
+        Assertions.assertNull(FeatureStages.copulaSpecs(off.getColumns()).get(0).diagnose());
+        // over its own scores: no flags ("" entries), and a flag column is not a score
+        final String explicit = """
+                  - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal}
+                  - {name: zq, scope: population, type: quantileTransform, input: quantity, distribution: normal}
+                  - {name: cop, scope: population, type: copula, inputs: [zp, zq], marginals: scores, diagnose: true}
+            """;
+        final FeaturePlan scored = compile(SOURCES, withEncoding(explicit));
+        Assertions.assertFalse(scored.getDiagnostics().hasErrors(), scored::describe);
+        Assertions.assertEquals(",", column(scored, "cop_cond_zp").getCoordinates().get("massFields"));
+        Assertions.assertEquals(java.util.Arrays.asList(null, null), FeatureStages.copulaSpecs(scored.getColumns()).get(0).diagnose().massFields());
+        final FeaturePlan onFlag = compile(SOURCES, withEncoding(COPULA_BLOCK.replace("type: copula", "type: copula\n        diagnose: true") + """
+                  - {name: cop2, scope: population, type: copula, inputs: [cop_z_quantity, cop_z_quantity__mass], marginals: scores}
+            """));
+        Assertions.assertTrue(onFlag.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("copula.marginals") && m.message().contains("cop_z_quantity__mass")), onFlag::describe);
+        // errors
+        final String block = COPULA_BLOCK;
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {tail: 0.4}"))), "copula.diagnose"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [[quantity, sold]]}"))), "copula.diagnose"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [[quantity, quantity]]}"))), "copula.diagnose"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: []}"))), "copula.diagnose"));
+        // the expanded marginals cap their scores at the clip (0.001 by default): a tail at or beyond 1 - clip sees no row
+        Assertions.assertTrue(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {tail: 0.999}"))).getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("copula.diagnose") && m.message().contains("marginals.clip")));
+        // pairs: null is an omitted key - every pair
+        final FeaturePlan nullPairs = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: null}")));
+        Assertions.assertFalse(nullPairs.getDiagnostics().hasErrors(), nullPairs::describe);
+        Assertions.assertEquals("0-1,0-2,1-2", column(nullPairs, "cop_cond_start_price").getCoordinates().get("diagnosePairs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [quantity]}"))), "copula.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {level: 2}"))), "copula.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: often"))), "copula.parameters"));
+        final FeaturePlan ignored = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: false")));
+        Assertions.assertFalse(ignored.getDiagnostics().hasErrors(), ignored::describe);
+        Assertions.assertNull(ignored.getColumn("cop_z_quantity__mass"));
+    }
+
+    /**
      * An outcome among the inputs: the fit reads it (a static fit says so, a forward fit delays its blocks by the
      * outcome's lag), a readout that does not read it on the row is a feature, one that does is an outcome itself.
      */
