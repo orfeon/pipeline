@@ -280,6 +280,15 @@ public class FeatureSpec implements Serializable {
         public String as;
     }
 
+    /**
+     * One copula readout: {@code conditional} / {@code conditionalProb} of input {@code of} given {@code given} (null =
+     * every other input), or {@code jointRank} / {@code logDensity} over every input ({@code of} and {@code given} null).
+     */
+    public record CopulaOutput(String kind, String of, List<String> given, String as) implements Serializable {
+        public static final List<String> CONDITIONAL_KINDS = List.of("conditional", "conditionalProb");
+        public static final List<String> JOINT_KINDS = List.of("jointRank", "logDensity");
+    }
+
     public static class Target implements Serializable {
         public String field;
         public String expr;
@@ -407,6 +416,22 @@ public class FeatureSpec implements Serializable {
         public String penaltyLambda;
         /** smooth: keys of the {@code penalty} block other than {@code order} / {@code lambda}. */
         public List<String> penaltyUnknown = new ArrayList<>();
+        // copula ({@code inputs} shared with svd)
+        /** copula: {@code family} (null = gaussian). */
+        public String copulaFamily;
+        /** copula: {@code marginals: scores} — the inputs are already normal scores (no marginal blocks are expanded). */
+        public boolean marginalsScores;
+        /** copula: {@code marginals.bins} / {@code marginals.clip} of the expanded quantile transforms (null = the defaults). */
+        public Integer marginalBins;
+        public Double marginalClip;
+        /** copula: {@code shrink} as written — {@code oas} | {@code none} | a number (null = oas). */
+        public String shrink;
+        /** copula: {@code eigenFloor} (null = the default). */
+        public Double eigenFloor;
+        /** copula: the readouts listed under {@code outputs} (empty = the default: every input given the others). */
+        public List<CopulaOutput> copulaOutputs = new ArrayList<>();
+        /** copula: what was not understood (unknown keys, an output in another shape). */
+        public List<String> copulaUnknown = new ArrayList<>();
         // spectralEmbedding / transitionStats: the values an entity takes one after another ({@code rank} shared with svd)
         /** {@code sequenceOf.entity} / {@code sequenceOf.field}. */
         public String sequenceEntity;
@@ -1206,7 +1231,9 @@ public class FeatureSpec implements Serializable {
             def.taskTargetExpr = Json.string(task, "expr");
             def.taskOffset = Json.string(task, "offset");
         }
-        for (final JsonObject out : objects(o, "outputs")) {
+        if ("copula".equals(def.type)) parseCopula(o, def);
+        // a copula's readouts are objects too: they are its own, not factorization outputs
+        for (final JsonObject out : "copula".equals(def.type) ? List.<JsonObject>of() : objects(o, "outputs")) {
             final FmOutput fm = new FmOutput();
             fm.as = Json.string(out, "as");
             if (out.has("pair")) {
@@ -1549,6 +1576,105 @@ public class FeatureSpec implements Serializable {
             list.add(e);
         }
         return list;
+    }
+
+    /**
+     * The keys of a {@code type: copula} block: {@code family}, {@code marginals} ({@code scores} or {@code {bins, clip}}),
+     * {@code shrink} ({@code oas} | {@code none} | a number), {@code eigenFloor} and the readouts under {@code outputs} —
+     * a bare {@code jointRank} / {@code logDensity} / {@code conditional} / {@code conditionalProb} (the last two: every
+     * input given the others), {@code {conditional | conditionalProb: <input>, given: [...], as: <name>}} or
+     * {@code {jointRank | logDensity: true, as: <name>}}. Anything in
+     * another shape lands in {@code copulaUnknown}, which the compiler reports.
+     */
+    private static void parseCopula(final JsonObject o, final FeatureDef def) {
+        def.copulaFamily = Json.string(o, "family");
+        // the quantileTransform spelling at the top level would otherwise be dropped and the defaults used in silence
+        for (final String key : List.of("bins", "clip", "distribution")) {
+            if (o.has(key) && !o.get(key).isJsonNull()) def.copulaUnknown.add(key + " (the marginals take marginals: {bins, clip})");
+        }
+        if (o.has("marginals") && !o.get("marginals").isJsonNull()) {
+            final JsonElement m = o.get("marginals");
+            if (m.isJsonPrimitive() && "scores".equals(m.getAsString())) {
+                def.marginalsScores = true;
+            } else if (m.isJsonObject()) {
+                final JsonObject marginals = m.getAsJsonObject();
+                for (final String key : marginals.keySet()) {
+                    final JsonElement v = marginals.get(key);
+                    final boolean number = v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber();
+                    switch (key) {
+                        case "bins" -> {
+                            if (number && v.getAsDouble() == Math.rint(v.getAsDouble())) def.marginalBins = v.getAsInt();
+                            else def.copulaUnknown.add("marginals.bins " + v);
+                        }
+                        case "clip" -> {
+                            if (number) def.marginalClip = v.getAsDouble();
+                            else def.copulaUnknown.add("marginals.clip " + v);
+                        }
+                        default -> def.copulaUnknown.add("marginals." + key);
+                    }
+                }
+            } else {
+                def.copulaUnknown.add("marginals " + m);
+            }
+        }
+        if (o.has("shrink") && !o.get("shrink").isJsonNull()) {
+            if (o.get("shrink").isJsonPrimitive()) def.shrink = o.get("shrink").getAsString();
+            else def.copulaUnknown.add("shrink " + o.get("shrink"));
+        }
+        if (o.has("eigenFloor") && !o.get("eigenFloor").isJsonNull()) {
+            final JsonElement v = o.get("eigenFloor");
+            if (v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber()) def.eigenFloor = v.getAsDouble();
+            else def.copulaUnknown.add("eigenFloor " + v);
+        }
+        if (!o.has("outputs") || o.get("outputs").isJsonNull()) return;
+        for (final JsonElement e : arrayOf(o.get("outputs"))) {
+            if (e.isJsonPrimitive()) {
+                final String kind = e.getAsString();
+                if (CopulaOutput.JOINT_KINDS.contains(kind) || CopulaOutput.CONDITIONAL_KINDS.contains(kind)) def.copulaOutputs.add(new CopulaOutput(kind, null, null, null));
+                else def.copulaUnknown.add("outputs " + kind);
+                continue;
+            }
+            if (!e.isJsonObject()) {
+                def.copulaUnknown.add("outputs " + e);
+                continue;
+            }
+            final JsonObject out = e.getAsJsonObject();
+            // {jointRank: true, as: <name>} / {logDensity: true, as: <name>}: a joint readout with its own column name
+            // (the shape of factorization's {sum: true, as: ...}); anything else beside them is not understood
+            final List<String> joint = CopulaOutput.JOINT_KINDS.stream().filter(out::has).toList();
+            if (!joint.isEmpty()) {
+                final JsonElement flag = out.get(joint.get(0));
+                final boolean declared = flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean() && flag.getAsBoolean();
+                final boolean alone = joint.size() == 1 && out.keySet().stream().allMatch(k -> k.equals(joint.get(0)) || k.equals("as"));
+                if (declared && alone) def.copulaOutputs.add(new CopulaOutput(joint.get(0), null, null, Json.string(out, "as")));
+                else def.copulaUnknown.add("outputs " + out + " (a joint readout is {" + joint.get(0) + ": true, as: <name>})");
+                continue;
+            }
+            String kind = null;
+            for (final String k : CopulaOutput.CONDITIONAL_KINDS) {
+                if (out.has(k)) {
+                    if (kind != null) def.copulaUnknown.add("outputs " + out + " (one of conditional / conditionalProb per entry)");
+                    kind = k;
+                }
+            }
+            if (kind == null || !out.get(kind).isJsonPrimitive()) {
+                def.copulaUnknown.add("outputs " + out);
+                continue;
+            }
+            List<String> given = null;
+            if (out.has("given") && !out.get("given").isJsonNull()) {
+                given = new ArrayList<>();
+                for (final JsonElement g : arrayOf(out.get("given"))) {
+                    if (g.isJsonPrimitive()) given.add(g.getAsString());
+                    else def.copulaUnknown.add("outputs.given " + g);
+                }
+            }
+            for (final String key : out.keySet()) {
+                // both conditional kinds in one entry are reported once, above
+                if (!CopulaOutput.CONDITIONAL_KINDS.contains(key) && !List.of("given", "as").contains(key)) def.copulaUnknown.add("outputs." + key);
+            }
+            def.copulaOutputs.add(new CopulaOutput(kind, out.get(kind).getAsString(), given, Json.string(out, "as")));
+        }
     }
 
     private static List<JsonObject> objects(final JsonObject parent, final String key) {

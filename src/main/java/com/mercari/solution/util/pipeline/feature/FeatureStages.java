@@ -345,7 +345,7 @@ public final class FeatureStages {
 
     /**
      * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
-     * static-fit population types (factorization, discretize, quantileTransform, svd, smooth, spectralEmbedding)
+     * static-fit population types (factorization, discretize, quantileTransform, svd, smooth, copula, spectralEmbedding)
      * and the joint estimator models of an encoding block: a new type is added here and nowhere else.
      */
     static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
@@ -355,6 +355,7 @@ public final class FeatureStages {
         blocks.addAll(quantileTransformSpecs(columns));
         blocks.addAll(svdSpecs(columns));
         blocks.addAll(smoothSpecs(columns));
+        blocks.addAll(copulaSpecs(columns));
         blocks.addAll(spectralSpecs(columns));
         blocks.addAll(jointSpecs(columns));
         return blocks;
@@ -1105,7 +1106,7 @@ public final class FeatureStages {
 
     /**
      * A {@link SummaryFitBlock} whose model is solved from the state and persisted as its own JSON artifact — every
-     * population type outside the encoding lattice (svd, quantileTransform, smooth, spectralEmbedding). They differ
+     * population type outside the encoding lattice (svd, quantileTransform, smooth, copula, spectralEmbedding). They differ
      * only in what a row contributes, how a state becomes a model and which columns it fills; the fit geometry is the
      * same for all of them and lives here: the whole-input fit plus one per change point under {@code forward}, the
      * artifact written once, and the lookup a row does ({@link #modelFor}).
@@ -2044,6 +2045,131 @@ public final class FeatureStages {
                     Smooth.REML.equals(k.get("lambda")) ? null : Double.valueOf(k.get("lambda")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), residual,
                     Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
+        }
+        return specs;
+    }
+
+    // --- copula ---------------------------------------------------------------------------------------
+
+    /**
+     * One copula block of a fit stage (all its readout columns), rebuilt from the columns' coordinates. A row contributes
+     * its vector of normal scores — complete rows only, as an svd's vectors — to the vector moments, the family of the
+     * svd blocks (the stage's one {@code _FitMoments_Combine} serves them all), and the correlation is solved from them on
+     * one worker. {@code kinds[i]} / {@code of[i]} / {@code given[i]} say what {@code columns.get(i)} reads.
+     */
+    record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String artifactUri, boolean refit,
+                      List<OutputColumn> columns, String[] kinds, int[] of, int[][] given,
+                      Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Copula> {
+        @Override
+        public FitArtifact.Json<Copula> artifact() {
+            return Copula.ARTIFACT;
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return fields;
+        }
+
+        @Override
+        public Summary<Svd.Moments> family() {
+            return Svd.SUMMARY;
+        }
+
+        @Override
+        public String familyName() {
+            return "Moments";
+        }
+
+        @Override
+        public Class<Svd.Moments> stateClass() {
+            return Svd.Moments.class;
+        }
+
+        @Override
+        public Coder<double[]> contributionCoder() {
+            return SerializableCoder.of(double[].class);
+        }
+
+        /** The row's scores, or null when one is missing (the fit is complete-case; a readout marginalises a missing score out). */
+        @Override
+        public KV<Long, double[]> contribution(final Map<String, Object> row) {
+            final double[] z = new double[fields.size()];
+            for (int i = 0; i < z.length; i++) {
+                final Double v = FeatureValues.toDouble(row.get(fields.get(i)));
+                if (v == null || v.isNaN() || v.isInfinite()) return null;
+                z[i] = v;
+            }
+            final Long timeBlock = timeBlock(row);
+            return timeBlock == null ? null : KV.of(timeBlock, z);
+        }
+
+        /** An input without a single complete score vector has no correlation: no model (every readout is null) and no artifact. */
+        @Override
+        public boolean fitsEmptyInput() {
+            return false;
+        }
+
+        @Override
+        public long rowsOf(final Svd.Moments m) {
+            return m.n;
+        }
+
+        @Override
+        public Copula fit(final Svd.Moments m, final boolean loud) {
+            final Copula fitted = Copula.fit(m, shrink, eigenFloor, loud);
+            if (loud) LOG.info("copula {}: {}", block, fitted.describe());
+            return fitted;
+        }
+
+        @Override
+        public void apply(final ForwardModel<Copula> model, final Map<String, Object> values) {
+            final Copula copula = modelFor(model, values);
+            final Double[] scores = new Double[fields.size()];
+            if (copula != null) for (int i = 0; i < scores.length; i++) scores[i] = FeatureValues.toDouble(values.get(fields.get(i)));
+            // jointRank and logDensity read the same quadratic form: solved once per row
+            double[] quadratic = null;
+            boolean solved = false;
+            for (int i = 0; i < kinds.length; i++) {
+                final boolean joint = "jointRank".equals(kinds[i]) || "logDensity".equals(kinds[i]);
+                if (copula != null && joint && !solved) {
+                    quadratic = copula.quadratic(scores);
+                    solved = true;
+                }
+                final Double value = copula == null ? null : switch (kinds[i]) {
+                    case "conditional" -> copula.conditional(scores, of[i], given[i]);
+                    case "conditionalProb" -> copula.conditionalProb(scores, of[i], given[i]);
+                    case "jointRank" -> Copula.jointRankOf(quadratic);
+                    case "logDensity" -> Copula.logDensityOf(quadratic);
+                    default -> throw new IllegalStateException("unknown copula output " + kinds[i]);
+                };
+                values.put(columns.get(i).getCanonicalName(), value);
+            }
+        }
+    }
+
+    static List<CopulaSpec> copulaSpecs(final List<OutputColumn> stageColumns) {
+        final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
+        for (final OutputColumn c : stageColumns) {
+            if ("copula".equals(c.getOperator())) columns.computeIfAbsent(c.getBlock(), b -> new ArrayList<>()).add(c);
+        }
+        final List<CopulaSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
+            final List<OutputColumn> cs = e.getValue();
+            final Map<String, String> k = cs.get(0).getCoordinates();
+            final String[] kinds = new String[cs.size()];
+            final int[] of = new int[cs.size()];
+            final int[][] given = new int[cs.size()][];
+            for (int i = 0; i < kinds.length; i++) {
+                final Map<String, String> ki = cs.get(i).getCoordinates();
+                kinds[i] = ki.get("output");
+                of[i] = ki.containsKey("of") ? Integer.parseInt(ki.get("of")) : -1;
+                final String g = ki.get("given");
+                given[i] = g == null || g.isEmpty() ? new int[0] : Arrays.stream(g.split(",")).mapToInt(Integer::parseInt).toArray();
+            }
+            specs.add(new CopulaSpec(e.getKey(), List.of(k.get("fields").split(",")), k.getOrDefault("shrink", Copula.OAS),
+                    Double.parseDouble(k.getOrDefault("eigenFloor", Double.toString(Copula.DEFAULT_EIGEN_FLOOR))),
+                    k.get("artifactUri"), "true".equals(k.get("refit")), cs, kinds, of, given,
+                    Forward.of(cs.get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
         }
         return specs;
     }

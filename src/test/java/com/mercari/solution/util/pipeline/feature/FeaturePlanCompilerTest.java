@@ -4525,4 +4525,180 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("lift: {fields: [start_price, quantity], timeAugment: true}", "lift: {fields: [start_price]}")
                 .replace("    compress:\n      svd: {rank: 2}\n", "")), "sequence.dynamics.channels"));
     }
+
+    private static final String COPULA_BLOCK = """
+                  - name: cop
+                    scope: population
+                    type: copula
+                    inputs: [start_price, quantity, current_bid_t10]
+                    fit: {artifact: "gs://bucket/features"}
+            """;
+
+    /**
+     * copula: the marginals expand into intermediate normal-score quantileTransform blocks of a fit stage ahead of the
+     * copula's, the default readout is every input given the others, and a readout's availability is that of the
+     * scores it reads on the row (the market bid's here).
+     */
+    @Test
+    public void testCopulaExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(COPULA_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "copula.marginals"), plan::describe);
+        final List<String> scores = List.of("cop_z_start_price", "cop_z_quantity", "cop_z_current_bid_t10");
+        for (final String s : scores) {
+            final OutputColumn z = column(plan, s);
+            Assertions.assertEquals("quantileTransform", z.getOperator());
+            Assertions.assertEquals("normal", z.getCoordinates().get("distribution"));
+            Assertions.assertEquals("0.001", z.getCoordinates().get("clip"));
+            Assertions.assertEquals("gs://bucket/features", z.getCoordinates().get("artifactUri"), "the marginals share the block's fit");
+            Assertions.assertTrue(z.isIntermediate(), s);
+        }
+        for (final String input : List.of("start_price", "quantity", "current_bid_t10")) {
+            final OutputColumn c = column(plan, "cop_cond_" + input);
+            Assertions.assertEquals("copula", c.getOperator());
+            Assertions.assertFalse(c.isIntermediate());
+            final Map<String, String> k = c.getCoordinates();
+            Assertions.assertEquals("static", k.get("fit"));
+            Assertions.assertEquals(String.join(",", scores), k.get("fields"));
+            Assertions.assertEquals("conditional", k.get("output"));
+            Assertions.assertEquals("oas", k.get("shrink"));
+            Assertions.assertEquals("1.0E-6", k.get("eigenFloor"));
+            Assertions.assertEquals("4", k.get("minRows"), "the default floor is one row more than the inputs");
+            Assertions.assertTrue(c.getPastInputs().containsAll(scores), c.getPastInputs()::toString);
+        }
+        Assertions.assertEquals("0", column(plan, "cop_cond_start_price").getCoordinates().get("of"));
+        Assertions.assertEquals("1,2", column(plan, "cop_cond_start_price").getCoordinates().get("given"));
+        Assertions.assertEquals("0,2", column(plan, "cop_cond_quantity").getCoordinates().get("given"));
+        // the bid is market information: every default readout conditions on it
+        Assertions.assertTrue(column(plan, "cop_cond_start_price").getDerivedFrom().contains("market"), plan::describe);
+        final FeaturePlan.Stage marginals = plan.getStages().stream().filter(s -> s.columnNames().contains("cop_z_start_price")).findFirst().orElseThrow();
+        final FeaturePlan.Stage copula = plan.getStages().stream().filter(s -> s.columnNames().contains("cop_cond_start_price")).findFirst().orElseThrow();
+        Assertions.assertEquals(FeaturePlan.StageKind.fit, copula.kind());
+        Assertions.assertTrue(marginals.index() < copula.index(), plan::describe);
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("cop").endsWith("cop.copula.json"));
+        Assertions.assertEquals(3, FeatureStages.copulaSpecs(plan.getColumns()).get(0).columns().size());
+
+        // declared readouts: a subset given, a name, the joint readouts; shrink / eigenFloor / marginals in the coordinates
+        final String declared = COPULA_BLOCK.replace("        fit: {", String.join("\n",
+                "        outputs:",
+                "          - {conditional: start_price, given: [quantity]}",
+                "          - {conditionalProb: quantity, as: qty_rank}",
+                "          - jointRank",
+                "          - logDensity",
+                "        shrink: 0.1",
+                "        eigenFloor: 0.001",
+                "        marginals: {bins: 20, clip: 0.01}",
+                "        fit: {"));
+        Assertions.assertNotEquals(COPULA_BLOCK, declared);
+        final FeaturePlan named = compile(SOURCES, withEncoding(declared));
+        Assertions.assertFalse(named.getDiagnostics().hasErrors(), named::describe);
+        final OutputColumn given = column(named, "cop_cond_start_price_given_quantity");
+        Assertions.assertEquals("0", given.getCoordinates().get("of"));
+        Assertions.assertEquals("1", given.getCoordinates().get("given"));
+        // the bid shapes it through the fit (lineage); what it reads on the row decides its availability
+        // (testCopulaOutcomeInputAndForwardFit: an outcome read only through the fit leaves the readout a feature)
+        Assertions.assertTrue(given.getPastInputs().contains("cop_z_current_bid_t10"), named::describe);
+        Assertions.assertTrue(given.getDerivedFrom().contains("market"), named::describe);
+        Assertions.assertEquals("conditionalProb", column(named, "qty_rank").getCoordinates().get("output"));
+        Assertions.assertEquals("jointRank", column(named, "cop_jointrank").getCoordinates().get("output"));
+        Assertions.assertNull(column(named, "cop_jointrank").getCoordinates().get("of"));
+        Assertions.assertEquals("logDensity", column(named, "cop_logdensity").getCoordinates().get("output"));
+        Assertions.assertEquals("0.1", given.getCoordinates().get("shrink"));
+        Assertions.assertEquals("0.001", given.getCoordinates().get("eigenFloor"));
+        Assertions.assertEquals("20", column(named, "cop_z_start_price").getCoordinates().get("bins"));
+        Assertions.assertEquals("0.01", column(named, "cop_z_start_price").getCoordinates().get("clip"));
+        Assertions.assertNull(named.getColumn("cop_cond_quantity"));
+        Assertions.assertNotEquals(plan.getHash(), named.getHash());
+
+        // marginals: scores reads the inputs as they are, and warns when one is not a normal score
+        final String explicit = """
+                  - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal}
+                  - {name: zq, scope: population, type: quantileTransform, input: quantity}
+                  - {name: cop, scope: population, type: copula, inputs: [zp, zq], marginals: scores}
+            """;
+        final FeaturePlan scored = compile(SOURCES, withEncoding(explicit));
+        Assertions.assertFalse(scored.getDiagnostics().hasErrors(), scored::describe);
+        Assertions.assertEquals("zp,zq", column(scored, "cop_cond_zp").getCoordinates().get("fields"));
+        Assertions.assertNull(scored.getColumn("cop_z_zp"));
+        Assertions.assertTrue(scored.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("copula.marginals") && m.message().contains("'zq'")), scored::describe);
+        Assertions.assertTrue(scored.getDiagnostics().getMessages().stream().noneMatch(m -> m.code().equals("copula.marginals") && m.message().contains("'zp'")), scored::describe);
+
+        // every parameter error
+        final String block = COPULA_BLOCK;
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price]"))), "copula.inputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price, start_price]"))), "copula.inputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price, condition_grade]"))), "copula.inputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t"))), "copula.family"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        shrink: 1.5"))), "copula.shrink"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        shrink: lw"))), "copula.shrink"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        eigenFloor: 0"))), "copula.eigenFloor"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        marginals: {bins: 1}"))), "copula.marginals"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        marginals: {binz: 10}"))), "copula.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [mahalanobis]"))), "copula.parameters"));
+        // a joint readout named with as: (the shape of factorization's {sum: true, as: ...})
+        final FeaturePlan renamed = compile(SOURCES, withEncoding(block.replace("type: copula",
+                "type: copula\n        outputs: [{jointRank: true, as: atypical}, {logDensity: true, as: dependence}, logDensity]")));
+        Assertions.assertFalse(renamed.getDiagnostics().hasErrors(), renamed::describe);
+        Assertions.assertEquals("jointRank", column(renamed, "atypical").getCoordinates().get("output"));
+        Assertions.assertEquals("logDensity", column(renamed, "dependence").getCoordinates().get("output"));
+        Assertions.assertEquals("logDensity", column(renamed, "cop_logdensity").getCoordinates().get("output"));
+        Assertions.assertNull(renamed.getColumn("cop_jointrank"));
+        for (final String bad : List.of("{jointRank: false}", "{jointRank: yes}", "{jointRank: true, given: [quantity]}", "{jointRank: true, logDensity: true}")) {
+            Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [" + bad + "]"))), "copula.parameters"), bad);
+        }
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: sold}]"))), "copula.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, as: x}, {conditional: start_price, as: x}]"))), "copula.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, given: [quantity]}]"))), "copula.given"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, given: []}]"))), "copula.given"));
+        final FeaturePlan fold = compile(SOURCES, withEncoding(block.replace("fit: {artifact", "fit: {mode: fold, artifact")));
+        Assertions.assertTrue(hasCode(fold, "copula.fit.mode"));
+        // reported once, for the copula, not again for every expanded marginal
+        Assertions.assertFalse(hasCode(fold, "quantileTransform.fit.mode"), fold::describe);
+        // the quantileTransform spelling at the top level is not silently dropped
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        bins: 20"))), "copula.parameters"));
+        // one column spelled two ways is one input
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding("""
+                  - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal}
+                  - {name: cop, scope: population, type: copula, inputs: [zp, zp.zp], marginals: scores}
+            """)), "copula.inputs"));
+    }
+
+    /**
+     * An outcome among the inputs: the fit reads it (a static fit says so, a forward fit delays its blocks by the
+     * outcome's lag), a readout that does not read it on the row is a feature, one that does is an outcome itself.
+     */
+    @Test
+    public void testCopulaOutcomeInputAndForwardFit() {
+        final String block = """
+                  - name: cop
+                    scope: population
+                    type: copula
+                    inputs: [start_price, quantity, final_price]
+                    outputs: [{conditional: start_price, given: [quantity]}]
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(block));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plan, "cop_cond_start_price_given_quantity").getStatus());
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("fit.mode.static") && m.location().equals("features.cop")
+                && m.message().contains("outcome-like")), plan::describe);
+        // reading the outcome on the row: a violation as a feature, fine as the declared label
+        final String reads = block.replace("{conditional: start_price, given: [quantity]}", "{conditional: final_price, as: price_surprise}");
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(reads)), "availability.violation"));
+        final FeaturePlan label = compile(SOURCES, withEncoding(reads).replace("output:\n", "output:\n  roles: {label: price_surprise}\n"));
+        Assertions.assertFalse(label.getDiagnostics().hasErrors(), label::describe);
+        Assertions.assertEquals(OutputColumn.Status.label, column(label, "price_surprise").getStatus());
+
+        // forward: the copula and its marginals walk forward together, the outcome's lag delays the readable blocks
+        final FeaturePlan forward = compile(SOURCES, withEncoding(block.replace("    outputs:", "    fit: {mode: forward, blocks: {size: P7D}, align: procrustes}\n        outputs:")));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        final Map<String, String> k = column(forward, "cop_cond_start_price_given_quantity").getCoordinates();
+        Assertions.assertEquals("forward", k.get("fit"));
+        Assertions.assertEquals(Long.toString(7 * 86_400_000L), k.get("blockSizeMillis"));
+        Assertions.assertNotEquals("0", k.get("forwardLagMillis"), "the fit reads the outcome's score");
+        Assertions.assertEquals("forward", column(forward, "cop_z_start_price").getCoordinates().get("fit"));
+        Assertions.assertEquals("0", column(forward, "cop_z_start_price").getCoordinates().get("forwardLagMillis"));
+        // fit.align: reported once, for the copula (it has no gauge), not for every marginal
+        Assertions.assertTrue(hasCode(forward, "copula.fit.align"), forward::describe);
+        Assertions.assertFalse(hasCode(forward, "quantileTransform.fit.align"), forward::describe);
+    }
 }

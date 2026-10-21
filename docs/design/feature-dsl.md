@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), transitionStats, spectralEmbedding, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), copula (the Gaussian copula of a few numeric inputs), transitionStats, spectralEmbedding, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -977,6 +977,36 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
 - Third-order and higher (HOFM / ANOVA kernels) wait for evidence from the r matrix / tree embeddings
   and are reserved as future `variant` values.
 
+```yaml
+- name: price_rel
+  scope: population
+  type: copula                   # Gaussian copula: quantile-transformed marginals + the correlation of their normal scores
+  inputs: [start_price, quantity, current_bid_t10]
+  outputs:
+    - conditional                # each input's position given the others (standard normal under the model)
+    - {conditional: start_price, given: [quantity]}
+    - jointRank                  # χ²(k) CDF of zᵀR⁻¹z: how atypical the combination is
+    - logDensity                 # log c(u): what the dependence alone makes of the combination
+  fit: {mode: forward, blocks: {bucket: month}}
+```
+
+**Copula (implemented, family `gaussian`).** Sklar's decomposition taken literally: the marginals are quantile
+transforms (expanded per input as synthetic `quantileTransform` blocks with normal scores, or declared by the user and
+read with `marginals: scores`), the dependence is the correlation `R` of the scores, solved from their moments — the
+two-step (IFM) estimate, which under `forward` is leak-free in time: a block's moments are those of the scores its
+rows read, each scored with the marginals of its own readable window, and a row whose marginal scores are still
+null takes no part (the marginals' warm-up is the copula's). `R` is shrunk towards the identity (OAS by default:
+the intensity follows from `R` and n alone for Gaussian data, which normal scores are) and its eigenvalues are
+floored, so every readout stays finite. The readouts are properties of the relation between the inputs, invariant
+under monotone transforms of each: `conditional` (`(z_j − r_jS R_SS⁻¹ z_S) / sqrt(1 − r_jS R_SS⁻¹ r_Sj)`, and
+`conditionalProb` = its Φ, the conditional copula `C(u_j | u_S)`), `jointRank` and `logDensity`; a missing input is
+marginalised out (the sub-matrix of `R`). A readout reads on the row only the scores it is computed from, so an
+outcome among the inputs shapes the fit (forward lag, static-fit caveat) while a readout that does not read it on
+the row stays a feature, and one that does is a margin-free normalised label. Left out by design: Archimedean
+families (one exchangeable parameter cannot express mixed-sign dependence among three or more inputs), the `t`
+family (its fit iterates over the rows instead of solving their moments — rejected with `copula.family`), vine
+constructions and Monte Carlo readouts (aggregates of a simulated portfolio are not row features).
+
 Every population definition carries fit metadata (top-level defaults + per-block overrides).
 `mode: expanding` computes statistics from data up to each row's time (the generalisation of ordered
 target statistics); `mode: fold` fits on out-of-fold data; `mode: static` fits once on the whole input;
@@ -996,14 +1026,14 @@ read* — and the model is what the merged state of those blocks solves to:
 | `mode: forward` | the complete blocks before the row whose inputs are known at predictAt — never the row's own block |
 | `mode: forward` + `window: P2Y` | of those, the blocks within the window (rounded up to whole blocks): the fit forgets |
 | `minBlocks: n` / `minHistory: P180D` | the row reads null until that many preceding blocks carry data |
-| `minRows: n` | lookup fits only (`smooth` / `svd` / `quantileTransform` / `spectralEmbedding`): a fit — one window's, or the whole input's under `static` — that fewer rows contributed to is not solved, and its rows read null. Blocks are cut from the epoch, so an input's first block is a fraction of one. Default: a `smooth` needs one row more than it has coefficients, the others have no floor; `0` = off |
+| `minRows: n` | lookup fits only (`smooth` / `svd` / `quantileTransform` / `copula` / `spectralEmbedding`): a fit — one window's, or the whole input's under `static` — that fewer rows contributed to is not solved, and its rows read null. Blocks are cut from the epoch, so an input's first block is a fraction of one. Default: a `smooth` needs one row more than it has coefficients, a `copula` one more than its inputs, the others have no floor; `0` = off |
 | `align: procrustes \| sign \| none` | `svd` / `spectralEmbedding` under `forward`: every fit is brought into the coordinates of the fit before it. An eigendecomposition leaves the signs and the rotations inside close eigenvalues open, and the static rule (largest loading positive) is discontinuous across re-fits: columns flip and mix between blocks while the subspace hardly moves. `procrustes` (default) rotates, `sign` flips, `none` keeps the per-fit rule. Forward in time only; the whole-input model ends the chain. A column is then a stable coordinate of the fitted subspace, not its k-th eigenvector |
 | `mode: fold` | every fold but the row's own (not leak-free in time: other folds include later events) |
 | `mode: fold` + `fold: {by: time, purge, embargo, until}` | every block but `[b − purge, b + purge + embargo]` around the row's block `b` — the purged, embargoed cross-validation of time series (the purge is two-sided: label windows overlap both ways; the embargo is an extra buffer after it); `purge` defaults to the horizon of the label the target reads. `until` ends the training period: the cross-fit stays within the blocks up to it, and a row of a later block reads forward (the blocks before its usable one, as `mode: forward`) — one batch yields out-of-fold training values and walk-forward evaluation values |
 
 `blocks` (`bucket: year | quarter | month | week | day`, or `size: <duration>`, default `P90D`), `window`, `minBlocks`
 / `minHistory` / `minRows` are semantic parameters (in the plan hash). Support by type: `encoding` — all modes (`forward` for the
-statistics derived from (n, Σy, Σy²)); `svd`, `quantileTransform` — `static | forward`, exact in both (an svd from the
+statistics derived from (n, Σy, Σy²)); `svd`, `quantileTransform`, `copula` — `static | forward`, exact in both (an svd or a copula from the
 merged moments, a quantile transform from the very values of the readable blocks); `discretize`, `factorization` —
 `static`. A block that declares no `mode` of its own follows a top-level `fit: {mode: forward}` when its type supports
 it, so a spec walks forward as a whole; `fit: {mode: static}` on the block opts out, with an info saying that this

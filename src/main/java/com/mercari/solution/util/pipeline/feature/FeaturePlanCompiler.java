@@ -2960,6 +2960,10 @@ public final class FeaturePlanCompiler {
             expandSmooth(def, computeAt);
             return;
         }
+        if ("copula".equals(def.type)) {
+            expandCopula(def, computeAt);
+            return;
+        }
         if ("transitionStats".equals(def.type)) {
             expandTransitionStats(def, computeAt);
             return;
@@ -3448,6 +3452,263 @@ public final class FeaturePlanCompiler {
             // the curve reads the targets of other rows (through the fit); the residual also reads the row's own
             if (residual) addSelfInput(c, def.target);
             addPastInput(c, def.target);
+            finishStaticFitted(c, def);
+            register(c);
+        }
+    }
+
+    /**
+     * §4.4 copula: the Gaussian copula of a few numeric inputs. The marginals are quantile transforms expanded as
+     * synthetic {@code quantileTransform} blocks ({@code <name>_z_<input>}, intermediate, normal scores) under the block's
+     * own fit geometry — or, with {@code marginals: scores}, the inputs are taken as normal scores already — and the
+     * block fits the correlation of the score vectors from their moments (the svd family). One FLOAT64 column per
+     * readout ({@link Copula}): {@code conditional} / {@code conditionalProb} of an input given others, {@code jointRank},
+     * {@code logDensity}. A readout reads on the row only the scores it is computed from, so its availability is theirs;
+     * the fit reads every score from the past rows (an outcome input delays a forward fit like a target).
+     */
+    private void expandCopula(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        boolean valid = true;
+        if (!def.copulaUnknown.isEmpty()) {
+            diagnostics.error("copula.parameters", loc, "not understood: " + def.copulaUnknown
+                    + " (family: gaussian; marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
+                    + " outputs: [jointRank | logDensity | conditional | conditionalProb | {conditional | conditionalProb: <input>, given: [...], as: <name>}"
+                    + " | {jointRank | logDensity: true, as: <name>}])");
+            valid = false;
+        }
+        final String family = def.copulaFamily == null ? Copula.GAUSSIAN : def.copulaFamily;
+        switch (family) {
+            case Copula.GAUSSIAN -> { }
+            case "t" -> {
+                diagnostics.error("copula.family", loc, "family t is not implemented yet (gaussian is available): its fit iterates over the rows rather than solving their moments");
+                valid = false;
+            }
+            default -> {
+                diagnostics.error("copula.family", loc, "family must be gaussian: " + family);
+                valid = false;
+            }
+        }
+        // the inputs: distinct numeric fields / columns, at least two
+        final List<String> inputs = def.inputs;
+        if (def.input != null) {
+            diagnostics.error("copula.inputs", loc, "copula takes 'inputs' (two or more numeric fields / columns), not 'input'");
+            return;
+        }
+        if (inputs.size() < 2 || inputs.size() > Copula.MAX_INPUTS) {
+            diagnostics.error("copula.inputs", loc, "copula requires 2 to " + Copula.MAX_INPUTS + " 'inputs' (numeric fields / columns): " + inputs.size() + " given");
+            return;
+        }
+        if (new LinkedHashSet<>(inputs).size() != inputs.size()) {
+            diagnostics.error("copula.inputs", loc, "copula inputs must be distinct: " + inputs);
+            return;
+        }
+        final List<Ref> refs = new ArrayList<>();
+        for (final String input : inputs) {
+            final Ref ref = resolve(input);
+            if (ref == null) {
+                diagnostics.error("reference.unknown", loc, "unknown field: " + input);
+                return;
+            }
+            if (!OperatorCatalog.isNumeric(ref.type())) {
+                diagnostics.error("copula.inputs", loc, "copula input '" + input + "' must be numeric");
+                valid = false;
+            }
+            refs.add(ref);
+        }
+        // two spellings of one column (zp, blk.zp) are one input: R would be singular and the readouts repeated
+        if (refs.stream().map(Ref::canonical).distinct().count() != refs.size()) {
+            diagnostics.error("copula.inputs", loc, "copula inputs must be distinct columns: " + inputs + " name one column twice");
+            return;
+        }
+        // shrink / eigenFloor: what keeps R⁻¹ finite with few rows or strongly related inputs
+        String shrink = Copula.OAS;
+        if (def.shrink != null && !Copula.OAS.equals(def.shrink) && !Copula.NONE.equals(def.shrink)) {
+            try {
+                final double declared = Double.parseDouble(def.shrink.trim());
+                if (!(declared >= 0 && declared < 1)) throw new NumberFormatException();
+                shrink = Double.toString(declared);
+            } catch (final NumberFormatException e) {
+                diagnostics.error("copula.shrink", loc, "shrink must be oas | none | a number in [0, 1): " + def.shrink);
+                valid = false;
+            }
+        } else if (def.shrink != null) {
+            shrink = def.shrink;
+        }
+        final double eigenFloor = def.eigenFloor == null ? Copula.DEFAULT_EIGEN_FLOOR : def.eigenFloor;
+        if (!(eigenFloor > 0 && eigenFloor < 1)) {
+            diagnostics.error("copula.eigenFloor", loc, "eigenFloor must be in (0, 1): " + eigenFloor);
+            valid = false;
+        }
+        // the marginals: expanded quantile transforms, or the inputs are scores already
+        final int bins = def.marginalBins == null ? QuantileTransform.DEFAULT_BINS : def.marginalBins;
+        final double clip = def.marginalClip == null ? Copula.DEFAULT_MARGINAL_CLIP : def.marginalClip;
+        if (def.marginalsScores) {
+            for (int i = 0; i < inputs.size(); i++) {
+                final OutputColumn column = refs.get(i).column();
+                if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))) {
+                    diagnostics.warning("copula.marginals", loc, "marginals: scores reads '" + inputs.get(i) + "' as a normal score, but it is not a quantileTransform"
+                            + " column with distribution: normal - the copula assumes N(0, 1) scores (it standardises them, but not their shape)");
+                }
+            }
+        } else {
+            if (bins < 2) {
+                diagnostics.error("copula.marginals", loc, "marginals.bins must be >= 2");
+                valid = false;
+            }
+            if (!(clip > 0 && clip < 0.5)) {
+                diagnostics.error("copula.marginals", loc, "marginals.clip must be a probability in (0, 0.5): " + clip);
+                valid = false;
+            }
+        }
+        // the readouts: indices into the inputs, validated once
+        final List<FeatureSpec.CopulaOutput> declared = def.copulaOutputs.isEmpty()
+                ? List.of(new FeatureSpec.CopulaOutput("conditional", null, null, null)) : def.copulaOutputs;
+        final List<FeatureSpec.CopulaOutput> outputs = new ArrayList<>();
+        for (final FeatureSpec.CopulaOutput o : declared) {
+            if (FeatureSpec.CopulaOutput.CONDITIONAL_KINDS.contains(o.kind()) && o.of() == null) {
+                // a bare conditional: every input given the others
+                for (final String input : inputs) outputs.add(new FeatureSpec.CopulaOutput(o.kind(), input, null, null));
+            } else {
+                outputs.add(o);
+            }
+        }
+        final List<String[]> readouts = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (final FeatureSpec.CopulaOutput o : outputs) {
+            final String name;
+            String of = null;
+            String given = null;
+            if (FeatureSpec.CopulaOutput.JOINT_KINDS.contains(o.kind())) {
+                name = o.as() != null ? o.as() : def.name + "_" + o.kind().toLowerCase(Locale.ROOT);
+            } else {
+                final int j = inputs.indexOf(o.of());
+                if (j < 0) {
+                    diagnostics.error("copula.outputs", loc, o.kind() + " of '" + o.of() + "' is not one of the inputs " + inputs);
+                    valid = false;
+                    continue;
+                }
+                final List<Integer> conditioning = new ArrayList<>();
+                if (o.given() == null) {
+                    for (int i = 0; i < inputs.size(); i++) if (i != j) conditioning.add(i);
+                } else {
+                    if (o.given().isEmpty()) {
+                        diagnostics.error("copula.given", loc, o.kind() + " of '" + o.of() + "': given must list at least one input (omit it to condition on every other input)");
+                        valid = false;
+                        continue;
+                    }
+                    for (final String g : o.given()) {
+                        final int i = inputs.indexOf(g);
+                        if (i < 0 || i == j || conditioning.contains(i)) {
+                            diagnostics.error("copula.given", loc, o.kind() + " of '" + o.of() + "': given '" + g + "' must be another input, listed once (inputs: " + inputs + ")");
+                            valid = false;
+                            continue;
+                        }
+                        conditioning.add(i);
+                    }
+                }
+                of = Integer.toString(j);
+                given = String.join(",", conditioning.stream().map(i -> Integer.toString(i)).toList());
+                if (o.as() != null) {
+                    name = o.as();
+                } else {
+                    final String segment = "conditional".equals(o.kind()) ? "_cond_" : "_condprob_";
+                    name = def.name + segment + displayName(o.of())
+                            + (o.given() == null ? "" : "_given_" + String.join("_", o.given().stream().map(FeaturePlanCompiler::displayName).toList()));
+                }
+            }
+            if (!seen.add(name)) {
+                diagnostics.error("copula.outputs", loc, "two readouts are named '" + name + "' - name one of them with as:");
+                valid = false;
+                continue;
+            }
+            readouts.add(new String[]{name, o.kind(), of, given});
+        }
+        final int errorsBefore = diagnostics.get(Diagnostics.Level.error).size();
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "copula", "the correlation is fitted", "the correlation of the normal scores solved from their moments", true);
+        warnAlignIgnored(def, "copula");
+        // a fit error stops here: the marginals would re-parse the same fit and report it again under blocks never declared
+        if (diagnostics.get(Diagnostics.Level.error).size() > errorsBefore) valid = false;
+        if (!valid) return;
+
+        // the score columns the block fits: the synthetic marginals, under the block's fit geometry (fit.align is the
+        // copula's to warn about, and it has no gauge)
+        final List<String> scores = new ArrayList<>();
+        if (def.marginalsScores) {
+            for (final String input : inputs) scores.add(canonicalOf(input));
+        } else {
+            final JsonObject marginalFit = parseJsonObject(def.fitJson);
+            if (marginalFit != null) marginalFit.remove("align");
+            for (int i = 0; i < inputs.size(); i++) {
+                final String input = inputs.get(i);
+                final FeatureDef marginal = new FeatureDef();
+                // named by the canonical column, which is unique: two inputs s.mean / t.mean share a display name
+                marginal.name = def.name + "_z_" + refs.get(i).canonical().replace('.', '_');
+                marginal.scope = Scope.population;
+                marginal.type = "quantileTransform";
+                marginal.input = input;
+                marginal.bins = bins;
+                marginal.distribution = QuantileTransform.NORMAL;
+                marginal.clip = clip;
+                marginal.fitJson = marginalFit == null ? null : marginalFit.toString();
+                marginal.validFor = def.validFor;
+                expandQuantileTransform(marginal, computeAt);
+                final OutputColumn column = columnsByCanonical.get(marginal.name);
+                if (column == null) return; // reported by the quantile transform
+                column.intermediate = true;
+                scores.add(column.canonicalName);
+            }
+            diagnostics.info("copula.marginals", loc, "the marginals are " + inputs.size() + " quantileTransform blocks " + def.name + "_z_<input> (normal scores, "
+                    + bins + " intervals, clip " + clip + ", intermediate) under the block's fit");
+        }
+
+        final int d = inputs.size();
+        final int minRows = fitSpec.minRows == null ? d + 1 : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, fitSpec.minRows == null ? "one more than the " + d + " inputs" : null);
+        final boolean forward = fitSpec.mode == FitMode.forward;
+        boolean outcome = false;
+        for (final Ref ref : refs) outcome |= isOutcomeLike(ref);
+        final String what = "copula fits the correlation of " + d + " normal scores from (n, sum z, sum zz^T) (shrinkage " + shrink + ", eigenvalue floor " + eigenFloor + ")";
+        if (forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves it over the complete blocks"
+                    + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose inputs are known at predictAt (the row's own block excluded)"
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + minRowsPhrase
+                    + "; a row whose marginal scores are still null (their own minBlocks) takes no part in the fit, so the marginals' warm-up is the copula's too"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input correlation is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+        } else {
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
+                    + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the correlation (static-fit caveat): fit.mode forward reads the earlier time blocks only" : ""));
+        }
+
+        final String fields = String.join(",", scores);
+        for (final String[] r : readouts) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "copula", r[0], Schema.FieldType.FLOAT64, computeAt);
+            c.fitted = true;
+            c.coordinates.put("fit", forward ? "forward" : "static");
+            if (forward) {
+                // the lag of the inputs, as for the marginals: a past row's score is known once its input is (the
+                // score column's own availability is floored at computeAt, which would delay the blocks further)
+                forwardCoordinates(c, null, inputs, def, fitSpec);
+                c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            }
+            c.coordinates.put("fields", fields);
+            c.coordinates.put("output", r[1]);
+            if (r[2] != null) c.coordinates.put("of", r[2]);
+            if (r[3] != null) c.coordinates.put("given", r[3]);
+            c.coordinates.put("shrink", shrink);
+            c.coordinates.put("eigenFloor", Double.toString(eigenFloor));
+            if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+            if (fitSpec.refit) c.coordinates.put("refit", "true");
+            if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
+            // the row side reads the scores the readout is computed from; the fit reads every score of past rows
+            if (r[2] == null) {
+                for (final String s : scores) addSelfInput(c, s);
+            } else {
+                addSelfInput(c, scores.get(Integer.parseInt(r[2])));
+                if (!r[3].isEmpty()) for (final String i : r[3].split(",")) addSelfInput(c, scores.get(Integer.parseInt(i)));
+            }
+            for (final String s : scores) addPastInput(c, s);
             finishStaticFitted(c, def);
             register(c);
         }

@@ -112,6 +112,7 @@ public final class OperatorCatalog {
         register(Scope.population, "quantileTransform", InputKind.numeric, F64, true, "empirical CDF position (or normal score) of a value, quantile knots fitted on the whole input");
         register(Scope.population, "discretize", InputKind.numeric, I64, true, "fitted discretization (v1)");
         register(Scope.population, "smooth", InputKind.numeric, F64, true, "smooth curve of a target over a numeric key (penalised B-splines, strength by REML), solved from the input's moments");
+        register(Scope.population, "copula", InputKind.numeric, F64, true, "Gaussian copula of a few numeric inputs (quantile-transformed marginals, the correlation of their normal scores): conditional positions, joint atypicality, the dependence's log density");
         register(Scope.population, "factorization", InputKind.categorical, F64, true, "factorization machine (v1)");
     }
 
@@ -282,7 +283,7 @@ public final class OperatorCatalog {
     }
 
     /** Population types implemented by the engine; the other registered ones parse but fail compilation. */
-    public static final List<String> IMPLEMENTED_POPULATION_TYPES = List.of("encoding", "factorization", "discretize", "quantileTransform", "svd", "smooth", "transitionStats", "spectralEmbedding");
+    public static final List<String> IMPLEMENTED_POPULATION_TYPES = List.of("encoding", "factorization", "discretize", "quantileTransform", "svd", "smooth", "copula", "transitionStats", "spectralEmbedding");
 
     public static boolean isImplemented(final Scope scope, final String name) {
         if (scope != Scope.population) return get(scope, name) != null;

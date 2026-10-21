@@ -299,6 +299,36 @@ explain, one float64 `<name>_resid_<input>` per input **in input units** (`x −
 needs named `inputs`, not an array — `svd.outputs`); `residualNorm` = `<name>_residnorm`, its Euclidean length
 (arrays too). Null wherever the scores are null; 0 when `rank` equals the vector length.
 
+### `type: copula` (static, or forward per time block)
+
+`inputs` (2 to 31 distinct numeric fields / columns), `family: gaussian` (the only one; `t` is rejected),
+`marginals: {bins, clip}` (default `{bins: 100, clip: 0.001}`: one `quantileTransform` with `distribution: normal` is
+expanded per input as the intermediate column `<name>_z_<input>`, under the block's `fit`) or `marginals: scores` (the
+inputs are your own normal-score columns; a warning names one that is not a normal quantileTransform), `shrink: oas |
+none | <number in [0, 1)>` (default `oas`: the correlation is shrunk towards the identity by an intensity that follows
+from the correlation and the row count), `eigenFloor` (default `1e-6`), `outputs` (default `[conditional]`):
+
+- `conditional` → `<name>_cond_<input>` for every input, given all the others; `{conditional: x, given: [a, b]}` →
+  `<name>_cond_x_given_a_b`: `(z_x − E[z_x | z_S]) / sd(z_x | z_S)` in the Gaussian copula — standard normal under the
+  model (0 = where the others put it). `conditionalProb` (bare or with `of` / `given`) → `<name>_condprob_…` = its Φ,
+  in (0, 1); a tree model splits the tails of `conditional` more finely.
+- `jointRank` → `<name>_jointrank`: the χ²(k) CDF of `zᵀR⁻¹z` — how atypical the combination is as a whole.
+- `logDensity` → `<name>_logdensity`: `log c(u)` — the dependence alone; negative when the inputs disagree with how they
+  usually move together, whatever each input's own extremeness.
+- `as:` names a readout's column: on a conditional entry, or on a joint one written `{jointRank: true, as: <name>}` /
+  `{logDensity: true, as: <name>}`.
+
+Invariant under a monotone transform of any input (exactly when the marginal has a knot per distinct value). The fit
+uses complete score vectors only (`fit.minRows` default: inputs + 1; an input with a single value / one mass point
+leaves nothing fitted); at read time a missing input is marginalised out (a `conditional` whose own input is missing
+reads null). A readout reads on the row only the scores it uses, so an outcome input is read through the fit only by
+a readout that does not list it — such a readout is a feature (use `fit.mode: forward`: a static fit has seen every
+training row's own outcome); one that reads it is an outcome (`availability.violation`, or a normalised label under
+`output.roles.label`). Under `forward` the marginals walk forward with the copula and a row whose scores are still
+null (the marginals' warm-up) takes no part in the copula fit; `fit.window` forgets, `fit.align` is ignored. No tail
+dependence (Gaussian): joint extremes beyond what the overall correlation implies are invisible. Artifact
+`<block>.copula.json` (means, sds, shrinkage, correlation), plus one `<name>_z_<input>.quantiles.json` per marginal.
+
 ### `type: smooth` (static, or forward per time block)
 
 `input` (numeric key), `target` (numeric / boolean field or column), `range: [lo, hi]` (required — the knots are

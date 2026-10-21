@@ -39,7 +39,8 @@ Supports:
   **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
   normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
   **smooth**: the curve of a target over a numeric key (penalised B-splines, strength by REML) and the
-  target's residual from it. **transitionStats** / **spectralEmbedding**: over the values an entity takes one
+  target's residual from it. **copula**: the Gaussian copula of a few numeric inputs — an input's position
+  given the others, how atypical the combination is, the dependence's log density. **transitionStats** / **spectralEmbedding**: over the values an entity takes one
   after another — the shrunk distribution of the next value given the previous one(s), and coordinates of a
   categorical state from its co-occurrences (PPMI + spectral factorisation).
 - **Leakage checking** — every column carries a derived availability time and lineage (source, kind,
@@ -836,14 +837,14 @@ empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` give
 
 `minBlocks` / `minHistory` count blocks, not rows — and blocks are cut from the epoch, so the input's first block is
 usually a fraction of one, and on a sparse key (a field that is mostly null) even a full block may hold a handful of
-rows. **`minRows`** is the floor in rows for the lookup fits (`smooth`, `svd`, `quantileTransform`,
+rows. **`minRows`** is the floor in rows for the lookup fits (`smooth`, `svd`, `quantileTransform`, `copula`,
 `spectralEmbedding`; a block's own `fit.minRows` wins over the top-level one): a fit — one window's under `forward`,
 the whole input's under `static` — that fewer rows contributed to is not solved, and the rows that would read it
 read null. It counts the rows that entered the fit (a key and a target for a curve, a complete vector for svd, a
 non-null value for a quantile transform, a value with at least one previous value for an embedding). Default: a
 `smooth` needs one row more than it has coefficients (`segments + degree + 1` — with fewer the penalty alone decides
 the curve, and with exactly as many the unpenalised fit interpolates the rows, leaving no residual degree of freedom
-to estimate the noise from); the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
+to estimate the noise from), a `copula` one more than its inputs; the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
 emptied (`forward fit over … change point(s), n of them with fewer than fit.minRows …`). Encodings ignore it: a thin
 level is shrunk towards its parent instead (`encoding.fit.minRows` warning on a block that declares one). Part of the
 plan hash when declared. A fit the floor empties writes no artifact, so a later run with enough rows still fits.
@@ -852,8 +853,8 @@ plan hash when declared. A fit the floor empties writes no artifact, so a later 
 system (`procrustes` by default) — see *Alignment of forward fits* under *SVD / PCA*; the other fits have no such
 freedom and ignore it (`<type>.fit.align` warning on a block that declares one).
 
-A `type: svd`, `type: quantileTransform`, `type: smooth` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
-*Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
+A `type: svd`, `type: quantileTransform`, `type: smooth`, `type: copula` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
+*Quantile transform*, *Smooth curve* and *Copula*); the other population types (factorization / discretize) are always static and are
 unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
@@ -1220,6 +1221,102 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
 - **The residual alone.** `outputs: [residual]` emits no curve column. It is the form to use when the *key* is
   known only after the event (a closing price): its curve would be an `availability.violation` as an output, while
   the residual — the target net of that key's curve — is consumed as an encoding target like any other.
+
+### Copula (population, type: copula)
+
+```yaml
+  - name: price_rel
+    scope: population
+    type: copula
+    inputs: [start_price, quantity, current_bid_t10]   # 2 to 31 numeric fields / columns
+    # family: gaussian                 # the only family implemented (t is rejected: copula.family)
+    marginals: {bins: 100, clip: 0.001} # quantile transforms expanded per input (the defaults); or: marginals: scores
+    shrink: oas                        # oas (default) | none | a number in [0, 1): R <- (1 - λ) R + λ I
+    eigenFloor: 1.0e-6                 # the smallest eigenvalue R keeps (default 1e-6)
+    outputs:                           # default: [conditional] = every input given the others
+      - conditional                    # price_rel_cond_<input> for every input
+      - {conditional: start_price, given: [quantity]}         # price_rel_cond_start_price_given_quantity
+      - {conditionalProb: current_bid_t10, as: bid_given_rest} # Φ of the conditional position
+      - jointRank                      # price_rel_jointrank
+      - logDensity                     # price_rel_logdensity
+      # - {jointRank: true, as: atypical} # a joint readout under a name of its own
+    fit: {mode: forward, blocks: {bucket: month}, window: P2Y, artifact: {uri: "gs://bucket/features"}}  # static | forward
+```
+
+A copula separates a multivariate distribution into its **marginals** (each input on its own) and its **dependence**
+(how the inputs move together). The block takes the marginals as quantile transforms — every input becomes its normal
+score `z = Φ⁻¹(F(x))` — and fits the dependence of those scores as one correlation matrix `R` (the Gaussian copula).
+What a row reads is then a property of the *relation* between its inputs, not of their scales: any monotone
+transform of an input (a log, a price in another currency, a rank) leaves every output the same (exactly when the
+marginal has a knot per distinct value, up to the interpolation between knots otherwise), heavy tails and outliers
+are ranks, and under `forward` every output stays calibrated as the inputs drift.
+
+| output | column | value |
+|---|---|---|
+| `conditional` (bare) | `<name>_cond_<input>` per input | the input's position given **all** the other inputs |
+| `{conditional: x, given: [a, b]}` | `<name>_cond_x_given_a_b` | `(z_x − r_xS R_SS⁻¹ z_S) / sqrt(1 − r_xS R_SS⁻¹ r_Sx)` over S = the `given` inputs — standard normal under the model: 0 = where the others put it, +2 = two standard deviations higher than they imply |
+| `conditionalProb` (bare or `{conditionalProb: x, given}`) | `<name>_condprob_…` | `Φ` of the conditional position: the conditional copula `C(u_x \| u_S)` in (0, 1). For a tree model prefer `conditional` — a probability squeezes the tails near 0 and 1 |
+| `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects). The lower tail is computed directly, so a row near the centre reads a small probability with its digits, not 0 |
+| `logDensity` | `<name>_logdensity` | `log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z`: what the dependence alone makes of the combination — positive when it is more common than independent inputs would make it, negative when the inputs disagree with how they usually move together. Unlike `jointRank` it ignores how extreme each input is on its own |
+
+`as:` names a readout's column (its full name, without the prefix) — on a conditional entry, or on a joint readout
+written `{jointRank: true, as: <name>}` / `{logDensity: true, as: <name>}`; two readouts with one name are an error
+(`copula.outputs`). `given` lists other inputs, each once (`copula.given`); omit it to condition on every other
+input.
+
+- **Marginals.** By default every input gets a `quantileTransform` block of its own, named `<name>_z_<input>`
+  (normal scores, `bins` intervals, probability clamp `clip` — default `0.001`, so an extreme row reads at most
+  ±3.09 rather than ±4.75; intermediate, not emitted; their artifacts sit next to the copula's). They take the
+  copula block's `fit` (mode, blocks, window, minBlocks, artifact): one fit stage for the marginals, one after it for
+  the copula. `marginals: scores` takes the inputs as normal scores already — quantileTransform columns with
+  `distribution: normal` declared by you, so their settings are shared with other uses (a `copula.marginals`
+  warning names an input that is not one; the copula standardises its scores but cannot fix their shape).
+- **Fit.** The correlation is solved from the moments of the score vectors (n, Σz, Σzzᵀ) — the state an svd keeps,
+  one Combine per time block, nothing gathered on one worker. The scores are standardised with their fitted mean and
+  standard deviation (≈ 0 and 1 for in-sample marginals), and `R` is shrunk towards the identity: with
+  `shrink: oas` (default) by the Oracle Approximating Shrinkage intensity, computed from `R` and the number of
+  rows alone (Chen, Wiesel, Eldar and Hero 2010; derived for Gaussian data, which normal scores are) — strong with
+  few rows or unrelated inputs, negligible with many rows and real dependence; a number fixes λ, `none` switches it
+  off. Eigenvalues below `eigenFloor` are then raised to it, so `R⁻¹` exists and every readout stays finite even with
+  two near-identical inputs. The artifact `<planHash>/<block>.copula.json` holds the dimension, n, the means and
+  standard deviations, the shrinkage method and value, the number of floored eigenvalues and `R`.
+- **Rows that enter the fit.** Only complete score vectors: a row with a missing input (null / NaN) takes no part
+  (as in svd). `fit.minRows` defaults to the number of inputs + 1; an input without spread (a single value, one mass
+  point) leaves nothing fitted and every readout null (the run log says which input).
+- **Missing inputs at read time** are marginalised out: the Gaussian copula of the observed inputs is the one with
+  the sub-matrix of `R`, so a `conditional` conditions on the observed part of `given`, and `jointRank` /
+  `logDensity` run over the observed inputs (k = how many there are). A `conditional` whose own input is missing
+  reads null; with none of `given` observed it reads the input's own standardised score. The solved systems depend
+  only on which inputs a row has and are cached per pattern, so a row costs a few dot products.
+- **Availability.** A readout reads on the row only the scores it is computed from (the input and its `given` for
+  `conditional`, every input for `jointRank` / `logDensity`), and the fit reads every score of the past rows. An
+  outcome among the inputs therefore shapes the fit — a static fit says so (`fit.mode.static` info, the static-fit
+  caveat: each training row's own outcome is one of the rows behind `R`; with d² parameters this is far milder than
+  a per-key encoding, but only `forward` is leak-free) and a forward fit's readable blocks are delayed by the
+  outcome's settlement and ingestion lag — while a readout that does not read it on the row is a feature. A readout
+  that does read it (`{conditional: final_price}`) is an outcome itself: an `availability.violation` as a feature,
+  or a margin-free normalised label when declared as `output.roles.label` (how far above what its attributes imply
+  the item sold).
+- **Forward.** Under `fit.mode: forward` the marginals and the copula walk forward together: a row reads the
+  correlation solved over the complete blocks before it (within `fit.window`) whose inputs are known at predictAt.
+  The moments of a block are those of the scores its rows read — each scored with the marginals of *its* readable
+  window — so the copula is the dependence of the walk-forward scores a model downstream actually sees. A row whose
+  marginal scores are still null (the marginals' own `minBlocks` / `minHistory`, or a window without values) takes
+  no part in any copula fit, so **the marginals' warm-up is the copula's too**; a copula-level `minBlocks` /
+  `minRows` lengthens it. `fit.window` forgets old blocks; there is no exponential down-weighting. Unlike svd the
+  readouts have no basis to align across re-fits (`fit.align` is ignored, `copula.fit.align` warning). The artifact
+  holds the whole-input correlation for a static serving run; it is solved from the forward scores, which match the
+  whole-input marginals' scores when the inputs do not drift.
+- **What a Gaussian copula cannot see.** It has no tail dependence: two inputs that crash together more often than
+  their overall correlation implies look like any other pair with that correlation. `conditional` is linear in the
+  scores (a rank-space regression), so a relation that is not monotone is invisible to it.
+- **Cost.** The state is d² numbers per time block; the fit inverts at most a d × d matrix per change point; a row is
+  a few dot products per readout. `fold` / `expanding` are rejected (`copula.fit.mode`).
+
+Diagnostics: `copula.inputs` (fewer than two, more than 31, repeated or non-numeric inputs), `copula.family`,
+`copula.shrink`, `copula.eigenFloor`, `copula.marginals` (bins / clip out of range: error; scores that are not
+normal-score columns: warning; the expanded marginal blocks: info), `copula.outputs`, `copula.given`,
+`copula.parameters` (an unknown key in `marginals`, a top-level `bins` / `clip` / `distribution`, or an output in another shape), `copula.fit.mode`, `copula.fit.align`.
 
 ### Sequences of values (population, types: transitionStats, spectralEmbedding)
 
@@ -2266,7 +2363,7 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   and non-static fits. Discretize: non-static fits (`fit.cadence / window /
   warmStart` are accepted and ignored); quantileTransform, svd and smooth: `fold` (`static` and `forward` are implemented, `fit.cadence /
   warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). Smooth: `method: isotonic` / `rff`,
-  several inputs in one block. In `shrinkage`,
+  several inputs in one block. Copula: `family: t`, and `fold`. In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;

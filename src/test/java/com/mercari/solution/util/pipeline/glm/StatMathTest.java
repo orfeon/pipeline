@@ -29,6 +29,30 @@ public class StatMathTest {
         Assertions.assertEquals(1d, StatMath.chiSquare1UpperTail(0d));
     }
 
+    /**
+     * The lower tail computed directly: equal to 1 − the upper tail where both are representable, and with its digits
+     * near 0, where 1 − Q has none left (df = 2 has the closed form 1 − e^{−x/2}, df = 1 erf(sqrt(x / 2))).
+     */
+    @Test
+    public void testChiSquareCdf() {
+        for (final int df : new int[]{1, 2, 3, 5, 20, 60}) {
+            for (final double x : new double[]{0.05, 0.5, 1, 3, 10, 30, 80}) {
+                Assertions.assertEquals(1 - StatMath.chiSquareUpperTail(x, df), StatMath.chiSquareCdf(x, df), 1e-12, "df " + df + ", x " + x);
+            }
+        }
+        Assertions.assertEquals(0d, StatMath.chiSquareCdf(0, 3));
+        Assertions.assertEquals(0d, StatMath.chiSquareCdf(-1, 3));
+        Assertions.assertTrue(Double.isNaN(StatMath.chiSquareCdf(Double.NaN, 3)));
+        // near 0: relative precision, where 1 − Q reads 0 or noise
+        final double tiny = 1e-14;
+        Assertions.assertEquals(-Math.expm1(-tiny / 2), StatMath.chiSquareCdf(tiny, 2), 1e-12 * tiny);
+        // df = 1 near 0: erf(sqrt(x / 2)) ≈ sqrt(2x / π)
+        Assertions.assertEquals(Math.sqrt(2 * tiny / Math.PI), StatMath.chiSquareCdf(tiny, 1), 1e-6 * Math.sqrt(2 * tiny / Math.PI));
+        // a central row in 20 dimensions: P(chi2(20) <= 1) ≈ 1.7e-10, its digits intact
+        final double p = StatMath.chiSquareCdf(1, 20);
+        Assertions.assertTrue(p > 1e-10 && p < 1e-9, "P(chi2(20) <= 1) = " + p);
+    }
+
     @Test
     public void testLogChiSquareTailsPastTheUnderflow() {
         // the log of the tail where the tail itself is representable

@@ -83,20 +83,40 @@ public final class StatMath {
         return 0.5 * (lo + hi);
     }
 
+    /**
+     * P(X ≤ chi2) of a chi-square(df) statistic: the regularized lower incomplete gamma P(df / 2, chi2 / 2), computed
+     * directly — the series below a + 1, so a value near 0 keeps its digits rather than being {@code 1 − Q} — and
+     * {@code 1 − Q} by the continued fraction above it, where P is close to 1 anyway. Every df, 1 included.
+     */
+    public static double chiSquareCdf(final double chi2, final int df) {
+        if (Double.isNaN(chi2)) return Double.NaN;
+        if (chi2 <= 0) return 0d;
+        return regularizedGammaP(Math.max(1, df) / 2d, chi2 / 2d);
+    }
+
+    /** Regularized lower incomplete gamma P(a, x) = γ(a, x) / Γ(a) (Numerical Recipes gammp). */
+    static double regularizedGammaP(final double a, final double x) {
+        if (x <= 0) return 0d;
+        if (x < a + 1) return gammaPSeries(a, x);
+        return 1d - Math.exp(-x + a * Math.log(x) - logGamma(a)) * gammaQContinuedFraction(a, x);
+    }
+
+    /** The series of P(a, x) for x < a + 1. */
+    private static double gammaPSeries(final double a, final double x) {
+        double ap = a, sum = 1d / a, del = sum;
+        for (int n = 1; n < 1000; n++) {
+            ap += 1;
+            del *= x / ap;
+            sum += del;
+            if (Math.abs(del) < Math.abs(sum) * 1e-15) break;
+        }
+        return sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
+    }
+
     /** Regularized upper incomplete gamma Q(a, x) = Γ(a, x) / Γ(a) (Numerical Recipes gammq). */
     static double regularizedGammaQ(final double a, final double x) {
         if (x <= 0) return 1d;
-        if (x < a + 1) {
-            // series for P(a, x)
-            double ap = a, sum = 1d / a, del = sum;
-            for (int n = 1; n < 1000; n++) {
-                ap += 1;
-                del *= x / ap;
-                sum += del;
-                if (Math.abs(del) < Math.abs(sum) * 1e-15) break;
-            }
-            return 1d - sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
-        }
+        if (x < a + 1) return 1d - gammaPSeries(a, x);
         return Math.exp(-x + a * Math.log(x) - logGamma(a)) * gammaQContinuedFraction(a, x);
     }
 
