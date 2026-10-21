@@ -338,7 +338,8 @@ shrinkage scale:
   only its last `k` events.
 - Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
   `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
-  `quadrantAsymmetry` among the funcs: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
+  `quadrantAsymmetry` among the funcs: warning; a `maxEvents` window whose `maxEvents − lag` pairs can never fill a
+  corner: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
 ### Ratings from contests (sequence `rating`)
 

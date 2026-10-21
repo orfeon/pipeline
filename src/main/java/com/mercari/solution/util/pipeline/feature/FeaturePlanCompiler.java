@@ -1644,6 +1644,13 @@ public final class FeaturePlanCompiler {
                             if (op.q != null && !funcs.contains(RankDependence.QUADRANT_ASYMMETRY)) {
                                 diagnostics.warning("sequence.regression.q", loc, "q is read by quadrantAsymmetry only, which funcs does not list: ignored");
                             }
+                            // a maxEvents window holds at most maxEvents − lag pairs: a corner that can never reach MIN_TAIL is a column of nulls
+                            if (funcs.contains(RankDependence.QUADRANT_ASYMMETRY) && window.maxEvents != null
+                                    && (1 - q) * (window.maxEvents - lag) < RankDependence.MIN_TAIL - 1e-9) {
+                                diagnostics.warning("sequence.regression.q", loc, "quadrantAsymmetry is always null over a maxEvents " + window.maxEvents + " window"
+                                        + (lag > 0 ? " with lag " + lag : "") + ": its corner needs (1 - q) * pairs >= " + RankDependence.MIN_TAIL
+                                        + " (q " + q + " needs " + (int) Math.ceil(RankDependence.MIN_TAIL / (1 - q) - 1e-9) + " pairs) - lower q or lengthen the window");
+                            }
                             final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
                             for (final String func : funcs) {
                                 if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {
