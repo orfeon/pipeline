@@ -1582,7 +1582,8 @@ public class FeatureSpec implements Serializable {
      * The keys of a {@code type: copula} block: {@code family}, {@code marginals} ({@code scores} or {@code {bins, clip}}),
      * {@code shrink} ({@code oas} | {@code none} | a number), {@code eigenFloor} and the readouts under {@code outputs} —
      * a bare {@code jointRank} / {@code logDensity} / {@code conditional} / {@code conditionalProb} (the last two: every
-     * input given the others) or {@code {conditional | conditionalProb: <input>, given: [...], as: <name>}}. Anything in
+     * input given the others), {@code {conditional | conditionalProb: <input>, given: [...], as: <name>}} or
+     * {@code {jointRank | logDensity: true, as: <name>}}. Anything in
      * another shape lands in {@code copulaUnknown}, which the compiler reports.
      */
     private static void parseCopula(final JsonObject o, final FeatureDef def) {
@@ -1638,6 +1639,17 @@ public class FeatureSpec implements Serializable {
                 continue;
             }
             final JsonObject out = e.getAsJsonObject();
+            // {jointRank: true, as: <name>} / {logDensity: true, as: <name>}: a joint readout with its own column name
+            // (the shape of factorization's {sum: true, as: ...}); anything else beside them is not understood
+            final List<String> joint = CopulaOutput.JOINT_KINDS.stream().filter(out::has).toList();
+            if (!joint.isEmpty()) {
+                final JsonElement flag = out.get(joint.get(0));
+                final boolean declared = flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean() && flag.getAsBoolean();
+                final boolean alone = joint.size() == 1 && out.keySet().stream().allMatch(k -> k.equals(joint.get(0)) || k.equals("as"));
+                if (declared && alone) def.copulaOutputs.add(new CopulaOutput(joint.get(0), null, null, Json.string(out, "as")));
+                else def.copulaUnknown.add("outputs " + out + " (a joint readout is {" + joint.get(0) + ": true, as: <name>})");
+                continue;
+            }
             String kind = null;
             for (final String k : CopulaOutput.CONDITIONAL_KINDS) {
                 if (out.has(k)) {

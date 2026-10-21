@@ -1239,6 +1239,7 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
       - {conditionalProb: current_bid_t10, as: bid_given_rest} # Φ of the conditional position
       - jointRank                      # price_rel_jointrank
       - logDensity                     # price_rel_logdensity
+      # - {jointRank: true, as: atypical} # a joint readout under a name of its own
     fit: {mode: forward, blocks: {bucket: month}, window: P2Y, artifact: {uri: "gs://bucket/features"}}  # static | forward
 ```
 
@@ -1255,10 +1256,11 @@ are ranks, and under `forward` every output stays calibrated as the inputs drift
 | `conditional` (bare) | `<name>_cond_<input>` per input | the input's position given **all** the other inputs |
 | `{conditional: x, given: [a, b]}` | `<name>_cond_x_given_a_b` | `(z_x − r_xS R_SS⁻¹ z_S) / sqrt(1 − r_xS R_SS⁻¹ r_Sx)` over S = the `given` inputs — standard normal under the model: 0 = where the others put it, +2 = two standard deviations higher than they imply |
 | `conditionalProb` (bare or `{conditionalProb: x, given}`) | `<name>_condprob_…` | `Φ` of the conditional position: the conditional copula `C(u_x \| u_S)` in (0, 1). For a tree model prefer `conditional` — a probability squeezes the tails near 0 and 1 |
-| `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects) |
+| `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects). The lower tail is computed directly, so a row near the centre reads a small probability with its digits, not 0 |
 | `logDensity` | `<name>_logdensity` | `log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z`: what the dependence alone makes of the combination — positive when it is more common than independent inputs would make it, negative when the inputs disagree with how they usually move together. Unlike `jointRank` it ignores how extreme each input is on its own |
 
-`as:` names a readout's column (its full name, without the prefix); two readouts with one name are an error
+`as:` names a readout's column (its full name, without the prefix) — on a conditional entry, or on a joint readout
+written `{jointRank: true, as: <name>}` / `{logDensity: true, as: <name>}`; two readouts with one name are an error
 (`copula.outputs`). `given` lists other inputs, each once (`copula.given`); omit it to condition on every other
 input.
 

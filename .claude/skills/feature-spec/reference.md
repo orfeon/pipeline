@@ -315,7 +315,8 @@ from the correlation and the row count), `eigenFloor` (default `1e-6`), `outputs
 - `jointRank` → `<name>_jointrank`: the χ²(k) CDF of `zᵀR⁻¹z` — how atypical the combination is as a whole.
 - `logDensity` → `<name>_logdensity`: `log c(u)` — the dependence alone; negative when the inputs disagree with how they
   usually move together, whatever each input's own extremeness.
-- `as:` names a readout's column.
+- `as:` names a readout's column: on a conditional entry, or on a joint one written `{jointRank: true, as: <name>}` /
+  `{logDensity: true, as: <name>}`.
 
 Invariant under a monotone transform of any input (exactly when the marginal has a knot per distinct value). The fit
 uses complete score vectors only (`fit.minRows` default: inputs + 1; an input with a single value / one mass point

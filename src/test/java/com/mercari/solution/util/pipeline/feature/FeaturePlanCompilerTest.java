@@ -4635,6 +4635,17 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        marginals: {bins: 1}"))), "copula.marginals"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        marginals: {binz: 10}"))), "copula.parameters"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [mahalanobis]"))), "copula.parameters"));
+        // a joint readout named with as: (the shape of factorization's {sum: true, as: ...})
+        final FeaturePlan renamed = compile(SOURCES, withEncoding(block.replace("type: copula",
+                "type: copula\n        outputs: [{jointRank: true, as: atypical}, {logDensity: true, as: dependence}, logDensity]")));
+        Assertions.assertFalse(renamed.getDiagnostics().hasErrors(), renamed::describe);
+        Assertions.assertEquals("jointRank", column(renamed, "atypical").getCoordinates().get("output"));
+        Assertions.assertEquals("logDensity", column(renamed, "dependence").getCoordinates().get("output"));
+        Assertions.assertEquals("logDensity", column(renamed, "cop_logdensity").getCoordinates().get("output"));
+        Assertions.assertNull(renamed.getColumn("cop_jointrank"));
+        for (final String bad : List.of("{jointRank: false}", "{jointRank: yes}", "{jointRank: true, given: [quantity]}", "{jointRank: true, logDensity: true}")) {
+            Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [" + bad + "]"))), "copula.parameters"), bad);
+        }
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: sold}]"))), "copula.outputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, as: x}, {conditional: start_price, as: x}]"))), "copula.outputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        outputs: [{conditional: quantity, given: [quantity]}]"))), "copula.given"));

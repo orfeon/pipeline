@@ -103,6 +103,12 @@ public class CopulaTest {
         final double[][] l = Copula.cholesky(c.correlation);
         final double logDet = 2 * (Math.log(l[0][0]) + Math.log(l[1][1]) + Math.log(l[2][2]));
         Assertions.assertEquals(1 - StatMath.chiSquareUpperTail(form, 3), c.jointRank(boxed(raw)), 1e-9);
+        // a row at the fitted centre: the probability is tiny but keeps its digits (the χ²(3) CDF near 0 ≈ (x/2)^1.5 / Γ(2.5))
+        final double[] centre = new double[3];
+        for (int i = 0; i < 3; i++) centre[i] = c.mean[i] + 1e-6 * c.sd[i];
+        final Double near = c.jointRank(boxed(centre));
+        Assertions.assertTrue(near > 0 && near < 1e-15, "jointRank at the centre: " + near);
+        Assertions.assertEquals(StatMath.chiSquareCdf(c.quadratic(boxed(centre))[0], 3), near, 1e-12 * near);
         Assertions.assertEquals(-0.5 * logDet - 0.5 * (form - squares), c.logDensity(boxed(raw)), 1e-9);
         // independent inputs: log c = 0 everywhere
         final Copula independent = Copula.fit(moments(draws(new double[][]{{1, 0}, {0, 1}}, 200, 5)), "0.999", Copula.DEFAULT_EIGEN_FLOOR, false);

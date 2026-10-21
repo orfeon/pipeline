@@ -3472,7 +3472,8 @@ public final class FeaturePlanCompiler {
         if (!def.copulaUnknown.isEmpty()) {
             diagnostics.error("copula.parameters", loc, "not understood: " + def.copulaUnknown
                     + " (family: gaussian; marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
-                    + " outputs: [jointRank | logDensity | conditional | conditionalProb | {conditional | conditionalProb: <input>, given: [...], as: <name>}])");
+                    + " outputs: [jointRank | logDensity | conditional | conditionalProb | {conditional | conditionalProb: <input>, given: [...], as: <name>}"
+                    + " | {jointRank | logDensity: true, as: <name>}])");
             valid = false;
         }
         final String family = def.copulaFamily == null ? Copula.GAUSSIAN : def.copulaFamily;

@@ -237,7 +237,8 @@ public final class Copula implements Serializable, FitArtifact.Model {
     /** {@link #jointRank} from a row's {@link #quadratic} (null = none observed / nothing fitted). */
     static Double jointRankOf(final double[] q) {
         if (q == null) return null;
-        return 1 - StatMath.chiSquareUpperTail(q[0], (int) q[2]);
+        // the lower tail directly: a row near the centre reads a small probability with its digits, not 1 − (1 − p)
+        return StatMath.chiSquareCdf(q[0], (int) q[2]);
     }
 
     /** {@link #logDensity} from a row's {@link #quadratic} (null = none observed / nothing fitted). */
