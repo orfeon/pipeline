@@ -122,7 +122,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   `Svd.Moments` of `[B(x), y]`, read through their centred form with the target centred; `<block>.smooth.json`; a
   *reused* family, engine doc §9.6.3), `Copula` (`type: copula`: the Gaussian copula of 2–31 numeric inputs — the
   correlation of their normal scores from the same `Svd.Moments`, standardised, OAS-shrunk towards I and eigenvalue-floored;
-  readouts `conditional` / `conditionalProb` / `jointRank` / `logDensity`, a missing score marginalised out; the conditional
+  readouts `conditional` / `conditionalProb` / `expected` (no self input: the row side reads `given` alone) / `jointRank` /
+  `logDensity`, a missing score marginalised out; the conditional
   system is cached per (input, observed mask) with β kept PER INPUT INDEX — keyed by the observed set alone, two readouts
   with different `given` lists share an entry, so β must not be indexed by position in `given` (the first version was, and
   collided); `<block>.copula.json`; the marginals are synthetic `quantileTransform` blocks `<name>_z_<input>` built by

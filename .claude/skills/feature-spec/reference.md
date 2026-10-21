@@ -311,7 +311,11 @@ from the correlation and the row count), `eigenFloor` (default `1e-6`), `outputs
 - `conditional` → `<name>_cond_<input>` for every input, given all the others; `{conditional: x, given: [a, b]}` →
   `<name>_cond_x_given_a_b`: `(z_x − E[z_x | z_S]) / sd(z_x | z_S)` in the Gaussian copula — standard normal under the
   model (0 = where the others put it). `conditionalProb` (bare or with `of` / `given`) → `<name>_condprob_…` = its Φ,
-  in (0, 1); a tree model splits the tails of `conditional` more finely.
+  in (0, 1); a tree model splits the tails of `conditional` more finely. `expected` (bare or `{expected: x, given}`) →
+  `<name>_expected_…` = `E[z_x | z_S]` in x's score units (≈ N(0, 1) scores): where the others put x (null when none of
+  `given` is observed). It does not read x
+  on the row, so the expected score of an outcome given pre-event inputs is a feature (a Gaussian copula regression;
+  use forward, since the outcome shapes the fit).
 - `jointRank` → `<name>_jointrank`: the χ²(k) CDF of `zᵀR⁻¹z` — how atypical the combination is as a whole.
 - `logDensity` → `<name>_logdensity`: `log c(u)` — the dependence alone; negative when the inputs disagree with how they
   usually move together, whatever each input's own extremeness.
@@ -322,8 +326,8 @@ Invariant under a monotone transform of any input (exactly when the marginal has
 uses complete score vectors only (`fit.minRows` default: inputs + 1; an input with a single value / one mass point
 leaves nothing fitted); at read time a missing input is marginalised out (a `conditional` whose own input is missing
 reads null). A readout reads on the row only the scores it uses, so an outcome input is read through the fit only by
-a readout that does not list it — such a readout is a feature (use `fit.mode: forward`: a static fit has seen every
-training row's own outcome); one that reads it is an outcome (`availability.violation`, or a normalised label under
+a readout that does not read it on the row (one that does not list it, or `expected` of it) — such a readout is a
+feature (use `fit.mode: forward`: a static fit has seen every training row's own outcome); one that reads it is an outcome (`availability.violation`, or a normalised label under
 `output.roles.label`). Under `forward` the marginals walk forward with the copula and a row whose scores are still
 null (the marginals' warm-up) takes no part in the copula fit; `fit.window` forgets, `fit.align` is ignored. No tail
 dependence (Gaussian): joint extremes beyond what the overall correlation implies are invisible — `diagnose: true` (or

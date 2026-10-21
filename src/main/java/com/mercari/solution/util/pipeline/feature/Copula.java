@@ -30,6 +30,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>{@link #conditional}: the standardised position of input j given the observed inputs of S,
  *       {@code (z_j − r_jS R_SS⁻¹ z_S) / sqrt(1 − r_jS R_SS⁻¹ r_Sj)} — N(0, 1) under the model; {@code Φ} of it is the
  *       conditional copula {@code C_{j|S}(u_j | u_S)};</li>
+ *   <li>{@link #expected}: the conditional mean of input j's score given the observed inputs of S, in the score's own
+ *       units ({@code mean_j + sd_j r_jS R_SS⁻¹ z_S}: the Gaussian copula regression of j on S) — it does not read j;</li>
  *   <li>{@link #jointRank}: the χ²(k) CDF of {@code zᵀ R⁻¹ z} over the k observed inputs — how atypical the vector is
  *       as a whole, on a probability scale;</li>
  *   <li>{@link #logDensity}: {@code log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z} — what the dependence alone makes of
@@ -223,6 +225,31 @@ public final class Copula implements Serializable, FitArtifact.Model {
         final double zj = standardised(scores, j);
         if (Double.isNaN(zj)) return null;
         final double[] zs = new double[given.length];
+        final Conditional c = system(scores, j, given, zs);
+        return (zj - predicted(c, given, zs)) / c.sd;
+    }
+
+    /**
+     * The conditional mean of input {@code j}'s score given the observed inputs among {@code given}, in the score's own
+     * units ({@code mean_j + sd_j r_jS R_SS⁻¹ z_S}: the Gaussian copula regression of j on S), or null when nothing was
+     * fitted. It does not read j, so it is defined whether or not j is observed. With none of {@code given} observed it
+     * is null, not j's mean score: the mean carries nothing about the row and would read like a row whose inputs put j
+     * exactly at the average (as {@link #jointRank} is null with nothing observed).
+     */
+    public Double expected(final Double[] scores, final int j, final int[] given) {
+        if (isEmpty()) return null;
+        final double[] zs = new double[given.length];
+        final Conditional c = system(scores, j, given, zs);
+        boolean observed = false;
+        for (final double z : zs) observed |= !Double.isNaN(z);
+        return observed ? mean[j] + sd[j] * predicted(c, given, zs) : null;
+    }
+
+    /**
+     * The regression of j on the observed inputs among {@code given} (their standardised scores written to {@code zs},
+     * NaN = missing), solved once per observed set.
+     */
+    private Conditional system(final Double[] scores, final int j, final int[] given, final double[] zs) {
         int mask = 0;
         for (int k = 0; k < given.length; k++) {
             zs[k] = standardised(scores, given[k]);
@@ -237,9 +264,14 @@ public final class Copula implements Serializable, FitArtifact.Model {
             // the masks are up to 2^31: beyond the bound a system is solved per row instead of kept
             if (cache.size() < MAX_CACHED_SYSTEMS) cache.putIfAbsent(key, c);
         }
+        return c;
+    }
+
+    /** {@code r_jS R_SS⁻¹ z_S} over the observed scores (standardised units). */
+    private static double predicted(final Conditional c, final int[] given, final double[] zs) {
         double predicted = 0;
-        for (int k = 0; k < given.length; k++) if ((mask & (1 << given[k])) != 0) predicted += c.beta[given[k]] * zs[k];
-        return (zj - predicted) / c.sd;
+        for (int k = 0; k < given.length; k++) if (!Double.isNaN(zs[k])) predicted += c.beta[given[k]] * zs[k];
+        return predicted;
     }
 
     /** {@code Φ(conditional)}: the conditional copula {@code C_{j|S}(u_j | u_S)} at the row. */

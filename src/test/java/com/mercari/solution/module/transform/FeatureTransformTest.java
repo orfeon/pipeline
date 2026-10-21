@@ -4523,6 +4523,69 @@ public class FeatureTransformTest {
         Assertions.assertEquals(0, report.getAsJsonObject("mass").getAsJsonArray("pairs").size(), "a pair needs a mass on both sides");
     }
 
+    private static final Map<String, Map<String, Object>> COPULA_EXPECTED_ROWS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * The outcome among a copula's inputs: {@code expected} of final_price given start_price reads only start_price on the
+     * row, so it is a feature — the regression {@code m + s ρ (z_p − m_p) / s_p} with the artifact's moments over zp, the
+     * explicit start_price score — while {@code conditional} of final_price reads the outcome and is emitted as the declared
+     * label. Together they give final_price's own score back ({@code expected + s √(1 − ρ²) · label}), which is the same
+     * for the two unsold rows (final_price 0) and rises with final_price over the others.
+     */
+    @Test
+    public void testCopulaExpectedAndLabel() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: cop
+                      scope: population
+                      type: copula
+                      inputs: [start_price, final_price]
+                      shrink: none
+                      outputs:
+                        - {expected: final_price, given: [start_price], as: price_expected}
+                        - {conditional: final_price, as: price_surprise}
+                      fit: {artifact: {uri: "%s"}}
+                    - {name: zp, scope: population, type: quantileTransform, input: start_price, distribution: normal, clip: 0.001}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n        roles: {label: price_surprise}\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertEquals("staticSafe", schema.getField("f_price_expected").getOptions().get("feature.status"));
+        Assertions.assertEquals("label", schema.getField("f_price_surprise").getOptions().get("feature.status"));
+        COPULA_EXPECTED_ROWS.clear();
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) COPULA_EXPECTED_ROWS.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row.asPrimitiveMap());
+            return null;
+        });
+        pipeline.run();
+        Assertions.assertEquals(6, COPULA_EXPECTED_ROWS.size());
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject cop = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop.copula.json").toPath())).getAsJsonObject();
+        final double mp = cop.getAsJsonArray("mean").get(0).getAsDouble(), mf = cop.getAsJsonArray("mean").get(1).getAsDouble();
+        final double sp = cop.getAsJsonArray("sd").get(0).getAsDouble(), sf = cop.getAsJsonArray("sd").get(1).getAsDouble();
+        final double rho = cop.getAsJsonArray("correlation").get(0).getAsJsonArray().get(1).getAsDouble();
+        // a weak relation over the six rows (the expensive B did not sell), but a fitted one
+        Assertions.assertTrue(Math.abs(rho) > 0.01 && Math.abs(rho) < 1, "rho " + rho);
+        final java.util.TreeMap<Double, java.util.Set<Long>> scoreByPrice = new java.util.TreeMap<>();
+        for (final Map<String, Object> row : COPULA_EXPECTED_ROWS.values()) {
+            final double zp = ((Number) row.get("f_zp")).doubleValue();
+            final double expected = ((Number) row.get("f_price_expected")).doubleValue();
+            Assertions.assertEquals(mf + sf * rho * (zp - mp) / sp, expected, 1e-9, row::toString);
+            final double score = expected + sf * Math.sqrt(1 - rho * rho) * ((Number) row.get("f_price_surprise")).doubleValue();
+            scoreByPrice.computeIfAbsent(((Number) row.get("final_price")).doubleValue(), p -> new java.util.TreeSet<>()).add(Math.round(score * 1e9));
+        }
+        // final_price's score recovered: one per price (the two zeros tie), increasing with the price
+        Assertions.assertEquals(5, scoreByPrice.size(), scoreByPrice::toString);
+        long previous = Long.MIN_VALUE;
+        for (final java.util.Set<Long> scores : scoreByPrice.values()) {
+            Assertions.assertEquals(1, scores.size(), scoreByPrice::toString);
+            final long score = scores.iterator().next();
+            Assertions.assertTrue(score > previous, scoreByPrice::toString);
+            previous = score;
+        }
+    }
+
     /**
      * copula under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874). The marginals walk
      * forward too, so A's scores are null (no earlier block) and A's rows take no part in any copula fit: C reads blocks

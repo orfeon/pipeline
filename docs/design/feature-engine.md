@@ -1397,7 +1397,9 @@ scheduler gives them a fit stage ahead of the copula's, and under `forward` the 
 scores — a row whose scores are still null contributes nothing. A readout is a function of `R` and of which inputs
 the row has: `Copula` solves the conditional system per (input, observed mask) — β kept per input index, so two
 readouts with different `given` sets cannot collide — and the joint system (precision, log det) per mask, both
-cached in transient maps on the model; a missing score is marginalised out (the sub-matrix of `R`). The model has
+cached in transient maps on the model; `expected` reads the regression part of the same conditional system
+(`m_j + s_j β·z_S`, without z_j — so its row side is `given` alone and an outcome's expected score is a feature); a
+missing score is marginalised out (the sub-matrix of `R`). The model has
 no gauge, so `alignTo` is the identity and forward re-fits are continuous by construction. Masks are `int` bits,
 hence at most 31 inputs (`copula.inputs`).
 

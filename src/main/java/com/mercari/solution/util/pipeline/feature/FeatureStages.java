@@ -2174,6 +2174,7 @@ public final class FeatureStages {
                 final Double value = copula == null ? null : switch (kinds[i]) {
                     case "conditional" -> copula.conditional(scores, of[i], given[i]);
                     case "conditionalProb" -> copula.conditionalProb(scores, of[i], given[i]);
+                    case "expected" -> copula.expected(scores, of[i], given[i]);
                     case "jointRank" -> Copula.jointRankOf(quadratic);
                     case "logDensity" -> Copula.logDensityOf(quadratic);
                     default -> throw new IllegalStateException("unknown copula output " + kinds[i]);
