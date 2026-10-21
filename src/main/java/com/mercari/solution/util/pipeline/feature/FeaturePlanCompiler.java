@@ -3545,8 +3545,11 @@ public final class FeaturePlanCompiler {
         if (def.marginalsScores) {
             for (int i = 0; i < inputs.size(); i++) {
                 final OutputColumn column = refs.get(i).column();
-                if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))
-                        || QuantileTransform.MASS.equals(column.coordinates.get("output"))) {
+                if (column != null && QuantileTransform.MASS.equals(column.coordinates.get("output"))) {
+                    // a hidden flag carries its marginal's coordinates (distribution: normal included), so it is named for what it is
+                    diagnostics.warning("copula.marginals", loc, "marginals: scores reads '" + inputs.get(i) + "' as a normal score, but it is the 0 / 1 point-mass"
+                            + " flag of a copula's marginal, not a score - the copula assumes N(0, 1) scores");
+                } else if (column == null || !"quantileTransform".equals(column.operator) || !QuantileTransform.NORMAL.equals(column.coordinates.get("distribution"))) {
                     diagnostics.warning("copula.marginals", loc, "marginals: scores reads '" + inputs.get(i) + "' as a normal score, but it is not a quantileTransform"
                             + " column with distribution: normal - the copula assumes N(0, 1) scores (it standardises them, but not their shape)");
                 }
@@ -3630,6 +3633,11 @@ public final class FeaturePlanCompiler {
         if (def.diagnose) {
             if (!(tail > 0.5 && tail < 1)) {
                 diagnostics.error("copula.diagnose", loc, "diagnose.tail must be a probability in (0.5, 1) - the upper threshold, its mirror 1 - tail the lower one: " + tail);
+                valid = false;
+            } else if (!def.marginalsScores && clip > 0 && clip < 0.5 && tail >= 1 - clip) {
+                // the expanded marginals cap their scores at Φ⁻¹(1 − clip): no row could be beyond the threshold
+                diagnostics.error("copula.diagnose", loc, "diagnose.tail " + tail + " must be below 1 - marginals.clip (clip " + clip
+                        + "): the marginal scores are capped there, so no row could be beyond the threshold and the tail report would be empty");
                 valid = false;
             }
             if (def.diagnosePairs == null) {
@@ -3718,7 +3726,8 @@ public final class FeaturePlanCompiler {
         if (def.diagnose) {
             final long withMass = massFields.stream().filter(f -> !f.isEmpty()).count();
             diagnostics.info("copula.diagnose", loc, "the whole-input fit reports, for " + diagnosePairs.size() + " pair(s), the share of rows beyond the " + tail
-                    + " quantile of one input that are beyond it in the other too (and the mirror below " + (1 - tail) + ") against what the fitted Gaussian copula"
+                    + " quantile of one input that are beyond it in the other too (and the mirror below "
+                    + java.math.BigDecimal.ONE.subtract(java.math.BigDecimal.valueOf(tail)).stripTrailingZeros().toPlainString() + ") against what the fitted Gaussian copula"
                     + " implies at that threshold - it has no tail dependence, so a share far above it says the model underestimates joint extremes - and, for the "
                     + withMass + " input(s) with an expanded marginal, how often their point masses (ties of at least 1 / bins of the rows) occur together;"
                     + " in the run log" + (fitSpec.artifactUri == null ? "" : " and the artifact") + ". The fit state grows to the moments of " + 4 * inputs.size()

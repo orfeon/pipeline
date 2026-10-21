@@ -4723,6 +4723,13 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [[quantity, sold]]}"))), "copula.diagnose"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [[quantity, quantity]]}"))), "copula.diagnose"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: []}"))), "copula.diagnose"));
+        // the expanded marginals cap their scores at the clip (0.001 by default): a tail at or beyond 1 - clip sees no row
+        Assertions.assertTrue(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {tail: 0.999}"))).getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("copula.diagnose") && m.message().contains("marginals.clip")));
+        // pairs: null is an omitted key - every pair
+        final FeaturePlan nullPairs = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: null}")));
+        Assertions.assertFalse(nullPairs.getDiagnostics().hasErrors(), nullPairs::describe);
+        Assertions.assertEquals("0-1,0-2,1-2", column(nullPairs, "cop_cond_start_price").getCoordinates().get("diagnosePairs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {pairs: [quantity]}"))), "copula.parameters"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: {level: 2}"))), "copula.parameters"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        diagnose: often"))), "copula.parameters"));

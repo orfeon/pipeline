@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -60,6 +61,9 @@ public final class Copula implements Serializable, FitArtifact.Model {
     public static final double DEFAULT_DIAGNOSE_TAIL = 0.95;
     /** A pair is flagged when its observed joint-tail share exceeds the implied one by more than this many standard errors. */
     static final double FLAG_STANDARD_ERRORS = 2;
+    /** {@link #upperOrthant} integrates over [max(a, −range), range]: the normal density is negligible beyond it. */
+    private static final double ORTHANT_RANGE = 9d;
+    private static final double SQRT_2PI = Math.sqrt(2 * Math.PI);
 
     public final int dimension;
     public final long n;
@@ -445,20 +449,26 @@ public final class Copula implements Serializable, FitArtifact.Model {
         return x;
     }
 
-    /** P(X > a, Y > b) for standard normals with correlation rho (Simpson over x of φ(x) P(Y > b | x)). */
+    /**
+     * P(X > a, Y > b) for standard normals with correlation rho (Simpson over x of φ(x) P(Y > b | x)). The range is
+     * {@code [max(a, −9), 9]}: φ is negligible beyond ±9 (Φ(−9) ≈ 1e-19), so a threshold far below the mean (a score
+     * column that is not centred) still integrates the whole upper range instead of a fixed width above {@code a}.
+     */
     static double upperOrthant(final double a, final double b, final double rho) {
         if (rho > 1 - 1e-9) return NormalDistribution.cdf(-Math.max(a, b));
         if (rho < -1 + 1e-9) return Math.max(0, NormalDistribution.cdf(-a) - NormalDistribution.cdf(b));
+        final double lo = Math.max(a, -ORTHANT_RANGE);
+        if (lo >= ORTHANT_RANGE) return 0d;
         final double s = Math.sqrt(1 - rho * rho);
         final int steps = 4000;
-        final double h = 12d / steps;
+        final double h = (ORTHANT_RANGE - lo) / steps;
         double sum = 0;
         for (int k = 0; k <= steps; k++) {
-            final double x = a + k * h;
-            final double f = Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI) * NormalDistribution.cdf(-(b - rho * x) / s);
+            final double x = lo + k * h;
+            final double f = Math.exp(-0.5 * x * x) * NormalDistribution.cdf(-(b - rho * x) / s);
             sum += (k == 0 || k == steps ? 1 : k % 2 == 1 ? 4 : 2) * f;
         }
-        return sum * h / 3;
+        return sum * h / 3 / SQRT_2PI;
     }
 
     /** What {@link #diagnose} found: the JSON report and the log lines (findings to warn about, the rest to inform). */
@@ -503,7 +513,10 @@ public final class Copula implements Serializable, FitArtifact.Model {
                 final double ta = (upper - (high ? 1 : -1) * model.mean[a]) / model.sd[a];
                 final double tb = (upper - (high ? 1 : -1) * model.mean[b]) / model.sd[b];
                 final double pa = NormalDistribution.cdf(-ta), pb = NormalDistribution.cdf(-tb);
-                final double implied = upperOrthant(ta, tb, rho) / ((pa + pb) / 2);
+                // both thresholds beyond the reach of Φ (scores with almost no spread): the model gives the tail no
+                // probability - 0, not 0 / 0 (a NaN would land in the artifact as a bare token strict JSON readers reject)
+                final double marginal = (pa + pb) / 2;
+                final double implied = marginal > 0 ? upperOrthant(ta, tb, rho) / marginal : 0d;
                 final double exceeding = (na + nb) / 2;
                 final JsonObject side = new JsonObject();
                 side.addProperty("rows", exceeding);
@@ -515,7 +528,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
                     side.addProperty("observed", observed);
                     side.addProperty("excess", observed - implied);
                     side.addProperty("se", se);
-                    final String line = String.format("(%s, %s) %s tail: %.3f of the rows beyond the threshold in one are beyond it in the other too, the Gaussian copula implies %.3f +- %.3f (rho %.3f, %d rows beyond)",
+                    final String line = String.format(Locale.ROOT, "(%s, %s) %s tail: %.3f of the rows beyond the threshold in one are beyond it in the other too, the Gaussian copula implies %.3f +- %.3f (rho %.3f, %d rows beyond)",
                             names.get(a), names.get(b), high ? "upper" : "lower", observed, implied, se, rho, Math.round(exceeding));
                     if (observed - implied > FLAG_STANDARD_ERRORS * se && nab >= 5) {
                         flagged++;
@@ -548,7 +561,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
             entry.addProperty("both", both);
             entry.addProperty("independent", sa * sb);
             together.add(entry);
-            final String line = String.format("(%s, %s) point masses: both on a mass in %.3f of the rows, %.3f if independent (shares %.3f / %.3f)",
+            final String line = String.format(Locale.ROOT, "(%s, %s) point masses: both on a mass in %.3f of the rows, %.3f if independent (shares %.3f / %.3f)",
                     names.get(a), names.get(b), both, sa * sb, sa, sb);
             if (both >= 0.01 && both > 2 * sa * sb) {
                 warnings.add(line + ": tied values that occur together put a spike into the scores the correlation is fitted on and narrow the conditional spread around it");

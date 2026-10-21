@@ -190,13 +190,7 @@ public final class QuantileTransform implements Serializable, FitArtifact.Model 
         if (v < knots[0]) return 0d;
         if (v > knots[bins]) return 1d;
         // first knot >= v and last knot <= v
-        int lo = 0, hi = bins;
-        while (lo < hi) {
-            final int mid = (lo + hi) >>> 1;
-            if (knots[mid] < v) lo = mid + 1;
-            else hi = mid;
-        }
-        final int first = lo;
+        final int first = firstKnotAtLeast(v);
         if (knots[first] == v) {
             int last = first;
             while (last + 1 <= bins && knots[last + 1] == v) last++;
@@ -216,13 +210,19 @@ public final class QuantileTransform implements Serializable, FitArtifact.Model 
         if (v == null || v.isNaN() || isEmpty()) return null;
         final int bins = bins();
         if (v < knots[0] || v > knots[bins]) return 0d;
-        int lo = 0, hi = bins;
+        final int first = firstKnotAtLeast(v);
+        return knots[first] == v && first + 1 <= bins && knots[first + 1] == v ? 1d : 0d;
+    }
+
+    /** The index of the first knot {@code >= v}, for {@code knots[0] <= v <= knots[bins]} (binary search). */
+    private int firstKnotAtLeast(final double v) {
+        int lo = 0, hi = bins();
         while (lo < hi) {
             final int mid = (lo + hi) >>> 1;
             if (knots[mid] < v) lo = mid + 1;
             else hi = mid;
         }
-        return knots[lo] == v && lo + 1 <= bins && knots[lo + 1] == v ? 1d : 0d;
+        return lo;
     }
 
     /** Inverse of the standard normal CDF on (0, 1) — the shared {@link NormalDistribution#inverseNormal}. */

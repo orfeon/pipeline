@@ -184,6 +184,9 @@ public class CopulaTest {
         Assertions.assertEquals(0.05, Copula.upperOrthant(t, t, 1), 1e-9);
         // the orthant grows with the correlation
         Assertions.assertTrue(Copula.upperOrthant(t, t, 0.2) < Copula.upperOrthant(t, t, 0.6));
+        // a threshold far below the mean (a score column that is not centred): X > a is almost sure, the orthant is P(Y > b)
+        Assertions.assertEquals(0.05, Copula.upperOrthant(-10, t, 0.5), 1e-9);
+        Assertions.assertEquals(0, Copula.upperOrthant(40, t, 0.5), 1e-300);
     }
 
     /** Ranks → normal scores, the way a quantile transform with a knot per value scores a column. */

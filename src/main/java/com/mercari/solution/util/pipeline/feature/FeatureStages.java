@@ -2192,7 +2192,8 @@ public final class FeatureStages {
         if (report.lines().size() <= 50) {
             for (final String line : report.lines()) LOG.info("copula {} diagnose: {}", spec.block(), line);
         }
-        LOG.info("copula {} diagnose: {} of {} pair(s) have a joint tail beyond the Gaussian copula's at {} ({} finding(s) in all, {} unremarkable line(s){})",
+        // "flagged" counts tails (a pair has an upper and a lower one), so it is not reported as a number of pairs
+        LOG.info("copula {} diagnose: {} joint tail(s) of {} pair(s) beyond the Gaussian copula's at {} ({} finding(s) in all, {} unremarkable line(s){})",
                 spec.block(), report.json().get("flagged") == null ? 0 : report.json().get("flagged").getAsInt(), diagnose.pairs().length, diagnose.tail(),
                 report.warnings().size(), report.lines().size(), report.lines().size() <= 50 ? "" : ", not logged");
         return fitted.withDiagnostics(report.json().toString());

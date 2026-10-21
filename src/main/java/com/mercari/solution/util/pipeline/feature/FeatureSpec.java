@@ -1647,7 +1647,8 @@ public class FeatureSpec implements Serializable {
                             else def.copulaUnknown.add("diagnose.tail " + v);
                         }
                         case "pairs" -> {
-                            if (v.isJsonPrimitive() && "all".equals(v.getAsString())) continue;
+                            // a null is an omitted key (every pair), as everywhere else in the block
+                            if (v.isJsonNull() || v.isJsonPrimitive() && "all".equals(v.getAsString())) continue;
                             def.diagnosePairs = new ArrayList<>();
                             for (final JsonElement pair : arrayOf(v)) {
                                 final List<String> names = new ArrayList<>();
