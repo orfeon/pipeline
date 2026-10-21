@@ -99,7 +99,7 @@ public final class OperatorCatalog {
         register(Scope.sequence, "sinceEvent", InputKind.predicate, null, false, "events / days since the predicate last held");
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
-        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2; lag pairs the field with the other series k events earlier (lead-lag)");
+        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2, and the rank dependence spearman / kendall / quadrantAsymmetry (scan-only); lag pairs the field with the other series k events earlier (lead-lag)");
         register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
         register(Scope.sequence, "rating", InputKind.numeric, F64, false, "sequential rating of the entity from the contests it took part in (method " + String.join(" | ", Rating.METHODS) + " - gaussian conditions the whole contest at once on its outcomes as margins, its prior and beta in the outcome's units; field = the outcome, context = the contest; funcs mu | sigma | count | delta | deviation | z; with = the other members of a team (name = a member's pool and column segment, weight = the row column it counts with), team = its readouts mu | sigma | count | deviation; bradleyTerry pairs " + String.join(" | ", Rating.PAIRS) + "; plackettLuce top = the place a ranking is read to, depthScale = the factor a deeper place's scale grows by; offset = a known per-row shift of the strength a contest expects (never rated; offsetUnits rating | logit - log-odds such as ln p of a benchmark, scaled by each comparison's c, bradleyTerry / plackettLuce only); tauBy = the rated entity's drift read from the row; tauPer = the period tau is the drift of instead of one contest): every contest moves all its players at once, so the state is not mergeable - one replay per pool (global key, or the partition of a reduced window filter)");
         register(Scope.sequence, "dynamics", InputKind.numeric, F64, false, "general form lift -> summarize.dynamics (lti: exponential | legendre | fourier measure, order, halflife / period, decayBy events|time|a declared calendar clock): one column per state component");
@@ -275,8 +275,12 @@ public final class OperatorCatalog {
      */
     public static final List<String> FUTURE_OPS = List.of("aggregate", "lag", "ewma", "sinceEvent", "countMatch", "runLength", "regression", "barrier");
 
-    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
-    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");
+    /**
+     * The funcs of the sequence {@code regression} op: the readouts of the {@link Summary.Regression} family, then the
+     * rank funcs of {@link RankDependence} (no family: scan only).
+     */
+    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2",
+            RankDependence.SPEARMAN, RankDependence.KENDALL, RankDependence.QUADRANT_ASYMMETRY);
 
     public static List<String> datetimeDerivations() {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");

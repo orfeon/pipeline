@@ -293,6 +293,7 @@ shrinkage scale:
   ops:
     - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # vs_index_90d_final_price_vs_start_price_beta / _corr
     - {type: regression, field: final_price, against: start_price, lag: 1, funcs: [corr]} # ..._vs_start_price_lag1_corr
+    - {type: regression, field: final_price, against: start_price, funcs: [spearman, kendall, quadrantAsymmetry]}  # rank dependence
     - {type: fracdiff, field: start_price, d: 0.4, k: 20}                                 # vs_index_90d_start_price_fracdiff0p4
 ```
 
@@ -302,6 +303,24 @@ shrinkage scale:
   contributing events; `corr` / `r2` are null when either series is constant, `beta` / `intercept` when x is.
   The other series is an ordinary field of the row (a market or group series joined onto each row upstream).
   The key is `against`, not `on` — YAML 1.1 reads a bare `on` as a boolean.
+- **Rank dependence** — the same pairs read as ranks within the window, so a monotone transform of either series
+  (a log, a price in another currency) changes nothing and an outlier is just the largest rank:
+  - `spearman` — the correlation of the mid-ranks (ties share the mean of their ranks);
+  - `kendall` — τ_b, the tie-corrected Kendall correlation: (concordant − discordant pairs) over the pairs not tied;
+  - `quadrantAsymmetry` — with `u` the pairs' ranks over n + 1 (`q`, default `0.75`, in (0.5, 1)):
+    `(#{u_x < 1 − q and u_y < 1 − q} − #{u_x > q and u_y > q}) / n` — positive when the two series fall together
+    more often than they rise together, negative for the reverse. Its expectation is 0 for any elliptical
+    dependence (normal, t), so it measures an asymmetry no correlation can, without assuming a family. It is null
+    while a corner holds fewer than 5 pairs in expectation (`(1 − q) · n < 5` over the window's n pairs: 20 at
+    the default `q`, so a `maxEvents` window shorter than that — plus the `lag` — never yields a value);
+    a declared `q` other than the default is in the column name (`_quadrantAsymmetry0p9`).
+
+  All three are null with fewer than two pairs or a constant series, and combine with `lag`. Tail dependence
+  *within* a window is deliberately not offered: with tens of events a 0.9 tail holds a handful of points, which
+  is noise (for that, the population `copula` with `diagnose`). A family's tail dependence is a function of
+  Kendall's τ, so it is a row `expr` over the `kendall` column rather than another func — Clayton's lower tail
+  `kendall > 0 ? pow(2, -(1 - kendall) / (2 * kendall)) : 0`, Gumbel's upper tail `kendall > 0 ? 2 - pow(2, 1 - kendall) : 0`
+  — and carries nothing more than τ for a tree model.
 - **`lag: k`** (lead-lag) pairs `field` of each event with `against` **k events earlier** inside the window —
   "does x lead y by k events" (swap the two fields for the other direction; `lag` ≥ 0). Columns are named
   `..._lag<k>_<func>`.
@@ -312,11 +331,15 @@ shrinkage scale:
   filter over fewer terms would be a different series). Like every sequence op it is strictly past: the value
   as of the latest past event, not including the current row.
 - **Cost / retention.** A same-event `regression` runs incrementally (running cross moments, evicted under
-  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression` is evaluated by scanning its window
-  per row: bound it with `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
+  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression` and the rank funcs are evaluated by
+  scanning the window per row (an event entering the window moves every other event's rank, so nothing is kept
+  running; `kendall` is O(w log w), `spearman` / `quadrantAsymmetry` sort the window): bound it with `maxAge` or
+  `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
   only its last `k` events.
 - Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
-  `sequence.regression.lag`, `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
+  `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
+  `quadrantAsymmetry` among the funcs: warning; a `maxEvents` window whose `maxEvents − lag` pairs can never fill a
+  corner: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
 ### Ratings from contests (sequence `rating`)
 
@@ -2356,7 +2379,7 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail (`ewma` and the path
   summaries are running states and keep none). Only the operators that re-read their window — `runLength` /
-  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression`,
+  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression` or one of its rank funcs,
   `weightBy` — without `maxAge` or `maxEvents`, and any window with a `filter` but no `maxAge`, read the key's
   full history, and they keep only the fields they read for it (the history is trimmed per field, so the
   other columns' fields still leave with their own windows, though each retained row keeps a ~40-byte entry

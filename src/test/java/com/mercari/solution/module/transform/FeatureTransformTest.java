@@ -846,13 +846,14 @@ public class FeatureTransformTest {
                       scope: sequence
                       entity: seller
                       ops:
-                        - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}
+                        - {type: regression, field: final_price, against: start_price, funcs: [beta, corr, spearman, kendall]}
                         - {type: fracdiff, field: start_price, d: 1, k: 2}
                 """;
         final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
         final MCollection output = outputs.get("features");
         Assertions.assertEquals("windowShift", output.getSchema().getField("f_pair_all_final_price_vs_start_price_beta").getOptions().get("feature.status"));
+        Assertions.assertEquals("windowShift", output.getSchema().getField("f_pair_all_final_price_vs_start_price_kendall").getOptions().get("feature.status"));
         PAssert.that(output.getCollection()).satisfies(rows -> {
             int count = 0;
             for (final MElement row : rows) {
@@ -873,16 +874,22 @@ public class FeatureTransformTest {
                         Assertions.assertEquals(sxy / Math.sqrt(sxx * syy), row.getAsDouble("f_pair_all_final_price_vs_start_price_corr"), 1e-9);
                         Assertions.assertTrue(row.getAsDouble("f_pair_all_final_price_vs_start_price_beta") < 0, "the expensive listing did not sell");
                         Assertions.assertEquals(80.0 - 200.0, row.getAsDouble("f_pair_all_start_price_fracdiff1"), 1e-9);
+                        // ranks x (2, 3, 1), y (3, 1, 2): Spearman -1 / 2; of the three pairs one is concordant, two discordant
+                        Assertions.assertEquals(-0.5, row.getAsDouble("f_pair_all_final_price_vs_start_price_spearman"), 1e-12);
+                        Assertions.assertEquals(-1.0 / 3, row.getAsDouble("f_pair_all_final_price_vs_start_price_kendall"), 1e-12);
                     }
                     case "C/s1" -> {
                         // two pairs: a line through (100, 150) and (200, 0)
                         Assertions.assertEquals(-1.5, row.getAsDouble("f_pair_all_final_price_vs_start_price_beta"), 1e-9);
                         Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_corr"), 1e-9);
                         Assertions.assertEquals(200.0 - 100.0, row.getAsDouble("f_pair_all_start_price_fracdiff1"), 1e-9);
+                        Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_spearman"), 1e-12);
+                        Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_kendall"), 1e-12);
                     }
                     case "A/s1", "A/s2", "B/s1", "C/s2" -> {
                         Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_beta"), id + ": fewer than two pairs");
                         Assertions.assertNull(row.getPrimitiveValue("f_pair_all_start_price_fracdiff1"), id + ": fewer than k events");
+                        Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_kendall"), id + ": fewer than two pairs");
                     }
                     default -> Assertions.fail("unexpected row " + id);
                 }

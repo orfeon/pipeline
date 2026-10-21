@@ -100,6 +100,8 @@ public class FeatureSpec implements Serializable {
         public String against;
         /** regression: pair {@code field} with {@code against} this many events earlier (lead-lag; null / 0 = same event). */
         public Integer lag;
+        /** regression quadrantAsymmetry: the quantile of the corners compared (u below 1 − q in both, above q in both; default 0.75). */
+        public Double q;
         /** fracdiff: the differencing order (0 < d < 1 keeps memory; 1 = the first difference). */
         public Double d;
         /** barrier (future windows): the relative move from the current row's value that counts as touching the upper / lower barrier. */
@@ -1405,6 +1407,7 @@ public class FeatureSpec implements Serializable {
         op.k = Json.integer(o, "k");
         op.against = Json.string(o, "against");
         op.lag = Json.integer(o, "lag");
+        op.q = doubleOf(o, "q", diagnostics, loc);
         op.d = doubleOf(o, "d", diagnostics, loc);
         op.up = doubleOf(o, "up", diagnostics, loc);
         op.down = doubleOf(o, "down", diagnostics, loc);

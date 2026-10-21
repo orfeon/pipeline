@@ -1257,12 +1257,17 @@ scan        ⇔ otherwise — bounded by maxAge, or, without a filter, by maxEve
               key's whole history and is reported (sequence.window.unbounded)
 ```
 
-Three kinds of statistic have **no family by construction**, and the reason is part of the design:
+Four kinds of statistic have **no family by construction**, and the reason is part of the design:
 
 - **self-dependent** (`weightBy`): the weight reads the current row, a different number for every (row, event)
   pair — nothing folded once per event can serve it. Declared as `OperatorCatalog.summary(stat, weighted)`.
 - **pairs of events** (the lagged `regression`, `lag: k`): the contribution belongs to two events; evicting the far
   edge would need the rows before it.
+- **rank statistics** (the `regression` funcs `spearman` / `kendall` / `quadrantAsymmetry`, `RankDependence`): an
+  event entering the window moves every other event's rank, so no contribution of one event survives the next one.
+  Updating them incrementally would take a two-dimensional order structure (Spearman's Σ R_x R_y needs a dominance
+  count as well), polylog per update at best; the windows these are meant for are tens to hundreds of events, so
+  the window is ranked again per row (`kendall` in O(w log w), Knight's merge-sort count).
 - **order-dependent readouts** (`SeriesStats`: zeroCross / peaks / acf / pacf / ar): as summaries they are *ordered*
   monoids — `merge` is a concatenation that carries boundary values, contributions must arrive in order (so they
   cannot be a Beam `CombineFn`), and removing the oldest element needs its *successors*, which
@@ -1270,7 +1275,7 @@ Three kinds of statistic have **no family by construction**, and the reason is p
   family (an `ordered()` property and a successor-aware removal) only pays off for the streaming state and is to
   be designed with it.
 
-All three fold the scan over the window; where a family exists for the same arithmetic (`regression`, `skew`), the
+All of them fold the scan over the window; where a family exists for the same arithmetic (`regression`, `skew`), the
 scan path folds that very family so both paths share one arithmetic and one null rule.
 
 #### 9.6.2 `BlockSeries<S>` — a fit as a window over time blocks

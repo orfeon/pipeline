@@ -1635,14 +1635,34 @@ public final class FeaturePlanCompiler {
                                 continue;
                             }
                             final List<String> funcs = op.funcs.isEmpty() ? List.of("beta", "corr") : op.funcs;
+                            // quadrantAsymmetry's corners: u below 1 − q in both series, above q in both
+                            final double q = op.q == null ? RankDependence.DEFAULT_Q : op.q;
+                            if (!(q > 0.5 && q < 1)) {
+                                diagnostics.error("sequence.regression.q", loc, "q must be in (0.5, 1) - quadrantAsymmetry compares the corners below 1 - q and above q: " + op.q);
+                                continue;
+                            }
+                            if (op.q != null && !funcs.contains(RankDependence.QUADRANT_ASYMMETRY)) {
+                                diagnostics.warning("sequence.regression.q", loc, "q is read by quadrantAsymmetry only, which funcs does not list: ignored");
+                            }
+                            // a maxEvents window holds at most maxEvents − lag pairs: a corner that can never reach MIN_TAIL is a column of nulls
+                            if (funcs.contains(RankDependence.QUADRANT_ASYMMETRY) && window.maxEvents != null
+                                    && (1 - q) * (window.maxEvents - lag) < RankDependence.MIN_TAIL - 1e-9) {
+                                diagnostics.warning("sequence.regression.q", loc, "quadrantAsymmetry is always null over a maxEvents " + window.maxEvents + " window"
+                                        + (lag > 0 ? " with lag " + lag : "") + ": its corner needs (1 - q) * pairs >= " + RankDependence.MIN_TAIL
+                                        + " (q " + q + " needs " + (int) Math.ceil(RankDependence.MIN_TAIL / (1 - q) - 1e-9) + " pairs) - lower q or lengthen the window");
+                            }
                             final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
                             for (final String func : funcs) {
                                 if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {
                                     diagnostics.error("sequence.regression.func", loc, "unknown regression func: " + func + " (available: " + String.join(" | ", OperatorCatalog.REGRESSION_FUNCS) + ")");
                                     continue;
                                 }
-                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, (op.as != null && fields.size() == 1 ? base : pair) + func, Schema.FieldType.FLOAT64, computeAt);
+                                final boolean quadrant = RankDependence.QUADRANT_ASYMMETRY.equals(func);
+                                // a declared q other than the default is in the name: two of them in one block do not collide
+                                final String suffix = quadrant && q != RankDependence.DEFAULT_Q ? func + number(q) : func;
+                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, (op.as != null && fields.size() == 1 ? base : pair) + suffix, Schema.FieldType.FLOAT64, computeAt);
                                 c.coordinates.put("func", func);
+                                if (quadrant) c.coordinates.put("q", Double.toString(q));
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 c.coordinates.put("against", canonicalOf(op.against)); addPastInput(c, op.against);
                                 if (lag > 0) c.coordinates.put("lag", Integer.toString(lag));
