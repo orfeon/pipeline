@@ -30,6 +30,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>{@link #conditional}: the standardised position of input j given the observed inputs of S,
  *       {@code (z_j − r_jS R_SS⁻¹ z_S) / sqrt(1 − r_jS R_SS⁻¹ r_Sj)} — N(0, 1) under the model; {@code Φ} of it is the
  *       conditional copula {@code C_{j|S}(u_j | u_S)};</li>
+ *   <li>{@link #expected}: the conditional mean of input j's score given the observed inputs of S, in the score's own
+ *       units ({@code mean_j + sd_j r_jS R_SS⁻¹ z_S}: the Gaussian copula regression of j on S) — it does not read j;</li>
  *   <li>{@link #jointRank}: the χ²(k) CDF of {@code zᵀ R⁻¹ z} over the k observed inputs — how atypical the vector is
  *       as a whole, on a probability scale;</li>
  *   <li>{@link #logDensity}: {@code log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z} — what the dependence alone makes of

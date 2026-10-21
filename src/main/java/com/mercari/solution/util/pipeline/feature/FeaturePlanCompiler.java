@@ -3572,7 +3572,7 @@ public final class FeaturePlanCompiler {
         final List<FeatureSpec.CopulaOutput> outputs = new ArrayList<>();
         for (final FeatureSpec.CopulaOutput o : declared) {
             if (FeatureSpec.CopulaOutput.CONDITIONAL_KINDS.contains(o.kind()) && o.of() == null) {
-                // a bare conditional: every input given the others
+                // a bare conditional / conditionalProb / expected: every input given the others
                 for (final String input : inputs) outputs.add(new FeatureSpec.CopulaOutput(o.kind(), input, null, null));
             } else {
                 outputs.add(o);
@@ -3620,7 +3620,8 @@ public final class FeaturePlanCompiler {
                     final String segment = switch (o.kind()) {
                         case "conditional" -> "_cond_";
                         case "conditionalProb" -> "_condprob_";
-                        default -> "_expected_";
+                        case "expected" -> "_expected_";
+                        default -> throw new IllegalStateException("unknown copula readout " + o.kind());
                     };
                     name = def.name + segment + displayName(o.of())
                             + (o.given() == null ? "" : "_given_" + String.join("_", o.given().stream().map(FeaturePlanCompiler::displayName).toList()));

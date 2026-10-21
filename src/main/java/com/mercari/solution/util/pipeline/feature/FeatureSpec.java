@@ -1698,7 +1698,11 @@ public class FeatureSpec implements Serializable {
             String kind = null;
             for (final String k : CopulaOutput.CONDITIONAL_KINDS) {
                 if (out.has(k)) {
-                    if (kind != null) def.copulaUnknown.add("outputs " + out + " (one of conditional / conditionalProb / expected per entry)");
+                    // reported once, however many of the kinds the entry names
+                    if (kind != null) {
+                        def.copulaUnknown.add("outputs " + out + " (one of conditional / conditionalProb / expected per entry)");
+                        break;
+                    }
                     kind = k;
                 }
             }

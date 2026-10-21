@@ -1001,9 +1001,9 @@ floored, so every readout stays finite. The readouts are properties of the relat
 under monotone transforms of each: `conditional` (`(z_j − r_jS R_SS⁻¹ z_S) / sqrt(1 − r_jS R_SS⁻¹ r_Sj)`, and
 `conditionalProb` = its Φ, the conditional copula `C(u_j | u_S)`), `expected` (the conditional mean score
 `m_j + s_j r_jS R_SS⁻¹ z_S`, read without z_j — the Gaussian copula regression; in score units, since for a tree model
-the conditional median or a quantile of the input in its own units is a monotone function of it and carries nothing
-more), `jointRank` and `logDensity`; a missing input is
-marginalised out (the sub-matrix of `R`). A readout reads on the row only the scores it is computed from, so an
+the conditional median of the input in its own units is a monotone function of it and carries nothing more — and so is
+any other conditional quantile among rows that observe the same inputs of S), `jointRank` and `logDensity`; a missing
+input is marginalised out (the sub-matrix of `R`). A readout reads on the row only the scores it is computed from, so an
 outcome among the inputs shapes the fit (forward lag, static-fit caveat) while a readout that does not read it on
 the row stays a feature, and one that does is a margin-free normalised label. Left out by design: Archimedean
 families (one exchangeable parameter cannot express mixed-sign dependence among three or more inputs), the `t`
