@@ -4558,7 +4558,9 @@ public class FeatureTransformTest {
             for (final MElement row : rows) {
                 count++;
                 for (final String readout : List.of("_cond_start_price", "_cond_quantity", "_jointrank", "_logdensity")) {
-                    Assertions.assertEquals(row.getAsDouble("f_cop_plain" + readout), row.getAsDouble("f_cop" + readout), readout + " " + row);
+                    // two fits of their own: the runner may merge their accumulators in different orders, so the last
+                    // bit can differ under parallel tests (equal to the rounding, not bit for bit)
+                    Assertions.assertEquals(row.getAsDouble("f_cop_plain" + readout), row.getAsDouble("f_cop" + readout), 1e-12, readout + " " + row);
                 }
             }
             Assertions.assertEquals(6, count);
