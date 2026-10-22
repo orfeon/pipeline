@@ -1969,7 +1969,12 @@ key (the first input of the `cross`), `y` the second, and a code's position is i
 - **Nulls.** The columns are null when the map is null or empty, and when the map is not a cell distribution:
   a key that is not two numbers joined by `|`, or a negative or non-numeric value. A one-dimensional map such as
   a `transitionStats` distribution is not a cell distribution either. They are also null when either code takes
-  a single value. A zero-mass cell is ignored. The map may hold shares or counts, and it is normalised.
+  a single value. An entry with a null value and a zero-mass cell are skipped. The map may hold shares or counts,
+  and it is normalised.
+- **Small maps.** The corner funcs carry no minimum count: a map does not say how many rows it holds, since
+  shares do not keep the count. An unshrunk distribution or a count map built from a handful of rows reads
+  `lowerTail` 0 or 1 and a corner difference of a few rows' mass. Shrink the encoding (`shrinkage`), which pulls a key
+  with few rows toward the parent table, or filter on the key's row count (a `count` stat beside the distribution).
 - **Availability** is the map's own. An encoding `distribution` reads strictly-past rows, after their settlement
   and ingestion lags. So the cell may hold the row's own **outcome**, and the readout is still a feature. Keep the
   outcome-derived row columns out of the output with `output.exclude`: they are availability violations as features.

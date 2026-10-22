@@ -141,8 +141,9 @@ public final class RankDependence {
      *       x the first code of the key (under independence they are the mass of y's corner).</li>
      * </ul>
      *
-     * Null when the map is null or empty, when a key is not two numbers joined by {@code |} or a value is not a
-     * non-negative number (it is not a cell distribution), when either series takes a single value, and for the
+     * Null when the map is null or empty, when a key is not two numbers joined by {@code |} or a value is negative or
+     * not a number (it is not a cell distribution; an entry with a null key or value, or a zero value, is skipped),
+     * when either series takes a single value, and for the
      * corner funcs while a corner they read holds no code (a code's mid-rank share sits in the corner only when the
      * code is rare enough: an extreme bin holding more than {@code 2 (1 − q)} of the mass never does).
      */
