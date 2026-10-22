@@ -70,6 +70,7 @@ public final class OperatorCatalog {
         register(Scope.row, "equals", InputKind.any, I64, false, "1 when two fields are equal, 0 otherwise (null if either is null)");
         register(Scope.row, "noise", InputKind.none, F64, false, "placebo: deterministic pseudo-random value from the row identity and a seed (normal | uniform)");
         register(Scope.row, "vector", InputKind.numeric, F64, false, "scalar readouts (funcs) of a numeric array field after optional slice / diff / normalize steps");
+        register(Scope.row, "dependence", InputKind.any, F64, false, "rank dependence (spearman, kendall, quadrantAsymmetry, lowerTail, upperTail) of a cell distribution map over a cross of two ordered codes");
 
         // context
         registerCallable(Scope.context, "rank", InputKind.numeric, I64, "rank within the group (1 = largest)");

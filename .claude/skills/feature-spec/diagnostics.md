@@ -141,6 +141,9 @@ not expand because another block failed).
 | `row.vector.degree` | error / warning | polyfit `degree` must be 1..5; a warning when `degree` is set but `funcs` has no `polyfit` |
 | `row.vector.coefficients` | error / warning | `coefficients` lists distinct integer indices in `0..degree` (the polyfit coefficients to emit); a warning when it is set but `funcs` has no `polyfit` |
 | `row.vector.resample` | error | `resample` is the length the vector is interpolated onto: ≥ 1 |
+| `row.dependence.input` | error | `dependence` needs one `input` that is a map of numbers: an encoding `distribution` or a `countByValue` map over a `cross` of two ordered codes |
+| `row.dependence.funcs` | error | `funcs` is missing, lists an unknown statistic (spearman / kendall / quadrantAsymmetry / lowerTail / upperTail) or lists one twice |
+| `row.dependence.q` | error / warning | error: `q` must be in (0.5, 1); warning: `q` declared without `quadrantAsymmetry` / `lowerTail` / `upperTail` (ignored) |
 | `row.vector.pad` | error | `pad` is an object `{length: ≥ 1, mode: edge \| zero, side: end \| start}` — a missing `length` or an unknown key is an error (a typo would otherwise leave the vector at a varying length) |
 | `baselines.emit.duplicate` | error | `emit` name collides with a column or input field |
 

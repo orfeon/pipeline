@@ -322,8 +322,13 @@ public class FeatureSpec implements Serializable {
         public String on;
         /** noise: {@code normal} (default) | {@code uniform}; the draw's seed is the shared {@code seed} field. */
         public String distribution;
-        /** vector: the readouts to emit (one column each; {@code polyfit} one per coefficient up to {@code degree}). */
+        /**
+         * vector: the readouts to emit (one column each; {@code polyfit} one per coefficient up to {@code degree});
+         * dependence: the statistics of the cell distribution.
+         */
         public List<String> funcs = new ArrayList<>();
+        /** dependence: the corner of {@code quadrantAsymmetry} / {@code lowerTail} / {@code upperTail}, in (0.5, 1) (null = 0.75). */
+        public Double q;
         /** vector: {@code slice: {from, to}} — elements [from, to), negative = from the end, null = open. */
         public Integer sliceFrom;
         public Integer sliceTo;
@@ -1005,6 +1010,7 @@ public class FeatureSpec implements Serializable {
         def.distribution = Json.string(o, "distribution");
         def.seed = longOf(o, "seed", diagnostics, loc);
         def.funcs = Json.strings(o, "funcs");
+        def.q = doubleOf(o, "q", diagnostics, loc);
         if (o.has("slice") && !o.get("slice").isJsonNull()) {
             if (o.get("slice").isJsonObject()) {
                 def.sliceFrom = Json.integer(o.getAsJsonObject("slice"), "from");

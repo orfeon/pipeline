@@ -2121,6 +2121,61 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * Row {@code type: dependence}: one FLOAT64 column per func over a map column, q on the corner funcs alone, the
+     * map's availability inherited (the outcome cell is read from settled past rows, so the readout is a feature).
+     */
+    @Test
+    public void testDependenceExpansion() {
+        final String output = "output:\n  prefix: f_\n";
+        Assertions.assertTrue(SPEC.contains(output));
+        final String spec = SPEC.replace(output, String.join("\n",
+                "  - {name: price_band, scope: row, type: bin, input: start_price, edges: [90]}",
+                "  - {name: final_band, scope: row, type: bin, input: final_price, edges: [100]}",
+                "  - {name: cell, scope: row, type: cross, inputs: [price_band, final_band]}",
+                "  - {name: pers, scope: population, type: encoding, keySets: [{keys: [seller_id]}], targets: [{field: cell, stats: [distribution]}]}",
+                "  - {name: dep, scope: row, type: dependence, input: pers__seller_id__cell__distribution, funcs: [kendall, lowerTail], q: 0.8}",
+                "") + output);
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn kendall = column(plan, "dep_kendall");
+        Assertions.assertEquals("dependence", kendall.getOperator());
+        Assertions.assertEquals(Schema.FieldType.FLOAT64, kendall.getFieldType());
+        Assertions.assertNull(kendall.getCoordinates().get("q"), "kendall reads no corner");
+        Assertions.assertEquals("0.8", column(plan, "dep_lowerTail").getCoordinates().get("q"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, kendall.getStatus());
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plan, "dep_lowerTail").getStatus());
+
+        // any numeric map is accepted (a countByValue over a cross holds counts per cell)
+        final FeaturePlan counts = compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: composition_condition_grade_countByValue"));
+        Assertions.assertFalse(counts.getDiagnostics().hasErrors(), counts::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: start_price")), "row.dependence.input"));
+        // a typo carrying the block's own prefix is expanded by the pass that lets a block wait for itself: still reported
+        final FeaturePlan typo = compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: dep_cells"));
+        Assertions.assertTrue(hasCode(typo, "row.dependence.input"), typo::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail], ", "")), "row.dependence.funcs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail]", "funcs: [kendall, beta]")), "row.dependence.funcs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail]", "funcs: [kendall, kendall]")), "row.dependence.funcs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("q: 0.8", "q: 0.5")), "row.dependence.q"));
+        final FeaturePlan unread = compile(SOURCES, spec.replace("funcs: [kendall, lowerTail]", "funcs: [kendall, spearman]"));
+        Assertions.assertFalse(unread.getDiagnostics().hasErrors(), unread::describe);
+        Assertions.assertTrue(hasCode(unread, "row.dependence.q"), "q without a corner func: a warning");
+
+        // the persistence recipe of the docs: previous / current value ranks, quintiles, crossed, pooled per category
+        final FeaturePlan recipe = compile(SOURCES, SPEC.replace(output, String.join("\n",
+                "  - {name: prev, scope: sequence, entity: seller, windows: [{maxEvents: 1}], ops: [{type: lag, fields: [final_price], k: 1}]}",
+                "  - {name: u_prev, scope: population, type: quantileTransform, input: prev_n1_final_price_lag1, fit: {mode: forward, blocks: {size: P7D}}}",
+                "  - {name: u_now, scope: population, type: quantileTransform, input: final_price, fit: {mode: forward, blocks: {size: P7D}}}",
+                "  - {name: b_prev, scope: row, type: bin, input: u_prev, edges: [0.2, 0.4, 0.6, 0.8]}",
+                "  - {name: b_now, scope: row, type: bin, input: u_now, edges: [0.2, 0.4, 0.6, 0.8]}",
+                "  - {name: step, scope: row, type: cross, inputs: [b_prev, b_now]}",
+                "  - {name: steps, scope: population, type: encoding, keySets: [{keys: [category]}], targets: [{field: step, stats: [distribution]}], shrinkage: {priorWeight: 20}}",
+                "  - {name: persist, scope: row, type: dependence, input: steps__category__step__distribution, funcs: [kendall, lowerTail, upperTail]}",
+                "") + "output:\n  prefix: f_\n  exclude: [u_now, b_now, step]\n"));
+        Assertions.assertFalse(recipe.getDiagnostics().hasErrors(), recipe::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(recipe, "persist_kendall").getStatus(), recipe::describe);
+    }
+
+    /**
      * Row {@code type: vector}: one column per readout (polyfit: one per coefficient), the steps and the readout in
      * the coordinates, the array field's availability and lineage inherited, every parameter validated.
      */

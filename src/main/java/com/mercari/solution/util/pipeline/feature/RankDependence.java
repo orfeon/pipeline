@@ -2,6 +2,8 @@ package com.mercari.solution.util.pipeline.feature;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Rank statistics of the dependence between two series over one window — the {@code regression} funcs
@@ -24,14 +26,23 @@ import java.util.List;
  * is also null while a corner holds fewer than {@link #MIN_TAIL} pairs in expectation ({@code (1 − q) n < MIN_TAIL}),
  * where it is noise. The values are finite (the evaluator drops a pair with a missing one); ties are numeric equality,
  * so {@code -0.0} and {@code 0.0} tie.
+ *
+ * <p>{@link #ofCells} is the population counterpart read by the row {@code dependence} op: the same funcs (plus the
+ * {@code lowerTail} / {@code upperTail} corners) over a cell distribution map keyed {@code "<x>|<y>"}.
  */
 public final class RankDependence {
 
     public static final String SPEARMAN = "spearman";
     public static final String KENDALL = "kendall";
     public static final String QUADRANT_ASYMMETRY = "quadrantAsymmetry";
+    public static final String LOWER_TAIL = "lowerTail";
+    public static final String UPPER_TAIL = "upperTail";
     /** The regression funcs computed here (scan-only). */
     public static final List<String> FUNCS = List.of(SPEARMAN, KENDALL, QUADRANT_ASYMMETRY);
+    /** The row {@code dependence} funcs over a cell distribution map ({@link #ofCells}). */
+    public static final List<String> CELL_FUNCS = List.of(SPEARMAN, KENDALL, QUADRANT_ASYMMETRY, LOWER_TAIL, UPPER_TAIL);
+    /** The cell funcs that read the corners, hence {@code q}. */
+    public static final List<String> CORNER_FUNCS = List.of(QUADRANT_ASYMMETRY, LOWER_TAIL, UPPER_TAIL);
     public static final double DEFAULT_Q = 0.75;
     /** quadrantAsymmetry is null while {@code (1 − q) n} is below this: a corner of a few pairs is noise. */
     public static final int MIN_TAIL = 5;
@@ -112,6 +123,184 @@ public final class RankDependence {
             if (n + 1 - rx[i] < corner && n + 1 - ry[i] < corner) upper++;
         }
         return (double) (lower - upper) / n;
+    }
+
+    /**
+     * A func over a two-dimensional cell distribution: the map a {@code distribution} stat (or a {@code countByValue})
+     * holds over a {@code cross} of two ordered codes, keyed {@code "<x>|<y>"} with a share or a count per cell. The map
+     * is read as the population of a sample in which a cell is a tie in both series, so each func is the limit of its
+     * {@code regression} namesake over that sample:
+     *
+     * <ul>
+     *   <li>{@code kendall}: τ_b of the table, {@code (P_c − P_d) / √((1 − Σ p_x²)(1 − Σ p_y²))}, which is exactly the
+     *       sample τ_b of the pairs the counts stand for;</li>
+     *   <li>{@code spearman}: the Pearson correlation of the codes' mid-rank shares {@code u = F(v−) + p(v) / 2},
+     *       weighted by the cells, which is exactly the sample Spearman of the same pairs;</li>
+     *   <li>{@code quadrantAsymmetry}: the mass with both {@code u < 1 − q} minus the mass with both {@code u > q};</li>
+     *   <li>{@code lowerTail} / {@code upperTail}: {@code P(u_y < 1 − q | u_x < 1 − q)} and {@code P(u_y > q | u_x > q)},
+     *       x the first code of the key (under independence they are the mass of y's corner).</li>
+     * </ul>
+     *
+     * Null when the map is null or empty, when a key is not two numbers joined by {@code |} or a value is negative or
+     * not a number (it is not a cell distribution; an entry with a null key or value, or a zero value, is skipped),
+     * when either series takes a single value, and for the
+     * corner funcs while a corner they read holds no code (a code's mid-rank share sits in the corner only when the
+     * code is rare enough: an extreme bin holding more than {@code 2 (1 − q)} of the mass never does).
+     */
+    public static Double ofCells(final String func, final Map<?, ?> cells, final double q) {
+        final Grid grid = Grid.of(cells);
+        if (grid == null) return null;
+        return switch (func) {
+            case SPEARMAN -> grid.spearman();
+            case KENDALL -> grid.kendall();
+            case QUADRANT_ASYMMETRY, LOWER_TAIL, UPPER_TAIL -> grid.corner(func, q);
+            default -> throw new IllegalArgumentException("not a cell dependence func: " + func);
+        };
+    }
+
+    /**
+     * A cell distribution normalised to shares, held sparse: the cells with mass sorted by x then y code
+     * ({@code row[k]} / {@code col[k]} index the sorted distinct x / y codes, {@code mass[k]} is the share) and the two
+     * marginals. Memory and time follow the cells (τ_b in O(cells log ny)), not the product of the code counts: a map
+     * over two high-cardinality codes (a cross of raw values) costs what its entries do.
+     */
+    private record Grid(int[] row, int[] col, double[] mass, double[] px, double[] py) {
+
+        static Grid of(final Map<?, ?> cells) {
+            if (cells == null || cells.isEmpty()) return null;
+            final TreeMap<Double, TreeMap<Double, Double>> byX = new TreeMap<>();
+            final TreeMap<Double, Integer> ys = new TreeMap<>();
+            double total = 0;
+            for (final Map.Entry<?, ?> e : cells.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) continue;
+                final Double v = FeatureValues.toDouble(e.getValue());
+                if (v == null || !(v >= 0) || Double.isInfinite(v)) return null;
+                if (v == 0) continue;
+                // keys may be CharSequence after a coder round trip
+                final String key = e.getKey().toString();
+                final int bar = key.indexOf('|');
+                if (bar < 0 || key.indexOf('|', bar + 1) >= 0) return null;
+                final double x, y;
+                try {
+                    x = Double.parseDouble(key.substring(0, bar).trim());
+                    y = Double.parseDouble(key.substring(bar + 1).trim());
+                } catch (final NumberFormatException notACell) {
+                    return null;
+                }
+                if (!Double.isFinite(x) || !Double.isFinite(y)) return null;
+                // + 0.0: -0.0 is the code 0 (TreeMap orders by Double.compare, which tells them apart)
+                byX.computeIfAbsent(x + 0.0, k -> new TreeMap<>()).merge(y + 0.0, v, Double::sum);
+                ys.put(y + 0.0, 0);
+                total += v;
+            }
+            if (byX.size() < 2 || ys.size() < 2) return null;
+            int j = 0;
+            for (final Map.Entry<Double, Integer> e : ys.entrySet()) e.setValue(j++);
+            int n = 0;
+            for (final TreeMap<Double, Double> cellsOfX : byX.values()) n += cellsOfX.size();
+            final int[] row = new int[n], col = new int[n];
+            final double[] mass = new double[n];
+            final double[] px = new double[byX.size()], py = new double[ys.size()];
+            int i = 0, k = 0;
+            for (final TreeMap<Double, Double> cellsOfX : byX.values()) {
+                for (final Map.Entry<Double, Double> e : cellsOfX.entrySet()) {
+                    row[k] = i;
+                    col[k] = ys.get(e.getKey());
+                    mass[k] = e.getValue() / total;
+                    px[i] += mass[k];
+                    py[col[k]] += mass[k];
+                    k++;
+                }
+                i++;
+            }
+            return new Grid(row, col, mass, px, py);
+        }
+
+        /** The mid-rank shares {@code F(v−) + p(v) / 2} of the codes. */
+        private static double[] midShares(final double[] marginal) {
+            final double[] u = new double[marginal.length];
+            double below = 0;
+            for (int i = 0; i < marginal.length; i++) {
+                u[i] = below + marginal[i] / 2;
+                below += marginal[i];
+            }
+            return u;
+        }
+
+        Double spearman() {
+            final double[] ux = midShares(px), uy = midShares(py);
+            double mx = 0, my = 0;
+            for (int i = 0; i < px.length; i++) mx += px[i] * ux[i];
+            for (int j = 0; j < py.length; j++) my += py[j] * uy[j];
+            double sxy = 0, sxx = 0, syy = 0;
+            for (int i = 0; i < px.length; i++) sxx += px[i] * (ux[i] - mx) * (ux[i] - mx);
+            for (int j = 0; j < py.length; j++) syy += py[j] * (uy[j] - my) * (uy[j] - my);
+            for (int k = 0; k < mass.length; k++) sxy += mass[k] * (ux[row[k]] - mx) * (uy[col[k]] - my);
+            if (!(sxx > 0) || !(syy > 0)) return null;
+            return sxy / Math.sqrt(sxx * syy);
+        }
+
+        Double kendall() {
+            // a Fenwick tree over the y codes holds the mass of the rows after the current one: its mass right of a
+            // cell is concordant with it, left of it discordant (each unordered pair of cells counted once; the cells
+            // of one x code tie in x, so a row is queried in full before it is added)
+            final double[] after = new double[py.length + 1];
+            double afterTotal = 0, concordant = 0, discordant = 0;
+            for (int end = mass.length; end > 0; ) {
+                int start = end - 1;
+                while (start > 0 && row[start - 1] == row[end - 1]) start--;
+                for (int k = start; k < end; k++) {
+                    concordant += mass[k] * (afterTotal - prefix(after, col[k] + 1));
+                    discordant += mass[k] * prefix(after, col[k]);
+                }
+                for (int k = start; k < end; k++) {
+                    for (int t = col[k] + 1; t < after.length; t += t & -t) after[t] += mass[k];
+                    afterTotal += mass[k];
+                }
+                end = start;
+            }
+            double sx = 0, sy = 0;
+            for (final double v : px) sx += v * v;
+            for (final double v : py) sy += v * v;
+            final double denominator = Math.sqrt((1 - sx) * (1 - sy));
+            if (!(denominator > 0)) return null;
+            // P_c − P_d over ordered pairs = 2 (concordant − discordant)
+            return 2 * (concordant - discordant) / denominator;
+        }
+
+        /** The mass of the y codes {@code [0, count)} in a Fenwick tree. */
+        private static double prefix(final double[] tree, final int count) {
+            double sum = 0;
+            for (int t = count; t > 0; t -= t & -t) sum += tree[t];
+            return sum;
+        }
+
+        Double corner(final String func, final double q) {
+            final double[] ux = midShares(px), uy = midShares(py);
+            // the regression corners on the mid-rank shares, with the same slack (a decimal q is not exact in binary)
+            final double corner = 1 - q - EPSILON;
+            boolean yLower = false, yUpper = false;
+            for (final double u : uy) {
+                yLower |= u < corner;
+                yUpper |= 1 - u < corner;
+            }
+            double xLower = 0, xUpper = 0, lower = 0, upper = 0;
+            for (int i = 0; i < px.length; i++) {
+                if (ux[i] < corner) xLower += px[i];
+                if (1 - ux[i] < corner) xUpper += px[i];
+            }
+            for (int k = 0; k < mass.length; k++) {
+                final double x = ux[row[k]], y = uy[col[k]];
+                if (x < corner && y < corner) lower += mass[k];
+                if (1 - x < corner && 1 - y < corner) upper += mass[k];
+            }
+            return switch (func) {
+                case QUADRANT_ASYMMETRY -> xLower > 0 && xUpper > 0 && yLower && yUpper ? Double.valueOf(lower - upper) : null;
+                case LOWER_TAIL -> xLower > 0 && yLower ? Double.valueOf(lower / xLower) : null;
+                case UPPER_TAIL -> xUpper > 0 && yUpper ? Double.valueOf(upper / xUpper) : null;
+                default -> throw new IllegalArgumentException("not a corner func: " + func);
+            };
+        }
     }
 
     /** The mid-ranks (1-based; ties share the mean of their ranks) of the first {@code n} values. */

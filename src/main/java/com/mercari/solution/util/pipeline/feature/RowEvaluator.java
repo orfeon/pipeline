@@ -217,6 +217,13 @@ public class RowEvaluator implements Serializable {
                     default -> throw new IllegalStateException("unsupported map readout: " + readout);
                 }
             }
+            case "dependence" -> {
+                // rank dependence of a cell distribution ("<x>|<y>" -> share or count)
+                final Object m = row.get(inputs.get(0));
+                if (!(m instanceof Map<?, ?> map)) yield null;
+                final String q = c.coordinates.get("q");
+                yield RankDependence.ofCells(c.coordinates.get("func"), map, q == null ? RankDependence.DEFAULT_Q : Double.parseDouble(q));
+            }
             case "deviation" -> composition(c, row).deviations()[Integer.parseInt(c.coordinates.get("level"))];
             case "effectiveN" -> composition(c, row).effectiveN();
             default -> throw new IllegalStateException("unsupported row operator: " + c.operator);

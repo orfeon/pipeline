@@ -899,7 +899,62 @@ public final class FeaturePlanCompiler {
                 finishRow(c, def);
             }
             case "vector" -> expandVector(def, computeAt);
+            case "dependence" -> expandDependence(def, computeAt);
             default -> diagnostics.error("row.type", loc, "unsupported row type: " + type);
+        }
+    }
+
+    /**
+     * Row {@code type: dependence}: the rank dependence of a cell distribution, a map keyed {@code "<x>|<y>"} over a
+     * {@code cross} of two ordered codes (an encoding {@code distribution}, a {@code countByValue}): one FLOAT64 column
+     * {@code <name>_<func>} per func ({@link RankDependence#ofCells}). The columns inherit the map's availability.
+     */
+    private void expandDependence(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final String input = singleInput(def);
+        if (input == null) return;
+        // an unresolved input reaches here when it carries the block's own prefix (the pass that lets a block wait for
+        // itself): report it, or the block would expand to nothing without a word
+        final Ref ref = resolve(input);
+        final Schema.FieldType type = ref == null ? null : ref.type();
+        if (type == null || type.getType() != Schema.Type.map || !OperatorCatalog.isNumeric(type.getMapValueType())) {
+            final String is = ref == null ? "unresolved" : type == null ? "unknown"
+                    : type.getType() == Schema.Type.map ? "a map of " + (type.getMapValueType() == null ? "unknown" : type.getMapValueType().getType()) : type.getType().toString();
+            diagnostics.error("row.dependence.input", loc, "dependence input '" + input + "' must be a map of shares or counts (an encoding distribution, a countByValue map)"
+                    + " over a cross of two ordered codes; is " + is);
+            return;
+        }
+        if (def.funcs.isEmpty()) {
+            diagnostics.error("row.dependence.funcs", loc, "dependence requires 'funcs' (available: " + String.join(" | ", RankDependence.CELL_FUNCS) + ")");
+            return;
+        }
+        boolean valid = true;
+        for (final String func : def.funcs) {
+            if (!RankDependence.CELL_FUNCS.contains(func)) {
+                diagnostics.error("row.dependence.funcs", loc, "unknown dependence func: " + func + " (available: " + String.join(" | ", RankDependence.CELL_FUNCS) + ")");
+                valid = false;
+            }
+        }
+        if (new LinkedHashSet<>(def.funcs).size() != def.funcs.size()) {
+            diagnostics.error("row.dependence.funcs", loc, "funcs lists a statistic twice: " + def.funcs);
+            valid = false;
+        }
+        final double q = def.q == null ? RankDependence.DEFAULT_Q : def.q;
+        if (!(q > 0.5 && q < 1)) {
+            diagnostics.error("row.dependence.q", loc, "q must be in (0.5, 1) - the corners are the mid-rank shares below 1 - q and above q: " + def.q);
+            valid = false;
+        } else if (def.q != null && def.funcs.stream().noneMatch(RankDependence.CORNER_FUNCS::contains)) {
+            diagnostics.warning("row.dependence.q", loc, "q is read by quadrantAsymmetry / lowerTail / upperTail only, which funcs does not list: ignored");
+        }
+        if (!valid) return;
+        final OutputColumn map = ref.column();
+        for (final String func : def.funcs) {
+            final OutputColumn c = newColumn(def.name, Scope.row, "dependence", def.name + "_" + func, Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("func", func);
+            if (RankDependence.CORNER_FUNCS.contains(func)) c.coordinates.put("q", Double.toString(q));
+            if (map != null) c.fitted = map.fitted;
+            addSelfInput(c, input);
+            finishRow(c, def);
         }
     }
 
