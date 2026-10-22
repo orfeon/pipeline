@@ -913,11 +913,15 @@ public final class FeaturePlanCompiler {
         final String loc = def.location();
         final String input = singleInput(def);
         if (input == null) return;
+        // an unresolved input reaches here when it carries the block's own prefix (the pass that lets a block wait for
+        // itself): report it, or the block would expand to nothing without a word
         final Ref ref = resolve(input);
-        if (ref == null) return;
-        if (ref.type() == null || ref.type().getType() != Schema.Type.map || !OperatorCatalog.isNumeric(ref.type().getMapValueType())) {
+        final Schema.FieldType type = ref == null ? null : ref.type();
+        if (type == null || type.getType() != Schema.Type.map || !OperatorCatalog.isNumeric(type.getMapValueType())) {
+            final String is = ref == null ? "unresolved" : type == null ? "unknown"
+                    : type.getType() == Schema.Type.map ? "a map of " + (type.getMapValueType() == null ? "unknown" : type.getMapValueType().getType()) : type.getType().toString();
             diagnostics.error("row.dependence.input", loc, "dependence input '" + input + "' must be a map of shares or counts (an encoding distribution, a countByValue map)"
-                    + " over a cross of two ordered codes; is " + (ref.type() == null ? "unknown" : ref.type().getType()));
+                    + " over a cross of two ordered codes; is " + is);
             return;
         }
         if (def.funcs.isEmpty()) {

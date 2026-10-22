@@ -26,6 +26,9 @@ import java.util.TreeMap;
  * is also null while a corner holds fewer than {@link #MIN_TAIL} pairs in expectation ({@code (1 − q) n < MIN_TAIL}),
  * where it is noise. The values are finite (the evaluator drops a pair with a missing one); ties are numeric equality,
  * so {@code -0.0} and {@code 0.0} tie.
+ *
+ * <p>{@link #ofCells} is the population counterpart read by the row {@code dependence} op: the same funcs (plus the
+ * {@code lowerTail} / {@code upperTail} corners) over a cell distribution map keyed {@code "<x>|<y>"}.
  */
 public final class RankDependence {
 
@@ -154,12 +157,17 @@ public final class RankDependence {
         };
     }
 
-    /** A cell distribution normalised to shares: {@code p[i][j]} over the sorted distinct x and y codes holding mass. */
-    private record Grid(double[][] p, double[] px, double[] py) {
+    /**
+     * A cell distribution normalised to shares, held sparse: the cells with mass sorted by x then y code
+     * ({@code row[k]} / {@code col[k]} index the sorted distinct x / y codes, {@code mass[k]} is the share) and the two
+     * marginals. Memory and time follow the cells (τ_b in O(cells log ny)), not the product of the code counts: a map
+     * over two high-cardinality codes (a cross of raw values) costs what its entries do.
+     */
+    private record Grid(int[] row, int[] col, double[] mass, double[] px, double[] py) {
 
         static Grid of(final Map<?, ?> cells) {
             if (cells == null || cells.isEmpty()) return null;
-            final TreeMap<Double, TreeMap<Double, Double>> mass = new TreeMap<>();
+            final TreeMap<Double, TreeMap<Double, Double>> byX = new TreeMap<>();
             final TreeMap<Double, Integer> ys = new TreeMap<>();
             double total = 0;
             for (final Map.Entry<?, ?> e : cells.entrySet()) {
@@ -180,26 +188,31 @@ public final class RankDependence {
                 }
                 if (!Double.isFinite(x) || !Double.isFinite(y)) return null;
                 // + 0.0: -0.0 is the code 0 (TreeMap orders by Double.compare, which tells them apart)
-                mass.computeIfAbsent(x + 0.0, k -> new TreeMap<>()).merge(y + 0.0, v, Double::sum);
+                byX.computeIfAbsent(x + 0.0, k -> new TreeMap<>()).merge(y + 0.0, v, Double::sum);
                 ys.put(y + 0.0, 0);
                 total += v;
             }
-            if (mass.size() < 2 || ys.size() < 2) return null;
+            if (byX.size() < 2 || ys.size() < 2) return null;
             int j = 0;
             for (final Map.Entry<Double, Integer> e : ys.entrySet()) e.setValue(j++);
-            final double[][] p = new double[mass.size()][ys.size()];
-            final double[] px = new double[mass.size()], py = new double[ys.size()];
-            int i = 0;
-            for (final TreeMap<Double, Double> row : mass.values()) {
-                for (final Map.Entry<Double, Double> e : row.entrySet()) {
-                    final int col = ys.get(e.getKey());
-                    p[i][col] = e.getValue() / total;
-                    px[i] += p[i][col];
-                    py[col] += p[i][col];
+            int n = 0;
+            for (final TreeMap<Double, Double> cellsOfX : byX.values()) n += cellsOfX.size();
+            final int[] row = new int[n], col = new int[n];
+            final double[] mass = new double[n];
+            final double[] px = new double[byX.size()], py = new double[ys.size()];
+            int i = 0, k = 0;
+            for (final TreeMap<Double, Double> cellsOfX : byX.values()) {
+                for (final Map.Entry<Double, Double> e : cellsOfX.entrySet()) {
+                    row[k] = i;
+                    col[k] = ys.get(e.getKey());
+                    mass[k] = e.getValue() / total;
+                    px[i] += mass[k];
+                    py[col[k]] += mass[k];
+                    k++;
                 }
                 i++;
             }
-            return new Grid(p, px, py);
+            return new Grid(row, col, mass, px, py);
         }
 
         /** The mid-rank shares {@code F(v−) + p(v) / 2} of the codes. */
@@ -221,29 +234,29 @@ public final class RankDependence {
             double sxy = 0, sxx = 0, syy = 0;
             for (int i = 0; i < px.length; i++) sxx += px[i] * (ux[i] - mx) * (ux[i] - mx);
             for (int j = 0; j < py.length; j++) syy += py[j] * (uy[j] - my) * (uy[j] - my);
-            for (int i = 0; i < px.length; i++) {
-                for (int j = 0; j < py.length; j++) sxy += p[i][j] * (ux[i] - mx) * (uy[j] - my);
-            }
+            for (int k = 0; k < mass.length; k++) sxy += mass[k] * (ux[row[k]] - mx) * (uy[col[k]] - my);
             if (!(sxx > 0) || !(syy > 0)) return null;
             return sxy / Math.sqrt(sxx * syy);
         }
 
         Double kendall() {
-            final int nx = px.length, ny = py.length;
-            // above[j] = the mass of the rows after the current one in column j: its sums right of a cell are the
-            // mass concordant with it, left of it the mass discordant (each unordered pair of cells counted once)
-            final double[] above = new double[ny];
-            final double[] left = new double[ny + 1];
-            double concordant = 0, discordant = 0;
-            for (int i = nx - 1; i >= 0; i--) {
-                for (int j = 0; j < ny; j++) left[j + 1] = left[j] + above[j];
-                final double all = left[ny];
-                for (int j = 0; j < ny; j++) {
-                    if (p[i][j] == 0) continue;
-                    concordant += p[i][j] * (all - left[j + 1]);
-                    discordant += p[i][j] * left[j];
+            // a Fenwick tree over the y codes holds the mass of the rows after the current one: its mass right of a
+            // cell is concordant with it, left of it discordant (each unordered pair of cells counted once; the cells
+            // of one x code tie in x, so a row is queried in full before it is added)
+            final double[] after = new double[py.length + 1];
+            double afterTotal = 0, concordant = 0, discordant = 0;
+            for (int end = mass.length; end > 0; ) {
+                int start = end - 1;
+                while (start > 0 && row[start - 1] == row[end - 1]) start--;
+                for (int k = start; k < end; k++) {
+                    concordant += mass[k] * (afterTotal - prefix(after, col[k] + 1));
+                    discordant += mass[k] * prefix(after, col[k]);
                 }
-                for (int j = 0; j < ny; j++) above[j] += p[i][j];
+                for (int k = start; k < end; k++) {
+                    for (int t = col[k] + 1; t < after.length; t += t & -t) after[t] += mass[k];
+                    afterTotal += mass[k];
+                }
+                end = start;
             }
             double sx = 0, sy = 0;
             for (final double v : px) sx += v * v;
@@ -252,6 +265,13 @@ public final class RankDependence {
             if (!(denominator > 0)) return null;
             // P_c − P_d over ordered pairs = 2 (concordant − discordant)
             return 2 * (concordant - discordant) / denominator;
+        }
+
+        /** The mass of the y codes {@code [0, count)} in a Fenwick tree. */
+        private static double prefix(final double[] tree, final int count) {
+            double sum = 0;
+            for (int t = count; t > 0; t -= t & -t) sum += tree[t];
+            return sum;
         }
 
         Double corner(final String func, final double q) {
@@ -265,13 +285,13 @@ public final class RankDependence {
             }
             double xLower = 0, xUpper = 0, lower = 0, upper = 0;
             for (int i = 0; i < px.length; i++) {
-                final boolean inLower = ux[i] < corner, inUpper = 1 - ux[i] < corner;
-                if (inLower) xLower += px[i];
-                if (inUpper) xUpper += px[i];
-                for (int j = 0; j < py.length; j++) {
-                    if (inLower && uy[j] < corner) lower += p[i][j];
-                    if (inUpper && 1 - uy[j] < corner) upper += p[i][j];
-                }
+                if (ux[i] < corner) xLower += px[i];
+                if (1 - ux[i] < corner) xUpper += px[i];
+            }
+            for (int k = 0; k < mass.length; k++) {
+                final double x = ux[row[k]], y = uy[col[k]];
+                if (x < corner && y < corner) lower += mass[k];
+                if (1 - x < corner && 1 - y < corner) upper += mass[k];
             }
             return switch (func) {
                 case QUADRANT_ASYMMETRY -> xLower > 0 && xUpper > 0 && yLower && yUpper ? Double.valueOf(lower - upper) : null;

@@ -200,6 +200,27 @@ public class RankDependenceTest {
     }
 
     /**
+     * A map over two high-cardinality codes (a cross of raw values: thousands of distinct x and y codes, nearly one cell
+     * each) is read cell by cell, not as an x-by-y table, and still equals the sample funcs.
+     */
+    @Test
+    public void testCellsOverHighCardinalityCodes() {
+        final Random random = new Random(11);
+        final int n = 4000;
+        final double[] x = new double[n], y = new double[n];
+        final Map<String, Object> counts = new HashMap<>();
+        for (int k = 0; k < n; k++) {
+            // three decimals: mostly distinct codes, a few ties in either series and in both
+            x[k] = Math.round(random.nextGaussian() * 1000) / 1000d;
+            y[k] = Math.round((0.6 * x[k] + 0.8 * random.nextGaussian()) * 1000) / 1000d;
+            counts.merge(x[k] + "|" + y[k], 1L, (a, b) -> (Long) a + (Long) b);
+        }
+        for (final String func : java.util.List.of(RankDependence.KENDALL, RankDependence.SPEARMAN)) {
+            Assertions.assertEquals(RankDependence.of(func, x, y, n, 0.75), RankDependence.ofCells(func, counts, 0.75), 1e-12, func);
+        }
+    }
+
+    /**
      * The corners of a 5 × 5 table of quantile bins: every code holds a fifth, so the mid-rank shares are 0.1 .. 0.9 and
      * at q = 0.75 the corners are the extreme bins.
      */

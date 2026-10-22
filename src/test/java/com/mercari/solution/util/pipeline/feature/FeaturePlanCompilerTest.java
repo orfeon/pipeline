@@ -2121,10 +2121,6 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
-     * Row {@code type: vector}: one column per readout (polyfit: one per coefficient), the steps and the readout in
-     * the coordinates, the array field's availability and lineage inherited, every parameter validated.
-     */
-    /**
      * Row {@code type: dependence}: one FLOAT64 column per func over a map column, q on the corner funcs alone, the
      * map's availability inherited (the outcome cell is read from settled past rows, so the readout is a feature).
      */
@@ -2153,6 +2149,9 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan counts = compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: composition_condition_grade_countByValue"));
         Assertions.assertFalse(counts.getDiagnostics().hasErrors(), counts::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: start_price")), "row.dependence.input"));
+        // a typo carrying the block's own prefix is expanded by the pass that lets a block wait for itself: still reported
+        final FeaturePlan typo = compile(SOURCES, spec.replace("input: pers__seller_id__cell__distribution", "input: dep_cells"));
+        Assertions.assertTrue(hasCode(typo, "row.dependence.input"), typo::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail], ", "")), "row.dependence.funcs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail]", "funcs: [kendall, beta]")), "row.dependence.funcs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("funcs: [kendall, lowerTail]", "funcs: [kendall, kendall]")), "row.dependence.funcs"));
@@ -2176,6 +2175,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(OutputColumn.Status.staticSafe, column(recipe, "persist_kendall").getStatus(), recipe::describe);
     }
 
+    /**
+     * Row {@code type: vector}: one column per readout (polyfit: one per coefficient), the steps and the readout in
+     * the coordinates, the array field's availability and lineage inherited, every parameter validated.
+     */
     @Test
     public void testVectorExpansion() {
         // bid_path: the bids observed up to ten minutes before the session (market information, like current_bid_t10)

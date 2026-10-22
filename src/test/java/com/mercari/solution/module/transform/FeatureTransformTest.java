@@ -4560,7 +4560,9 @@ public class FeatureTransformTest {
                 for (final String readout : List.of("_cond_start_price", "_cond_quantity", "_jointrank", "_logdensity")) {
                     // two fits of their own: the runner may merge their accumulators in different orders, so the last
                     // bit can differ under parallel tests (equal to the rounding, not bit for bit)
-                    Assertions.assertEquals(row.getAsDouble("f_cop_plain" + readout), row.getAsDouble("f_cop" + readout), 1e-12, readout + " " + row);
+                    final Double plain = row.getAsDouble("f_cop_plain" + readout), diagnosed = row.getAsDouble("f_cop" + readout);
+                    if (plain == null || diagnosed == null) Assertions.assertEquals(plain, diagnosed, readout + " " + row);
+                    else Assertions.assertEquals(plain, diagnosed, 1e-12, readout + " " + row);
                 }
             }
             Assertions.assertEquals(6, count);
