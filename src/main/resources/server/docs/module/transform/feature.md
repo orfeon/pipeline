@@ -20,7 +20,8 @@ Supports:
 
 - **row** scope — expressions, calendar decomposition (optionally cyclical sin/cos), fixed-edge binning,
   categorical crosses, per-value indicators, field equality, residuals against a named baseline, readouts
-  of a numeric array field (`type: vector`: slice / diff / normalize, then mean / slope / argmax / polyfit …).
+  of a numeric array field (`type: vector`: slice / diff / normalize, then mean / slope / argmax / polyfit …),
+  and the rank dependence of a cell distribution map (`type: dependence`: Kendall / Spearman / corner statistics).
 - **context** scope — statistics relative to the rows that co-occur in the same group (rank, z-score,
   share of total, gap to best, percentile, median difference, group size, value counts / ratios, entropy).
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
@@ -152,6 +153,7 @@ features:
   - {name: vs_market, scope: row, type: residual, input: share, baseline: market, on: identity}
   - {name: placebo_noise, scope: row, type: noise, distribution: normal, seed: 20260717}   # information-free column (see Placebos)
   - {name: bids, scope: row, type: vector, input: bid_path, funcs: [mean, slope, argmax]}   # readouts of an array<float64> field (see Array readouts)
+  - {name: persist, scope: row, type: dependence, input: steps__category__step__distribution, funcs: [kendall, lowerTail]}   # a cell distribution's rank dependence (see Rank dependence of a cell distribution)
 
   - name: relative                  # context: inputs × ops, or ops with their own fields
     scope: context
@@ -317,7 +319,8 @@ shrinkage scale:
 
   All three are null with fewer than two pairs or a constant series, and combine with `lag`. Tail dependence
   *within* a window is deliberately not offered: with tens of events a 0.9 tail holds a handful of points, which
-  is noise (for that, the population `copula` with `diagnose`). A family's tail dependence is a function of
+  is noise (for that, the population `copula` with `diagnose`, or per key the rows pooled into a cell
+  distribution: row `type: dependence`, see *Rank dependence of a cell distribution*). A family's tail dependence is a function of
   Kendall's τ, so it is a row `expr` over the `kendall` column rather than another func — Clayton's lower tail
   `kendall > 0 ? pow(2, -(1 - kendall) / (2 * kendall)) : 0`, Gumbel's upper tail `kendall > 0 ? 2 - pow(2, 1 - kendall) : 0`
   — and carries nothing more than τ for a tree model.
@@ -1924,6 +1927,83 @@ The steps always run in the order slice → diff → normalize → resample / pa
 
 Every parameter is part of the plan hash. The array field itself still passes through to the output
 unless `output.passThrough` / `include` drops it, and `type: svd` takes the same kind of field as its vector.
+
+### Rank dependence of a cell distribution (row, `type: dependence`)
+
+How strongly two ordered quantities move together **per key**: the persistence of a value from one event to the
+next per category and state, say. An entity's window rarely holds enough events for a rank correlation, let alone
+a corner (the sequence `regression` rank funcs need tens of pairs); pooling the rows of a key does, and the
+shrinkage of an encoding `distribution` takes care of the keys with few. The block reads a **cell distribution**,
+a map keyed `"<x>|<y>"` (a `cross` of two ordered codes, such as two `bin` indices) holding a share or a count per
+cell, and emits one FLOAT64 column `<name>_<func>` per func:
+
+```yaml
+- name: persist
+  scope: row
+  type: dependence
+  input: steps__category__step__distribution   # an encoding distribution (or a countByValue map) over a cross of two codes
+  funcs: [spearman, kendall, quadrantAsymmetry, lowerTail, upperTail]
+  q: 0.75                                      # the corners of quadrantAsymmetry / lowerTail / upperTail, in (0.5, 1) (default 0.75)
+```
+
+The map is read as the population of a sample in which a cell is a tie in both codes; `x` is the first code of the
+key (the first input of the `cross`), `y` the second, and a code's position is its **mid-rank share**
+`u = F(code−) + p(code) / 2` (the share below it plus half its own).
+
+| func | value |
+|---|---|
+| `kendall` | τ_b of the table, `(P_c − P_d) / √((1 − Σ p_x²)(1 − Σ p_y²))`: over a map of counts exactly the sequence `kendall` of the pairs they stand for |
+| `spearman` | the Pearson correlation of the mid-rank shares, weighted by the cells: exactly the sequence `spearman` of the same pairs |
+| `quadrantAsymmetry` | the mass with both `u < 1 − q` minus the mass with both `u > q`: positive when the codes fall together more than they rise together |
+| `lowerTail` / `upperTail` | `P(u_y < 1 − q given u_x < 1 − q)` / `P(u_y > q given u_x > q)`: how often y stays in its corner when x is in its corner. Under independence it is the mass of y's corner (≈ `1 − q`); 1 is full persistence |
+
+- **Corners are whole codes.** A code is in a corner when its mid-rank share is: with five equal-mass bins the
+  shares are 0.1, 0.3, …, 0.9, so the default `q` = 0.75 makes the corners the two extreme bins, `q` = 0.6 the
+  two outer ones on each side, and `q` = 0.9 leaves them empty. A corner func is null while a corner it reads
+  holds no code. That also happens for a key whose extreme bin holds more than `2 (1 − q)` of the mass, since
+  the bin's mid-rank share then falls outside the corner. Use at least `1 / (1 − q)` bins.
+- **Discretisation shrinks the correlations toward 0.** With five bins a perfect relation reads τ_b = 1, but a
+  strong continuous one reads less than its continuous τ. The values are for comparing keys under one binning,
+  not for estimating the continuous τ. A copula family's parameter is still a row `expr` over `kendall`, as for
+  the sequence funcs.
+- **Nulls.** The columns are null when the map is null or empty, and when the map is not a cell distribution:
+  a key that is not two numbers joined by `|`, or a negative or non-numeric value. A one-dimensional map such as
+  a `transitionStats` distribution is not a cell distribution either. They are also null when either code takes
+  a single value. A zero-mass cell is ignored. The map may hold shares or counts, and it is normalised.
+- **Availability** is the map's own. An encoding `distribution` reads strictly-past rows, after their settlement
+  and ingestion lags. So the cell may hold the row's own **outcome**, and the readout is still a feature. Keep the
+  outcome-derived row columns out of the output with `output.exclude`: they are availability violations as features.
+- Diagnostics: `row.dependence.input` (not a map of numbers), `row.dependence.funcs` (missing / unknown /
+  listed twice), `row.dependence.q` (outside (0.5, 1): error; declared without a corner func: warning).
+
+**Recipe: the persistence of a value per key.** "Does a high price this time follow a high price last time, and in
+which categories?" The previous value comes from a sequence `lag`. Each value becomes its forward rank, which is
+binned into quintiles and crossed into a cell. The cell's distribution is pooled per category and shrunk toward
+the global one:
+
+```yaml
+- name: prev
+  scope: sequence
+  entity: seller
+  windows: [{maxEvents: 1}]
+  ops: [{type: lag, fields: [final_price], k: 1}]                         # prev_n1_final_price_lag1
+- {name: u_prev, scope: population, type: quantileTransform, input: prev_n1_final_price_lag1, fit: {mode: forward, blocks: {size: P7D}}}
+- {name: u_now, scope: population, type: quantileTransform, input: final_price, fit: {mode: forward, blocks: {size: P7D}}}
+- {name: b_prev, scope: row, type: bin, input: u_prev, edges: [0.2, 0.4, 0.6, 0.8]}
+- {name: b_now, scope: row, type: bin, input: u_now, edges: [0.2, 0.4, 0.6, 0.8]}
+- {name: step, scope: row, type: cross, inputs: [b_prev, b_now]}
+- name: steps
+  scope: population
+  type: encoding
+  keySets: [{keys: [category]}]
+  targets: [{field: step, stats: [distribution]}]
+  shrinkage: {priorWeight: 20}                                            # a category with few steps reads the global table
+- {name: persist, scope: row, type: dependence, input: steps__category__step__distribution, funcs: [kendall, lowerTail, upperTail]}
+# output: {exclude: [u_now, b_now, step]}                                # the row's own outcome: not features
+```
+
+The previous-value bin plus the readouts give a model the key's persistence without listing the 25 cells. To emit
+the cells as well, add `values: ["0|0", "4|4"]` to the target.
 
 ### Placebos (`type: noise`, context op `shuffle`)
 

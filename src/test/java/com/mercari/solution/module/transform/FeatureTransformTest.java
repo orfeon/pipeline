@@ -3450,6 +3450,62 @@ public class FeatureTransformTest {
         Assertions.assertTrue(manifest.contains("lambdasByBlock"), manifest);
     }
 
+    /**
+     * Row {@code type: dependence} over an encoding distribution of a cross of two bins: the seller's past (start_price
+     * band, final_price band) cells. final_price is an outcome, so a past row counts once it is settled and ingested
+     * (6 days 30 minutes): at D (Feb 1) A, B and C are in, at C (Jan 20) A and B.
+     */
+    @Test
+    public void testDependenceOfACellDistribution() throws java.io.IOException {
+        final String blocks = """
+                    - {name: price_band, scope: row, type: bin, input: start_price, edges: [90]}
+                    - {name: final_band, scope: row, type: bin, input: final_price, edges: [100]}
+                    - {name: cell, scope: row, type: cross, inputs: [price_band, final_band]}
+                    - name: pers
+                      scope: population
+                      type: encoding
+                      keySets:
+                        - keys: [seller_id]
+                      targets:
+                        - {field: cell, stats: [distribution]}
+                    - name: dep
+                      scope: row
+                      type: dependence
+                      input: pers__seller_id__cell__distribution
+                      funcs: [spearman, kendall, quadrantAsymmetry, lowerTail, upperTail]
+                      q: 0.6
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ")
+                + "      output:\n        exclude: [final_band, cell]\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        // the band of the row's own outcome and its cell are violations as features: excluded, still read by the encoding
+        Assertions.assertNull(schema.getField("f_final_band"));
+        Assertions.assertNull(schema.getField("f_cell"));
+        Assertions.assertEquals("staticSafe", schema.getField("f_dep_kendall").getOptions().get("feature.status"));
+        Assertions.assertEquals("0.6", schema.getField("f_dep_lowerTail").getOptions().get("feature.coord.q"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // D/s1: cells A 1|1, B 1|0, C 0|0, a third each. Over the pairs x = [1, 1, 0], y = [1, 0, 0]: one concordant
+            // pair, a tie in x, a tie in y -> tau_b = 1 / sqrt(2 * 2); the mid-ranks give the same 0.5
+            final MElement d = byKey.get("D/s1");
+            Assertions.assertEquals(0.5, d.getAsDouble("f_dep_kendall"), 1e-12);
+            Assertions.assertEquals(0.5, d.getAsDouble("f_dep_spearman"), 1e-12);
+            // q = 0.6, corners at mid-rank shares below / above 0.4: x 0 (1/6) low, x 1 (2/3) high; y 0 (1/3) low, y 1 (5/6) high
+            Assertions.assertEquals(0.0, d.getAsDouble("f_dep_quadrantAsymmetry"), 1e-12);
+            Assertions.assertEquals(1.0, d.getAsDouble("f_dep_lowerTail"), 1e-12);
+            Assertions.assertEquals(0.5, d.getAsDouble("f_dep_upperTail"), 1e-12);
+            // C/s1: A and B share the start band (a single x value); A/s1: nothing settled yet
+            for (final String key : java.util.List.of("C/s1", "A/s1", "B/s1")) {
+                Assertions.assertNull(byKey.get(key).getPrimitiveValue("f_dep_kendall"), key);
+                Assertions.assertNull(byKey.get(key).getPrimitiveValue("f_dep_lowerTail"), key);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
     /** Rows collected by {@link #testForwardFitVarianceComponents} (the assertion needs the manifest written by the same run). */
     private static final Map<String, Map<String, Object>> FORWARD_VC_ROWS = new java.util.concurrent.ConcurrentHashMap<>();
 

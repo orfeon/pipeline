@@ -3,6 +3,9 @@ package com.mercari.solution.util.pipeline.feature;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Random;
 
 public class RankDependenceTest {
@@ -151,5 +154,97 @@ public class RankDependenceTest {
             Assertions.assertNull(RankDependence.of(func, constant, varying, 30, 0.75), func + ": a constant series");
             Assertions.assertNull(RankDependence.of(func, varying, constant, 30, 0.75), func + ": a constant series");
         }
+    }
+
+    /**
+     * The cell funcs are their regression namesakes over the sample the counts stand for: a table of counts expanded
+     * into pairs (a cell = a tie in both series) gives the same τ_b and Spearman, and so does the table as shares.
+     */
+    @Test
+    public void testCellFuncsAreTheSampleLimits() {
+        final Random random = new Random(3);
+        for (int trial = 0; trial < 200; trial++) {
+            final int bx = 2 + random.nextInt(5), by = 2 + random.nextInt(5);
+            final Map<String, Object> counts = new HashMap<>(), shares = new HashMap<>();
+            final java.util.List<double[]> pairs = new java.util.ArrayList<>();
+            int total = 0;
+            for (int i = 0; i < bx; i++) {
+                for (int j = 0; j < by; j++) {
+                    // sparse, skewed tables: empty cells, a dominant diagonal now and then
+                    final int n = random.nextInt(3) == 0 ? 0 : random.nextInt(i == j ? 12 : 4);
+                    if (n == 0) continue;
+                    counts.put(i + "|" + j, (long) n);
+                    for (int k = 0; k < n; k++) pairs.add(new double[]{i, j});
+                    total += n;
+                }
+            }
+            for (final Map.Entry<String, Object> e : counts.entrySet()) shares.put(e.getKey(), ((Long) e.getValue()) / (double) total);
+            final double[] x = new double[pairs.size()], y = new double[pairs.size()];
+            for (int k = 0; k < pairs.size(); k++) {
+                x[k] = pairs.get(k)[0];
+                y[k] = pairs.get(k)[1];
+            }
+            for (final String func : java.util.List.of(RankDependence.KENDALL, RankDependence.SPEARMAN)) {
+                final Double sample = RankDependence.of(func, x, y, x.length, 0.75);
+                final Double fromCounts = RankDependence.ofCells(func, counts, 0.75);
+                final Double fromShares = RankDependence.ofCells(func, shares, 0.75);
+                if (sample == null) {
+                    Assertions.assertNull(fromCounts, func + " trial " + trial);
+                    Assertions.assertNull(fromShares, func + " trial " + trial);
+                } else {
+                    Assertions.assertEquals(sample, fromCounts, 1e-12, func + " trial " + trial);
+                    Assertions.assertEquals(sample, fromShares, 1e-12, func + " trial " + trial);
+                }
+            }
+        }
+    }
+
+    /**
+     * The corners of a 5 × 5 table of quantile bins: every code holds a fifth, so the mid-rank shares are 0.1 .. 0.9 and
+     * at q = 0.75 the corners are the extreme bins.
+     */
+    @Test
+    public void testCellCorners() {
+        // counts over 30 pairs, every code 6: the lowest bins move together (x = 0 -> y = 0), the highest half the time
+        final Map<String, Object> cells = new LinkedHashMap<>();
+        cells.put("0|0", 6L);
+        cells.put("1|1", 6L);
+        final long[][] middle = {{3, 1, 2}, {2, 3, 1}, {1, 2, 3}};
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) cells.put((i + 2) + "|" + (j + 2), middle[i][j]);
+        Assertions.assertEquals(1.0, RankDependence.ofCells(RankDependence.LOWER_TAIL, cells, 0.75), 1e-12);
+        Assertions.assertEquals(0.5, RankDependence.ofCells(RankDependence.UPPER_TAIL, cells, 0.75), 1e-12);
+        // both lower 6 / 30, both upper 3 / 30
+        Assertions.assertEquals(0.1, RankDependence.ofCells(RankDependence.QUADRANT_ASYMMETRY, cells, 0.75), 1e-12);
+        // independence: the tails are the corner's mass, no asymmetry
+        final Map<String, Object> independent = new HashMap<>();
+        for (int i = 0; i < 5; i++) for (int j = 0; j < 5; j++) independent.put(i + "|" + j, 1L);
+        Assertions.assertEquals(0.2, RankDependence.ofCells(RankDependence.LOWER_TAIL, independent, 0.75), 1e-12);
+        Assertions.assertEquals(0.2, RankDependence.ofCells(RankDependence.UPPER_TAIL, independent, 0.75), 1e-12);
+        Assertions.assertEquals(0.0, RankDependence.ofCells(RankDependence.QUADRANT_ASYMMETRY, independent, 0.75), 1e-12);
+        Assertions.assertEquals(0.0, RankDependence.ofCells(RankDependence.KENDALL, independent, 0.75), 1e-12);
+        // q = 0.9: a fifth's mid-rank share (0.1) is not below 0.1 — the corner holds no code
+        Assertions.assertNull(RankDependence.ofCells(RankDependence.LOWER_TAIL, independent, 0.9));
+        Assertions.assertNull(RankDependence.ofCells(RankDependence.QUADRANT_ASYMMETRY, independent, 0.9));
+        // q = 0.6: the two extreme bins on each side (mid-rank shares 0.1, 0.3 < 0.4)
+        Assertions.assertEquals(0.4, RankDependence.ofCells(RankDependence.LOWER_TAIL, independent, 0.6), 1e-12);
+    }
+
+    @Test
+    public void testCellsThatAreNotATableAreNull() {
+        for (final String func : RankDependence.CELL_FUNCS) {
+            Assertions.assertNull(RankDependence.ofCells(func, null, 0.75), func);
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of(), 0.75), func);
+            // a one-dimensional distribution (a transitionStats map), text codes, a third component, a negative share
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of("0", 0.5, "1", 0.5), 0.75), func);
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of("good|fair", 0.5, "fair|good", 0.5), 0.75), func);
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of("0|0|0", 0.5, "1|1|1", 0.5), 0.75), func);
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of("0|0", -0.5, "1|1", 1.5), 0.75), func);
+            // a single value in one series
+            Assertions.assertNull(RankDependence.ofCells(func, Map.of("0|0", 0.5, "0|1", 0.5), 0.75), func);
+        }
+        // -0.0 is the code 0; a zero-mass cell is no code at all
+        final Map<String, Object> signed = Map.of("-0.0|0", 1L, "0|1", 1L, "1|0", 1L, "1|1", 3L, "2|5", 0L);
+        final Map<String, Object> plain = Map.of("0|0", 1L, "0|1", 1L, "1|0", 1L, "1|1", 3L);
+        Assertions.assertEquals(RankDependence.ofCells(RankDependence.KENDALL, plain, 0.75), RankDependence.ofCells(RankDependence.KENDALL, signed, 0.75));
     }
 }

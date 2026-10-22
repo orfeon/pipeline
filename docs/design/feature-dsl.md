@@ -572,6 +572,23 @@ expanded into scalar columns.
   degree: 2                      # polyfit → bid_step_poly0 .. poly2
 ```
 
+A **cell distribution** (a map keyed `"<x>|<y>"` over a `cross` of two ordered codes: an encoding
+`distribution`, a `countByValue`) has a rank dependence of its own. `type: dependence` reads it as the
+population of a sample whose cells are ties in both codes, so `kendall` / `spearman` are exactly the
+sequence `regression` funcs of the pairs a map of counts stands for, and the corner funcs read whole codes
+by their mid-rank share `F(code−) + p(code) / 2`. It is the key-level counterpart of the window funcs:
+pooling a key's rows is what gives a corner enough mass. The availability is the map's own (strictly past for an
+encoding, so a cell holding the outcome still yields a feature).
+
+```yaml
+- name: persist
+  scope: row
+  type: dependence
+  input: steps__category__step__distribution   # cross of the previous and the current value's quintile
+  funcs: [kendall, quadrantAsymmetry, lowerTail, upperTail]   # | spearman
+  q: 0.75                        # corners: mid-rank share below 1 − q / above q
+```
+
 ### 4.2 context — transforms within a co-occurrence group
 
 ```yaml
