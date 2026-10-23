@@ -916,7 +916,11 @@ public final class FeatureStages {
         final Map<String, PCollectionView<?>> blockViews = new LinkedHashMap<>();
         final Set<String> blockLoad = new LinkedHashSet<>();
         // forward factorization: its models are joined with the rows ahead of the apply (FmSpec.serve), whose
-        // columns the rows then carry in; a windowed input keeps the side input (the models are global-window)
+        // columns the rows then carry in; a windowed input keeps the side input (the models are global-window), as
+        // does one under a non-default trigger: the join could fire a change point's model and its rows in different
+        // panes (the rows then read null), and its continuation trigger may not flatten with the unserved rows
+        final boolean joinable = globalInput
+                && input.getWindowingStrategy().getTrigger() instanceof org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
         final Set<String> blockServed = new LinkedHashSet<>();
         final List<PCollection<BadRecord>> serveFailures = new ArrayList<>();
         PCollection<MElement> rows = input;
@@ -936,7 +940,7 @@ public final class FeatureStages {
                 summaryBlocks.add(summaryBlock);
                 continue;
             }
-            if (block instanceof FmSpec fm && fm.joined() && globalInput) {
+            if (block instanceof FmSpec fm && fm.joined() && joinable) {
                 rows = fm.serve(rows, fitInput, label, planHash, failFast, failureTag, serveFailures);
                 blockServed.add(block.block());
                 continue;
@@ -1468,7 +1472,9 @@ public final class FeatureStages {
         @SuppressWarnings({"unchecked", "rawtypes"})
         private static <T> Coder<ArrayList<T>> listCoder(final Coder<T> inputCoder) {
             if (inputCoder == null || inputCoder instanceof SerializableCoder) return (Coder) SerializableCoder.of(ArrayList.class);
-            return org.apache.beam.sdk.coders.DelegateCoder.<ArrayList<T>, List<T>>of(org.apache.beam.sdk.coders.ListCoder.of(inputCoder), list -> list, ArrayList::new);
+            // ListCoder decodes into an ArrayList already: kept as it is rather than copied (a gather holds every example)
+            return org.apache.beam.sdk.coders.DelegateCoder.<ArrayList<T>, List<T>>of(org.apache.beam.sdk.coders.ListCoder.of(inputCoder),
+                    list -> list, list -> list instanceof ArrayList<T> a ? a : new ArrayList<>(list));
         }
 
         @Override
@@ -1624,8 +1630,9 @@ public final class FeatureStages {
          * at a time, where a side input would hold every change point's model on every worker. A row before the first
          * usable model, or of a change point left unsolved (fit.minRows), reads null.
          *
-         * @param rows     the stage input, in the global window (the models are)
-         * @param failures collects the failures of the apply
+         * @param rows     the stage input, in the global window under the default trigger (the models are global-window,
+         *                 and one pane carries a change point's model and its rows together)
+         * @param failures collects the failures of the keying and the apply
          */
         PCollection<MElement> serve(final PCollection<MElement> rows, final PCollection<MElement> fitInput, final String label, final String planHash,
                                     final boolean failFast, final TupleTag<BadRecord> failureTag, final List<PCollection<BadRecord>> failures) {
@@ -1642,9 +1649,10 @@ public final class FeatureStages {
             final TupleTag<KV<Long, MElement>> keyedTag = new TupleTag<>() {};
             final TupleTag<MElement> unservedTag = new TupleTag<>() {};
             final PCollectionTuple keyed = rows.apply(prefix + "_Key", ParDo
-                    .of(new KeyByChangePointDoFn(this, index, unservedTag))
+                    .of(new KeyByChangePointDoFn(this, index, unservedTag, failFast, failureTag))
                     .withSideInputs(index)
-                    .withOutputTags(keyedTag, TupleTagList.of(unservedTag)));
+                    .withOutputTags(keyedTag, TupleTagList.of(unservedTag).and(failureTag)));
+            failures.add(keyed.get(failureTag));
             final TupleTag<Factorization.Model> joinModelTag = new TupleTag<>() {};
             final TupleTag<MElement> joinRowTag = new TupleTag<>() {};
             final TupleTag<MElement> servedTag = new TupleTag<>() {};
@@ -1662,7 +1670,12 @@ public final class FeatureStages {
 
         /** fit.mode forward: the row's usable time block, or null without an event time. */
         Long usableBlock(final Map<String, Object> row) {
-            final Long eventMillis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+            return usableBlockOf(row.get(forward.blockField()));
+        }
+
+        /** fit.mode forward: the usable time block of a row whose block field holds {@code event}, or null without one. */
+        Long usableBlockOf(final Object event) {
+            final Long eventMillis = FeatureValues.toEpochMillis(event, forward.blockFieldType());
             return eventMillis == null ? null : forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
         }
 
@@ -1682,12 +1695,14 @@ public final class FeatureStages {
                     && foldKeys.subList(1, foldKeys.size()).equals(contestKeys);
         }
 
-        /** Writes the whole-input model: on every fit under static, once (or on refit) under fold / forward. */
+        /** Whether the whole-input model is written: on every fit under static, once (or on refit) under fold / forward. */
+        boolean writesTotal(final String planHash) {
+            return artifactUri != null && (foldKeys == null && forward == null || refit || !Factorization.exists(artifactUri, planHash, block));
+        }
+
+        /** Writes the whole-input model when {@link #writesTotal}. */
         void writeTotal(final Factorization.Model total, final String planHash) {
-            if (artifactUri == null || total == null) return;
-            if (foldKeys == null && forward == null || refit || !Factorization.exists(artifactUri, planHash, block)) {
-                Factorization.write(artifactUri, planHash, block, total);
-            }
+            if (total != null && writesTotal(planHash)) Factorization.write(artifactUri, planHash, block, total);
         }
 
         @Override
@@ -1697,6 +1712,10 @@ public final class FeatureStages {
 
         /** Fills the block's columns of one row from the model it reads (all null without one). */
         void applyModel(final Factorization.Model model, final Map<String, Object> values) {
+            if (model == null) {
+                for (final OutputColumn col : columns) values.put(col.getCanonicalName(), null);
+                return;
+            }
             final double[] numericValues = x(values);
             final String[] x = values(values, numericValues);
             for (final OutputColumn col : columns) {
@@ -1910,8 +1929,7 @@ public final class FeatureStages {
         Long changePointOf(final Long usable, final int minBlocks) {
             if (usable == null) return null;
             final Long floor = changePoints.floor(usable);
-            if (floor == null || observedBlocks.headSet(usable, true).size() < minBlocks) return null;
-            return floor;
+            return floor == null || !BlockSeries.reached(observedBlocks, usable, minBlocks) ? null : floor;
         }
     }
 
@@ -1932,47 +1950,61 @@ public final class FeatureStages {
             final ArrayList<Factorization.Example> examples = c.element();
             LOG.info("factorization {}: fitting on {} examples (forward)", spec.block(), examples.size());
             final TreeSet<Long> changePoints = new TreeSet<>();
-            final Factorization.Model total = Factorization.fitForward(spec.options(), examples, spec.plan(), (at, model) -> {
+            // no row reads the whole-input model: it is fitted only when the artifact will be written
+            final boolean writesTotal = spec.writesTotal(planHash);
+            final Factorization.Model total = Factorization.fitForward(spec.options(), examples, spec.plan(), writesTotal, (at, model) -> {
                 changePoints.add(at);
                 if (model != null) c.output(KV.of(at, model));
             });
-            spec.writeTotal(total, planHash);
+            if (writesTotal && total != null) Factorization.write(spec.artifactUri(), planHash, spec.block(), total);
             c.output(indexTag, new FmIndex(changePoints, Factorization.observedBlocks(examples)));
         }
     }
 
     /**
      * fit.mode forward, served by a join: a row keyed by the change point whose model it reads, or - without one -
-     * passed on with the block's columns null.
+     * passed on with the block's columns null; a row that fails here goes to the failures, as in the apply.
      */
     static class KeyByChangePointDoFn extends DoFn<MElement, KV<Long, MElement>> {
         private final FmSpec spec;
         private final PCollectionView<List<FmIndex>> indexView;
         private final TupleTag<MElement> unservedTag;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
         /** Read once per DoFn instance (immutable in a batch run); null until then, empty when nothing was fitted. */
         private transient Optional<FmIndex> index;
 
-        KeyByChangePointDoFn(final FmSpec spec, final PCollectionView<List<FmIndex>> indexView, final TupleTag<MElement> unservedTag) {
+        KeyByChangePointDoFn(final FmSpec spec, final PCollectionView<List<FmIndex>> indexView, final TupleTag<MElement> unservedTag,
+                             final boolean failFast, final TupleTag<BadRecord> failureTag) {
             this.spec = spec;
             this.indexView = indexView;
             this.unservedTag = unservedTag;
+            this.failFast = failFast;
+            this.failureTag = failureTag;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final MElement row = c.element();
             if (row == null) return;
-            if (index == null) {
-                final List<FmIndex> indices = c.sideInput(indexView);
-                index = indices.isEmpty() ? Optional.empty() : Optional.of(indices.get(0));
-            }
-            final Map<String, Object> values = row.asPrimitiveMap();
-            final Long at = index.map(i -> i.changePointOf(spec.usableBlock(values), spec.forward().minBlocks())).orElse(null);
-            if (at != null) {
-                c.output(KV.of(at, row));
-            } else {
+            try {
+                if (index == null) {
+                    final List<FmIndex> indices = c.sideInput(indexView);
+                    index = indices.isEmpty() ? Optional.empty() : Optional.of(indices.get(0));
+                }
+                // the block field read in place: a keyed row rides the join as it is, so its map is not copied here
+                final Object event = row.getValue() instanceof Map<?, ?> map ? map.get(spec.forward().blockField())
+                        : row.asPrimitiveMap().get(spec.forward().blockField());
+                final Long at = index.map(i -> i.changePointOf(spec.usableBlockOf(event), spec.forward().minBlocks())).orElse(null);
+                if (at != null) {
+                    c.output(KV.of(at, row));
+                    return;
+                }
+                final Map<String, Object> values = row.asPrimitiveMap();
                 spec.applyModel(null, values);
                 c.output(unservedTag, MElement.of(values, c.timestamp()));
+            } catch (final Throwable e) {
+                c.output(failureTag, Module.processError("Failed to key factorization " + spec.block(), row, e, failFast));
             }
         }
     }
@@ -2003,8 +2035,10 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final CoGbkResult result = c.element().getValue();
-            // a change point left unsolved (fit.minRows) has no model: its rows read null
-            final Factorization.Model model = result.getOnly(modelTag, null);
+            // a change point left unsolved (fit.minRows) has no model: its rows read null. One model per change point,
+            // so the first is it: getOnly would read the whole group once more to prove there is no second
+            final Iterator<Factorization.Model> models = result.getAll(modelTag).iterator();
+            final Factorization.Model model = models.hasNext() ? models.next() : null;
             for (final MElement row : result.getAll(rowTag)) {
                 try {
                     final Map<String, Object> values = row.asPrimitiveMap();

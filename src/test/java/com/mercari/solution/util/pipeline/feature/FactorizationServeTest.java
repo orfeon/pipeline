@@ -123,7 +123,26 @@ public class FactorizationServeTest {
             for (final long at : fits.blocks.keySet()) assertSameModel(fits.blocks.get(at), streamed.get(at));
             assertSameModel(fits.total, total);
             Assertions.assertEquals(fits.observedBlocks, Factorization.observedBlocks(examples));
+            // without an artifact to write, the whole-input model is not fitted; the change points are the same
+            final TreeMap<Long, Factorization.Model> withoutTotal = new TreeMap<>();
+            Assertions.assertNull(Factorization.fitForward(OPTIONS, examples, plan, false, withoutTotal::put));
+            Assertions.assertEquals(fits.blocks.keySet(), withoutTotal.keySet());
+            for (final long at : fits.blocks.keySet()) assertSameModel(fits.blocks.get(at), withoutTotal.get(at));
         }
+    }
+
+    /** minBlocks counts the observed blocks at or before the usable one (checked against a headSet count). */
+    @Test
+    public void testReachedCountsObservedBlocks() {
+        final TreeSet<Long> observed = new TreeSet<>(List.of(-1L, 2L, 3L, 5L, 9L));
+        for (int minBlocks = 0; minBlocks <= 6; minBlocks++) {
+            for (long usable = -3; usable <= 11; usable++) {
+                Assertions.assertEquals(observed.headSet(usable, true).size() >= minBlocks, BlockSeries.reached(observed, usable, minBlocks),
+                        "usable " + usable + ", minBlocks " + minBlocks);
+            }
+        }
+        Assertions.assertFalse(BlockSeries.reached(new TreeSet<>(), 4L, 1));
+        Assertions.assertTrue(BlockSeries.reached(new TreeSet<>(), 4L, 0));
     }
 
     /** The change point a row is keyed by is the one whose model the side-input lookup would serve it. */

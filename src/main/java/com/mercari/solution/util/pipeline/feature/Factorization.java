@@ -407,7 +407,7 @@ public final class Factorization {
         }
         if (!plan.forward()) return Fits.ofTotal(trainOrNull(options, sorted, null, options.epochs(), plan.minRows()));
         final TreeMap<Long, Model> models = new TreeMap<>();
-        final Model total = forward(options, sorted, plan, models::put);
+        final Model total = forward(options, sorted, plan, true, models::put);
         return new Fits(total, null, models, observedBlocks(sorted));
     }
 
@@ -418,9 +418,18 @@ public final class Factorization {
      * whole-input model.
      */
     public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final BiConsumer<Long, Model> sink) {
+        return fitForward(options, examples, plan, true, sink);
+    }
+
+    /**
+     * {@link #fitForward}, fitting the whole-input model only when {@code total} (no row reads it: only the artifact
+     * does, so a run that writes none skips its fit — under a window, one more fit over every example); null otherwise.
+     */
+    public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final boolean total,
+                                   final BiConsumer<Long, Model> sink) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return forward(options, sorted, plan, sink);
+        return forward(options, sorted, plan, total, sink);
     }
 
     /** The time blocks that carry examples (the tags of a forward fit's examples): what {@code minBlocks} counts. */
@@ -437,7 +446,8 @@ public final class Factorization {
         return out;
     }
 
-    private static Model forward(final Options options, final List<Example> sorted, final Plan plan, final BiConsumer<Long, Model> sink) {
+    private static Model forward(final Options options, final List<Example> sorted, final Plan plan, final boolean withTotal,
+                                 final BiConsumer<Long, Model> sink) {
         // sorted by tag first, so a block is a contiguous range [start, end)
         final TreeMap<Long, int[]> ranges = new TreeMap<>();
         for (int i = 0; i < sorted.size(); i++) {
@@ -466,6 +476,7 @@ public final class Factorization {
             latest = model;
             LOG.info("factorization forward: change point {} - {} example(s){}", at, window.size(), model == null ? ", not solved (fit.minRows)" : "");
         }
+        if (!withTotal) return null;
         // the whole-input model (a static serving run loads it): the last change point when it reads every block
         Model total;
         if (plan.windowBlocks() == 0 && latest != null) {

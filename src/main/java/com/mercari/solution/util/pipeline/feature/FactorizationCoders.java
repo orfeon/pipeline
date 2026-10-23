@@ -5,6 +5,7 @@ import org.apache.beam.sdk.util.VarInt;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -76,8 +77,9 @@ final class FactorizationCoders {
             VarInt.encode(m.k, out);
             data.writeDouble(m.w0);
             writeString(m.loss, out);
+            // the numeric flags first: with the layout they are all the decoder needs to build the model it fills
+            for (int f = 0; f < fields; f++) data.writeBoolean(m.numeric[f]);
             for (int f = 0; f < fields; f++) {
-                data.writeBoolean(m.numeric[f]);
                 data.writeDouble(m.mean[f]);
                 data.writeDouble(m.scale[f]);
                 for (int g = 0; g < fields; g++) data.writeDouble(m.r[f][g]);
@@ -104,20 +106,15 @@ final class FactorizationCoders {
             final double w0 = data.readDouble();
             final String loss = readString(in);
             final boolean[] numeric = new boolean[fields];
-            final double[] mean = new double[fields], scale = new double[fields];
-            final double[][] r = new double[fields][fields];
-            for (int f = 0; f < fields; f++) {
-                numeric[f] = data.readBoolean();
-                mean[f] = data.readDouble();
-                scale[f] = data.readDouble();
-                for (int g = 0; g < fields; g++) r[f][g] = data.readDouble();
-            }
+            for (int f = 0; f < fields; f++) numeric[f] = data.readBoolean();
             final Factorization.Model m = new Factorization.Model(List.copyOf(names), numeric, fieldWeighted, k);
             m.w0 = w0;
             m.loss = loss;
-            System.arraycopy(mean, 0, m.mean, 0, fields);
-            System.arraycopy(scale, 0, m.scale, 0, fields);
-            for (int f = 0; f < fields; f++) System.arraycopy(r[f], 0, m.r[f], 0, fields);
+            for (int f = 0; f < fields; f++) {
+                m.mean[f] = data.readDouble();
+                m.scale[f] = data.readDouble();
+                for (int g = 0; g < fields; g++) m.r[f][g] = data.readDouble();
+            }
             for (int f = 0; f < fields; f++) {
                 final int size = VarInt.decodeInt(in);
                 final Map<String, double[]> params = m.params.get(f);
@@ -188,7 +185,10 @@ final class FactorizationCoders {
         }
 
         private static Factorization.Model readModel(final InputStream in) throws IOException {
-            return in.read() == 1 ? ModelCoder.INSTANCE.decode(in) : null;
+            final int present = in.read();
+            // a truncated stream is an error, not a missing model
+            if (present < 0) throw new EOFException("factorization fits: truncated before a model");
+            return present == 1 ? ModelCoder.INSTANCE.decode(in) : null;
         }
     }
 

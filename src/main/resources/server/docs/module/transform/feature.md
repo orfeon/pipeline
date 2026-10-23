@@ -1011,7 +1011,8 @@ refitting modes give training rows values fitted without their own target:
   no worker holds more than a model or two at a time — a model is values × (k + 2) × 8 bytes (a million values at
   k = 8 is ~80 MB) — at the price of one more shuffle of the rows. The cost that remains grows with the change points:
   the fits run one after another, so with a large vocabulary keep the blocks coarse (a month, not a day). An input
-  under a non-global windowing strategy reads the models from one side input instead (all of them on every worker).
+  under a non-global windowing strategy, or a non-default trigger, reads the models from one side input instead (all
+  of them on every worker).
 - **`fold`** (`folds`, `groupBy` as in *Out-of-fold fits*; a top-level hash `fold` is inherited like a top-level
   `forward`) fits one model per fold over the other folds — from scratch, a warm start would carry the fold's own
   targets into it — one worker per fold, in parallel; the fold models reach the rows as one side input (the
