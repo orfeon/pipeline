@@ -1008,8 +1008,10 @@ refitting modes give training rows values fitted without their own target:
   but a warm-started fit starts the values in it from the fit before, which read older blocks: with few `warmEpochs`
   that start still shows; `fit.warmStart: none` gives fits that read the window alone. Each change point's model is
   handed out as soon as it is fitted and joined with the rows that read it (the rows are grouped by change point), so
-  no worker holds more than a model or two at a time — a model is values × (k + 2) × 8 bytes (a million values at
-  k = 8 is ~80 MB) — at the price of one more shuffle of the rows. The cost that remains grows with the change points:
+  a worker applying the models holds one per change point it serves, never all of them — a model is values × (k + 2)
+  × 8 bytes (a million values at k = 8 is ~80 MB) — at the price of one more shuffle of the rows. The fit worker keeps
+  a model or two where the runner streams a step's outputs as they come (Dataflow); a runner that buffers them until
+  the step returns (the DirectRunner, possibly Spark) holds every change point's model there for the length of the fit. The cost that remains grows with the change points:
   the fits run one after another, so with a large vocabulary keep the blocks coarse (a month, not a day). An input
   under a non-global windowing strategy, or a non-default trigger, reads the models from one side input instead (all
   of them on every worker).
