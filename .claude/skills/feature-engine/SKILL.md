@@ -557,7 +557,10 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   Plackett–Luce pool sums `Z` per contest stage) current, `refresh` recomputes them once per epoch — a new loss is one
   `Objective` checked by `FactorizationTest.assertDerivatives` (finite differences + shift-vs-refresh). Contest keys are
   `FmSpec.contestOf` = (event millis, context keys); `ORDER` sorts by contest, so the key text decides the fit order —
-  a test that rebuilds the examples must build the same key.)
+  a test that rebuilds the examples must build the same key. Numeric fields: `Example.x` holds the raw values by field
+  index and `values[f]` is `Factorization.NUMERIC` ("") when present; `train` turns them into the per-example units `u`
+  (every slope is multiplied by them, and the fm cache `q` sums `v · u`), and the fitted mean / scale ride in the model
+  and the artifact.)
 - `runtimeFilter` columns (`atRowCreation`, `event_date THH:MM`): per-row availability filtering.
 - Streaming keyed stages (stateful DoFn + timers) and the stateful wave merge (§9.4.6).
 - Sequence / population stages as fold-in merge targets (composite sorter key), §9.4.4 prefix-scan

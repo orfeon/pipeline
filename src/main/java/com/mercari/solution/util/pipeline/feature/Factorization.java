@@ -20,11 +20,15 @@ import java.io.Serializable;
 import java.util.*;
 
 /**
- * Factorization machine over categorical fields (docs/design/feature-dsl.md §4.4):
+ * Factorization machine over categorical and numeric fields (docs/design/feature-dsl.md §4.4):
  *
  * <pre>
- *   ŷ = w0 + Σ_f w_f[x_f] + Σ_{f&lt;g} r_fg · ⟨v_f[x_f], v_g[x_g]⟩
+ *   ŷ = w0 + Σ_f w_f[x_f] · u_f + Σ_{f&lt;g} r_fg · ⟨v_f[x_f], v_g[x_g]⟩ · u_f · u_g
  * </pre>
+ *
+ * A categorical field has a parameter set per value and {@code u = 1}; a numeric field has one parameter set and
+ * {@code u} = its (standardised) value, so a pair with it is the value's slope times the affinity — a categorical ×
+ * continuous interaction on the same latent space.
  *
  * {@code fm}: r ≡ 1; {@code fwfm}: one scalar r per field pair (its fitted values are a field-pair
  * importance ranking, exported with the artifact manifest). Training is coordinate descent: the model is
@@ -50,22 +54,30 @@ public final class Factorization {
     private Factorization() {}
 
     /**
-     * One training example: the field values (null = missing), the target, the offset its score starts from (0 without
+     * One training example: the field values (null = missing; a numeric field's is {@link #NUMERIC} when it has a value),
+     * the raw values of the numeric fields ({@code x}, by field index; null without numeric fields), the target, the offset its score starts from (0 without
      * one; on the score scale: the target's own units under squared loss, log-odds under logistic, log-strength under
      * Plackett–Luce), the tag the fit plan partitions by — the row's fold under {@code fit.mode: fold}, its time block
      * under {@code forward}, 0 otherwise — and the contest it is ranked in (Plackett–Luce; null otherwise).
      */
-    public record Example(String[] values, double y, double offset, long tag, String contest) implements Serializable {
+    public record Example(String[] values, double[] x, double y, double offset, long tag, String contest) implements Serializable {
         public Example(final String[] values, final double y) {
-            this(values, y, 0d, 0L, null);
+            this(values, null, y, 0d, 0L, null);
         }
 
         public Example(final String[] values, final double y, final long tag) {
-            this(values, y, 0d, tag, null);
+            this(values, null, y, 0d, tag, null);
+        }
+
+        public Example(final String[] values, final double y, final double offset, final long tag, final String contest) {
+            this(values, null, y, offset, tag, contest);
         }
     }
 
-    /** The canonical example order: tag, contest, then the values (null first), the target and the offset. */
+    /** The value a numeric field carries in {@link Example#values} (and its one key in {@link Model#params}). */
+    public static final String NUMERIC = "";
+
+    /** The canonical example order: tag, contest, then the values (null first), the numeric values, the target and the offset. */
     static final Comparator<Example> ORDER = (a, b) -> {
         int c = Long.compare(a.tag(), b.tag());
         if (c != 0) return c;
@@ -84,6 +96,12 @@ public final class Factorization {
             c = x.compareTo(y);
             if (c != 0) return c;
         }
+        if (a.x() != null && b.x() != null) {
+            for (int f = 0; f < a.x().length; f++) {
+                c = Double.compare(a.x()[f], b.x()[f]);
+                if (c != 0) return c;
+            }
+        }
         c = Double.compare(a.y(), b.y());
         return c != 0 ? c : Double.compare(a.offset(), b.offset());
     };
@@ -99,9 +117,21 @@ public final class Factorization {
         public final double[][] r;
         /** The loss the model was fitted under ({@link Loss}; recorded in the artifact manifest). */
         public String loss = Loss.squared.name();
+        /** Per field: numeric (one parameter set, scaled by the standardised value) or categorical. */
+        public final boolean[] numeric;
+        /** Per numeric field: the centre and the scale its value is standardised by (0 and 1 when not standardised). */
+        public final double[] mean, scale;
 
         Model(final List<String> fields, final boolean fieldWeighted, final int k) {
+            this(fields, new boolean[fields.size()], fieldWeighted, k);
+        }
+
+        Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
+            this.numeric = numeric.clone();
+            this.mean = new double[fields.size()];
+            this.scale = new double[fields.size()];
+            Arrays.fill(scale, 1d);
             this.fieldWeighted = fieldWeighted;
             this.k = k;
             this.params = new ArrayList<>();
@@ -114,14 +144,32 @@ public final class Factorization {
             return value == null ? null : params.get(f).get(value);
         }
 
-        /** ⟨v_f[x_f], v_g[x_g]⟩ scaled by r_fg, or null when either value is unknown. */
+        /** The multiplier of field {@code f}'s parameters: 1 for a categorical field, the standardised value of a numeric one (NaN when missing). */
+        public double unit(final int f, final double[] x) {
+            if (!numeric[f]) return 1d;
+            if (x == null || !Double.isFinite(x[f])) return Double.NaN;
+            return (x[f] - mean[f]) / scale[f];
+        }
+
+        /** ⟨v_f[x_f], v_g[x_g]⟩ scaled by r_fg, or null when either value is unknown (categorical fields only). */
         public Double pair(final String[] values, final int f, final int g) {
+            return pair(values, null, f, g, false);
+        }
+
+        /**
+         * {@code r_fg ⟨v_f[x_f], v_g[x_g]⟩ u_f u_g}: the pair's term of the prediction, or — {@code perUnit} — its value per
+         * unit of the numeric fields' standardised values (the slope; {@code u = 1}). Null when either value is unknown
+         * or missing.
+         */
+        public Double pair(final String[] values, final double[] x, final int f, final int g, final boolean perUnit) {
             final double[] a = param(f, values[f]);
             final double[] b = param(g, values[g]);
             if (a == null || b == null) return null;
+            final double units = perUnit ? 1d : unit(f, x) * unit(g, x);
+            if (Double.isNaN(units)) return null;
             double dot = 0;
             for (int d = 1; d <= k; d++) dot += a[d] * b[d];
-            return r[f][g] * dot;
+            return r[f][g] * dot * units;
         }
 
         public double[] embedding(final String[] values, final int f, final int dims) {
@@ -137,16 +185,22 @@ public final class Factorization {
             return p == null ? 0L : (long) p[k + 1];
         }
 
-        /** Full linear predictor (without the offset). */
+        /** Full linear predictor (without the offset) over categorical fields. */
         public double predict(final String[] values) {
+            return predict(values, null);
+        }
+
+        /** Full linear predictor (without the offset): an unknown or missing value contributes nothing. */
+        public double predict(final String[] values, final double[] x) {
             double y = w0;
             for (int f = 0; f < fields.size(); f++) {
                 final double[] p = param(f, values[f]);
-                if (p != null) y += p[0];
+                final double u = unit(f, x);
+                if (p != null && !Double.isNaN(u)) y += p[0] * u;
             }
             for (int f = 0; f < fields.size(); f++) {
                 for (int g = f + 1; g < fields.size(); g++) {
-                    final Double pair = pair(values, f, g);
+                    final Double pair = pair(values, x, f, g, false);
                     if (pair != null) y += pair;
                 }
             }
@@ -184,9 +238,11 @@ public final class Factorization {
             }
             final Alignment.Map map = Alignment.map(mode, Alignment.cross(a, b, k), a);
             if (map == null) return this;
-            final Model rotated = new Model(fields, fieldWeighted, k);
+            final Model rotated = new Model(fields, numeric, fieldWeighted, k);
             rotated.w0 = w0;
             rotated.loss = loss;
+            System.arraycopy(mean, 0, rotated.mean, 0, mean.length);
+            System.arraycopy(scale, 0, rotated.scale, 0, scale.length);
             for (int f = 0; f < fields.size(); f++) {
                 System.arraycopy(r[f], 0, rotated.r[f], 0, fields.size());
                 for (final Map.Entry<String, double[]> e : params.get(f).entrySet()) {
@@ -207,11 +263,25 @@ public final class Factorization {
      * @param descending Plackett–Luce: a larger target is a better place
      * @param linear     whether the per-value weights w are fitted (false: interactions only, e.g. over an offset
      *                   that already carries the main effects)
+     * @param scales     per field: null for a categorical field, {@code zscore} / {@code none} for a numeric one (how its
+     *                   value is standardised; the mean and standard deviation are the fit's own); null = all categorical
      */
     public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, double reg, long seed,
-                          Loss loss, int top, boolean descending, boolean linear) implements Serializable {
+                          Loss loss, int top, boolean descending, boolean linear, List<String> scales) implements Serializable {
         public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed) {
-            this(fields, fieldWeighted, latentDim, epochs, reg, seed, Loss.squared, 0, false, true);
+            this(fields, fieldWeighted, latentDim, epochs, reg, seed, Loss.squared, 0, false, true, null);
+        }
+
+        public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed,
+                       final Loss loss, final int top, final boolean descending, final boolean linear) {
+            this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, null);
+        }
+
+        /** Per field: numeric or categorical. */
+        public boolean[] numeric() {
+            final boolean[] numeric = new boolean[fields.size()];
+            for (int f = 0; f < numeric.length; f++) numeric[f] = scales != null && scales.get(f) != null;
+            return numeric;
         }
     }
 
@@ -403,6 +473,29 @@ public final class Factorization {
                 idx[i * F + f] = id;
             }
         }
+        // the multiplier of every field of every example: 1 for a categorical field, the standardised value of a numeric one
+        final boolean[] numeric = options.numeric();
+        final double[] mean = new double[F], scale = new double[F];
+        Arrays.fill(scale, 1d);
+        final double[] u = new double[n * F];
+        Arrays.fill(u, 1d);
+        for (int f = 0; f < F; f++) {
+            if (!numeric[f]) continue;
+            double count = 0, sum = 0, sumSq = 0;
+            for (int i = 0; i < n; i++) {
+                if (idx[i * F + f] < 0) continue;
+                final double value = examples.get(i).x()[f];
+                count++;
+                sum += value;
+                sumSq += value * value;
+            }
+            if ("zscore".equals(options.scales().get(f)) && count > 0) {
+                mean[f] = sum / count;
+                final double sd = Math.sqrt(Math.max(0, sumSq / count - mean[f] * mean[f]));
+                scale[f] = sd > 0 ? sd : 1d;
+            }
+            for (int i = 0; i < n; i++) if (idx[i * F + f] >= 0) u[i * F + f] = (examples.get(i).x()[f] - mean[f]) / scale[f];
+        }
         // parameters as flat arrays: w[f][id], v[f][id · k + d]
         final double[][] w = new double[F][];
         final double[][] v = new double[F][];
@@ -445,7 +538,7 @@ public final class Factorization {
             double y = w0;
             for (int f = 0; f < F; f++) {
                 final int id = idx[i * F + f];
-                if (id >= 0) y += w[f][id];
+                if (id >= 0) y += w[f][id] * u[i * F + f];
             }
             for (int f = 0; f < F; f++) {
                 final int a = idx[i * F + f];
@@ -455,14 +548,14 @@ public final class Factorization {
                     if (b < 0) continue;
                     double dot = 0;
                     for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
-                    y += r[f][g] * dot;
+                    y += r[f][g] * dot * u[i * F + f] * u[i * F + g];
                 }
             }
             s[i] = examples.get(i).offset() + y;
             if (fm) {
                 for (int f = 0; f < F; f++) {
                     final int id = idx[i * F + f];
-                    if (id >= 0) for (int d = 0; d < k; d++) q[i * k + d] += v[f][id * k + d];
+                    if (id >= 0) for (int d = 0; d < k; d++) q[i * k + d] += v[f][id * k + d] * u[i * F + f];
                 }
             }
         }
@@ -488,14 +581,14 @@ public final class Factorization {
                 for (int f = 0; f < F; f++) {
                     for (int id = 0; id + 1 < start[f].length; id++) {
                         final int from = start[f][id], to = start[f][id + 1];
-                        Arrays.fill(h, 0, to - from, 1d);
+                        for (int j = from; j < to; j++) h[j - from] = u[members[f][j] * F + f];
                         final double delta = objective.delta(members[f], from, to, h, w[f][id], reg);
                         objective.shift(members[f], from, to, h, delta);
                         w[f][id] += delta;
                     }
                 }
             }
-            // factors: ŷ is linear in v_f[x][d] with slope h = Σ_{g≠f} r_fg v_g[x_g][d]
+            // factors: ŷ is linear in v_f[x][d] with slope h = u_f Σ_{g≠f} r_fg v_g[x_g][d] u_g
             for (int f = 0; f < F; f++) {
                 for (int id = 0; id + 1 < start[f].length; id++) {
                     final int from = start[f][id], to = start[f][id + 1];
@@ -503,11 +596,12 @@ public final class Factorization {
                         final double p = v[f][id * k + d];
                         for (int j = from; j < to; j++) {
                             final int i = members[f][j];
-                            h[j - from] = fm ? q[i * k + d] - p : slope(r, v, idx, i, F, f, d, k);
+                            final double own = u[i * F + f];
+                            h[j - from] = own * (fm ? q[i * k + d] - p * own : slope(r, v, u, idx, i, F, f, d, k));
                         }
                         final double delta = objective.delta(members[f], from, to, h, p, reg);
                         objective.shift(members[f], from, to, h, delta);
-                        if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta;
+                        if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta * u[members[f][j] * F + f];
                         v[f][id * k + d] = p + delta;
                     }
                 }
@@ -520,7 +614,7 @@ public final class Factorization {
                             final int a = idx[i * F + f], b = idx[i * F + g];
                             double dot = 0;
                             if (a >= 0 && b >= 0) for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
-                            h[i] = dot;
+                            h[i] = a >= 0 && b >= 0 ? dot * u[i * F + f] * u[i * F + g] : 0;
                         }
                         final double delta = objective.delta(all, 0, n, h, r[f][g], reg);
                         objective.shift(all, 0, n, h, delta);
@@ -534,9 +628,11 @@ public final class Factorization {
         objective.refresh();
         LOG.info("factorization fit: {} example(s), {} epoch(s){}, {}", n, epochs, warm == null ? "" : " (warm start)", objective.describe());
 
-        final Model model = new Model(options.fields(), options.fieldWeighted(), k);
+        final Model model = new Model(options.fields(), numeric, options.fieldWeighted(), k);
         model.w0 = w0;
         model.loss = options.loss().name();
+        System.arraycopy(mean, 0, model.mean, 0, F);
+        System.arraycopy(scale, 0, model.scale, 0, F);
         for (int f = 0; f < F; f++) {
             for (int id = 0; id < names.get(f).size(); id++) {
                 final double[] p = new double[k + 2];
@@ -869,12 +965,12 @@ public final class Factorization {
         }
     }
 
-    private static double slope(final double[][] r, final double[][] v, final int[] idx, final int i, final int F, final int f, final int d, final int k) {
+    private static double slope(final double[][] r, final double[][] v, final double[] u, final int[] idx, final int i, final int F, final int f, final int d, final int k) {
         double h = 0;
         for (int g = 0; g < F; g++) {
             if (g == f) continue;
             final int id = idx[i * F + g];
-            if (id >= 0) h += r[f][g] * v[g][id * k + d];
+            if (id >= 0) h += r[f][g] * v[g][id * k + d] * u[i * F + g];
         }
         return h;
     }
@@ -890,7 +986,9 @@ public final class Factorization {
                {"name": "value", "type": "string"},
                {"name": "w", "type": "double"},
                {"name": "v", "type": "bytes"},
-               {"name": "n", "type": "long", "default": 0}
+               {"name": "n", "type": "long", "default": 0},
+               {"name": "mean", "type": "double", "default": 0},
+               {"name": "scale", "type": "double", "default": 1}
              ]}
             """);
 
@@ -908,10 +1006,10 @@ public final class Factorization {
             final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             try (final DataFileWriter<GenericRecord> writer = new DataFileWriter<>(new GenericDatumWriter<>(SCHEMA))) {
                 writer.create(SCHEMA, bytes);
-                writer.append(record("__global", "", model.w0, new double[0], 0L));
+                writer.append(record("__global", "", model.w0, new double[0], 0L, 0, 1));
                 for (int f = 0; f < model.fields.size(); f++) {
                     for (int g = f + 1; g < model.fields.size(); g++) {
-                        writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L));
+                        writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L, 0, 1));
                     }
                 }
                 for (int f = 0; f < model.fields.size(); f++) {
@@ -919,7 +1017,8 @@ public final class Factorization {
                     Collections.sort(values);
                     for (final String value : values) {
                         final double[] p = model.params.get(f).get(value);
-                        writer.append(record(model.fields.get(f), value, p[0], Arrays.copyOfRange(p, 1, model.k + 1), (long) p[model.k + 1]));
+                        writer.append(record(model.fields.get(f), value, p[0], Arrays.copyOfRange(p, 1, model.k + 1), (long) p[model.k + 1],
+                                model.mean[f], model.scale[f]));
                     }
                 }
             }
@@ -928,6 +1027,16 @@ public final class Factorization {
             manifest.addProperty("variant", model.fieldWeighted ? "fwfm" : "fm");
             manifest.addProperty("latentDim", model.k);
             manifest.addProperty("loss", model.loss);
+            // the standardisation of every numeric field: what a serving run's values are scaled by
+            final JsonObject numericFields = new JsonObject();
+            for (int f = 0; f < model.fields.size(); f++) {
+                if (!model.numeric[f]) continue;
+                final JsonObject standardisation = new JsonObject();
+                standardisation.addProperty("mean", model.mean[f]);
+                standardisation.addProperty("scale", model.scale[f]);
+                numericFields.add(model.fields.get(f), standardisation);
+            }
+            if (!numericFields.isEmpty()) manifest.add("numeric", numericFields);
             manifest.addProperty("parameters", model.size());
             final JsonArray fields = new JsonArray();
             model.fields.forEach(fields::add);
@@ -950,7 +1059,8 @@ public final class Factorization {
         }
     }
 
-    private static GenericRecord record(final String field, final String value, final double w, final double[] v, final long n) {
+    private static GenericRecord record(final String field, final String value, final double w, final double[] v, final long n,
+                                        final double mean, final double scale) {
         final GenericRecord record = new GenericData.Record(SCHEMA);
         record.put("field", field);
         record.put("value", value);
@@ -961,14 +1071,22 @@ public final class Factorization {
         buffer.flip();
         record.put("v", buffer);
         record.put("n", n);
+        record.put("mean", mean);
+        record.put("scale", scale);
         return record;
+    }
+
+    /** Reads an artifact of categorical fields. */
+    public static Model read(final String artifactUri, final String planHash, final String block,
+                             final List<String> fields, final boolean fieldWeighted, final int k) {
+        return read(artifactUri, planHash, block, fields, new boolean[fields.size()], fieldWeighted, k);
     }
 
     /** Reads an artifact; one written before the per-value counts were kept reads count 0 for every value. */
     public static Model read(final String artifactUri, final String planHash, final String block,
-                             final List<String> fields, final boolean fieldWeighted, final int k) {
+                             final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
         final String path = artifactPath(artifactUri, planHash, block);
-        final Model model = new Model(fields, fieldWeighted, k);
+        final Model model = new Model(fields, numeric, fieldWeighted, k);
         try (final DataFileReader<GenericRecord> reader = new DataFileReader<>(
                 new SeekableByteArrayInput(ResourceUtil.readBytes(path)), new GenericDatumReader<>(null, SCHEMA))) {
             while (reader.hasNext()) {
@@ -995,6 +1113,10 @@ public final class Factorization {
                     for (int d = 0; d < k && v.remaining() >= 8; d++) p[d + 1] = v.getDouble();
                     p[k + 1] = (Long) record.get("n");
                     model.params.get(f).put(value, p);
+                    if (numeric[f]) {
+                        model.mean[f] = (Double) record.get("mean");
+                        model.scale[f] = (Double) record.get("scale");
+                    }
                 }
             }
         } catch (final IOException e) {

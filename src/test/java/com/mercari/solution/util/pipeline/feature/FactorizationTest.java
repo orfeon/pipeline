@@ -369,6 +369,54 @@ public class FactorizationTest {
         Assertions.assertTrue(interactions.pair(new String[]{"a1", "b1"}, 0, 1) > interactions.pair(new String[]{"a1", "b2"}, 0, 1));
     }
 
+    /**
+     * A numeric field has one vector, scaled by its standardised value: a slope that differs by category is the pair
+     * of the category with the numeric field. The standardisation is the fit's own and travels with the artifact.
+     */
+    @Test
+    public void testNumericField() {
+        final java.util.Random random = new java.util.Random(31);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 600; i++) {
+            final String a = "a" + random.nextInt(3);
+            final double x = 50 + 10 * random.nextGaussian();
+            // the slope of x is +2 (per sd) for a0, 0 for a1, -2 for a2
+            final double slope = a.equals("a0") ? 2 : a.equals("a1") ? 0 : -2;
+            final double y = slope * (x - 50) / 10 + 0.05 * random.nextGaussian();
+            examples.add(new Factorization.Example(new String[]{a, Factorization.NUMERIC}, new double[]{Double.NaN, x}, y, 0, 0, null));
+        }
+        final java.util.ArrayList<String> scales = new java.util.ArrayList<>(java.util.Arrays.asList(null, "zscore"));
+        final Factorization.Options options = new Factorization.Options(List.of("a", "x"), false, 2, 60, 0.001, 9L,
+                Factorization.Loss.squared, 0, false, true, scales);
+        final Factorization.Model model = Factorization.fit(options, examples);
+        Assertions.assertArrayEquals(new boolean[]{false, true}, model.numeric);
+        Assertions.assertEquals(50, model.mean[1], 1.5);
+        Assertions.assertEquals(10, model.scale[1], 1.0);
+        // the per-unit slope of x by category, in units of the fitted standard deviation
+        final double[] slopes = new double[3];
+        for (int c = 0; c < 3; c++) {
+            final String[] values = {"a" + c, Factorization.NUMERIC};
+            slopes[c] = model.pair(values, null, 0, 1, true) + model.params.get(1).get(Factorization.NUMERIC)[0];
+        }
+        Assertions.assertEquals(2, slopes[0] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        Assertions.assertEquals(0, slopes[1] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        Assertions.assertEquals(-2, slopes[2] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        // the pair at a row's value is the slope times its standardised value; a missing value contributes nothing
+        final double[] at60 = {Double.NaN, 60};
+        final String[] row = {"a0", Factorization.NUMERIC};
+        Assertions.assertEquals(model.pair(row, null, 0, 1, true) * (60 - model.mean[1]) / model.scale[1], model.pair(row, at60, 0, 1, false), 1e-12);
+        Assertions.assertNull(model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, false));
+        Assertions.assertEquals(model.w0 + model.params.get(0).get("a0")[0], model.predict(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}), 1e-12);
+        Assertions.assertEquals(600L, model.count(row, 1));
+
+        final String dir = "target/feature-artifacts/" + UUID.randomUUID();
+        Factorization.write(dir, "hash1", "fm", model);
+        final Factorization.Model loaded = Factorization.read(dir, "hash1", "fm", List.of("a", "x"), new boolean[]{false, true}, false, 2);
+        Assertions.assertEquals(model.mean[1], loaded.mean[1], 0d);
+        Assertions.assertEquals(model.scale[1], loaded.scale[1], 0d);
+        Assertions.assertEquals(model.predict(row, at60), loaded.predict(row, at60), 1e-12);
+    }
+
     /** Noisy targets with main effects and an a × b interaction over a few values per field. */
     private static List<Factorization.Example> noisy(final int n, final int values) {
         final java.util.Random random = new java.util.Random(17);

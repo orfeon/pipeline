@@ -968,7 +968,7 @@ is a fold:
     scope: population
     type: factorization
     variant: fwfm                                 # fm | fwfm (field-pair weights r_fg; bayesian is v2)
-    fields: [seller_id, category, condition_grade] # categorical fields (≥ 2)
+    fields: [seller_id, category, condition_grade, {field: start_price, numeric: true}]   # ≥ 2; categorical, or numeric (below)
     latentDim: 8
     task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset; loss (below)
     # linear: false                               # fit no per-value weight w (interactions only, over an offset that carries the main effects)
@@ -977,6 +977,7 @@ is a fold:
     outputs:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
+      - {pair: [seller_id, start_price], as: seller_price, perUnit: true}   # a numeric pair per unit: the seller's price slope
       - {count: seller_id, as: seller_rows}                    # training rows with the row's seller (int64)
       - {sum: true, as: fm_linear}                             # w0 + Σ w + Σ pairs (without the offset)
 ```
@@ -1016,6 +1017,19 @@ rotation, embeddings are not — so every refit is rotated into a reference befo
 fit into the fit before it, a fold model into the whole-input model (`fit.align`: `procrustes` default, `sign`,
 `none`; see *Alignment of forward fits* under *SVD / PCA*). An embedding column then continues across blocks and
 means the same across folds.
+
+**Numeric fields** — `{field: <name>, numeric: true, scale: zscore | none}` (a numeric type; an integer field is
+categorical unless declared so). A numeric field has **one** parameter set `(w, v)` instead of one per value, multiplied
+by the row's standardised value `u = (x − mean) / sd`: its main effect is a slope, and its pair with a categorical field,
+`r ⟨v_seller, v_price⟩ · u`, is that value's own slope — a category × continuous interaction that shares the latent space
+of the categorical pairs (a seller whose factors resemble another's gets a similar price slope from fewer rows). The
+`mean` / `sd` are fitted from the training rows of each fit (`scale: zscore`, default; `none` uses the raw value) and
+stored in the artifact (and its manifest's `numeric`), so a serving run standardises with the training values. A row
+whose numeric value is missing (or not finite) contributes nothing for that field, as an unseen category does — that is
+not the same as filling the mean. A `pair` that includes a numeric field is the term at the row's value; `perUnit: true`
+reads it per unit of `u` (the slope, independent of the row's value). `embedding` reads categorical fields only (a
+numeric field's vector is the same on every row); `count` of a numeric field counts the rows with a value. A block whose
+fields are all numeric is a quadratic form of the values (warning `factorization.fields.numeric`).
 
 **`task.loss`** — what the target is:
 
