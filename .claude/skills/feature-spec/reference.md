@@ -259,10 +259,12 @@ level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and n
 
 `variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}]`,
 `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as,
-perUnit}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
+perUnit}, {between: {left: [...], right: [...]}, as}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
 rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
-(independent of the row's value).
+(independent of the row's value). `between` sums the cross-side pairs whose both values are known (disjoint sides,
+each field once): an entity with its attributes on one side still reads through the attributes when the entity is
+unseen; null only when no cross-side pair is known.
 
 ### `type: discretize` (always static)
 

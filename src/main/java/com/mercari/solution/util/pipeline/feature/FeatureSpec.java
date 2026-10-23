@@ -279,7 +279,7 @@ public class FeatureSpec implements Serializable {
         public List<String> pair = new ArrayList<>();
         public String embedding;
         public String count;
-        /** pair: the slope per unit of the numeric fields' standardised values instead of the term at the row's values. */
+        /** pair: the slope per unit of the numeric fields' standardised values instead of the term at the row's values (read on between only to warn that it is ignored). */
         public boolean perUnit;
         /** between: the fields of the two sides. */
         public List<String> left = new ArrayList<>();
@@ -1323,6 +1323,7 @@ public class FeatureSpec implements Serializable {
                 fm.dims = Json.integer(out, "dims");
             } else if (out.has("between")) {
                 fm.kind = "between";
+                fm.perUnit = Json.bool(out, "perUnit", false);
                 if (out.get("between").isJsonObject()) {
                     fm.left = Json.strings(out.getAsJsonObject("between"), "left");
                     fm.right = Json.strings(out.getAsJsonObject("between"), "right");
