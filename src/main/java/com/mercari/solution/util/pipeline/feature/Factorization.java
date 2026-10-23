@@ -270,7 +270,7 @@ public final class Factorization {
     public static Model fit(final Options options, final List<Example> examples) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return train(options, sorted, null, options.epochs());
+        return train(options, informative(options, sorted), null, options.epochs());
     }
 
     /** {@link #fit}, or null over fewer than {@code minRows} examples (none at all included). */
@@ -348,8 +348,23 @@ public final class Factorization {
     }
 
     private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows) {
-        if (sorted.isEmpty() || sorted.size() < minRows) return null;
-        return train(options, sorted, warm, epochs);
+        final List<Example> used = informative(options, sorted);
+        if (used.isEmpty() || used.size() < minRows) return null;
+        return train(options, used, warm, epochs);
+    }
+
+    /**
+     * The examples a fit learns from, in their order: under Plackett–Luce the rows of the contests of two or more entries
+     * only — a lone entry (or a row without a contest) carries no information, so it neither counts towards
+     * {@code minRows} nor gives a value parameters or a {@code count}; every example otherwise.
+     */
+    static List<Example> informative(final Options options, final List<Example> examples) {
+        if (options.loss() != Loss.plackettLuce) return examples;
+        final Map<String, Integer> sizes = new HashMap<>();
+        for (final Example e : examples) if (e.contest() != null) sizes.merge(e.contest(), 1, Integer::sum);
+        final List<Example> kept = new ArrayList<>(examples.size());
+        for (final Example e : examples) if (e.contest() != null && sizes.get(e.contest()) >= 2) kept.add(e);
+        return kept.size() == examples.size() ? examples : kept;
     }
 
     /**

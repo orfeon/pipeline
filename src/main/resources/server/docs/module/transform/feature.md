@@ -1044,7 +1044,8 @@ keeps the embeddings strictly out of fold (each fold then has its own orientatio
   a place, smaller is better) or `descending` (a score or a 1 / 0 win flag: larger is better). Places are 1 + the entries
   strictly better, so equal targets tie and are chosen from one pool (the likelihood never depends on the row order);
   `top: k` makes only the first k places choices (the entries behind stay in the earlier pools: a top-k likelihood).
-  A contest of one entry, or a row without a contest key, takes no part. The loss sees score differences within a
+  A contest of one entry, or a row without a contest key, takes no part (nor counts towards `fit.minRows` or a `count`
+  readout). The loss sees score differences within a
   contest only: there is no global bias, a field that is constant within every contest (a key of the contest, a venue)
   gets no main effect — its pairs with the fields that vary within a contest are identified, which is where its
   information is (info `factorization.contest.constant`; a `pair` of two contest keys is warned as noise,
@@ -1056,8 +1057,9 @@ keeps the embeddings strictly out of fold (each fold then has its own orientatio
   score, `b ≤ 0` in a contest or `b ∉ (0, 1)` under logistic, is not a training row) or as a score already
   (`offsetScale: score`). The outputs never include it.
 - **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
-  parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). The
-  artifact manifest records the `loss`.
+  parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). Under
+  `plackettLuce` / `softmax` `als.reg` must be > 0: the ridge is what fixes what a contest cannot see (a contest key's
+  main effect). The artifact manifest records the `loss`.
 - **Probabilities**: the context `softmax` op over the `sum` column with the same offset turns the log-strengths into win
   probabilities within the group — the serving-side reading of exactly this model:
 

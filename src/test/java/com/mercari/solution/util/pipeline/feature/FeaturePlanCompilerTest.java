@@ -2068,6 +2068,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("loss: plackettLuce", "loss: hinge"))), "factorization.task.loss"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("order: descending", "order: up"))), "factorization.task.order"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("top: 3", "top: 0"))), "factorization.task.top"));
+        final FeaturePlan unregularised = compile(SOURCES, withEncoding(ranked.replace("latentDim: 4", "latentDim: 4\n        als: {reg: 0}")));
+        Assertions.assertTrue(unregularised.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("als.reg must be > 0")), unregularised::describe);
+        // an order under a loss that ignores it is warned, not rejected
+        final FeaturePlan ignoredOrder = compile(SOURCES, withEncoding(FM_BLOCK.replace("offset: market}", "offset: market, order: up}")));
+        Assertions.assertFalse(ignoredOrder.getDiagnostics().hasErrors(), ignoredOrder::describe);
+        Assertions.assertTrue(hasCode(ignoredOrder, "factorization.task.order"), ignoredOrder::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("offset: market}", "offset: market, contest: session}"))), "factorization.task.contest"));
         final FeaturePlan logistic = compile(SOURCES, withEncoding(FM_BLOCK.replace("offset: market}", "offset: market, loss: logistic}")));
         Assertions.assertFalse(logistic.getDiagnostics().hasErrors(), logistic::describe);

@@ -1510,13 +1510,15 @@ public final class FeatureStages {
         String contestOf(final Map<String, Object> row) {
             final Long millis = FeatureValues.toEpochMillis(row.get(contestTime), contestTimeType);
             if (millis == null) return null;
-            final Map<String, Object> parts = new HashMap<>();
-            parts.put(CONTEST_TIME, millis);
-            for (final String key : contestKeys) parts.put(key, row.get(key));
-            final List<String> keys = new ArrayList<>();
-            keys.add(CONTEST_TIME);
-            keys.addAll(contestKeys);
-            return FeatureValues.key(parts, keys);
+            // the components FeatureValues.key would join, built in place (once per training row)
+            final StringBuilder sb = new StringBuilder();
+            FeatureValues.appendKeyComponent(sb, millis);
+            for (final String key : contestKeys) {
+                final Object value = row.get(key);
+                if (value == null) return null;
+                FeatureValues.appendKeyComponent(sb, value);
+            }
+            return sb.toString();
         }
 
         @Override
@@ -1617,15 +1619,12 @@ public final class FeatureStages {
                     foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan,
                     Factorization.Loss.valueOf(k.getOrDefault("loss", "squared")), k.get("offsetScale"),
-                    contestKeys == null ? null : List.of(contestKeys.split(",")), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
+                    contestKeys == null ? null : FeaturePlanCompiler.keyList(contestKeys), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
                     "descending".equals(k.get("order")), Integer.parseInt(k.getOrDefault("top", "0")), !"false".equals(k.get("linear")),
                     e.getValue()));
         }
         return specs;
     }
-
-    /** The key component of a contest's event time ({@link FmSpec#contestOf}). */
-    static final String CONTEST_TIME = "__contestTime";
 
     static String[] fieldValues(final Map<String, Object> row, final List<String> fields) {
         final String[] values = new String[fields.size()];

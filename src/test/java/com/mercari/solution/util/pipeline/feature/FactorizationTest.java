@@ -344,6 +344,22 @@ public class FactorizationTest {
         Assertions.assertTrue(even > 0.5 && odd < -0.5, "even " + even + " odd " + odd);
     }
 
+    /** Plackett–Luce: a lone entry carries no information — it counts towards neither minRows nor a value's count. */
+    @Test
+    public void testPlackettLuceLoneEntriesTakeNoPart() {
+        final List<Factorization.Example> examples = List.of(
+                new Factorization.Example(new String[]{"p1", "v"}, 1, 0, 0, "c1"),
+                new Factorization.Example(new String[]{"p2", "v"}, 2, 0, 0, "c1"),
+                new Factorization.Example(new String[]{"p3", "v"}, 1, 0, 0, "c2"));   // alone
+        final Factorization.Options options = new Factorization.Options(List.of("player", "venue"), false, 2, 5, 0.1, 1L,
+                Factorization.Loss.plackettLuce, 0, false, true);
+        final Factorization.Model model = Factorization.fit(options, examples);
+        Assertions.assertEquals(0L, model.count(new String[]{"p3", "v"}, 0));
+        Assertions.assertEquals(2L, model.count(new String[]{"p1", "v"}, 1));
+        Assertions.assertNull(Factorization.fit(options, examples, 3));
+        Assertions.assertNotNull(Factorization.fit(options, examples, 2));
+    }
+
     /** Logistic loss: the fitted probability of a cell follows its observed rate; linear: false fits no per-value weight. */
     @Test
     public void testLogisticAndInteractionsOnly() {
