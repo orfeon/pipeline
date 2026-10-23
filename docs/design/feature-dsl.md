@@ -983,7 +983,13 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
 - `task.loss: plackettLuce` (contest = a context group at one event time, `order`, `top`; `softmax` = top 1) fits
   the model to the order within each contest instead of the values, on top of an offset read in probability space — the
   same contest a `rating` op is updated with, so a rating's main effects and a factorization's low-rank pair effects
-  compose under one likelihood (the rating's mu as the offset, `linear: false`). `logistic` fits a probability target.
+  compose under one likelihood (the rating's `ratingProb` as the offset, `linear: false`). `logistic` fits a probability
+  target.
+- Low-rank + sparse: the factorization is the low-rank pairing term; the sparse term γ_ij is a rating member keyed by
+  the pair (online, the main effects the rating's other members, the factorization over its `ratingProb` with
+  `linear: false`) or a shrunk encoding of the cross offset by the factorization's `sum` (batch, the main effects the
+  factorization's own linear terms) — composed through baselines, not one joint objective (feature.md
+  *Low-rank + sparse*).
 - Numeric fields (`{field, numeric: true}`) enter with one vector scaled by the standardised value, so a categorical ×
   continuous interaction (a seller's price slope) is a pair on the same latent space, without binning.
 - `variant: fwfm` multiplies each pair product by a per-field-pair scalar weight r. Few extra

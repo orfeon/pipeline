@@ -958,6 +958,104 @@ public class FeatureTransformTest {
     }
 
     /**
+     * The Low-Rank + Sparse recipes run end to end: a team rating with a pairing member (main effects + the sparse
+     * pairing term, online) read as a contest probability, with a forward Plackett–Luce factorization (linear: false) on
+     * top of it; and, in batch, a squared-loss factorization of the sold rate whose sum offsets a shrunk encoding of
+     * seller × category (what the whole factorization leaves over, on the rate's scale). Under weekly blocks and the
+     * 6.5-day target lag, A and B have no usable block (null factorization outputs) while C and D read the fit of the
+     * blocks before them. The encoding reads null on C (its past rows A and B have a null offset, so they train nothing)
+     * and on D the residuals of C alone: s1's {@code 1 − sum} shrunk toward s2's (the leave-node-out root).
+     */
+    @Test
+    public void testFactorizationLowRankPlusSparse() throws java.io.IOException {
+        final String blocks = """
+                    - name: skill
+                      scope: sequence
+                      entity: seller
+                      ops:
+                        - {type: rating, field: final_price, context: session, order: descending, as: parts,
+                           with: [{entity: sellerCat, mu: 0, sigma: 1.5}], team: [mu, sigma]}
+                    - name: contest
+                      scope: context
+                      context: session
+                      ops:
+                        - {type: ratingProb, field: skill_all_parts_team_mu, sigma: skill_all_parts_team_sigma, beta: 4.1667, as: pRating}
+                    - name: fm
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, category, condition_grade]
+                      latentDim: 2
+                      linear: false
+                      task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: ability}
+                      fit: {mode: forward, blocks: {size: P7D}}
+                      als: {epochs: 10, reg: 0.1, seed: 1}
+                      outputs:
+                        - {sum: true, as: fm_lowrank}
+                    - name: fm_rate
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, category, condition_grade]
+                      latentDim: 2
+                      task: {expr: "sold >= 1"}
+                      fit: {mode: forward, blocks: {size: P7D}}
+                      als: {epochs: 10, reg: 0.1, seed: 1}
+                      outputs:
+                        - {pair: [seller_id, category], as: fm_rate_pair}
+                        - {sum: true, as: fm_rate_sum}
+                    - name: affinity
+                      scope: population
+                      type: encoding
+                      keySets:
+                        - keys: [seller_id, category]
+                      targets:
+                        - {expr: "sold >= 1", stats: [mean]}
+                      offset: lowrank
+                      shrinkage: {priorWeight: 20}
+                """;
+        final String config = FEATURE_CONFIG
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n")
+                .replace("        - {name: seller, keys: [seller_id]}\n", "        - {name: seller, keys: [seller_id]}\n        - {name: sellerCat, keys: [seller_id, category]}\n")
+                .replace("        - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}\n",
+                        "        - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}\n"
+                                + "        - {name: ability, expr: \"contest_pRating_ratingProb\"}\n"
+                                + "        - {name: lowrank, expr: \"fm_rate_sum\"}\n");
+        Assertions.assertTrue(config.contains("name: sellerCat") && config.contains("name: ability") && config.contains("name: lowrank"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_fm_lowrank"));
+        final String affinity = "f_affinity__seller_id_category__e1__mean";
+        Assertions.assertNotNull(schema.getField(affinity), schema::toString);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            final Map<String, Double> sumOfC = new HashMap<>();
+            Double affinityOfD = null;
+            for (final MElement row : rows) {
+                final String session = row.getAsString("session_id");
+                final boolean early = "A".equals(session) || "B".equals(session);
+                Assertions.assertEquals(early, row.getPrimitiveValue("f_fm_lowrank") == null, row::toString);
+                Assertions.assertEquals(early, row.getPrimitiveValue("f_fm_rate_pair") == null, row::toString);
+                Assertions.assertEquals(early, row.getPrimitiveValue("f_fm_rate_sum") == null, row::toString);
+                Assertions.assertNotNull(row.getPrimitiveValue("f_contest_pRating_ratingProb"), row::toString);
+                if ("D".equals(session)) {
+                    affinityOfD = (Double) row.getPrimitiveValue(affinity);
+                } else {
+                    Assertions.assertNull(row.getPrimitiveValue(affinity), row::toString);
+                }
+                if ("C".equals(session)) sumOfC.put(row.getAsString("seller_id"), (Double) row.getPrimitiveValue("f_fm_rate_sum"));
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            // both C rows sold: s1's residual 1 - sum, shrunk with n = 1 toward the root without the leaf (s2's residual)
+            final double leaf = 1 - sumOfC.get("s1");
+            final double root = 1 - sumOfC.get("s2");
+            Assertions.assertNotNull(affinityOfD);
+            Assertions.assertEquals(root + (leaf - root) / (1 + 20.0), affinityOfD, 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * svd {@code outputs}: with one component of (start_price, current_bid_t10) kept, the residual is what the shared
      * price axis does not explain, per input and in input units — it sums to zero over the rows, its norm column is its
      * length, and it is orthogonal to the score; with both components kept nothing is left.
