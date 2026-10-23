@@ -4365,6 +4365,8 @@ public final class FeaturePlanCompiler {
                         + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
                         + (warmStart ? ", each started from the fit before it for " + warmEpochs + " epoch(s) (fit.warmStart previous; the first takes " + epochs + ")"
                         : ", each from scratch for " + epochs + " epoch(s) (fit.warmStart none)")
+                        + (warmStart && fitSpec.window != null ? "; a value with no row in the window leaves the fit, but the values in it"
+                        + " start from the fit before, which read older blocks (fit.warmStart none for fits that read the window alone)" : "")
                         + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                         + minRowsPhrase(minRows, null) + alignPhrase(align, "embeddings")
                         + "; the training set of every fit is gathered on one worker and the fits run one after another"
@@ -4374,7 +4376,9 @@ public final class FeaturePlanCompiler {
                     + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy : "row identity: time.field + orderTieBreak") + "), each row read from its own"
                     + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
                     + (Alignment.NONE.equals(align) ? "; the embeddings of every fold model are oriented on their own (fit.align none): an embedding column means something else in every fold"
-                    : "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + ")")
+                    : "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + "): that"
+                    + " rotation (k x k numbers, orientation only) is fitted against a model that read every fold's target - pair / between / sum /"
+                    + " count never depend on it, and fit.align none keeps the embeddings strictly out of fold")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             default -> diagnostics.info("fit.mode.static", loc, what + " on the whole input" + artifactPhrase(fitSpec) + minRowsPhrase(minRows, null)
                     + "; training rows read a model fitted on their own target (fit.mode forward or fold gives them values fitted without it)");
