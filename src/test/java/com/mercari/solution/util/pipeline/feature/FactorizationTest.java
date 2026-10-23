@@ -440,6 +440,8 @@ public class FactorizationTest {
         Assertions.assertEquals(model.pair(row, null, 0, 1, true) * (60 - model.mean[1]) / model.scale[1], model.pair(row, at60, 0, 1, false), 1e-12);
         Assertions.assertNull(model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, false));
         Assertions.assertEquals(model.w0 + model.params.get(0).get("a0")[0], model.predict(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}), 1e-12);
+        // the slope per unit does not depend on the row's value, a missing one included
+        Assertions.assertEquals(model.pair(row, null, 0, 1, true), model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, true));
         Assertions.assertEquals(600L, model.count(row, 1));
 
         final String dir = "target/feature-artifacts/" + UUID.randomUUID();
@@ -448,6 +450,38 @@ public class FactorizationTest {
         Assertions.assertEquals(model.mean[1], loaded.mean[1], 0d);
         Assertions.assertEquals(model.scale[1], loaded.scale[1], 0d);
         Assertions.assertEquals(model.predict(row, at60), loaded.predict(row, at60), 1e-12);
+    }
+
+    /**
+     * Numeric fields under fwfm (the slope through r and the per-pair update), the standardisation of a value far from 0
+     * with a small spread (one-pass Σx² / n − mean² cancels away there), and a numeric value that is not finite read as
+     * missing whatever the example's text says.
+     */
+    @Test
+    public void testNumericFieldStandardisation() {
+        final java.util.Random random = new java.util.Random(43);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 600; i++) {
+            final String a = "a" + random.nextInt(3);
+            final double z = random.nextGaussian();
+            final double slope = a.equals("a0") ? 2 : a.equals("a1") ? 0 : -2;
+            examples.add(new Factorization.Example(new String[]{a, Factorization.NUMERIC}, new double[]{Double.NaN, 1e9 + 10 * z},
+                    slope * z + 0.05 * random.nextGaussian(), 0, 0, null));
+        }
+        // present by its text, but without a finite value: missing
+        examples.add(new Factorization.Example(new String[]{"a0", Factorization.NUMERIC}, new double[]{Double.NaN, Double.NaN}, 5, 0, 0, null));
+        final java.util.ArrayList<String> scales = new java.util.ArrayList<>(java.util.Arrays.asList(null, "zscore"));
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "x"), true, 2, 60, 0.001, 9L,
+                Factorization.Loss.squared, 0, false, true, scales), examples);
+        Assertions.assertEquals(1e9, model.mean[1], 2);
+        Assertions.assertEquals(10, model.scale[1], 1.0);
+        Assertions.assertTrue(Double.isFinite(model.w0));
+        Assertions.assertEquals(600L, model.count(new String[]{"a0", Factorization.NUMERIC}, 1));
+        for (int c = 0; c < 3; c++) {
+            final double expected = c == 0 ? 2 : c == 1 ? 0 : -2;
+            final double slope = model.pair(new String[]{"a" + c, null}, null, 0, 1, true) + model.params.get(1).get(Factorization.NUMERIC)[0];
+            Assertions.assertEquals(expected, slope * 10 / model.scale[1], 0.3, "a" + c);
+        }
     }
 
     /** Noisy targets with main effects and an a × b interaction over a few values per field. */

@@ -2115,6 +2115,8 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("scale: none", "scale: minmax"))), "factorization.fields"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: start_price, numeric: true}", "start_price"))), "factorization.fields"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: quantity, numeric: true, scale: none}", "{field: quantity, scale: none}"))), "factorization.fields"));
+        // a field listed twice (here once numeric, once as a name: the engine would read the second as categorical)
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: quantity, numeric: true, scale: none}", "start_price"))), "factorization.fields"));
         // perUnit on a categorical pair is ignored with a warning
         final FeaturePlan ignored = compile(SOURCES, withEncoding(numeric.replace("{pair: [seller_id, category], as: fm_seller_category}", "{pair: [seller_id, category], as: fm_seller_category, perUnit: true}")));
         Assertions.assertFalse(ignored.getDiagnostics().hasErrors(), ignored::describe);

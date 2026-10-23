@@ -122,10 +122,6 @@ public final class Factorization {
         /** Per numeric field: the centre and the scale its value is standardised by (0 and 1 when not standardised). */
         public final double[] mean, scale;
 
-        Model(final List<String> fields, final boolean fieldWeighted, final int k) {
-            this(fields, new boolean[fields.size()], fieldWeighted, k);
-        }
-
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
             this.numeric = numeric.clone();
@@ -158,12 +154,13 @@ public final class Factorization {
 
         /**
          * {@code r_fg ⟨v_f[x_f], v_g[x_g]⟩ u_f u_g}: the pair's term of the prediction, or — {@code perUnit} — its value per
-         * unit of the numeric fields' standardised values (the slope; {@code u = 1}). Null when either value is unknown
-         * or missing.
+         * unit of the numeric fields' standardised values (the slope; {@code u = 1}), which does not depend on the row's
+         * numeric value (a missing one included). Null when a categorical value is unknown or missing, or (not per unit)
+         * a numeric value is missing.
          */
         public Double pair(final String[] values, final double[] x, final int f, final int g, final boolean perUnit) {
-            final double[] a = param(f, values[f]);
-            final double[] b = param(g, values[g]);
+            final double[] a = perUnit && numeric[f] ? params.get(f).get(NUMERIC) : param(f, values[f]);
+            final double[] b = perUnit && numeric[g] ? params.get(g).get(NUMERIC) : param(g, values[g]);
             if (a == null || b == null) return null;
             final double units = perUnit ? 1d : unit(f, x) * unit(g, x);
             if (Double.isNaN(units)) return null;
@@ -470,13 +467,16 @@ public final class Factorization {
             ids.add(new HashMap<>());
             names.add(new ArrayList<>());
         }
+        final boolean[] numeric = options.numeric();
         final int[] idx = new int[n * F];
         final List<List<double[]>> initial = new ArrayList<>();
         for (int f = 0; f < F; f++) initial.add(new ArrayList<>());
         for (int i = 0; i < n; i++) {
             final String[] x = examples.get(i).values();
+            final double[] raw = examples.get(i).x();
             for (int f = 0; f < F; f++) {
-                if (x[f] == null) {
+                // a numeric field is present only with a finite value (whatever its text says)
+                if (x[f] == null || numeric[f] && (raw == null || !Double.isFinite(raw[f]))) {
                     idx[i * F + f] = -1;
                     continue;
                 }
@@ -499,26 +499,36 @@ public final class Factorization {
                 idx[i * F + f] = id;
             }
         }
-        // the multiplier of every field of every example: 1 for a categorical field, the standardised value of a numeric one
-        final boolean[] numeric = options.numeric();
+        // the multiplier of every field of every example: 1 for a categorical field, the standardised value of a numeric
+        // one (null without numeric fields: every multiplier is 1, see multiplier)
         final double[] mean = new double[F], scale = new double[F];
         Arrays.fill(scale, 1d);
-        final double[] u = new double[n * F];
-        Arrays.fill(u, 1d);
+        boolean anyNumeric = false;
+        for (final boolean b : numeric) anyNumeric |= b;
+        final double[] u = anyNumeric ? new double[n * F] : null;
+        if (u != null) Arrays.fill(u, 1d);
         for (int f = 0; f < F; f++) {
             if (!numeric[f]) continue;
-            double count = 0, sum = 0, sumSq = 0;
-            for (int i = 0; i < n; i++) {
-                if (idx[i * F + f] < 0) continue;
-                final double value = examples.get(i).x()[f];
-                count++;
-                sum += value;
-                sumSq += value * value;
-            }
-            if ("zscore".equals(options.scales().get(f)) && count > 0) {
-                mean[f] = sum / count;
-                final double sd = Math.sqrt(Math.max(0, sumSq / count - mean[f] * mean[f]));
-                scale[f] = sd > 0 ? sd : 1d;
+            if ("zscore".equals(options.scales().get(f))) {
+                double count = 0, sum = 0;
+                for (int i = 0; i < n; i++) {
+                    if (idx[i * F + f] < 0) continue;
+                    count++;
+                    sum += examples.get(i).x()[f];
+                }
+                if (count > 0) {
+                    mean[f] = sum / count;
+                    // the squared deviations from the mean (two passes): Σx² / n − mean² cancels away for a value far
+                    // from 0 with a small spread
+                    double squares = 0;
+                    for (int i = 0; i < n; i++) {
+                        if (idx[i * F + f] < 0) continue;
+                        final double deviation = examples.get(i).x()[f] - mean[f];
+                        squares += deviation * deviation;
+                    }
+                    final double sd = Math.sqrt(squares / count);
+                    scale[f] = sd > 0 ? sd : 1d;
+                }
             }
             for (int i = 0; i < n; i++) if (idx[i * F + f] >= 0) u[i * F + f] = (examples.get(i).x()[f] - mean[f]) / scale[f];
         }
@@ -564,7 +574,7 @@ public final class Factorization {
             double y = w0;
             for (int f = 0; f < F; f++) {
                 final int id = idx[i * F + f];
-                if (id >= 0) y += w[f][id] * u[i * F + f];
+                if (id >= 0) y += w[f][id] * multiplier(u, i * F + f);
             }
             for (int f = 0; f < F; f++) {
                 final int a = idx[i * F + f];
@@ -574,14 +584,14 @@ public final class Factorization {
                     if (b < 0) continue;
                     double dot = 0;
                     for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
-                    y += r[f][g] * dot * u[i * F + f] * u[i * F + g];
+                    y += r[f][g] * dot * multiplier(u, i * F + f) * multiplier(u, i * F + g);
                 }
             }
             s[i] = examples.get(i).offset() + y;
             if (fm) {
                 for (int f = 0; f < F; f++) {
                     final int id = idx[i * F + f];
-                    if (id >= 0) for (int d = 0; d < k; d++) q[i * k + d] += v[f][id * k + d] * u[i * F + f];
+                    if (id >= 0) for (int d = 0; d < k; d++) q[i * k + d] += v[f][id * k + d] * multiplier(u, i * F + f);
                 }
             }
         }
@@ -607,7 +617,7 @@ public final class Factorization {
                 for (int f = 0; f < F; f++) {
                     for (int id = 0; id + 1 < start[f].length; id++) {
                         final int from = start[f][id], to = start[f][id + 1];
-                        for (int j = from; j < to; j++) h[j - from] = u[members[f][j] * F + f];
+                        for (int j = from; j < to; j++) h[j - from] = multiplier(u, members[f][j] * F + f);
                         final double delta = objective.delta(members[f], from, to, h, w[f][id], reg);
                         objective.shift(members[f], from, to, h, delta);
                         w[f][id] += delta;
@@ -622,12 +632,12 @@ public final class Factorization {
                         final double p = v[f][id * k + d];
                         for (int j = from; j < to; j++) {
                             final int i = members[f][j];
-                            final double own = u[i * F + f];
+                            final double own = multiplier(u, i * F + f);
                             h[j - from] = own * (fm ? q[i * k + d] - p * own : slope(r, v, u, idx, i, F, f, d, k));
                         }
                         final double delta = objective.delta(members[f], from, to, h, p, reg);
                         objective.shift(members[f], from, to, h, delta);
-                        if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta * u[members[f][j] * F + f];
+                        if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta * multiplier(u, members[f][j] * F + f);
                         v[f][id * k + d] = p + delta;
                     }
                 }
@@ -640,7 +650,7 @@ public final class Factorization {
                             final int a = idx[i * F + f], b = idx[i * F + g];
                             double dot = 0;
                             if (a >= 0 && b >= 0) for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
-                            h[i] = a >= 0 && b >= 0 ? dot * u[i * F + f] * u[i * F + g] : 0;
+                            h[i] = a >= 0 && b >= 0 ? dot * multiplier(u, i * F + f) * multiplier(u, i * F + g) : 0;
                         }
                         final double delta = objective.delta(all, 0, n, h, r[f][g], reg);
                         objective.shift(all, 0, n, h, delta);
@@ -1002,9 +1012,14 @@ public final class Factorization {
         for (int g = 0; g < F; g++) {
             if (g == f) continue;
             final int id = idx[i * F + g];
-            if (id >= 0) h += r[f][g] * v[g][id * k + d] * u[i * F + g];
+            if (id >= 0) h += r[f][g] * v[g][id * k + d] * multiplier(u, i * F + g);
         }
         return h;
+    }
+
+    /** The per-example multiplier at {@code at}: {@code u[at]}, or 1 without numeric fields ({@code u} null). */
+    private static double multiplier(final double[] u, final int at) {
+        return u == null ? 1d : u[at];
     }
 
     // ------------------------------------------------------------------------------------------

@@ -1483,13 +1483,15 @@ public final class FeatureStages {
             return options().numeric();
         }
 
-        /** The row's field values: a categorical value as text, {@link Factorization#NUMERIC} for a numeric field with a finite value, null when missing. */
-        String[] values(final Map<String, Object> row) {
+        /**
+         * The row's field values: a categorical value as text, {@link Factorization#NUMERIC} for a numeric field with a
+         * finite value in {@code x} (the row's {@link #x}), null when missing.
+         */
+        String[] values(final Map<String, Object> row, final double[] x) {
             final String[] values = new String[fields.size()];
             for (int f = 0; f < fields.size(); f++) {
                 if (scales != null && scales.get(f) != null) {
-                    final Double x = FeatureValues.toDouble(row.get(fields.get(f)));
-                    values[f] = x == null || !Double.isFinite(x) ? null : Factorization.NUMERIC;
+                    values[f] = Double.isFinite(x[f]) ? Factorization.NUMERIC : null;
                 } else {
                     values[f] = FeatureValues.toText(row.get(fields.get(f)));
                 }
@@ -1611,8 +1613,8 @@ public final class FeatureStages {
                 }
                 model = fits.modelFor(foldOf(values), usable, forward == null ? 1 : forward.minBlocks());
             }
-            final String[] x = values(values);
             final double[] numericValues = x(values);
+            final String[] x = values(values, numericValues);
             for (final OutputColumn col : columns) {
                 Object v = null;
                 if (model != null) {
@@ -1703,7 +1705,8 @@ public final class FeatureStages {
             contest = spec.contestOf(row);
             if (contest == null) return null;
         }
-        return new Factorization.Example(spec.values(row), spec.x(row), y, offset, tag, contest);
+        final double[] x = spec.x(row);
+        return new Factorization.Example(spec.values(row, x), x, y, offset, tag, contest);
     }
 
     /** Static / forward: one example per row, tagged with the row's time block under forward. */

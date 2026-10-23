@@ -4319,7 +4319,13 @@ public final class FeaturePlanCompiler {
             default -> diagnostics.error("factorization.variant", loc, "variant must be fm | fwfm: " + variant);
         }
         if (def.fields.size() < 2) diagnostics.error("factorization.fields", loc, "factorization requires at least two 'fields'");
+        final Set<String> listed = new HashSet<>();
         for (final String f : def.fields) {
+            // a field is one parameter block (and one numeric declaration): the engine reads a name at its first position
+            if (!listed.add(f)) {
+                diagnostics.error("factorization.fields", loc, "field '" + f + "' is listed more than once");
+                continue;
+            }
             final Ref ref = resolve(f);
             if (ref == null) {
                 diagnostics.error("reference.unknown", loc, "unknown field: " + f);

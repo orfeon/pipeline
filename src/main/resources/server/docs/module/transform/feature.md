@@ -1036,7 +1036,7 @@ of the categorical pairs (a seller whose factors resemble another's gets a simil
 stored in the artifact (and its manifest's `numeric`), so a serving run standardises with the training values. A row
 whose numeric value is missing (or not finite) contributes nothing for that field, as an unseen category does — that is
 not the same as filling the mean. A `pair` that includes a numeric field is the term at the row's value; `perUnit: true`
-reads it per unit of `u` (the slope, independent of the row's value). `embedding` reads categorical fields only (a
+reads it per unit of `u` (the slope, independent of the row's value — a row whose value is missing reads it too). `embedding` reads categorical fields only (a
 numeric field's vector is the same on every row); `count` of a numeric field counts the rows with a value. A block whose
 fields are all numeric is a quadratic form of the values (warning `factorization.fields.numeric`).
 
