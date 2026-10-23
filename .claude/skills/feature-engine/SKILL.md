@@ -136,7 +136,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   any code that enumerates quantileTransform columns as blocks), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
   values — the `PairCounts` summary, sorted maps so nothing depends on arrival order — → PPMI → `Svd.jacobi` →
   coordinates `sqrt(|λ|) · v` by decreasing |λ|, vocabulary capped by co-occurrence mass; `<block>.spectral.json`), `Factorization`
-  (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
+  (fm / fwfm ALS + `<block>.fm.avro`; `Fits` = whole-input + fold / forward models, `Model.count` the per-value training rows), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from
   `outbound.Durations` by decision), `FeatureValues` (value coercion, keys, `keyWithNullTokens`),
@@ -547,7 +547,12 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   synthetic `lag` block expanded under the population block's name. `transitionStats` is a compile-time desugaring
   into an expanding distribution encoding — no run-time operator; `spectralEmbedding` is a `SummaryFitBlock` over
   `Spectral.SUMMARY` pair counts. A new sequence-of-values type starts from the same path columns.)
-- factorization `variant: bayesian`, `fit.cadence / window / warmStart` (fit boundaries).
+- factorization `variant: bayesian`, `fit.cadence`, `fold: {by: time}`. (`fit.mode: forward` / `fold` are implemented:
+  `Factorization.fitAll` + `Fits` follow `JointFit` — one model per change point, warm-started from the one before,
+  or one per fold fitted from scratch on its own worker (`FitFmPartDoFn`, key −1 = the whole input) — and every refit
+  is rotated by `Model.alignTo`, which returns a copy: a model can be a runner's input, and DirectRunner rejects an
+  in-place rotation of one. The examples are sorted (`Factorization.ORDER`) before every fit, so a fit is a function
+  of the example set, never of the runner's delivery order.)
 - `runtimeFilter` columns (`atRowCreation`, `event_date THH:MM`): per-row availability filtering.
 - Streaming keyed stages (stateful DoFn + timers) and the stateful wave merge (§9.4.6).
 - Sequence / population stages as fold-in merge targets (composite sorter key), §9.4.4 prefix-scan

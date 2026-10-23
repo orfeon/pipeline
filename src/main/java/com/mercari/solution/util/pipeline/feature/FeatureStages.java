@@ -14,6 +14,7 @@ import org.apache.beam.sdk.coders.DoubleCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.transforms.ApproximateQuantiles;
@@ -1460,10 +1461,17 @@ public final class FeatureStages {
 
     // --- factorization ---------------------------------------------------------------------------
 
-    /** One factorization block of a fit stage, rebuilt from its output columns' coordinates. */
+    /**
+     * One factorization block of a fit stage, rebuilt from its output columns' coordinates. Static: one model over the
+     * whole input, gathered on one worker. Forward: every row's example tagged with its time block, gathered on one
+     * worker and fitted change point by change point (each warm-started from the one before). Fold: every example
+     * sent to the whole-input fit and to the fit of every fold but its own, one worker per fit, assembled into one
+     * side input. The artifact holds the whole-input model; fold / forward models are always re-fitted.
+     */
     record FmSpec(String block, List<String> fields, boolean fieldWeighted, int k, String target, String offsetColumn,
                   int epochs, double reg, long seed, String artifactUri, boolean refit,
-                  List<OutputColumn> columns) implements StaticFitBlock<Factorization.Model> {
+                  List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis, Factorization.Plan plan,
+                  List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
             return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed);
         }
@@ -1473,14 +1481,15 @@ public final class FeatureStages {
             return Factorization.artifactPath(artifactUri, planHash, block);
         }
 
+        /** fold / forward models are always re-fitted: the artifact holds the whole-input model only. */
         @Override
         public boolean artifactExists(final String planHash) {
-            return Factorization.exists(artifactUri, planHash, block);
+            return foldKeys == null && forward == null && Factorization.exists(artifactUri, planHash, block);
         }
 
         @Override
-        public Factorization.Model readArtifact(final String planHash) {
-            return Factorization.read(artifactUri, planHash, block, fields, fieldWeighted, k);
+        public Factorization.Fits readArtifact(final String planHash) {
+            return Factorization.Fits.ofTotal(Factorization.read(artifactUri, planHash, block, fields, fieldWeighted, k));
         }
 
         @Override
@@ -1488,20 +1497,57 @@ public final class FeatureStages {
             return offsetColumn == null ? List.of(target) : List.of(target, offsetColumn);
         }
 
-        /** Gathers the training set on one worker and fits by ALS. */
         @Override
-        public PCollectionView<List<Factorization.Model>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+        public PCollectionView<List<Factorization.Fits>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            final String prefix = label + "_Fm_" + block;
+            if (foldKeys != null) {
+                // one fit per fold (and the whole-input fit, key −1), each on a worker of its own
+                return fitInput
+                        .apply(prefix + "_FoldExamples", ParDo.of(new ExtractFoldExamplesDoFn(this)))
+                        .setCoder(KvCoder.of(VarIntCoder.of(), SerializableCoder.of(Factorization.Example.class)))
+                        .apply(prefix + "_FoldGroup", GroupByKey.create())
+                        .apply(prefix + "_FoldFit", ParDo.of(new FitFmPartDoFn(this)))
+                        .setCoder(KvCoder.of(VarIntCoder.of(), SerializableCoder.of(Factorization.Model.class)))
+                        .apply(prefix + "_FoldGather", Combine.globally(new GatherFn<KV<Integer, Factorization.Model>>()).withoutDefaults())
+                        .apply(prefix + "_Fit", ParDo.of(new AssembleFmFoldsDoFn(this, planHash)))
+                        .setCoder(SerializableCoder.of(Factorization.Fits.class))
+                        .apply(prefix + "_View", View.asList());
+            }
             return fitInput
-                    .apply(label + "_Fm_" + block + "_Examples", ParDo.of(new ExtractExamplesDoFn(this)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Example.class))
-                    .apply(label + "_Fm_" + block + "_Gather", Combine.globally(new GatherFn<Factorization.Example>()).withoutDefaults())
-                    .apply(label + "_Fm_" + block + "_Fit", ParDo.of(new FitFmDoFn(this, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Model.class))
-                    .apply(label + "_Fm_" + block + "_View", View.asList());
+                    .apply(prefix + "_Examples", ParDo.of(new ExtractExamplesDoFn(this)))
+                    .setCoder(SerializableCoder.of(Factorization.Example.class))
+                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<Factorization.Example>()).withoutDefaults())
+                    .apply(prefix + "_Fit", ParDo.of(new FitFmDoFn(this, planHash)))
+                    .setCoder(SerializableCoder.of(Factorization.Fits.class))
+                    .apply(prefix + "_View", View.asList());
+        }
+
+        /** The row's fold (null without a fold unit, or outside fit.mode fold). */
+        Integer foldOf(final Map<String, Object> row) {
+            if (foldKeys == null) return null;
+            final String unit = FeatureValues.key(row, foldKeys);
+            return unit == null ? null : VarianceComponents.foldOf(unit, folds);
+        }
+
+        /** Writes the whole-input model: on every fit under static, once (or on refit) under fold / forward. */
+        void writeTotal(final Factorization.Model total, final String planHash) {
+            if (artifactUri == null || total == null) return;
+            if (foldKeys == null && forward == null || refit || !Factorization.exists(artifactUri, planHash, block)) {
+                Factorization.write(artifactUri, planHash, block, total);
+            }
         }
 
         @Override
-        public void apply(final Factorization.Model model, final Map<String, Object> values) {
+        public void apply(final Factorization.Fits fits, final Map<String, Object> values) {
+            Factorization.Model model = null;
+            if (fits != null) {
+                Long usable = null;
+                if (forward != null) {
+                    final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+                    usable = eventMillis == null ? null : forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+                }
+                model = fits.modelFor(foldOf(values), usable, forward == null ? 1 : forward.minBlocks());
+            }
             final String[] x = fieldValues(values, fields);
             for (final OutputColumn col : columns) {
                 Object v = null;
@@ -1517,6 +1563,7 @@ public final class FeatureStages {
                             final double[] e = model.embedding(x, f, d + 1);
                             v = e == null || e.length <= d ? null : e[d];
                         }
+                        case "count" -> v = model.count(x, fields.indexOf(col.getCoordinates().get("field")));
                         default -> v = model.predict(x);
                     }
                 }
@@ -1533,10 +1580,19 @@ public final class FeatureStages {
         final List<FmSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final Forward forward = Forward.of(e.getValue().get(0));
+            final String foldKeys = k.get("foldKeys");
+            final int folds = foldKeys != null ? Integer.parseInt(k.get("folds")) : 0;
+            final int epochs = Integer.parseInt(k.get("epochs"));
+            final Factorization.Plan plan = new Factorization.Plan(folds, forward != null, forward == null ? 0 : forward.windowBlocks(),
+                    Integer.parseInt(k.getOrDefault("minRows", "0")), k.get("align"), "previous".equals(k.get("warmStart")),
+                    Integer.parseInt(k.getOrDefault("warmEpochs", Integer.toString(epochs))));
             specs.add(new FmSpec(e.getKey(), List.of(k.get("fields").split(",")), "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
-                    Integer.parseInt(k.get("epochs")), Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
-                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
+                    epochs, Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
+                    k.get("artifactUri"), "true".equals(k.get("refit")),
+                    foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan, e.getValue()));
         }
         return specs;
     }
@@ -1547,6 +1603,19 @@ public final class FeatureStages {
         return values;
     }
 
+    /** The row's training example (target minus offset), or null when the target or the offset is missing. */
+    static Factorization.Example example(final FmSpec spec, final Map<String, Object> row, final long tag) {
+        Double y = FeatureValues.toDouble(row.get(spec.target()));
+        if (y == null || y.isNaN()) return null;
+        if (spec.offsetColumn() != null) {
+            final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
+            if (b == null || b.isNaN()) return null;
+            y -= b;
+        }
+        return new Factorization.Example(fieldValues(row, spec.fields()), y, tag);
+    }
+
+    /** Static / forward: one example per row, tagged with the row's time block under forward. */
     static class ExtractExamplesDoFn extends DoFn<MElement, Factorization.Example> {
         private final FmSpec spec;
 
@@ -1559,18 +1628,42 @@ public final class FeatureStages {
             final MElement element = c.element();
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
-            Double y = FeatureValues.toDouble(row.get(spec.target()));
-            if (y == null) return;
-            if (spec.offsetColumn() != null) {
-                final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                if (b == null) return;
-                y -= b;
+            long tag = 0;
+            if (spec.forward() != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
+                if (millis == null) return;
+                tag = spec.forward().blocks().indexOf(millis);
             }
-            c.output(new Factorization.Example(fieldValues(row, spec.fields()), y));
+            final Factorization.Example example = example(spec, row, tag);
+            if (example != null) c.output(example);
         }
     }
 
-    static class FitFmDoFn extends DoFn<ArrayList<Factorization.Example>, Factorization.Model> {
+    /**
+     * Fold: the row's example (tagged with its fold, −1 without a fold unit) to the whole-input fit (key −1) and to
+     * the fit of every other fold. A row without a fold unit is never read out-of-fold, so it trains every fold's fit.
+     */
+    static class ExtractFoldExamplesDoFn extends DoFn<MElement, KV<Integer, Factorization.Example>> {
+        private final FmSpec spec;
+
+        ExtractFoldExamplesDoFn(final FmSpec spec) {
+            this.spec = spec;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Map<String, Object> row = element.asPrimitiveMap();
+            final Integer fold = spec.foldOf(row);
+            final Factorization.Example example = example(spec, row, fold == null ? -1 : fold);
+            if (example == null) return;
+            c.output(KV.of(-1, example));
+            for (int f = 0; f < spec.folds(); f++) if (fold == null || f != fold) c.output(KV.of(f, example));
+        }
+    }
+
+    static class FitFmDoFn extends DoFn<ArrayList<Factorization.Example>, Factorization.Fits> {
         private final FmSpec spec;
         private final String planHash;
 
@@ -1582,10 +1675,54 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final ArrayList<Factorization.Example> examples = c.element();
-            LOG.info("factorization {}: fitting on {} examples", spec.block(), examples.size());
-            final Factorization.Model model = Factorization.fit(spec.options(), examples);
-            if (spec.artifactUri() != null) Factorization.write(spec.artifactUri(), planHash, spec.block(), model);
-            c.output(model);
+            LOG.info("factorization {}: fitting on {} examples{}", spec.block(), examples.size(), spec.forward() == null ? "" : " (forward)");
+            final Factorization.Fits fits = Factorization.fitAll(spec.options(), examples, spec.plan());
+            spec.writeTotal(fits.total, planHash);
+            c.output(fits);
+        }
+    }
+
+    /** Fold: one fit (a fold's out-of-fold model, or the whole input's under key −1) over the examples sent to it. */
+    static class FitFmPartDoFn extends DoFn<KV<Integer, Iterable<Factorization.Example>>, KV<Integer, Factorization.Model>> {
+        private final FmSpec spec;
+
+        FitFmPartDoFn(final FmSpec spec) {
+            this.spec = spec;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final List<Factorization.Example> examples = new ArrayList<>();
+            for (final Factorization.Example e : c.element().getValue()) examples.add(e);
+            final int part = c.element().getKey();
+            LOG.info("factorization {}: fitting {} on {} examples", spec.block(), part < 0 ? "the whole input" : "fold " + part + " (out of fold)", examples.size());
+            final Factorization.Fits fits = Factorization.fitAll(spec.options(), examples,
+                    new Factorization.Plan(0, false, 0, spec.plan().minRows(), null, false, 0));
+            if (fits.total != null) c.output(KV.of(part, fits.total));
+        }
+    }
+
+    /** Fold: the fold models aligned to the whole-input model, and the artifact. */
+    static class AssembleFmFoldsDoFn extends DoFn<ArrayList<KV<Integer, Factorization.Model>>, Factorization.Fits> {
+        private final FmSpec spec;
+        private final String planHash;
+
+        AssembleFmFoldsDoFn(final FmSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            Factorization.Model total = null;
+            final Factorization.Model[] folds = new Factorization.Model[spec.folds()];
+            for (final KV<Integer, Factorization.Model> part : c.element()) {
+                if (part.getKey() < 0) total = part.getValue();
+                else folds[part.getKey()] = part.getValue();
+            }
+            final Factorization.Fits fits = Factorization.Fits.ofFolds(total, folds, spec.plan().align());
+            spec.writeTotal(total, planHash);
+            c.output(fits);
         }
     }
 

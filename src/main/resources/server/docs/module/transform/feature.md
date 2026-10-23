@@ -880,8 +880,8 @@ system (`procrustes` by default) — see *Alignment of forward fits* under *SVD 
 freedom and ignore it (`<type>.fit.align` warning on a block that declares one).
 
 A `type: svd`, `type: quantileTransform`, `type: smooth`, `type: copula` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
-*Quantile transform*, *Smooth curve* and *Copula*); the other population types (factorization / discretize) are always static and are
-unaffected.
+*Quantile transform*, *Smooth curve* and *Copula*), and so does a `type: factorization` block (which also inherits a top-level
+`fold`, see *Factorization*); `discretize` is always static and is unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -971,19 +971,50 @@ is a fold:
     fields: [seller_id, category, condition_grade] # categorical fields (≥ 2)
     latentDim: 8
     task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset
-    fit: {artifact: {uri: "gs://bucket/features"}} # always fit.mode static; cadence / window / warmStart are not implemented yet
-    als: {epochs: 10, reg: 0.01, seed: 0}
+    fit: {mode: forward, blocks: {size: P30D}, artifact: {uri: "gs://bucket/features"}}   # static (default) | forward | fold
+    als: {epochs: 10, warmEpochs: 5, reg: 0.01, seed: 0}
     outputs:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
+      - {count: seller_id, as: seller_rows}                    # training rows with the row's seller (int64)
       - {sum: true, as: fm_linear}                             # w0 + Σ w + Σ pairs (without the offset)
 ```
 
 `ŷ = w0 + Σ_f w_f[x_f] + Σ_{f<g} r_fg ⟨v_f[x_f], v_g[x_g]⟩`, fitted by alternating least squares (closed-form
-ridge update per parameter, deterministic for a seed). The whole training set is gathered on one worker
-for the fit, so it must fit in memory. Unknown field values yield null outputs. The artifact
-(`<planHash>/<block>.fm.avro` + manifest with the fwfm `pairWeights` ranking) is written and reused like
-the static encoding artifacts.
+ridge update per parameter). The fit is a function of the training rows and the seed: the rows are put in a canonical
+order before it, so the order a runner delivers them in does not change the model. Every training set is gathered
+on one worker, so it must fit in memory. A pair score is non-null whenever both values were seen in the fit — also
+for a pair that never occurred together: that is what the low-rank model adds over an encoding of the cross, which
+falls back to its parent for an unseen pair. A value the fit never saw yields null `pair` / `embedding` outputs and a
+`count` of 0 (the `sum` still adds what the known fields contribute); a null value yields a null `count`. `count` is the
+number of training rows that carried the row's value in the model the row reads — the support behind its factors. The
+artifact (`<planHash>/<block>.fm.avro` with the per-value counts + manifest with the fwfm `pairWeights` ranking) holds
+the whole-input model and is written and reused like the static encoding artifacts.
+
+**`fit.mode`.** Under `static` (the default) every row reads the model fitted on the whole input — its own target
+included, so use it for serving and analysis, not for training rows (the plan says so, `fit.mode.static`). The two
+refitting modes give training rows values fitted without their own target:
+
+- **`forward`** fits one model per time block (`fit.blocks`, `minBlocks`, `window` / `minHistory` as in *Forward block
+  fits*) over the complete blocks whose targets are known at `predictAt`; a row reads the model of the last such block
+  (null before `minBlocks`). Each fit starts from the one before it and runs `als.warmEpochs` epochs (default half of
+  `epochs`, rounded up; `fit.warmStart: none` fits each from scratch with `epochs`), so a run costs roughly
+  `epochs · N₁ + warmEpochs · (N₂ + N₃ + …)` row passes, `Nᵢ` the rows of the i-th fit's window — measure it on a
+  subset before a long history. The fits run one after another on one worker. `fit.minRows: n` leaves a fit over
+  fewer than `n` rows unsolved (its rows read null).
+- **`fold`** (`folds`, `groupBy` as in *Out-of-fold fits*; a top-level `fold` is inherited like a top-level
+  `forward`) fits one model per fold over the other folds — from scratch, a warm start would carry the fold's own
+  targets into it — one worker per fold, in parallel. A row reads its fold's model; a row whose fold unit is null reads
+  null. With `groupBy: seller`, a seller's own value is never in the model its rows read (its `count` is 0, its pairs
+  null): the pair scores then come from the other fields alone, which is what an unseen seller gets at serving time.
+  `fold: {by: time}` is not implemented for factorization (use `forward`).
+
+Both refit modes always re-fit (the artifact holds the whole-input model only, for a static serving run). The latent
+space of a refit is determined only up to a rotation — inner products, hence pair scores and `sum`, are the same in any
+rotation, embeddings are not — so every refit is rotated into a reference before its embeddings are read: a forward
+fit into the fit before it, a fold model into the whole-input model (`fit.align`: `procrustes` default, `sign`,
+`none`; see *Alignment of forward fits* under *SVD / PCA*). An embedding column then continues across blocks and
+means the same across folds.
 
 ### Discretize (population, type: discretize)
 
@@ -2501,8 +2532,8 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   GroupByKey).
 - Nested encoding targets, the `quantile` / `distribution` stats in
   `fit.mode: static` / `fold` (expanding only) are parsed but rejected. transitionStats is always expanding;
-  spectralEmbedding: `fold`, and `cooccur.weighting` other than `ppmi`. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
-  and non-static fits. Discretize: non-static fits (`fit.cadence / window /
+  spectralEmbedding: `fold`, and `cooccur.weighting` other than `ppmi`. Factorization: `variant: bayesian`, `fit.cadence`,
+  and `fold: {by: time}`. Discretize: non-static fits (`fit.cadence / window /
   warmStart` are accepted and ignored); quantileTransform, svd and smooth: `fold` (`static` and `forward` are implemented, `fit.cadence /
   warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). Smooth: `method: isotonic` / `rff`,
   several inputs in one block. Copula: `family: t`, and `fold`. In `shrinkage`,

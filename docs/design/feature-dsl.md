@@ -959,7 +959,7 @@ coarser than single-key bins (cardinality multiplies; 4–8 as a guide).
   scope: population
   type: factorization            # low-rank interpolation of categorical crosses (FM family)
   variant: fwfm                  # fm | fwfm | bayesian (v2)
-  fit: {cadence: daily, window: trailing(P3Y), warmStart: previous}
+  fit: {mode: forward, blocks: {size: P1D}, window: P1095D, warmStart: previous}   # the cadence is the block size; or mode: fold
   fields: [seller_id, category, condition_grade]
   latentDim: 16
   task: {target: sold, offset: market}       # baselines[].name (§3); a raw column name is not accepted
@@ -985,7 +985,8 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
   material for choosing `outputs` pairs and candidate coarse crosses for a lattice (§8); it is emitted
   as lineage metadata.
 - The default fit is ALS: each pass is an aggregation of sufficient statistics (combiner-friendly) and
-  converges in a few passes per fit boundary (`warmStart: previous`). Implemented in-house (a few
+  converges in a few passes per fit boundary (`warmStart: previous`: a forward refit starts from the one before; a fold
+  model starts from scratch, a warm start would carry its own targets in). Implemented in-house (a few
   hundred lines) since no dependable JVM FM implementation exists. Inference is "embedding lookup +
   inner product (+ r)", a pure map that is easy to express in ONNX.
 - `variant: bayesian` (Gibbs) estimates the regularisation together with a prior and yields posterior

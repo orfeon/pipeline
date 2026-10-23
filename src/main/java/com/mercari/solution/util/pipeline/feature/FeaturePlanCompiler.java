@@ -4184,6 +4184,16 @@ public final class FeaturePlanCompiler {
      * lookup-fit counterpart and leave the block static), so the whole spec walks forward together.
      */
     private FeatureSpec.FitSpec parseLookupFit(final FeatureDef def, final String codePrefix, final String fitted, final String why, final boolean forwardAllowed) {
+        return parseLookupFit(def, codePrefix, fitted, why, forwardAllowed, false);
+    }
+
+    /**
+     * @param foldAllowed the type refits per fold ({@code fit.mode: fold}, hash folds of the row identity or the
+     *                    {@code fit.groupBy} entity) and reads {@code fit.warmStart} itself (factorization); a block
+     *                    without a mode of its own then follows a top-level {@code fold} as it follows {@code forward}
+     */
+    private FeatureSpec.FitSpec parseLookupFit(final FeatureDef def, final String codePrefix, final String fitted, final String why,
+                                               final boolean forwardAllowed, final boolean foldAllowed) {
         final String loc = def.location();
         final JsonObject defFit = parseJsonObject(def.fitJson);
         final FeatureSpec.FitSpec fitSpec = new FeatureSpec.FitSpec();
@@ -4197,8 +4207,36 @@ public final class FeaturePlanCompiler {
                 modeDeclared = true;
             }
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
-            for (final String key : List.of("cadence", "warmStart")) {
+            for (final String key : foldAllowed ? List.of("cadence") : List.of("cadence", "warmStart")) {
                 if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored (" + fitted + " on the whole input)");
+            }
+        }
+        if (foldAllowed) {
+            if (!modeDeclared && spec.fit.mode == FitMode.fold) mode = FitMode.fold;
+            fitSpec.folds = spec.fit.folds;
+            fitSpec.groupBy = spec.fit.groupBy;
+            fitSpec.foldBy = spec.fit.foldBy;
+            if (defFit != null) {
+                final Integer folds = SourceContract.Json.integer(defFit, "folds");
+                if (folds != null) fitSpec.folds = folds;
+                final String groupBy = SourceContract.Json.string(defFit, "groupBy");
+                if (groupBy != null) {
+                    if (entities.containsKey(groupBy)) fitSpec.groupBy = groupBy;
+                    else diagnostics.error("fit.groupBy", loc, "fit.groupBy must reference an entity: " + groupBy);
+                }
+                FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
+            }
+            if (mode == FitMode.fold) {
+                if (fitSpec.isTimeFold()) {
+                    diagnostics.error(codePrefix + ".fit.fold.time", loc, def.type + " folds by hash of the row identity or the fit.groupBy entity only;"
+                            + " fit.fold.by: time is not implemented (use fit.mode forward for a walk-forward fit)");
+                } else if (fitSpec.purge != null || fitSpec.embargo != null || fitSpec.untilMillis != null) {
+                    diagnostics.warning(codePrefix + ".fit.fold.ignored", loc, "fit.fold.purge / embargo / until apply to time folds only and are ignored by " + def.type);
+                }
+                if (fitSpec.folds == null || fitSpec.folds < 2) {
+                    diagnostics.error("fit.folds", loc, "fit.folds must be at least 2: " + fitSpec.folds);
+                    fitSpec.folds = 2;
+                }
             }
         }
         if (forwardAllowed) {
@@ -4230,9 +4268,9 @@ public final class FeaturePlanCompiler {
             if (defFit.has("window")) diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");
             if (defFit.has("minRows")) diagnostics.warning(codePrefix + ".fit.minRows", loc, "fit.minRows is not implemented for " + def.type + " and ignored (smooth / svd / quantileTransform / spectralEmbedding take it)");
         }
-        if (mode != FitMode.statik && !(forwardAllowed && mode == FitMode.forward)) {
-            diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static" + (forwardAllowed ? " | forward" : "") + " (" + why + "); "
-                    + (forwardAllowed ? "expanding / fold" : "expanding / fold / forward") + " are not available");
+        if (mode != FitMode.statik && !(forwardAllowed && mode == FitMode.forward) && !(foldAllowed && mode == FitMode.fold)) {
+            diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static" + (forwardAllowed ? " | forward" : "") + (foldAllowed ? " | fold" : "")
+                    + " (" + why + "); " + (foldAllowed ? "expanding is" : forwardAllowed ? "expanding / fold are" : "expanding / fold / forward are") + " not available");
             mode = FitMode.statik;
         }
         fitSpec.mode = mode;
@@ -4254,7 +4292,10 @@ public final class FeaturePlanCompiler {
         c.validFor = def.validFor;
     }
 
-    /** §4.4 factorization: a static fit (ALS) applied by lookup; outputs are pair scores, embeddings or the linear predictor. */
+    /**
+     * §4.4 factorization: an ALS fit applied by lookup — over the whole input (static), per fold (out-of-fold models)
+     * or per forward change point; outputs are pair scores, embeddings, value counts or the linear predictor.
+     */
     private void expandFactorization(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
         final String variant = def.variant == null ? "fm" : def.variant;
@@ -4271,10 +4312,55 @@ public final class FeaturePlanCompiler {
         }
         final int latentDim = def.latentDim == null ? 8 : def.latentDim;
         if (latentDim < 1) diagnostics.error("factorization.latentDim", loc, "latentDim must be >= 1");
+        final int epochs = def.epochs == null ? 10 : def.epochs;
+        if (epochs < 1) diagnostics.error("factorization.als", loc, "als.epochs must be >= 1: " + epochs);
+        final int warmEpochs = def.warmEpochs == null ? Math.max(1, (epochs + 1) / 2) : def.warmEpochs;
+        if (warmEpochs < 1) diagnostics.error("factorization.als", loc, "als.warmEpochs must be >= 1: " + warmEpochs);
 
-        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "factorization", "the model is fitted", "iterative ALS fit");
-        diagnostics.info("fit.mode.static", loc, "factorization is fitted on the whole input" + artifactPhrase(fitSpec)
-                + "; the whole training set is gathered on one worker for ALS");
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "factorization", "the model is fitted", "iterative ALS fit", true, true);
+        final FitMode mode = fitSpec.mode;
+        final JsonObject defFit = parseJsonObject(def.fitJson);
+        // the gauge of a refit (fold models are rotated into the whole-input model, a forward model into the one before)
+        String align = null;
+        if (mode != FitMode.statik) {
+            align = fitSpec.align == null ? Alignment.PROCRUSTES : fitSpec.align;
+        } else if (defFit != null && defFit.has("align")) {
+            diagnostics.warning("factorization.fit.align", loc, "fit.align applies to fit.mode forward / fold only (a static fit is solved once: there is no other fit to align to)");
+        }
+        boolean warmStart = mode == FitMode.forward;
+        final String warmStartText = defFit == null ? null : SourceContract.Json.string(defFit, "warmStart");
+        if (warmStartText != null) {
+            if (!List.of("previous", "none").contains(warmStartText)) {
+                diagnostics.error("factorization.fit.warmStart", loc, "fit.warmStart must be previous | none: " + warmStartText);
+            } else if (mode != FitMode.forward) {
+                diagnostics.warning("factorization.fit.warmStart", loc, "fit.warmStart applies to fit.mode forward only and is ignored"
+                        + (mode == FitMode.fold ? " (a fold model starts from scratch: a warm start would carry the fold's own outcomes into it)" : ""));
+            } else {
+                warmStart = "previous".equals(warmStartText);
+            }
+        }
+        final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
+        final String what = "factorization fits " + variant + " (k = " + latentDim + ") by ALS on one worker per fit";
+        switch (mode) {
+            case forward -> {
+                final ForwardBlocks blocks = fitSpec.forwardBlocks();
+                diagnostics.info("fit.mode.forward", loc, what + " at every time block (" + blocks.describe() + ") over the complete blocks"
+                        + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
+                        + (warmStart ? ", each started from the fit before it for " + warmEpochs + " epoch(s) (fit.warmStart previous; the first takes " + epochs + ")"
+                        : ", each from scratch for " + epochs + " epoch(s) (fit.warmStart none)")
+                        + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                        + minRowsPhrase(minRows, null) + alignPhrase(align, "embeddings")
+                        + "; the training set of every fit is gathered on one worker and the fits run one after another"
+                        + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+            }
+            case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
+                    + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy : "row identity: time.field + orderTieBreak") + "), each row read from its own"
+                    + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
+                    + "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + ")"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+            default -> diagnostics.info("fit.mode.static", loc, what + " on the whole input" + artifactPhrase(fitSpec) + minRowsPhrase(minRows, null)
+                    + "; training rows read a model fitted on their own target (fit.mode forward or fold gives them values fitted without it)");
+        }
 
         // task: target (field or expr) and optional baseline offset
         String target = def.taskTarget;
@@ -4297,6 +4383,16 @@ public final class FeaturePlanCompiler {
             else if (!computeAt.equals(spec.predictAt)) diagnostics.error("encoding.offset.computeAt", loc, "blocks referencing a baseline offset must be computed at predictAt");
         }
         if (def.fmOutputs.isEmpty()) diagnostics.error("factorization.outputs", loc, "factorization requires 'outputs'");
+        // fold unit: the groupBy entity's keys, else the row identity (read at apply time only, like an encoding's folds)
+        final List<String> foldKeys = new ArrayList<>();
+        if (mode == FitMode.fold) {
+            if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
+                foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
+            } else {
+                foldKeys.add(spec.timeField);
+                foldKeys.addAll(spec.orderTieBreak);
+            }
+        }
 
         int produced = 0;
         for (final FmOutput out : def.fmOutputs) {
@@ -4328,6 +4424,17 @@ public final class FeaturePlanCompiler {
                         cols.add(c);
                     }
                 }
+                case "count" -> {
+                    if (out.count == null || !def.fields.contains(out.count)) {
+                        diagnostics.error("factorization.outputs", loc, "count must name one of the block's fields: " + out.count);
+                        continue;
+                    }
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_" + out.count + "_count",
+                            Schema.FieldType.INT64, computeAt);
+                    c.coordinates.put("kind", "count");
+                    c.coordinates.put("field", out.count);
+                    cols.add(c);
+                }
                 default -> {
                     final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_sum", Schema.FieldType.FLOAT64, computeAt);
                     c.coordinates.put("kind", "sum");
@@ -4336,16 +4443,28 @@ public final class FeaturePlanCompiler {
             }
             for (final OutputColumn c : cols) {
                 c.fitted = true;
-                c.coordinates.put("fit", "static");
+                c.coordinates.put("fit", mode.token());
                 c.coordinates.put("variant", variant);
                 c.coordinates.put("fields", String.join(",", def.fields));
                 c.coordinates.put("latentDim", Integer.toString(latentDim));
                 c.coordinates.put("target", target);
-                c.coordinates.put("epochs", Integer.toString(def.epochs == null ? 10 : def.epochs));
+                c.coordinates.put("epochs", Integer.toString(epochs));
                 c.coordinates.put("reg", Double.toString(def.reg == null ? 0.01 : def.reg));
                 c.coordinates.put("seed", Long.toString(def.seed == null ? 0L : def.seed));
+                if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
+                if (align != null) c.coordinates.put("align", align);
                 if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
                 if (fitSpec.refit) c.coordinates.put("refit", "true");
+                if (mode == FitMode.fold) {
+                    c.coordinates.put("foldKeys", String.join(",", foldKeys));
+                    c.coordinates.put("folds", String.valueOf(fitSpec.folds));
+                }
+                if (mode == FitMode.forward) {
+                    forwardCoordinates(c, null, target, offsetColumn, def, fitSpec);
+                    c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+                    c.coordinates.put("warmStart", warmStart ? "previous" : "none");
+                    c.coordinates.put("warmEpochs", Integer.toString(warmEpochs));
+                }
                 if (offsetColumn != null) {
                     // read from the training rows only (the example's target minus its baseline), like the target
                     c.coordinates.put("offset", offsetColumn);

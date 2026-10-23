@@ -273,11 +273,12 @@ public class FeatureSpec implements Serializable {
         public String as;
     }
 
-    /** One factorization output: {@code pair: [a, b]}, {@code embedding: field (dims)} or {@code sum: true}. */
+    /** One factorization output: {@code pair: [a, b]}, {@code embedding: field (dims)}, {@code count: field} or {@code sum: true}. */
     public static class FmOutput implements Serializable {
         public String kind;
         public List<String> pair = new ArrayList<>();
         public String embedding;
+        public String count;
         public Integer dims;
         public String as;
     }
@@ -397,6 +398,8 @@ public class FeatureSpec implements Serializable {
         public String taskOffset;
         public List<FmOutput> fmOutputs = new ArrayList<>();
         public Integer epochs;
+        /** factorization {@code als.warmEpochs}: the epochs of a warm-started forward refit (default: half of {@code epochs}, rounded up). */
+        public Integer warmEpochs;
         public Double reg;
         public Long seed;
         // discretize / quantileTransform ({@code bins}, {@code distribution} shared with noise)
@@ -1263,10 +1266,13 @@ public class FeatureSpec implements Serializable {
                 fm.kind = "embedding";
                 fm.embedding = Json.string(out, "embedding");
                 fm.dims = Json.integer(out, "dims");
+            } else if (out.has("count")) {
+                fm.kind = "count";
+                fm.count = Json.string(out, "count");
             } else if (Json.bool(out, "sum", false)) {
                 fm.kind = "sum";
             } else {
-                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], embedding: <field> or sum: true");
+                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], embedding: <field>, count: <field> or sum: true");
                 continue;
             }
             def.fmOutputs.add(fm);
@@ -1275,10 +1281,11 @@ public class FeatureSpec implements Serializable {
             final JsonObject als = o.getAsJsonObject("als");
             try {
                 def.epochs = Json.integer(als, "epochs");
+                def.warmEpochs = Json.integer(als, "warmEpochs");
                 def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
                 def.seed = Json.string(als, "seed") == null ? null : Long.parseLong(Json.string(als, "seed"));
             } catch (final RuntimeException e) {
-                diagnostics.error("factorization.als", loc, "als.epochs / reg / seed must be numeric: " + als);
+                diagnostics.error("factorization.als", loc, "als.epochs / warmEpochs / reg / seed must be numeric: " + als);
             }
         }
         def.fitJson = o.has("fit") && o.get("fit").isJsonObject() ? o.get("fit").toString() : null;
