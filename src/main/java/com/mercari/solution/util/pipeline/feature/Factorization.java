@@ -147,9 +147,20 @@ public final class Factorization {
             return (x[f] - mean[f]) / scale[f];
         }
 
-        /** ⟨v_f[x_f], v_g[x_g]⟩ scaled by r_fg, or null when either value is unknown (categorical fields only). */
+        /**
+         * ⟨v_f[x_f], v_g[x_g]⟩ scaled by r_fg, or null when either value is unknown (categorical fields only: a model with
+         * a numeric field needs the row's values, {@link #pair(String[], double[], int, int, boolean)}).
+         */
         public Double pair(final String[] values, final int f, final int g) {
+            requireCategorical();
             return pair(values, null, f, g, false);
+        }
+
+        /** The categorical-only readouts would drop a numeric field's terms without a word: refuse them instead. */
+        private void requireCategorical() {
+            for (final boolean b : numeric) {
+                if (b) throw new IllegalStateException("factorization model with numeric fields " + fields + ": pass the row's numeric values");
+            }
         }
 
         /**
@@ -182,8 +193,9 @@ public final class Factorization {
             return p == null ? 0L : (long) p[k + 1];
         }
 
-        /** Full linear predictor (without the offset) over categorical fields. */
+        /** Full linear predictor (without the offset) over categorical fields ({@link #pair(String[], int, int)}). */
         public double predict(final String[] values) {
+            requireCategorical();
             return predict(values, null);
         }
 
@@ -531,6 +543,19 @@ public final class Factorization {
                 }
             }
             for (int i = 0; i < n; i++) if (idx[i * F + f] >= 0) u[i * F + f] = (examples.get(i).x()[f] - mean[f]) / scale[f];
+        }
+        // a warm start keeps a numeric field's slope per raw unit: its parameters were fitted against the previous fit's
+        // scale, so they move by the ratio of the scales (the centre's move is left to the epochs)
+        if (warm != null) {
+            for (int f = 0; f < F; f++) {
+                if (!numeric[f]) continue;
+                final int wf = warm.fields.indexOf(options.fields().get(f));
+                final Integer id = ids.get(f).get(NUMERIC);
+                if (wf < 0 || !warm.numeric[wf] || id == null || warm.param(wf, NUMERIC) == null) continue;
+                final double ratio = scale[f] / warm.scale[wf];
+                final double[] p = initial.get(f).get(id);
+                for (int d = 0; d <= k; d++) p[d] *= ratio;
+            }
         }
         // parameters as flat arrays: w[f][id], v[f][id · k + d]
         final double[][] w = new double[F][];

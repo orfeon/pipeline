@@ -2108,6 +2108,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("true", k.get("perUnit"));
         Assertions.assertNull(column(plan, "fm_seller_category").getCoordinates().get("perUnit"));
         Assertions.assertTrue(column(plan, "fm_linear").getInputs().contains("start_price"));
+        // a raw numeric value is fine under squared loss (exact steps), warned under the capped ones
+        Assertions.assertFalse(hasCode(plan, "factorization.fields.scale"), plan::describe);
+        final FeaturePlan logistic = compile(SOURCES, withEncoding(numeric.replace("offset: market}", "offset: market, loss: logistic}")));
+        Assertions.assertFalse(logistic.getDiagnostics().hasErrors(), logistic::describe);
+        Assertions.assertTrue(logistic.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.fields.scale".equals(m.code()) && m.message().contains("'quantity'")), logistic::describe);
 
         // an embedding of a numeric field, a numeric flag on a string field, a bad scale, a float as a category
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{embedding: category,", "{embedding: start_price,"))), "factorization.outputs"));

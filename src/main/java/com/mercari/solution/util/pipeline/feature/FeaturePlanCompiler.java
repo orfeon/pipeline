@@ -4445,6 +4445,14 @@ public final class FeaturePlanCompiler {
             }
             default -> diagnostics.error("factorization.task.loss", loc, "task.loss must be squared | logistic | plackettLuce | softmax: " + lossText);
         }
+        if (loss != Factorization.Loss.squared) {
+            for (final String f : def.fields) {
+                if (!"none".equals(def.fmNumeric.get(f))) continue;
+                diagnostics.warning("factorization.fields.scale", loc, "numeric field '" + f + "' keeps its raw value (scale none) under loss " + lossText
+                        + ": the Newton steps are capped at " + Factorization.MAX_STEP + " per parameter, which a value far from ±1 turns into"
+                        + " score moves far from that cap - the fit overshoots or crawls; scale: zscore conditions it (the artifact keeps the scale for serving)");
+            }
+        }
         final boolean ranked = loss == Factorization.Loss.plackettLuce;
         List<String> contestKeys = null;
         if (ranked) {
