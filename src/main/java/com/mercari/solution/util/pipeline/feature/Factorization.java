@@ -182,10 +182,12 @@ public final class Factorization {
 
         /**
          * The affinity between two sides of a row: {@code Σ_{f ∈ left, g ∈ right} r_fg ⟨v_f, v_g⟩ u_f u_g} over the pairs
-         * whose both values are known — a side whose own entity is new still reads through its other fields (its sire,
-         * its trainer). Null when no pair is known.
+         * whose both values are known — a side whose own entity is new still reads through its other fields (its
+         * attributes). Null when no pair is known. {@code x} may be null only without numeric fields (their terms would
+         * drop out without a word).
          */
         public Double between(final String[] values, final double[] x, final int[] left, final int[] right) {
+            if (x == null) requireCategorical();
             double sum = 0;
             boolean any = false;
             for (final int f : left) {

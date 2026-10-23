@@ -454,6 +454,10 @@ public class FactorizationTest {
         // the slope per unit does not depend on the row's value, a missing one included
         Assertions.assertEquals(model.pair(row, null, 0, 1, true), model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, true));
         Assertions.assertEquals(600L, model.count(row, 1));
+        // between reads the numeric side at the row's value; a missing value leaves no known pair; no values = refused
+        Assertions.assertEquals(model.pair(row, at60, 0, 1, false), model.between(row, at60, new int[]{0}, new int[]{1}), 1e-12);
+        Assertions.assertNull(model.between(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, new int[]{0}, new int[]{1}));
+        Assertions.assertThrows(IllegalStateException.class, () -> model.between(row, null, new int[]{0}, new int[]{1}));
 
         final String dir = "target/feature-artifacts/" + UUID.randomUUID();
         Factorization.write(dir, "hash1", "fm", model);
