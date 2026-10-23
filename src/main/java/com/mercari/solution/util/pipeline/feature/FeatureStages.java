@@ -1546,11 +1546,20 @@ public final class FeatureStages {
                     .apply(prefix + "_View", View.asList());
         }
 
-        /** The row's fold (null without a fold unit, or outside fit.mode fold). */
+        /**
+         * The row's fold (null without a fold unit, or outside fit.mode fold). A fold unit that is the contest (event
+         * time + its keys, no fit.groupBy) is read as {@link #contestOf} reads it, at the event time's millis: hashing
+         * the raw time would split a contest whose rows write one instant two ways across folds.
+         */
         Integer foldOf(final Map<String, Object> row) {
             if (foldKeys == null) return null;
-            final String unit = FeatureValues.key(row, foldKeys);
+            final String unit = foldsByContest() ? contestOf(row) : FeatureValues.key(row, foldKeys);
             return unit == null ? null : VarianceComponents.foldOf(unit, folds);
+        }
+
+        private boolean foldsByContest() {
+            return contestKeys != null && foldKeys.size() == contestKeys.size() + 1 && foldKeys.get(0).equals(contestTime)
+                    && foldKeys.subList(1, foldKeys.size()).equals(contestKeys);
         }
 
         /** Writes the whole-input model: on every fit under static, once (or on refit) under fold / forward. */

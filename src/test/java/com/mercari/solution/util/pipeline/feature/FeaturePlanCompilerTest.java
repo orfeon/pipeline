@@ -2061,6 +2061,13 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("session_time,session_id", column(fold, "fm_linear").getCoordinates().get("foldKeys"));
         Assertions.assertTrue(fold.getDiagnostics().getMessages().stream()
                 .anyMatch(m -> "fit.mode.fold".equals(m.code()) && m.message().contains("contest: time.field + the keys of session")), fold::describe);
+        // the engine hashes the contest as the fit reads it (event time as millis): one instant written two ways is one fold
+        final FeatureStages.FmSpec foldSpec = FeatureStages.fmSpecs(fold.getColumns().stream().filter(c -> "fm".equals(c.getBlock())).toList()).get(0);
+        final Map<String, Object> plain = Map.of("session_time", "2024-01-01T00:00:00Z", "session_id", "s1");
+        final Map<String, Object> padded = Map.of("session_time", "2024-01-01T00:00:00.000Z", "session_id", "s1");
+        Assertions.assertEquals(foldSpec.contestOf(plain), foldSpec.contestOf(padded));
+        Assertions.assertEquals(VarianceComponents.foldOf(foldSpec.contestOf(plain), 3), foldSpec.foldOf(plain));
+        Assertions.assertEquals(foldSpec.foldOf(plain), foldSpec.foldOf(padded));
 
         // errors and warnings
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace(", contest: session", ""))), "factorization.task.contest"));
