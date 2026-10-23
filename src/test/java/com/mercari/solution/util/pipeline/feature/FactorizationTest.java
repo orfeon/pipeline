@@ -402,6 +402,122 @@ public class FactorizationTest {
         Assertions.assertTrue(interactions.pair(new String[]{"a1", "b1"}, 0, 1) > interactions.pair(new String[]{"a1", "b2"}, 0, 1));
     }
 
+    /**
+     * A numeric field has one vector, scaled by its standardised value: a slope that differs by category is the pair
+     * of the category with the numeric field. The standardisation is the fit's own and travels with the artifact.
+     */
+    @Test
+    public void testNumericField() {
+        final java.util.Random random = new java.util.Random(31);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 600; i++) {
+            final String a = "a" + random.nextInt(3);
+            final double x = 50 + 10 * random.nextGaussian();
+            // the slope of x is +2 (per sd) for a0, 0 for a1, -2 for a2
+            final double slope = a.equals("a0") ? 2 : a.equals("a1") ? 0 : -2;
+            final double y = slope * (x - 50) / 10 + 0.05 * random.nextGaussian();
+            examples.add(new Factorization.Example(new String[]{a, Factorization.NUMERIC}, new double[]{Double.NaN, x}, y, 0, 0, null));
+        }
+        final java.util.ArrayList<String> scales = new java.util.ArrayList<>(java.util.Arrays.asList(null, "zscore"));
+        final Factorization.Options options = new Factorization.Options(List.of("a", "x"), false, 2, 60, 0.001, 9L,
+                Factorization.Loss.squared, 0, false, true, scales);
+        final Factorization.Model model = Factorization.fit(options, examples);
+        Assertions.assertArrayEquals(new boolean[]{false, true}, model.numeric);
+        Assertions.assertEquals(50, model.mean[1], 1.5);
+        Assertions.assertEquals(10, model.scale[1], 1.0);
+        // the per-unit slope of x by category, in units of the fitted standard deviation
+        final double[] slopes = new double[3];
+        for (int c = 0; c < 3; c++) {
+            final String[] values = {"a" + c, Factorization.NUMERIC};
+            slopes[c] = model.pair(values, null, 0, 1, true) + model.params.get(1).get(Factorization.NUMERIC)[0];
+        }
+        Assertions.assertEquals(2, slopes[0] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        Assertions.assertEquals(0, slopes[1] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        Assertions.assertEquals(-2, slopes[2] * 10 / model.scale[1], 0.3, java.util.Arrays.toString(slopes));
+        // the pair at a row's value is the slope times its standardised value; a missing value contributes nothing
+        final double[] at60 = {Double.NaN, 60};
+        final String[] row = {"a0", Factorization.NUMERIC};
+        Assertions.assertEquals(model.pair(row, null, 0, 1, true) * (60 - model.mean[1]) / model.scale[1], model.pair(row, at60, 0, 1, false), 1e-12);
+        Assertions.assertNull(model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, false));
+        Assertions.assertEquals(model.w0 + model.params.get(0).get("a0")[0], model.predict(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}), 1e-12);
+        // the slope per unit does not depend on the row's value, a missing one included
+        Assertions.assertEquals(model.pair(row, null, 0, 1, true), model.pair(new String[]{"a0", null}, new double[]{Double.NaN, Double.NaN}, 0, 1, true));
+        Assertions.assertEquals(600L, model.count(row, 1));
+
+        final String dir = "target/feature-artifacts/" + UUID.randomUUID();
+        Factorization.write(dir, "hash1", "fm", model);
+        final Factorization.Model loaded = Factorization.read(dir, "hash1", "fm", List.of("a", "x"), new boolean[]{false, true}, false, 2);
+        Assertions.assertEquals(model.mean[1], loaded.mean[1], 0d);
+        Assertions.assertEquals(model.scale[1], loaded.scale[1], 0d);
+        Assertions.assertEquals(model.predict(row, at60), loaded.predict(row, at60), 1e-12);
+    }
+
+    /**
+     * Numeric fields under fwfm (the slope through r and the per-pair update), the standardisation of a value far from 0
+     * with a small spread (one-pass Σx² / n − mean² cancels away there), and a numeric value that is not finite read as
+     * missing whatever the example's text says.
+     */
+    @Test
+    public void testNumericFieldStandardisation() {
+        final java.util.Random random = new java.util.Random(43);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 600; i++) {
+            final String a = "a" + random.nextInt(3);
+            final double z = random.nextGaussian();
+            final double slope = a.equals("a0") ? 2 : a.equals("a1") ? 0 : -2;
+            examples.add(new Factorization.Example(new String[]{a, Factorization.NUMERIC}, new double[]{Double.NaN, 1e9 + 10 * z},
+                    slope * z + 0.05 * random.nextGaussian(), 0, 0, null));
+        }
+        // present by its text, but without a finite value: missing
+        examples.add(new Factorization.Example(new String[]{"a0", Factorization.NUMERIC}, new double[]{Double.NaN, Double.NaN}, 5, 0, 0, null));
+        final java.util.ArrayList<String> scales = new java.util.ArrayList<>(java.util.Arrays.asList(null, "zscore"));
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "x"), true, 2, 60, 0.001, 9L,
+                Factorization.Loss.squared, 0, false, true, scales), examples);
+        Assertions.assertEquals(1e9, model.mean[1], 2);
+        Assertions.assertEquals(10, model.scale[1], 1.0);
+        Assertions.assertTrue(Double.isFinite(model.w0));
+        Assertions.assertEquals(600L, model.count(new String[]{"a0", Factorization.NUMERIC}, 1));
+        for (int c = 0; c < 3; c++) {
+            final double expected = c == 0 ? 2 : c == 1 ? 0 : -2;
+            final double slope = model.pair(new String[]{"a" + c, null}, null, 0, 1, true) + model.params.get(1).get(Factorization.NUMERIC)[0];
+            Assertions.assertEquals(expected, slope * 10 / model.scale[1], 0.3, "a" + c);
+        }
+    }
+
+    /**
+     * A warm start carries a numeric field's slope per raw unit over a change of scale: block 1 widens the spread four
+     * times (the centre stays), and the change point 1 model started from change point 0's — with no epoch of its own —
+     * predicts every raw value as change point 0 did. The categorical-only readouts refuse a model with a numeric field.
+     */
+    @Test
+    public void testNumericWarmStartKeepsRawSlope() {
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            final long block = i < 100 ? 0 : 1;
+            final String a = "a" + i % 3;
+            final double x = 50 + (i % 2 == 0 ? 1 : -1) * (block == 0 ? 10 : 40);
+            final double slope = a.equals("a0") ? 2 : a.equals("a1") ? 0 : -2;
+            examples.add(new Factorization.Example(new String[]{a, Factorization.NUMERIC}, new double[]{Double.NaN, x},
+                    slope * (x - 50) / 10, 0, block, null));
+        }
+        final java.util.ArrayList<String> scales = new java.util.ArrayList<>(java.util.Arrays.asList(null, "zscore"));
+        final Factorization.Options options = new Factorization.Options(List.of("a", "x"), false, 2, 30, 0.01, 5L,
+                Factorization.Loss.squared, 0, false, true, scales);
+        final Factorization.Fits fits = Factorization.fitAll(options, examples, new Factorization.Plan(0, true, 0, 0, Alignment.PROCRUSTES, true, 0));
+        final Factorization.Model first = fits.blocks.get(0L), second = fits.blocks.get(1L);
+        Assertions.assertEquals(10, first.scale[1], 1e-9);
+        Assertions.assertEquals(Math.sqrt((100 + 1600) / 2d), second.scale[1], 1e-9);
+        for (final String a : List.of("a0", "a1", "a2")) {
+            for (final double x : new double[]{10, 45, 70, 90}) {
+                final String[] values = {a, Factorization.NUMERIC};
+                final double[] raw = {Double.NaN, x};
+                Assertions.assertEquals(first.predict(values, raw), second.predict(values, raw), 1e-9, a + " at " + x);
+            }
+        }
+        Assertions.assertThrows(IllegalStateException.class, () -> first.predict(new String[]{"a0", Factorization.NUMERIC}));
+        Assertions.assertThrows(IllegalStateException.class, () -> first.pair(new String[]{"a0", Factorization.NUMERIC}, 0, 1));
+    }
+
     /** Noisy targets with main effects and an a × b interaction over a few values per field. */
     private static List<Factorization.Example> noisy(final int n, final int values) {
         final java.util.Random random = new java.util.Random(17);

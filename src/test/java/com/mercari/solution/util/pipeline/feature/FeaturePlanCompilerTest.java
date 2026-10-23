@@ -2093,6 +2093,42 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(constant, "factorization.contest.constantPair"), constant::describe);
     }
 
+    /** factorization numeric fields: {field, numeric: true, scale}, a per-unit pair, and what a numeric field cannot do. */
+    @Test
+    public void testFactorizationNumericFields() {
+        final String numeric = FM_BLOCK.replace("fields: [seller_id, category, condition_grade]",
+                        "fields: [seller_id, category, {field: start_price, numeric: true}, {field: quantity, numeric: true, scale: none}]")
+                .replace("{pair: [seller_id, category], as: fm_seller_category}",
+                        "{pair: [seller_id, category], as: fm_seller_category}\n          - {pair: [seller_id, start_price], as: fm_seller_price, perUnit: true}");
+        final FeaturePlan plan = compile(SOURCES, withEncoding(numeric));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final Map<String, String> k = column(plan, "fm_seller_price").getCoordinates();
+        Assertions.assertEquals("seller_id,category,start_price,quantity", k.get("fields"));
+        Assertions.assertEquals("start_price:zscore,quantity:none", k.get("numeric"));
+        Assertions.assertEquals("true", k.get("perUnit"));
+        Assertions.assertNull(column(plan, "fm_seller_category").getCoordinates().get("perUnit"));
+        Assertions.assertTrue(column(plan, "fm_linear").getInputs().contains("start_price"));
+        // a raw numeric value is fine under squared loss (exact steps), warned under the capped ones
+        Assertions.assertFalse(hasCode(plan, "factorization.fields.scale"), plan::describe);
+        final FeaturePlan logistic = compile(SOURCES, withEncoding(numeric.replace("offset: market}", "offset: market, loss: logistic}")));
+        Assertions.assertFalse(logistic.getDiagnostics().hasErrors(), logistic::describe);
+        Assertions.assertTrue(logistic.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.fields.scale".equals(m.code()) && m.message().contains("'quantity'")), logistic::describe);
+
+        // an embedding of a numeric field, a numeric flag on a string field, a bad scale, a float as a category
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{embedding: category,", "{embedding: start_price,"))), "factorization.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("category, {field: start_price", "{field: category, numeric: true}, {field: start_price"))), "factorization.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("scale: none", "scale: minmax"))), "factorization.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: start_price, numeric: true}", "start_price"))), "factorization.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: quantity, numeric: true, scale: none}", "{field: quantity, scale: none}"))), "factorization.fields"));
+        // a field listed twice (here once numeric, once as a name: the engine would read the second as categorical)
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(numeric.replace("{field: quantity, numeric: true, scale: none}", "start_price"))), "factorization.fields"));
+        // perUnit on a categorical pair is ignored with a warning
+        final FeaturePlan ignored = compile(SOURCES, withEncoding(numeric.replace("{pair: [seller_id, category], as: fm_seller_category}", "{pair: [seller_id, category], as: fm_seller_category, perUnit: true}")));
+        Assertions.assertFalse(ignored.getDiagnostics().hasErrors(), ignored::describe);
+        Assertions.assertTrue(hasCode(ignored, "factorization.outputs"), ignored::describe);
+    }
+
     private static final String DISCRETIZE_BLOCK = """
                   - name: price_bin
                     scope: population

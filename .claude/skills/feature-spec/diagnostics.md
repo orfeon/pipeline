@@ -277,7 +277,10 @@ not expand because another block failed).
 | `fit.mode.forward.dynamic` | error | the target's availability is not static (`atRowCreation`): the block boundary cannot be decided per row |
 | `fit.fold.identity` | warning | fold by `time.field` alone (no `groupBy`, no tie-break): rows sharing a timestamp share a fold — declare `orderTieBreak` |
 | `fit.groupBy.required` | error | a key derives from a past target and `fit.mode: fold` needs entity-level folds: set `fit.groupBy` |
-| `factorization.fields` / `.latentDim` / `.task` / `.outputs` / `.offset` / `.variant` / `.als` | error | ≥ 2 categorical fields; latentDim ≥ 1; `task.target` or `task.expr`; outputs as `pair` / `embedding` / `sum` naming the block's fields; offset names a baseline; variant `fm \| fwfm`; numeric ALS settings |
+| `factorization.fields` / `.latentDim` / `.task` / `.outputs` / `.offset` / `.variant` / `.als` | error | ≥ 2 distinct fields, categorical or declared `{field, numeric: true, scale: zscore \| none}` (a numeric type; a float field must be declared so); latentDim ≥ 1; `task.target` or `task.expr`; outputs as `pair` / `embedding` / `count` / `sum` naming the block's fields (`embedding` of a categorical field only); offset names a baseline; variant `fm \| fwfm`; numeric ALS settings |
+| `factorization.fields.numeric` | warning | every field is numeric: the model is a quadratic form of the values, with no per-value parameter |
+| `factorization.fields.scale` | warning | a numeric field with `scale: none` under `loss: logistic` / `plackettLuce` / `softmax`: the capped steps overshoot or crawl on a raw value far from ±1 — use `scale: zscore` |
+| `factorization.outputs` | warning | `perUnit: true` on a pair without a numeric field is ignored |
 | `factorization.fit.mode` / `discretize.fit.mode` | error | these types are always `static` |
 | `quantileTransform.fit.mode` / `quantileTransform.fit.mode.static` | error / info | quantileTransform is `static` or `forward` (expanding / fold are rejected); the info says a block declared `static` under a top-level forward fit and therefore sees the whole input |
 | `svd.fit.mode` | error | `static` \| `forward` only (`expanding` / `fold` are rejected) |

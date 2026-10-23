@@ -279,6 +279,8 @@ public class FeatureSpec implements Serializable {
         public List<String> pair = new ArrayList<>();
         public String embedding;
         public String count;
+        /** pair: the slope per unit of the numeric fields' standardised values instead of the term at the row's values. */
+        public boolean perUnit;
         public Integer dims;
         public String as;
     }
@@ -408,6 +410,8 @@ public class FeatureSpec implements Serializable {
         public String taskOffsetScale;
         /** factorization {@code linear}: whether the per-value weights are fitted (default true). */
         public Boolean fmLinear;
+        /** factorization: the numeric fields ({@code {field, numeric: true, scale}}) and their scale (zscore | none), in field order. */
+        public Map<String, String> fmNumeric = new LinkedHashMap<>();
         public List<FmOutput> fmOutputs = new ArrayList<>();
         public Integer epochs;
         /** factorization {@code als.warmEpochs}: the epochs of a warm-started forward refit (default: half of {@code epochs}, rounded up). */
@@ -1180,6 +1184,31 @@ public class FeatureSpec implements Serializable {
         def.smoothingJson = o.has("smoothing") && o.get("smoothing").isJsonObject() ? o.get("smoothing").toString() : null;
         def.variant = Json.string(o, "variant");
         def.fields = Json.strings(o, "fields");
+        if ("factorization".equals(def.type) && o.has("fields") && o.get("fields").isJsonArray()) {
+            // a factorization field is a name, or {field, numeric: true, scale: zscore | none} for a numeric one
+            def.fields = new ArrayList<>();
+            for (final JsonElement e : o.getAsJsonArray("fields")) {
+                if (e.isJsonPrimitive()) {
+                    def.fields.add(e.getAsString());
+                    continue;
+                }
+                final JsonObject field = e.isJsonObject() ? e.getAsJsonObject() : null;
+                final String name = field == null ? null : Json.string(field, "field");
+                if (name == null) {
+                    diagnostics.error("factorization.fields", loc, "a field is a name or {field: <name>, numeric: true, scale: zscore | none}: " + e);
+                    continue;
+                }
+                def.fields.add(name);
+                for (final String key : field.keySet()) {
+                    if (!List.of("field", "numeric", "scale").contains(key)) diagnostics.error("factorization.fields", loc, "unknown key '" + key + "' in field " + name + " (field, numeric, scale)");
+                }
+                if (Json.bool(field, "numeric", false)) {
+                    def.fmNumeric.put(name, Json.string(field, "scale") == null ? "zscore" : Json.string(field, "scale"));
+                } else if (field.has("scale")) {
+                    diagnostics.error("factorization.fields", loc, "scale applies to a numeric field ({field: " + name + ", numeric: true, scale: ...})");
+                }
+            }
+        }
         def.latentDim = Json.integer(o, "latentDim");
         def.method = Json.string(o, "method");
         def.bins = Json.integer(o, "bins");
@@ -1284,6 +1313,7 @@ public class FeatureSpec implements Serializable {
             if (out.has("pair")) {
                 fm.kind = "pair";
                 fm.pair = Json.strings(out, "pair");
+                fm.perUnit = Json.bool(out, "perUnit", false);
             } else if (out.has("embedding")) {
                 fm.kind = "embedding";
                 fm.embedding = Json.string(out, "embedding");

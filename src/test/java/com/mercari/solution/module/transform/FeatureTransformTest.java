@@ -902,6 +902,57 @@ public class FeatureTransformTest {
     }
 
     /**
+     * factorization with a numeric field: start_price enters with one vector scaled by its standardised value, so the
+     * seller × start_price pair is the seller's own price slope. The engine's values are the pure model's on the same
+     * examples (the standardisation is fitted from the training rows).
+     */
+    @Test
+    public void testFactorizationNumericField() throws java.io.IOException {
+        final String blocks = """
+                    - name: fm
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, {field: start_price, numeric: true}]
+                      latentDim: 2
+                      task: {expr: "sold >= 1"}
+                      als: {epochs: 20, reg: 0.1, seed: 1}
+                      outputs:
+                        - {pair: [seller_id, start_price], as: fm_price}
+                        - {pair: [seller_id, start_price], as: fm_price_slope, perUnit: true}
+                        - {sum: true, as: fm_linear}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Object[][] rows = {{"A", "s1", 100.0, 1}, {"A", "s2", 50.0, 0}, {"B", "s1", 200.0, 0}, {"C", "s1", 80.0, 1}, {"C", "s2", 60.0, 1}, {"D", "s1", 120.0, 1}};
+        final List<com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = new ArrayList<>();
+        final Map<String, Object[]> byKey = new HashMap<>();
+        for (final Object[] r : rows) {
+            byKey.put(r[0] + "/" + r[1], r);
+            examples.add(new com.mercari.solution.util.pipeline.feature.Factorization.Example(new String[]{(String) r[1], ""},
+                    new double[]{Double.NaN, (Double) r[2]}, ((Integer) r[3]).doubleValue(), 0, 0, null));
+        }
+        final com.mercari.solution.util.pipeline.feature.Factorization.Model model = com.mercari.solution.util.pipeline.feature.Factorization.fit(
+                new com.mercari.solution.util.pipeline.feature.Factorization.Options(List.of("seller_id", "start_price"), false, 2, 20, 0.1, 1L,
+                        com.mercari.solution.util.pipeline.feature.Factorization.Loss.squared, 0, false, true, java.util.Arrays.asList(null, "zscore")), examples);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(out -> {
+            int count = 0;
+            for (final MElement row : out) {
+                final Object[] r = byKey.get(row.getAsString("session_id") + "/" + row.getAsString("seller_id"));
+                final String[] values = {(String) r[1], ""};
+                final double[] x = {Double.NaN, (Double) r[2]};
+                Assertions.assertEquals(model.predict(values, x), row.getAsDouble("f_fm_linear"), 1e-9, row::toString);
+                Assertions.assertEquals(model.pair(values, x, 0, 1, false), row.getAsDouble("f_fm_price"), 1e-9, row::toString);
+                Assertions.assertEquals(model.pair(values, x, 0, 1, true), row.getAsDouble("f_fm_price_slope"), 1e-9, row::toString);
+                Assertions.assertEquals(row.getAsDouble("f_fm_price_slope") * ((Double) r[2] - model.mean[1]) / model.scale[1], row.getAsDouble("f_fm_price"), 1e-9);
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * svd {@code outputs}: with one component of (start_price, current_bid_t10) kept, the residual is what the shared
      * price axis does not explain, per input and in input units — it sums to zero over the rows, its norm column is its
      * length, and it is orthogonal to the score; with both components kept nothing is left.

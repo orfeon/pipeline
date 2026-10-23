@@ -257,9 +257,12 @@ level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and n
 
 ### `type: factorization` (always static)
 
-`variant: fm | fwfm`, `fields: [categorical ≥ 2]`, `latentDim` (default 8), `task: {target | expr,
-offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as}, {embedding: <field>, as, dims},
-{sum: true, as}]`, `fit: {artifact}`. Unknown values → null.
+`variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}]`,
+`latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as,
+perUnit}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
+Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
+rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
+(independent of the row's value).
 
 ### `type: discretize` (always static)
 

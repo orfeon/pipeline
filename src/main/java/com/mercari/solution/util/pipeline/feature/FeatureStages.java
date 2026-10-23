@@ -1472,10 +1472,42 @@ public final class FeatureStages {
                   int epochs, double reg, long seed, String artifactUri, boolean refit,
                   List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis, Factorization.Plan plan,
                   Factorization.Loss loss, String offsetScale, List<String> contestKeys, String contestTime, String contestTimeType,
-                  boolean descending, int top, boolean linear,
+                  boolean descending, int top, boolean linear, List<String> scales,
                   List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
-            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear);
+            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales);
+        }
+
+        /** Per field: numeric or categorical. */
+        boolean[] numeric() {
+            return options().numeric();
+        }
+
+        /**
+         * The row's field values: a categorical value as text, {@link Factorization#NUMERIC} for a numeric field with a
+         * finite value in {@code x} (the row's {@link #x}), null when missing.
+         */
+        String[] values(final Map<String, Object> row, final double[] x) {
+            final String[] values = new String[fields.size()];
+            for (int f = 0; f < fields.size(); f++) {
+                if (scales != null && scales.get(f) != null) {
+                    values[f] = Double.isFinite(x[f]) ? Factorization.NUMERIC : null;
+                } else {
+                    values[f] = FeatureValues.toText(row.get(fields.get(f)));
+                }
+            }
+            return values;
+        }
+
+        /** The raw values of the numeric fields by field index (NaN when missing), or null without numeric fields. */
+        double[] x(final Map<String, Object> row) {
+            if (scales == null) return null;
+            final double[] x = new double[fields.size()];
+            for (int f = 0; f < fields.size(); f++) {
+                final Double value = scales.get(f) == null ? null : FeatureValues.toDouble(row.get(fields.get(f)));
+                x[f] = value == null ? Double.NaN : value;
+            }
+            return x;
         }
 
         @Override
@@ -1491,7 +1523,7 @@ public final class FeatureStages {
 
         @Override
         public Factorization.Fits readArtifact(final String planHash) {
-            return Factorization.Fits.ofTotal(Factorization.read(artifactUri, planHash, block, fields, fieldWeighted, k));
+            return Factorization.Fits.ofTotal(Factorization.read(artifactUri, planHash, block, fields, numeric(), fieldWeighted, k));
         }
 
         @Override
@@ -1581,14 +1613,15 @@ public final class FeatureStages {
                 }
                 model = fits.modelFor(foldOf(values), usable, forward == null ? 1 : forward.minBlocks());
             }
-            final String[] x = fieldValues(values, fields);
+            final double[] numericValues = x(values);
+            final String[] x = values(values, numericValues);
             for (final OutputColumn col : columns) {
                 Object v = null;
                 if (model != null) {
                     switch (col.getCoordinates().get("kind")) {
                         case "pair" -> {
                             final String[] pair = col.getCoordinates().get("pair").split(",");
-                            v = model.pair(x, fields.indexOf(pair[0]), fields.indexOf(pair[1]));
+                            v = model.pair(x, numericValues, fields.indexOf(pair[0]), fields.indexOf(pair[1]), "true".equals(col.getCoordinates().get("perUnit")));
                         }
                         case "embedding" -> {
                             final int f = fields.indexOf(col.getCoordinates().get("field"));
@@ -1597,7 +1630,7 @@ public final class FeatureStages {
                             v = e == null || e.length <= d ? null : e[d];
                         }
                         case "count" -> v = model.count(x, fields.indexOf(col.getCoordinates().get("field")));
-                        default -> v = model.predict(x);
+                        default -> v = model.predict(x, numericValues);
                     }
                 }
                 values.put(col.getCanonicalName(), v);
@@ -1621,7 +1654,16 @@ public final class FeatureStages {
                     Integer.parseInt(k.getOrDefault("minRows", "0")), k.get("align"), "previous".equals(k.get("warmStart")),
                     Integer.parseInt(k.getOrDefault("warmEpochs", Integer.toString(epochs))));
             final String contestKeys = k.get("contestKeys");
-            specs.add(new FmSpec(e.getKey(), List.of(k.get("fields").split(",")), "fwfm".equals(k.get("variant")),
+            final List<String> fields = List.of(k.get("fields").split(","));
+            List<String> scales = null;
+            if (k.get("numeric") != null) {
+                scales = new ArrayList<>(Collections.nCopies(fields.size(), (String) null));
+                for (final String entry : k.get("numeric").split(",")) {
+                    final int at = entry.lastIndexOf(':');
+                    scales.set(fields.indexOf(entry.substring(0, at)), entry.substring(at + 1));
+                }
+            }
+            specs.add(new FmSpec(e.getKey(), fields, "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
                     epochs, Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
@@ -1630,15 +1672,9 @@ public final class FeatureStages {
                     Factorization.Loss.valueOf(k.getOrDefault("loss", "squared")), k.get("offsetScale"),
                     contestKeys == null ? null : FeaturePlanCompiler.keyList(contestKeys), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
                     "descending".equals(k.get("order")), Integer.parseInt(k.getOrDefault("top", "0")), !"false".equals(k.get("linear")),
-                    e.getValue()));
+                    scales, e.getValue()));
         }
         return specs;
-    }
-
-    static String[] fieldValues(final Map<String, Object> row, final List<String> fields) {
-        final String[] values = new String[fields.size()];
-        for (int i = 0; i < fields.size(); i++) values[i] = FeatureValues.toText(row.get(fields.get(i)));
-        return values;
     }
 
     /**
@@ -1669,7 +1705,8 @@ public final class FeatureStages {
             contest = spec.contestOf(row);
             if (contest == null) return null;
         }
-        return new Factorization.Example(fieldValues(row, spec.fields()), y, offset, tag, contest);
+        final double[] x = spec.x(row);
+        return new Factorization.Example(spec.values(row, x), x, y, offset, tag, contest);
     }
 
     /** Static / forward: one example per row, tagged with the row's time block under forward. */

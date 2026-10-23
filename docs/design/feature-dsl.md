@@ -984,6 +984,8 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
   the model to the order within each contest instead of the values, on top of an offset read in probability space — the
   same contest a `rating` op is updated with, so a rating's main effects and a factorization's low-rank pair effects
   compose under one likelihood (the rating's mu as the offset, `linear: false`). `logistic` fits a probability target.
+- Numeric fields (`{field, numeric: true}`) enter with one vector scaled by the standardised value, so a categorical ×
+  continuous interaction (a seller's price slope) is a pair on the same latent space, without binning.
 - `variant: fwfm` multiplies each pair product by a per-field-pair scalar weight r. Few extra
   parameters, hard to overfit, and **the learned r matrix ranks field pairs by importance** — the
   material for choosing `outputs` pairs and candidate coarse crosses for a lattice (§8); it is emitted

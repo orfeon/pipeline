@@ -4319,10 +4319,28 @@ public final class FeaturePlanCompiler {
             default -> diagnostics.error("factorization.variant", loc, "variant must be fm | fwfm: " + variant);
         }
         if (def.fields.size() < 2) diagnostics.error("factorization.fields", loc, "factorization requires at least two 'fields'");
+        final Set<String> listed = new HashSet<>();
         for (final String f : def.fields) {
+            // a field is one parameter block (and one numeric declaration): the engine reads a name at its first position
+            if (!listed.add(f)) {
+                diagnostics.error("factorization.fields", loc, "field '" + f + "' is listed more than once");
+                continue;
+            }
             final Ref ref = resolve(f);
-            if (ref == null) diagnostics.error("reference.unknown", loc, "unknown field: " + f);
-            else if (!OperatorCatalog.isCategorical(ref.type())) diagnostics.error("factorization.fields", loc, "field '" + f + "' must be categorical");
+            if (ref == null) {
+                diagnostics.error("reference.unknown", loc, "unknown field: " + f);
+            } else if (def.fmNumeric.containsKey(f)) {
+                if (!OperatorCatalog.isNumeric(ref.type())) diagnostics.error("factorization.fields", loc, "numeric field '" + f + "' must be numeric: " + ref.type().getType());
+                if (!List.of("zscore", "none").contains(def.fmNumeric.get(f))) {
+                    diagnostics.error("factorization.fields", loc, "the scale of numeric field '" + f + "' must be zscore | none: " + def.fmNumeric.get(f));
+                }
+            } else if (!OperatorCatalog.isCategorical(ref.type())) {
+                diagnostics.error("factorization.fields", loc, "field '" + f + "' must be categorical (declare a numeric one as {field: " + f + ", numeric: true})");
+            }
+        }
+        if (!def.fmNumeric.isEmpty() && def.fmNumeric.size() == def.fields.size()) {
+            diagnostics.warning("factorization.fields.numeric", loc, "every field is numeric: the model is a quadratic form of the values"
+                    + " (one vector per field), with no per-value parameter to interpolate");
         }
         final int latentDim = def.latentDim == null ? 8 : def.latentDim;
         if (latentDim < 1) diagnostics.error("factorization.latentDim", loc, "latentDim must be >= 1");
@@ -4427,6 +4445,14 @@ public final class FeaturePlanCompiler {
             }
             default -> diagnostics.error("factorization.task.loss", loc, "task.loss must be squared | logistic | plackettLuce | softmax: " + lossText);
         }
+        if (loss != Factorization.Loss.squared) {
+            for (final String f : def.fields) {
+                if (!"none".equals(def.fmNumeric.get(f))) continue;
+                diagnostics.warning("factorization.fields.scale", loc, "numeric field '" + f + "' keeps its raw value (scale none) under loss " + lossText
+                        + ": the Newton steps are capped at " + Factorization.MAX_STEP + " per parameter, which a value far from ±1 turns into"
+                        + " score moves far from that cap - the fit overshoots or crawls; scale: zscore conditions it (the artifact keeps the scale for serving)");
+            }
+        }
         final boolean ranked = loss == Factorization.Loss.plackettLuce;
         List<String> contestKeys = null;
         if (ranked) {
@@ -4509,11 +4535,23 @@ public final class FeaturePlanCompiler {
                     final OutputColumn c = newColumn(def.name, Scope.population, "fm", name, Schema.FieldType.FLOAT64, computeAt);
                     c.coordinates.put("kind", "pair");
                     c.coordinates.put("pair", String.join(",", out.pair));
+                    if (out.perUnit) {
+                        if (def.fmNumeric.containsKey(out.pair.get(0)) || def.fmNumeric.containsKey(out.pair.get(1))) {
+                            c.coordinates.put("perUnit", "true");
+                        } else {
+                            diagnostics.warning("factorization.outputs", loc, "perUnit applies to a pair with a numeric field and is ignored for " + out.pair);
+                        }
+                    }
                     cols.add(c);
                 }
                 case "embedding" -> {
                     if (out.embedding == null || !def.fields.contains(out.embedding)) {
                         diagnostics.error("factorization.outputs", loc, "embedding must name one of the block's fields: " + out.embedding);
+                        continue;
+                    }
+                    if (def.fmNumeric.containsKey(out.embedding)) {
+                        diagnostics.error("factorization.outputs", loc, "embedding reads a categorical field: numeric field '" + out.embedding
+                                + "' has one vector for every row, not one per value");
                         continue;
                     }
                     final int dims = out.dims == null ? latentDim : Math.min(out.dims, latentDim);
@@ -4548,6 +4586,11 @@ public final class FeaturePlanCompiler {
                 c.coordinates.put("fit", mode.token());
                 c.coordinates.put("variant", variant);
                 c.coordinates.put("fields", String.join(",", def.fields));
+                if (!def.fmNumeric.isEmpty()) {
+                    final List<String> numeric = new ArrayList<>();
+                    for (final Map.Entry<String, String> e : def.fmNumeric.entrySet()) numeric.add(e.getKey() + ":" + e.getValue());
+                    c.coordinates.put("numeric", String.join(",", numeric));
+                }
                 c.coordinates.put("latentDim", Integer.toString(latentDim));
                 c.coordinates.put("target", target);
                 c.coordinates.put("epochs", Integer.toString(epochs));
