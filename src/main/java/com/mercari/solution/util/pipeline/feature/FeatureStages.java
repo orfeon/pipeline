@@ -1603,16 +1603,10 @@ public final class FeatureStages {
         return values;
     }
 
-    /** The row's training example (target minus offset), or null when the target or the offset is missing. */
+    /** The row's training example (target minus offset), or null when the target or the offset is missing / NaN. */
     static Factorization.Example example(final FmSpec spec, final Map<String, Object> row, final long tag) {
-        Double y = FeatureValues.toDouble(row.get(spec.target()));
-        if (y == null || y.isNaN()) return null;
-        if (spec.offsetColumn() != null) {
-            final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-            if (b == null || b.isNaN()) return null;
-            y -= b;
-        }
-        return new Factorization.Example(fieldValues(row, spec.fields()), y, tag);
+        final KV<Double, Double> y = FeatureValues.offsetTarget(row, spec.target(), spec.offsetColumn());
+        return y == null ? null : new Factorization.Example(fieldValues(row, spec.fields()), y.getKey(), tag);
     }
 
     /** Static / forward: one example per row, tagged with the row's time block under forward. */
@@ -1696,9 +1690,8 @@ public final class FeatureStages {
             for (final Factorization.Example e : c.element().getValue()) examples.add(e);
             final int part = c.element().getKey();
             LOG.info("factorization {}: fitting {} on {} examples", spec.block(), part < 0 ? "the whole input" : "fold " + part + " (out of fold)", examples.size());
-            final Factorization.Fits fits = Factorization.fitAll(spec.options(), examples,
-                    new Factorization.Plan(0, false, 0, spec.plan().minRows(), null, false, 0));
-            if (fits.total != null) c.output(KV.of(part, fits.total));
+            final Factorization.Model model = Factorization.fit(spec.options(), examples, spec.plan().minRows());
+            if (model != null) c.output(KV.of(part, model));
         }
     }
 

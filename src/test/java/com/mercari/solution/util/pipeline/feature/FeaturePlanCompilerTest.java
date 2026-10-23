@@ -2012,6 +2012,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("folds: 4", "folds: 1"))), "fit.folds"));
         // static: align is reported as ignored
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fit: {artifact", "fit: {align: sign, artifact"))), "factorization.fit.align"));
+        // a top-level hash fold is inherited; a top-level time fold leaves the block static (warned), not a compile error
+        final String topLevel = withEncoding(FM_BLOCK);
+        Assertions.assertEquals("fold", column(compile(SOURCES, topLevel.replace("output:\n  prefix: f_\n", "fit: {mode: fold, folds: 3}\noutput:\n  prefix: f_\n")), "fm_linear")
+                .getCoordinates().get("fit"));
+        final FeaturePlan timeFold = compile(SOURCES, topLevel.replace("output:\n  prefix: f_\n", "fit: {mode: fold, blocks: {bucket: month}, fold: {by: time}}\noutput:\n  prefix: f_\n"));
+        Assertions.assertFalse(timeFold.getDiagnostics().hasErrors(), timeFold::describe);
+        Assertions.assertEquals("static", column(timeFold, "fm_linear").getCoordinates().get("fit"));
+        Assertions.assertTrue(hasCode(timeFold, "factorization.fit.fold.time"), timeFold::describe);
+        // forward-only keys under a hash fold are reported as ignored
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("mode: fold,", "mode: fold, window: P28D,"))), "factorization.fit.window"));
     }
 
     private static final String DISCRETIZE_BLOCK = """
