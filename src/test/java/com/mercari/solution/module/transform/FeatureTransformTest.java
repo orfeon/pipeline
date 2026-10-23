@@ -837,6 +837,71 @@ public class FeatureTransformTest {
     }
 
     /**
+     * factorization under a Plackett–Luce loss: each session is a contest ranked by final_price (larger is better) on top
+     * of the market baseline (in probability space, so ln market is the offset). Sessions B and D have one entry and
+     * carry no information. The fitted sum is the log-strength over the market, and the context softmax over it with
+     * the same offset reads it as a win probability. s1 won both two-entry sessions against the market's favourite, so
+     * the model moves s1's probability above the market's.
+     */
+    @Test
+    public void testFactorizationPlackettLuce() throws java.io.IOException {
+        final String blocks = """
+                    - name: fm
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, condition_grade]
+                      latentDim: 2
+                      task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: market}
+                      als: {epochs: 20, reg: 0.1, seed: 1}
+                      outputs:
+                        - {sum: true, as: fm_strength}
+                    - name: prob
+                      scope: context
+                      context: session
+                      ops:
+                        - {type: softmax, field: fm_strength, offset: market, as: pWin}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        // the expected model: the same examples, keyed by contest as the engine keys them (event millis + session)
+        final Map<String, Double> market = Map.of("A/s1", 55.0 / 175, "A/s2", 120.0 / 175, "B/s1", 1.0, "C/s1", 70.0 / 160, "C/s2", 90.0 / 160, "D/s1", 1.0);
+        final Object[][] rows = {
+                {"A", "s1", "good", 150.0, "2025-01-01T10:00:00Z"}, {"A", "s2", "fair", 0.0, "2025-01-01T10:00:00Z"},
+                {"B", "s1", "good", 0.0, "2025-01-03T10:00:00Z"}, {"C", "s1", "fair", 95.0, "2025-01-20T10:00:00Z"},
+                {"C", "s2", "good", 72.0, "2025-01-20T10:00:00Z"}, {"D", "s1", "good", 140.0, "2025-02-01T10:00:00Z"}};
+        final List<com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = new ArrayList<>();
+        final Map<String, String[]> values = new HashMap<>();
+        for (final Object[] r : rows) {
+            final String key = r[0] + "/" + r[1];
+            final String contest = com.mercari.solution.util.pipeline.feature.FeatureValues.key(
+                    Map.of("__contestTime", java.time.Instant.parse((String) r[4]).toEpochMilli(), "session_id", r[0]), List.of("__contestTime", "session_id"));
+            values.put(key, new String[]{(String) r[1], (String) r[2]});
+            examples.add(new com.mercari.solution.util.pipeline.feature.Factorization.Example(values.get(key), (Double) r[3], Math.log(market.get(key)), 0L, contest));
+        }
+        final com.mercari.solution.util.pipeline.feature.Factorization.Model model = com.mercari.solution.util.pipeline.feature.Factorization.fit(
+                new com.mercari.solution.util.pipeline.feature.Factorization.Options(List.of("seller_id", "condition_grade"), false, 2, 20, 0.1, 1L,
+                        com.mercari.solution.util.pipeline.feature.Factorization.Loss.plackettLuce, 0, true, true), examples);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(out -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : out) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            for (final Map.Entry<String, MElement> e : byKey.entrySet()) {
+                Assertions.assertEquals(model.predict(values.get(e.getKey())), e.getValue().getAsDouble("f_fm_strength"), 1e-9, e.getKey());
+            }
+            for (final String session : List.of("A", "C")) {
+                final double s1 = market.get(session + "/s1") * Math.exp(model.predict(values.get(session + "/s1")));
+                final double s2 = market.get(session + "/s2") * Math.exp(model.predict(values.get(session + "/s2")));
+                final double p1 = byKey.get(session + "/s1").getAsDouble("f_prob_pWin_softmax");
+                Assertions.assertEquals(s1 / (s1 + s2), p1, 1e-9, session);
+                Assertions.assertEquals(1.0, p1 + byKey.get(session + "/s2").getAsDouble("f_prob_pWin_softmax"), 1e-9, session);
+                Assertions.assertTrue(p1 > market.get(session + "/s1"), session + ": " + p1);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * svd {@code outputs}: with one component of (start_price, current_bid_t10) kept, the residual is what the shared
      * price axis does not explain, per input and in input units — it sums to zero over the rows, its norm column is its
      * length, and it is orthogonal to the score; with both components kept nothing is left.

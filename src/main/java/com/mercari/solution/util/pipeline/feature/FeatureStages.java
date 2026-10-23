@@ -1471,9 +1471,11 @@ public final class FeatureStages {
     record FmSpec(String block, List<String> fields, boolean fieldWeighted, int k, String target, String offsetColumn,
                   int epochs, double reg, long seed, String artifactUri, boolean refit,
                   List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis, Factorization.Plan plan,
+                  Factorization.Loss loss, String offsetScale, List<String> contestKeys, String contestTime, String contestTimeType,
+                  boolean descending, int top, boolean linear,
                   List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
-            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed);
+            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear);
         }
 
         @Override
@@ -1494,7 +1496,29 @@ public final class FeatureStages {
 
         @Override
         public List<String> fitInputs() {
-            return offsetColumn == null ? List.of(target) : List.of(target, offsetColumn);
+            final List<String> inputs = new ArrayList<>();
+            inputs.add(target);
+            if (offsetColumn != null) inputs.add(offsetColumn);
+            if (contestKeys != null) inputs.addAll(contestKeys);
+            return inputs;
+        }
+
+        /**
+         * The row's contest under a ranking loss: its event time (as epoch millis) and its context keys, or null when
+         * one of them is missing ({@link FeatureValues#key}).
+         */
+        String contestOf(final Map<String, Object> row) {
+            final Long millis = FeatureValues.toEpochMillis(row.get(contestTime), contestTimeType);
+            if (millis == null) return null;
+            // the components FeatureValues.key would join, built in place (once per training row)
+            final StringBuilder sb = new StringBuilder();
+            FeatureValues.appendKeyComponent(sb, millis);
+            for (final String key : contestKeys) {
+                final Object value = row.get(key);
+                if (value == null) return null;
+                FeatureValues.appendKeyComponent(sb, value);
+            }
+            return sb.toString();
         }
 
         @Override
@@ -1522,11 +1546,20 @@ public final class FeatureStages {
                     .apply(prefix + "_View", View.asList());
         }
 
-        /** The row's fold (null without a fold unit, or outside fit.mode fold). */
+        /**
+         * The row's fold (null without a fold unit, or outside fit.mode fold). A fold unit that is the contest (event
+         * time + its keys, no fit.groupBy) is read as {@link #contestOf} reads it, at the event time's millis: hashing
+         * the raw time would split a contest whose rows write one instant two ways across folds.
+         */
         Integer foldOf(final Map<String, Object> row) {
             if (foldKeys == null) return null;
-            final String unit = FeatureValues.key(row, foldKeys);
+            final String unit = foldsByContest() ? contestOf(row) : FeatureValues.key(row, foldKeys);
             return unit == null ? null : VarianceComponents.foldOf(unit, folds);
+        }
+
+        private boolean foldsByContest() {
+            return contestKeys != null && foldKeys.size() == contestKeys.size() + 1 && foldKeys.get(0).equals(contestTime)
+                    && foldKeys.subList(1, foldKeys.size()).equals(contestKeys);
         }
 
         /** Writes the whole-input model: on every fit under static, once (or on refit) under fold / forward. */
@@ -1587,12 +1620,17 @@ public final class FeatureStages {
             final Factorization.Plan plan = new Factorization.Plan(folds, forward != null, forward == null ? 0 : forward.windowBlocks(),
                     Integer.parseInt(k.getOrDefault("minRows", "0")), k.get("align"), "previous".equals(k.get("warmStart")),
                     Integer.parseInt(k.getOrDefault("warmEpochs", Integer.toString(epochs))));
+            final String contestKeys = k.get("contestKeys");
             specs.add(new FmSpec(e.getKey(), List.of(k.get("fields").split(",")), "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
                     epochs, Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan, e.getValue()));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan,
+                    Factorization.Loss.valueOf(k.getOrDefault("loss", "squared")), k.get("offsetScale"),
+                    contestKeys == null ? null : FeaturePlanCompiler.keyList(contestKeys), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
+                    "descending".equals(k.get("order")), Integer.parseInt(k.getOrDefault("top", "0")), !"false".equals(k.get("linear")),
+                    e.getValue()));
         }
         return specs;
     }
@@ -1603,10 +1641,35 @@ public final class FeatureStages {
         return values;
     }
 
-    /** The row's training example (target minus offset), or null when the target or the offset is missing / NaN. */
+    /**
+     * The row's training example, or null when it has none: a missing target, offset or contest; a logistic target
+     * outside [0, 1]; an offset in probability space at which the score is not finite (≤ 0 under plackettLuce — the
+     * row leaves its contest, as a rating's ln 0 offset does —, outside (0, 1) under logistic).
+     */
     static Factorization.Example example(final FmSpec spec, final Map<String, Object> row, final long tag) {
-        final KV<Double, Double> y = FeatureValues.offsetTarget(row, spec.target(), spec.offsetColumn());
-        return y == null ? null : new Factorization.Example(fieldValues(row, spec.fields()), y.getKey(), tag);
+        final Double y = FeatureValues.toDouble(row.get(spec.target()));
+        if (y == null || y.isNaN()) return null;
+        if (spec.loss() == Factorization.Loss.logistic && (y < 0 || y > 1)) return null;
+        double offset = 0;
+        if (spec.offsetColumn() != null) {
+            final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
+            if (b == null || b.isNaN()) return null;
+            offset = b;
+            if ("probability".equals(spec.offsetScale())) {
+                offset = switch (spec.loss()) {
+                    case plackettLuce -> Math.log(b);
+                    case logistic -> Math.log(b / (1 - b));
+                    case squared -> b;
+                };
+            }
+            if (!Double.isFinite(offset)) return null;
+        }
+        String contest = null;
+        if (spec.loss() == Factorization.Loss.plackettLuce) {
+            contest = spec.contestOf(row);
+            if (contest == null) return null;
+        }
+        return new Factorization.Example(fieldValues(row, spec.fields()), y, offset, tag, contest);
     }
 
     /** Static / forward: one example per row, tagged with the row's time block under forward. */

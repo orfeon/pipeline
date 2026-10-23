@@ -629,7 +629,9 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `fit.groupBy`); from **v1 / v1 additions**: `fit.mode: static` and `fold` with artifacts,
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
 ALS, `pair` / `embedding` / `count` / `sum` outputs, r-matrix lineage; `static` / `forward` (warm-started change-point
-refits) / `fold` (one fit per fold, in parallel), refits aligned by Procrustes), `type: discretize` (`method: quantile`),
+refits) / `fold` (one fit per fold, in parallel), refits aligned by Procrustes; `task.loss` squared / logistic /
+plackettLuce (contest = context group × event time, Breslow ties, the last place no choice, top-k) by coordinate Newton — exact ALS under
+squared), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 `type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
 `type: copula` (Gaussian copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),

@@ -552,7 +552,12 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   or one per fold fitted from scratch on its own worker (`FitFmPartDoFn`, key −1 = the whole input) — and every refit
   is rotated by `Model.alignTo`, which returns a copy: a model can be a runner's input, and DirectRunner rejects an
   in-place rotation of one. The examples are sorted (`Factorization.ORDER`) before every fit, so a fit is a function
-  of the example set, never of the runner's delivery order.)
+  of the example set, never of the runner's delivery order. `task.loss` (squared / logistic / plackettLuce) is a
+  `Factorization.Objective`: `derivatives` = {g, H} along one parameter, `shift` keeps the cached scores (and the
+  Plackett–Luce pool sums `Z` per contest stage) current, `refresh` recomputes them once per epoch — a new loss is one
+  `Objective` checked by `FactorizationTest.assertDerivatives` (finite differences + shift-vs-refresh). Contest keys are
+  `FmSpec.contestOf` = (event millis, context keys); `ORDER` sorts by contest, so the key text decides the fit order —
+  a test that rebuilds the examples must build the same key.)
 - `runtimeFilter` columns (`atRowCreation`, `event_date THH:MM`): per-row availability filtering.
 - Streaming keyed stages (stateful DoFn + timers) and the stateful wave merge (§9.4.6).
 - Sequence / population stages as fold-in merge targets (composite sorter key), §9.4.4 prefix-scan

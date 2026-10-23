@@ -980,6 +980,10 @@ rank through inner products of per-value latent vectors, **giving structural int
 sparse (empty) cells**. Roles: lattice + ANOVA = intrinsic interactions of well-observed cells,
 factorization = transfer to sparse cells, tree embeddings = discovery of interaction regions.
 
+- `task.loss: plackettLuce` (contest = a context group at one event time, `order`, `top`; `softmax` = top 1) fits
+  the model to the order within each contest instead of the values, on top of an offset read in probability space — the
+  same contest a `rating` op is updated with, so a rating's main effects and a factorization's low-rank pair effects
+  compose under one likelihood (the rating's mu as the offset, `linear: false`). `logistic` fits a probability target.
 - `variant: fwfm` multiplies each pair product by a per-field-pair scalar weight r. Few extra
   parameters, hard to overfit, and **the learned r matrix ranks field pairs by importance** — the
   material for choosing `outputs` pairs and candidate coarse crosses for a lattice (§8); it is emitted

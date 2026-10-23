@@ -4358,6 +4358,9 @@ public final class FeaturePlanCompiler {
         }
         final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
         final String what = "factorization fits " + variant + " (k = " + latentDim + ") by ALS on one worker per fit";
+        // a ranking loss over a known context folds by its contest (task.loss below, foldUnitKeys)
+        final boolean contestFolds = ("plackettLuce".equals(def.taskLoss) || "softmax".equals(def.taskLoss))
+                && def.taskContest != null && contexts.containsKey(def.taskContest);
         switch (mode) {
             case forward -> {
                 final ForwardBlocks blocks = fitSpec.forwardBlocks();
@@ -4373,7 +4376,9 @@ public final class FeaturePlanCompiler {
                         + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             }
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
-                    + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy : "row identity: time.field + orderTieBreak") + "), each row read from its own"
+                    + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy
+                    : contestFolds ? "contest: time.field + the keys of " + def.taskContest
+                    : "row identity: time.field + orderTieBreak") + "), each row read from its own"
                     + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
                     + (Alignment.NONE.equals(align) ? "; the embeddings of every fold model are oriented on their own (fit.align none): an embedding column means something else in every fold"
                     : "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + "): that"
@@ -4405,8 +4410,91 @@ public final class FeaturePlanCompiler {
             else if (!computeAt.equals(spec.predictAt)) diagnostics.error("encoding.offset.computeAt", loc, "blocks referencing a baseline offset must be computed at predictAt");
         }
         if (def.fmOutputs.isEmpty()) diagnostics.error("factorization.outputs", loc, "factorization requires 'outputs'");
-        // fold unit: read at apply time only, like an encoding's folds
-        final List<String> foldKeys = mode == FitMode.fold ? foldUnitKeys(fitSpec) : List.of();
+
+        // task.loss: the target as a value, a probability, or a place within a contest
+        Factorization.Loss loss = Factorization.Loss.squared;
+        Integer top = def.taskTop;
+        final String lossText = def.taskLoss == null ? "squared" : def.taskLoss;
+        switch (lossText) {
+            case "squared" -> loss = Factorization.Loss.squared;
+            case "logistic" -> loss = Factorization.Loss.logistic;
+            case "plackettLuce" -> loss = Factorization.Loss.plackettLuce;
+            case "softmax" -> {
+                // the winner alone: a Plackett-Luce likelihood with one choice
+                loss = Factorization.Loss.plackettLuce;
+                if (top != null && top != 1) diagnostics.error("factorization.task.top", loc, "loss softmax is plackettLuce with top 1; it cannot take top " + top);
+                top = 1;
+            }
+            default -> diagnostics.error("factorization.task.loss", loc, "task.loss must be squared | logistic | plackettLuce | softmax: " + lossText);
+        }
+        final boolean ranked = loss == Factorization.Loss.plackettLuce;
+        List<String> contestKeys = null;
+        if (ranked) {
+            final ContextDef contest = def.taskContest == null ? null : contexts.get(def.taskContest);
+            if (contest == null) {
+                diagnostics.error("factorization.task.contest", loc, "loss " + lossText + " ranks the rows of a contest: task.contest must name a contexts[].name"
+                        + (def.taskContest == null ? "" : " (unknown: " + def.taskContest + ")"));
+            } else {
+                contestKeys = contest.keys();
+            }
+            if (top != null && top < 1) diagnostics.error("factorization.task.top", loc, "task.top must be >= 1: " + top);
+            if (def.taskOrder != null && !List.of("ascending", "descending").contains(def.taskOrder)) {
+                diagnostics.error("factorization.task.order", loc, "task.order must be ascending | descending: " + def.taskOrder);
+            }
+            // the likelihood is invariant to a common shift within a contest: the ridge is what fixes what it cannot see
+            // (a contest key's main effect would otherwise follow rounding noise)
+            if (def.reg != null && !(def.reg > 0)) {
+                diagnostics.error("factorization.als", loc, "als.reg must be > 0 under loss " + lossText + " (a contest sees score differences only): " + def.reg);
+            }
+        } else {
+            for (final String key : new String[]{"contest", "order", "top"}) {
+                final boolean declared = switch (key) {
+                    case "contest" -> def.taskContest != null;
+                    case "order" -> def.taskOrder != null;
+                    default -> def.taskTop != null;
+                };
+                if (declared) diagnostics.warning("factorization.task." + key, loc, "task." + key + " applies to loss plackettLuce / softmax only and is ignored under " + lossText);
+            }
+        }
+        final String order = def.taskOrder == null ? "ascending" : def.taskOrder;
+        String offsetScale = null;
+        if (def.taskOffsetScale != null && !List.of("probability", "score").contains(def.taskOffsetScale)) {
+            diagnostics.error("factorization.task.offsetScale", loc, "task.offsetScale must be probability | score: " + def.taskOffsetScale);
+        } else if (loss == Factorization.Loss.squared) {
+            if (def.taskOffsetScale != null) diagnostics.warning("factorization.task.offsetScale", loc, "task.offsetScale applies to loss logistic / plackettLuce only (squared subtracts the offset as it is)");
+        } else if (def.taskOffset != null) {
+            offsetScale = def.taskOffsetScale == null ? "probability" : def.taskOffsetScale;
+        } else if (def.taskOffsetScale != null) {
+            diagnostics.warning("factorization.task.offsetScale", loc, "task.offsetScale reads task.offset, and there is none: it is ignored");
+        }
+        final boolean linear = def.fmLinear == null || def.fmLinear;
+        if (ranked && contestKeys != null) {
+            // a contest sees score differences only: what is constant within one has no main effect
+            final List<String> constant = new ArrayList<>();
+            for (final String f : def.fields) if (contestKeys.contains(f)) constant.add(f);
+            if (!constant.isEmpty()) {
+                diagnostics.info("factorization.contest.constant", loc, "fields " + constant + " are keys of the contest " + def.taskContest
+                        + ", constant within it: their main effects are not identified (fitted at 0) and nor are their pairs with each other;"
+                        + " their pairs with the fields that vary within a contest are");
+            }
+            for (final FmOutput out : def.fmOutputs) {
+                if ("pair".equals(out.kind) && out.pair.size() == 2 && contestKeys.containsAll(out.pair)) {
+                    diagnostics.warning("factorization.contest.constantPair", loc, "pair " + out.pair + " is constant within every contest of " + def.taskContest
+                            + ": a ranking loss cannot identify it, its score is noise around 0");
+                }
+            }
+        }
+        if (ranked) {
+            diagnostics.info("factorization.task.loss", loc, "the rows of one " + def.taskContest + " group at one event time are a contest, ranked by "
+                    + (def.taskTarget != null ? def.taskTarget : "the task expression") + " (" + ("descending".equals(order) ? "larger" : "smaller") + " is better"
+                    + (top == null ? "" : ", the first " + top + " place(s) are choices") + "; ties share a place); the outputs are log-strengths within the contest"
+                    + (offsetScale == null ? "" : ", on top of the offset (" + ("probability".equals(offsetScale) ? "ln of the baseline" : "the baseline as a log-strength") + ")")
+                    + " - a context softmax over sum (with the same offset) reads them as probabilities");
+        }
+
+        // fold unit: read at apply time only, like an encoding's folds; under a ranking loss the contest stands for the
+        // row identity, so a contest is never split across folds
+        final List<String> foldKeys = mode == FitMode.fold ? foldUnitKeys(fitSpec, contestKeys) : List.of();
 
         int produced = 0;
         for (final FmOutput out : def.fmOutputs) {
@@ -4465,6 +4553,19 @@ public final class FeaturePlanCompiler {
                 c.coordinates.put("epochs", Integer.toString(epochs));
                 c.coordinates.put("reg", Double.toString(def.reg == null ? 0.01 : def.reg));
                 c.coordinates.put("seed", Long.toString(def.seed == null ? 0L : def.seed));
+                c.coordinates.put("loss", loss.name());
+                if (!linear) c.coordinates.put("linear", "false");
+                if (offsetScale != null) c.coordinates.put("offsetScale", offsetScale);
+                if (ranked && contestKeys != null) {
+                    c.coordinates.put("contestKeys", String.join(",", contestKeys));
+                    c.coordinates.put("contestTime", spec.timeField);
+                    final FieldContract time = inputFields.get(spec.timeField);
+                    c.coordinates.put("contestTimeType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
+                    c.coordinates.put("order", order);
+                    if (top != null) c.coordinates.put("top", Integer.toString(top));
+                    // the contest is read from the training rows, like the target
+                    for (final String key : contestKeys) addPastInput(c, key);
+                }
                 if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
                 if (align != null) c.coordinates.put("align", align);
                 if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
@@ -4480,7 +4581,8 @@ public final class FeaturePlanCompiler {
                     c.coordinates.put("warmEpochs", Integer.toString(warmEpochs));
                 }
                 if (offsetColumn != null) {
-                    // read from the training rows only (the example's target minus its baseline), like the target
+                    // read from the training rows only (the score the example starts from: subtracted from the target
+                    // under squared loss, offsetScale under the others), like the target
                     c.coordinates.put("offset", offsetColumn);
                     addPastInput(c, offsetColumn);
                 }
@@ -5267,12 +5369,17 @@ public final class FeaturePlanCompiler {
      * a fold).
      */
     private List<String> foldUnitKeys(final FeatureSpec.FitSpec fitSpec) {
+        return foldUnitKeys(fitSpec, null);
+    }
+
+    /** {@link #foldUnitKeys(FeatureSpec.FitSpec)} with {@code contestKeys} (when not null) in place of the tie-break. */
+    private List<String> foldUnitKeys(final FeatureSpec.FitSpec fitSpec, final List<String> contestKeys) {
         final List<String> foldKeys = new ArrayList<>();
         if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
             foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
         } else {
             foldKeys.add(spec.timeField);
-            foldKeys.addAll(spec.orderTieBreak);
+            foldKeys.addAll(contestKeys != null ? contestKeys : spec.orderTieBreak);
         }
         return foldKeys;
     }
