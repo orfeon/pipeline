@@ -2059,6 +2059,8 @@ public class FeaturePlanCompilerTest {
         // a fold under a ranking loss keeps a contest together
         final FeaturePlan fold = compile(SOURCES, withEncoding(ranked.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}", "fit: {mode: fold, folds: 3}")));
         Assertions.assertEquals("session_time,session_id", column(fold, "fm_linear").getCoordinates().get("foldKeys"));
+        Assertions.assertTrue(fold.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "fit.mode.fold".equals(m.code()) && m.message().contains("contest: time.field + the keys of session")), fold::describe);
 
         // errors and warnings
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace(", contest: session", ""))), "factorization.task.contest"));
