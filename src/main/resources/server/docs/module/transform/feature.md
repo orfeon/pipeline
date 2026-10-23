@@ -1040,10 +1040,15 @@ by the row's standardised value `u = (x − mean) / sd`: its main effect is a sl
 `r ⟨v_seller, v_price⟩ · u`, is that value's own slope — a category × continuous interaction that shares the latent space
 of the categorical pairs (a seller whose factors resemble another's gets a similar price slope from fewer rows). The
 `mean` / `sd` are fitted from the training rows of each fit (`scale: zscore`, default; `none` uses the raw value) and
-stored in the artifact (and its manifest's `numeric`), so a serving run standardises with the training values. A row
+stored in the artifact (and its manifest's `numeric`), so a serving run standardises with the training values. Under
+`fit.mode: forward` every change point standardises with its own rows; a warm start rescales the numeric field's
+parameters by the ratio of the two `sd`s, so the fit starts from the previous slope per raw unit (a move of the `mean`
+is left to the epochs). `scale: none` suits `loss: squared`, whose steps are exact; under `logistic` / `plackettLuce`
+the steps are capped per parameter, so a raw value far from ±1 makes the fit overshoot or crawl (warning
+`factorization.fields.scale`). A row
 whose numeric value is missing (or not finite) contributes nothing for that field, as an unseen category does — that is
 not the same as filling the mean. A `pair` that includes a numeric field is the term at the row's value; `perUnit: true`
-reads it per unit of `u` (the slope, independent of the row's value). `embedding` reads categorical fields only (a
+reads it per unit of `u` (the slope, independent of the row's value — a row whose value is missing reads it too). `embedding` reads categorical fields only (a
 numeric field's vector is the same on every row); `count` of a numeric field counts the rows with a value. A block whose
 fields are all numeric is a quadratic form of the values (warning `factorization.fields.numeric`).
 
