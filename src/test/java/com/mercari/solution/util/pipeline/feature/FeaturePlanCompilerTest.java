@@ -2014,6 +2014,57 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fit: {artifact", "fit: {align: sign, artifact"))), "factorization.fit.align"));
     }
 
+    /**
+     * factorization task.loss: a ranking loss names its contest (a context), reads the contest keys from the training
+     * rows, defaults the offset to probability space and folds by contest; the pairs it cannot identify are reported.
+     */
+    @Test
+    public void testFactorizationContestLoss() {
+        final String ranked = FM_BLOCK.replace("task: {expr: \"sold >= 1\", offset: market}",
+                "task: {target: final_price, loss: plackettLuce, contest: session, order: descending, top: 3, offset: market}");
+        Assertions.assertTrue(ranked.contains("loss: plackettLuce"), ranked);
+        final FeaturePlan plan = compile(SOURCES, withEncoding(ranked));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "factorization.task.loss"), plan::describe);
+        final OutputColumn sum = column(plan, "fm_linear");
+        Assertions.assertEquals("plackettLuce", sum.getCoordinates().get("loss"));
+        Assertions.assertEquals("session_id", sum.getCoordinates().get("contestKeys"));
+        Assertions.assertEquals("descending", sum.getCoordinates().get("order"));
+        Assertions.assertEquals("3", sum.getCoordinates().get("top"));
+        Assertions.assertEquals("probability", sum.getCoordinates().get("offsetScale"));
+        Assertions.assertNull(sum.getCoordinates().get("linear"));
+
+        // softmax = the winner alone; linear: false keeps the interactions only
+        final FeaturePlan softmax = compile(SOURCES, withEncoding(ranked.replace("loss: plackettLuce", "loss: softmax").replace(", top: 3", "")
+                .replace("latentDim: 4", "latentDim: 4\n        linear: false")));
+        Assertions.assertFalse(softmax.getDiagnostics().hasErrors(), softmax::describe);
+        Assertions.assertEquals("plackettLuce", column(softmax, "fm_linear").getCoordinates().get("loss"));
+        Assertions.assertEquals("1", column(softmax, "fm_linear").getCoordinates().get("top"));
+        Assertions.assertEquals("false", column(softmax, "fm_linear").getCoordinates().get("linear"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("loss: plackettLuce", "loss: softmax"))), "factorization.task.top"));
+
+        // a fold under a ranking loss keeps a contest together
+        final FeaturePlan fold = compile(SOURCES, withEncoding(ranked.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}", "fit: {mode: fold, folds: 3}")));
+        Assertions.assertEquals("session_time,session_id", column(fold, "fm_linear").getCoordinates().get("foldKeys"));
+
+        // errors and warnings
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace(", contest: session", ""))), "factorization.task.contest"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("contest: session", "contest: seller"))), "factorization.task.contest"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("loss: plackettLuce", "loss: hinge"))), "factorization.task.loss"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("order: descending", "order: up"))), "factorization.task.order"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(ranked.replace("top: 3", "top: 0"))), "factorization.task.top"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("offset: market}", "offset: market, contest: session}"))), "factorization.task.contest"));
+        final FeaturePlan logistic = compile(SOURCES, withEncoding(FM_BLOCK.replace("offset: market}", "offset: market, loss: logistic}")));
+        Assertions.assertFalse(logistic.getDiagnostics().hasErrors(), logistic::describe);
+        Assertions.assertEquals("probability", column(logistic, "fm_linear").getCoordinates().get("offsetScale"));
+        Assertions.assertNull(column(logistic, "fm_linear").getCoordinates().get("contestKeys"));
+        // a field that is a contest key has no main effect; a pair of two of them is noise
+        final FeaturePlan constant = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id, category, condition_grade]", "fields: [seller_id, session_id, category]")
+                .replace("{embedding: category, as: cat_emb, dims: 2}", "{pair: [session_id, category], as: fm_session_category}")));
+        Assertions.assertTrue(hasCode(constant, "factorization.contest.constant"), constant::describe);
+        Assertions.assertFalse(hasCode(constant, "factorization.contest.constantPair"), constant::describe);
+    }
+
     private static final String DISCRETIZE_BLOCK = """
                   - name: price_bin
                     scope: population

@@ -396,6 +396,18 @@ public class FeatureSpec implements Serializable {
         public String taskTarget;
         public String taskTargetExpr;
         public String taskOffset;
+        /** factorization {@code task.loss}: squared (default) | logistic | plackettLuce | softmax (= plackettLuce, top 1). */
+        public String taskLoss;
+        /** factorization {@code task.contest}: the context whose groups (per event time) are the contests of a plackettLuce loss. */
+        public String taskContest;
+        /** factorization {@code task.order}: ascending (default: smaller is better) | descending. */
+        public String taskOrder;
+        /** factorization {@code task.top}: the places that are choices of a plackettLuce loss (null = every place). */
+        public Integer taskTop;
+        /** factorization {@code task.offsetScale}: probability (default under logistic / plackettLuce) | score. */
+        public String taskOffsetScale;
+        /** factorization {@code linear}: whether the per-value weights are fitted (default true). */
+        public Boolean fmLinear;
         public List<FmOutput> fmOutputs = new ArrayList<>();
         public Integer epochs;
         /** factorization {@code als.warmEpochs}: the epochs of a warm-started forward refit (default: half of {@code epochs}, rounded up). */
@@ -1253,7 +1265,13 @@ public class FeatureSpec implements Serializable {
             def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");
             def.taskTargetExpr = Json.string(task, "expr");
             def.taskOffset = Json.string(task, "offset");
+            def.taskLoss = Json.string(task, "loss");
+            def.taskContest = Json.string(task, "contest");
+            def.taskOrder = Json.string(task, "order");
+            def.taskTop = Json.integer(task, "top");
+            def.taskOffsetScale = Json.string(task, "offsetScale");
         }
+        if ("factorization".equals(def.type) && o.has("linear") && !o.get("linear").isJsonNull()) def.fmLinear = Json.bool(o, "linear", true);
         if ("copula".equals(def.type)) parseCopula(o, def);
         // a copula's readouts are objects too: they are its own, not factorization outputs
         for (final JsonObject out : "copula".equals(def.type) ? List.<JsonObject>of() : objects(o, "outputs")) {

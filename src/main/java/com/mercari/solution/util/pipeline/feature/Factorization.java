@@ -27,10 +27,11 @@ import java.util.*;
  * </pre>
  *
  * {@code fm}: r ≡ 1; {@code fwfm}: one scalar r per field pair (its fitted values are a field-pair
- * importance ranking, exported with the artifact manifest). Training is alternating least squares: the
- * model is linear in every single parameter, so each parameter has a closed-form ridge update; residuals
- * are cached (and, for fm, the per-example sums {@code Σ_g v_g[x_g]}, so a factor's slope is read in O(1))
- * so one sweep over all parameters costs O(N · F · k) for fm and O(N · F² · k) for fwfm.
+ * importance ranking, exported with the artifact manifest). Training is coordinate descent: the model is
+ * linear in every single parameter, so each parameter takes a closed-form step — the ridge minimiser under
+ * squared loss (alternating least squares), one Newton step under the logistic and Plackett–Luce losses
+ * ({@link Loss}). The scores are cached (and, for fm, the per-example sums {@code Σ_g v_g[x_g]}, so a factor's
+ * slope is read in O(1)), so one sweep over all parameters costs O(N · F · k) for fm and O(N · F² · k) for fwfm.
  *
  * <p>The fit is a function of the example SET and the seed: the examples are put in a canonical order first
  * ({@link #ORDER}), so the order a runner delivers them in never reaches the model.
@@ -49,20 +50,31 @@ public final class Factorization {
     private Factorization() {}
 
     /**
-     * One training example: the field values (null = missing), the (offset-adjusted) target, and the tag the fit
-     * plan partitions by — the row's fold under {@code fit.mode: fold}, its time block under {@code forward}, 0
-     * otherwise.
+     * One training example: the field values (null = missing), the target, the offset its score starts from (0 without
+     * one; on the score scale: the target's own units under squared loss, log-odds under logistic, log-strength under
+     * Plackett–Luce), the tag the fit plan partitions by — the row's fold under {@code fit.mode: fold}, its time block
+     * under {@code forward}, 0 otherwise — and the contest it is ranked in (Plackett–Luce; null otherwise).
      */
-    public record Example(String[] values, double y, long tag) implements Serializable {
+    public record Example(String[] values, double y, double offset, long tag, String contest) implements Serializable {
         public Example(final String[] values, final double y) {
-            this(values, y, 0L);
+            this(values, y, 0d, 0L, null);
+        }
+
+        public Example(final String[] values, final double y, final long tag) {
+            this(values, y, 0d, tag, null);
         }
     }
 
-    /** The canonical example order: tag, then the values (null first), then the target. */
+    /** The canonical example order: tag, contest, then the values (null first), the target and the offset. */
     static final Comparator<Example> ORDER = (a, b) -> {
         int c = Long.compare(a.tag(), b.tag());
         if (c != 0) return c;
+        if (a.contest() == null || b.contest() == null) {
+            if (a.contest() != b.contest()) return a.contest() == null ? -1 : 1;
+        } else {
+            c = a.contest().compareTo(b.contest());
+            if (c != 0) return c;
+        }
         for (int f = 0; f < a.values().length; f++) {
             final String x = a.values()[f], y = b.values()[f];
             if (x == null || y == null) {
@@ -72,7 +84,8 @@ public final class Factorization {
             c = x.compareTo(y);
             if (c != 0) return c;
         }
-        return Double.compare(a.y(), b.y());
+        c = Double.compare(a.y(), b.y());
+        return c != 0 ? c : Double.compare(a.offset(), b.offset());
     };
 
     public static final class Model implements Serializable {
@@ -84,6 +97,8 @@ public final class Factorization {
         public final List<Map<String, double[]>> params;
         /** pair weights r[f][g] (symmetric; 1 for fm) */
         public final double[][] r;
+        /** The loss the model was fitted under ({@link Loss}; recorded in the artifact manifest). */
+        public String loss = Loss.squared.name();
 
         Model(final List<String> fields, final boolean fieldWeighted, final int k) {
             this.fields = fields;
@@ -171,6 +186,7 @@ public final class Factorization {
             if (map == null) return this;
             final Model rotated = new Model(fields, fieldWeighted, k);
             rotated.w0 = w0;
+            rotated.loss = loss;
             for (int f = 0; f < fields.size(); f++) {
                 System.arraycopy(r[f], 0, rotated.r[f], 0, fields.size());
                 for (final Map.Entry<String, double[]> e : params.get(f).entrySet()) {
@@ -183,7 +199,21 @@ public final class Factorization {
         }
     }
 
-    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, double reg, long seed) implements Serializable {}
+    /** {@code task.loss}: the target as a value (squared), a probability (logistic) or a rank within a contest (Plackett–Luce). */
+    public enum Loss { squared, logistic, plackettLuce }
+
+    /**
+     * @param top        Plackett–Luce: the places that are choices (0 = every place)
+     * @param descending Plackett–Luce: a larger target is a better place
+     * @param linear     whether the per-value weights w are fitted (false: interactions only, e.g. over an offset
+     *                   that already carries the main effects)
+     */
+    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, double reg, long seed,
+                          Loss loss, int top, boolean descending, boolean linear) implements Serializable {
+        public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed) {
+            this(fields, fieldWeighted, latentDim, epochs, reg, seed, Loss.squared, 0, false, true);
+        }
+    }
 
     /**
      * How a block is refitted: {@code folds} out-of-fold models (≤ 1 = none), or one model per {@code forward} change
@@ -323,13 +353,20 @@ public final class Factorization {
     }
 
     /**
-     * ALS over examples in canonical order. Values get dense ids in order of first appearance; a value the warm model
-     * knows starts from its parameters, any other from small random factors (drawn in that same order).
+     * Coordinate Newton over examples in canonical order. Values get dense ids in order of first appearance; a value the
+     * warm model knows starts from its parameters, any other from small random factors (drawn in that same order).
+     *
+     * <p>The score of an example is {@code s = offset + ŷ}, and ŷ is linear in every single parameter θ with a slope
+     * {@code h} per example, so each parameter takes one Newton step {@code θ += (g − reg θ) / (H + reg)} on the
+     * loss restricted to it ({@link Objective}). Under squared loss that step is the exact ridge minimiser — the
+     * alternating least squares of the plain fit; under the logistic and Plackett–Luce losses, which are convex in
+     * every single parameter, it is one step towards it (capped at {@link #MAX_STEP}).
      */
     private static Model train(final Options options, final List<Example> examples, final Model warm, final int epochs) {
         final int F = options.fields().size();
         final int k = options.latentDim();
         final int n = examples.size();
+        final boolean contest = options.loss() == Loss.plackettLuce;
         final Random random = new Random(options.seed());
         final List<Map<String, Integer>> ids = new ArrayList<>();
         final List<List<String>> names = new ArrayList<>();
@@ -360,6 +397,7 @@ public final class Factorization {
                     } else {
                         for (int d = 1; d <= k; d++) p[d] = random.nextGaussian() * 0.1;
                     }
+                    if (!options.linear()) p[0] = 0;
                     initial.get(f).add(p);
                 }
                 idx[i * F + f] = id;
@@ -397,11 +435,12 @@ public final class Factorization {
                 }
             }
         }
-        double w0 = warm == null ? 0 : warm.w0;
+        // a contest loss sees score differences within a contest only: a global bias is not identified
+        double w0 = warm == null || contest ? 0 : warm.w0;
         final boolean fm = !options.fieldWeighted();
         // fm: q[i · k + d] = Σ_g v_g[x_g][d], so the slope of v_f[x_f][d] is q − v_f[x_f][d]
         final double[] q = fm ? new double[n * k] : null;
-        final double[] e = new double[n];
+        final double[] s = new double[n];
         for (int i = 0; i < n; i++) {
             double y = w0;
             for (int f = 0; f < F; f++) {
@@ -419,7 +458,7 @@ public final class Factorization {
                     y += r[f][g] * dot;
                 }
             }
-            e[i] = examples.get(i).y() - y;
+            s[i] = examples.get(i).offset() + y;
             if (fm) {
                 for (int f = 0; f < F; f++) {
                     final int id = idx[i * F + f];
@@ -427,31 +466,33 @@ public final class Factorization {
                 }
             }
         }
+        final Objective objective = Objective.of(options, examples, s);
         final double reg = options.reg();
         int longest = 0;
         for (int f = 0; f < F; f++) for (int id = 0; id + 1 < start[f].length; id++) longest = Math.max(longest, start[f][id + 1] - start[f][id]);
-        final double[] h = new double[longest];
+        final double[] h = new double[Math.max(longest, n)];
+        final int[] all = new int[n];
+        for (int i = 0; i < n; i++) all[i] = i;
 
         for (int epoch = 0; epoch < epochs; epoch++) {
+            objective.refresh();
             // global bias
-            {
-                double num = 0;
-                for (int i = 0; i < n; i++) num += e[i] + w0;
-                final double updated = num / (n + reg);
-                final double delta = updated - w0;
-                for (int i = 0; i < n; i++) e[i] -= delta;
-                w0 = updated;
+            if (!contest) {
+                Arrays.fill(h, 0, n, 1d);
+                final double delta = objective.delta(all, 0, n, h, w0, reg);
+                objective.shift(all, 0, n, h, delta);
+                w0 += delta;
             }
             // linear weights
-            for (int f = 0; f < F; f++) {
-                for (int id = 0; id + 1 < start[f].length; id++) {
-                    final int from = start[f][id], to = start[f][id + 1];
-                    double num = 0;
-                    for (int j = from; j < to; j++) num += e[members[f][j]] + w[f][id];
-                    final double updated = num / ((to - from) + reg);
-                    final double delta = updated - w[f][id];
-                    for (int j = from; j < to; j++) e[members[f][j]] -= delta;
-                    w[f][id] = updated;
+            if (options.linear()) {
+                for (int f = 0; f < F; f++) {
+                    for (int id = 0; id + 1 < start[f].length; id++) {
+                        final int from = start[f][id], to = start[f][id + 1];
+                        Arrays.fill(h, 0, to - from, 1d);
+                        final double delta = objective.delta(members[f], from, to, h, w[f][id], reg);
+                        objective.shift(members[f], from, to, h, delta);
+                        w[f][id] += delta;
+                    }
                 }
             }
             // factors: ŷ is linear in v_f[x][d] with slope h = Σ_{g≠f} r_fg v_g[x_g][d]
@@ -460,59 +501,42 @@ public final class Factorization {
                     final int from = start[f][id], to = start[f][id + 1];
                     for (int d = 0; d < k; d++) {
                         final double p = v[f][id * k + d];
-                        double num = 0, den = reg;
                         for (int j = from; j < to; j++) {
                             final int i = members[f][j];
-                            final double slope = fm ? q[i * k + d] - p : slope(r, v, idx, i, F, f, d, k);
-                            h[j - from] = slope;
-                            num += slope * (e[i] + p * slope);
-                            den += slope * slope;
+                            h[j - from] = fm ? q[i * k + d] - p : slope(r, v, idx, i, F, f, d, k);
                         }
-                        final double updated = den == 0 ? 0 : num / den;
-                        final double delta = updated - p;
-                        for (int j = from; j < to; j++) {
-                            final int i = members[f][j];
-                            e[i] -= delta * h[j - from];
-                            if (fm) q[i * k + d] += delta;
-                        }
-                        v[f][id * k + d] = updated;
+                        final double delta = objective.delta(members[f], from, to, h, p, reg);
+                        objective.shift(members[f], from, to, h, delta);
+                        if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta;
+                        v[f][id * k + d] = p + delta;
                     }
                 }
             }
             // field-pair weights (fwfm): ŷ is linear in r_fg with slope ⟨v_f, v_g⟩
             if (!fm) {
-                final double[] dots = new double[n];
                 for (int f = 0; f < F; f++) {
                     for (int g = f + 1; g < F; g++) {
-                        double num = 0, den = reg;
                         for (int i = 0; i < n; i++) {
                             final int a = idx[i * F + f], b = idx[i * F + g];
                             double dot = 0;
                             if (a >= 0 && b >= 0) for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
-                            dots[i] = dot;
-                            num += dot * (e[i] + r[f][g] * dot);
-                            den += dot * dot;
+                            h[i] = dot;
                         }
-                        final double updated = den == 0 ? r[f][g] : num / den;
-                        final double delta = updated - r[f][g];
-                        for (int i = 0; i < n; i++) e[i] -= delta * dots[i];
-                        r[f][g] = updated;
-                        r[g][f] = updated;
+                        final double delta = objective.delta(all, 0, n, h, r[f][g], reg);
+                        objective.shift(all, 0, n, h, delta);
+                        r[f][g] += delta;
+                        r[g][f] = r[f][g];
                     }
                 }
             }
-            if (LOG.isDebugEnabled()) {
-                double sse = 0;
-                for (final double x : e) sse += x * x;
-                LOG.debug("factorization epoch {}: rmse={}", epoch + 1, Math.sqrt(sse / Math.max(1, n)));
-            }
+            if (LOG.isDebugEnabled()) LOG.debug("factorization epoch {}: {}", epoch + 1, objective.describe());
         }
-        double sse = 0;
-        for (final double x : e) sse += x * x;
-        LOG.info("factorization fit: {} example(s), {} epoch(s){}, rmse={}", n, epochs, warm == null ? "" : " (warm start)", Math.sqrt(sse / Math.max(1, n)));
+        objective.refresh();
+        LOG.info("factorization fit: {} example(s), {} epoch(s){}, {}", n, epochs, warm == null ? "" : " (warm start)", objective.describe());
 
         final Model model = new Model(options.fields(), options.fieldWeighted(), k);
         model.w0 = w0;
+        model.loss = options.loss().name();
         for (int f = 0; f < F; f++) {
             for (int id = 0; id < names.get(f).size(); id++) {
                 final double[] p = new double[k + 2];
@@ -524,6 +548,325 @@ public final class Factorization {
             if (!fm) System.arraycopy(r[f], 0, model.r[f], 0, F);
         }
         return model;
+    }
+
+    /** The largest single coordinate step under a loss whose Newton step is not exact (logistic, Plackett–Luce). */
+    static final double MAX_STEP = 1d;
+
+    /**
+     * The loss of a fit over the example scores {@code s} (kept current by {@link #shift}): the coordinate Newton step
+     * of one parameter given its slopes over the examples that carry it.
+     */
+    abstract static class Objective {
+        final double[] s;
+
+        Objective(final double[] s) {
+            this.s = s;
+        }
+
+        static Objective of(final Options options, final List<Example> examples, final double[] s) {
+            return switch (options.loss()) {
+                case squared -> new Squared(examples, s);
+                case logistic -> new Logistic(examples, s);
+                case plackettLuce -> new PlackettLuce(examples, s, options.top(), options.descending());
+            };
+        }
+
+        /**
+         * The step of a parameter at {@code theta} whose slope on example {@code rows[j]} is {@code h[j − from]} for
+         * j in {@code [from, to)}: {@code (g − reg θ) / (H + reg)} ({@link #derivatives}), capped at {@link #MAX_STEP}
+         * unless the step is exact.
+         */
+        final double delta(final int[] rows, final int from, final int to, final double[] h, final double theta, final double reg) {
+            final double[] gh = derivatives(rows, from, to, h);
+            final double curvature = gh[1] + reg;
+            if (!(curvature > 0)) return 0;
+            final double step = (gh[0] - reg * theta) / curvature;
+            return exact() ? step : capped(step);
+        }
+
+        /**
+         * {g, H}: the derivative of the log-likelihood (the negative half squared error) along the parameter, and its
+         * curvature (the negative second derivative, ≥ 0).
+         */
+        abstract double[] derivatives(int[] rows, int from, int to, double[] h);
+
+        /** Whether the Newton step is the exact minimiser along the parameter (a quadratic loss). */
+        boolean exact() {
+            return false;
+        }
+
+        /** Moves the scores of the examples by {@code delta · h}. */
+        void shift(final int[] rows, final int from, final int to, final double[] h, final double delta) {
+            if (delta == 0) return;
+            for (int j = from; j < to; j++) s[rows[j]] += delta * h[j - from];
+        }
+
+        /** Recomputes what the loss caches from the scores (once per epoch, so rounding does not accumulate). */
+        void refresh() {
+        }
+
+        /** The loss of the current scores, for the log. */
+        abstract String describe();
+
+        /** The log-likelihood of the current scores (the negative half squared error under squared loss). */
+        abstract double logLikelihood();
+
+        static double capped(final double step) {
+            return Math.max(-MAX_STEP, Math.min(MAX_STEP, step));
+        }
+    }
+
+    /** Squared error: the Newton step is the exact ridge minimiser of the parameter. */
+    static final class Squared extends Objective {
+        private final double[] y;
+
+        Squared(final List<Example> examples, final double[] s) {
+            super(s);
+            this.y = new double[examples.size()];
+            for (int i = 0; i < y.length; i++) y[i] = examples.get(i).y();
+        }
+
+        @Override
+        double[] derivatives(final int[] rows, final int from, final int to, final double[] h) {
+            double g = 0, curvature = 0;
+            for (int j = from; j < to; j++) {
+                final int i = rows[j];
+                final double slope = h[j - from];
+                g += slope * (y[i] - s[i]);
+                curvature += slope * slope;
+            }
+            return new double[]{g, curvature};
+        }
+
+        @Override
+        boolean exact() {
+            return true;
+        }
+
+        @Override
+        String describe() {
+            return "rmse=" + Math.sqrt(-2 * logLikelihood() / Math.max(1, y.length));
+        }
+
+        @Override
+        double logLikelihood() {
+            double sse = 0;
+            for (int i = 0; i < y.length; i++) sse += (y[i] - s[i]) * (y[i] - s[i]);
+            return -sse / 2;
+        }
+    }
+
+    /** Binary log loss on the log-odds score: y in [0, 1] (a rate or a 0 / 1 outcome). */
+    static final class Logistic extends Objective {
+        private final double[] y;
+
+        Logistic(final List<Example> examples, final double[] s) {
+            super(s);
+            this.y = new double[examples.size()];
+            for (int i = 0; i < y.length; i++) y[i] = examples.get(i).y();
+        }
+
+        static double sigmoid(final double x) {
+            return x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x));
+        }
+
+        @Override
+        double[] derivatives(final int[] rows, final int from, final int to, final double[] h) {
+            double g = 0, curvature = 0;
+            for (int j = from; j < to; j++) {
+                final int i = rows[j];
+                final double slope = h[j - from];
+                final double p = sigmoid(s[i]);
+                g += slope * (y[i] - p);
+                curvature += slope * slope * p * (1 - p);
+            }
+            return new double[]{g, curvature};
+        }
+
+        @Override
+        String describe() {
+            return "logloss=" + -logLikelihood() / Math.max(1, y.length);
+        }
+
+        @Override
+        double logLikelihood() {
+            double ll = 0;
+            for (int i = 0; i < y.length; i++) {
+                final double p = Math.min(1 - 1e-15, Math.max(1e-15, sigmoid(s[i])));
+                ll += y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p);
+            }
+            return ll;
+        }
+    }
+
+    /**
+     * Plackett–Luce over the examples of a contest (the same {@link Example#contest}): the entries are chosen best first,
+     * each with probability {@code exp(s_j) / Σ_{l still in} exp(s_l)}. Places come from the target ({@code descending}:
+     * larger is better) as 1 + the entries strictly better, so ties share a place; a place deeper than {@code top}
+     * (0 = every place) adds no choice, its entries stay in the earlier pools. Tied entries are chosen from one pool
+     * (Breslow), which keeps the likelihood free of the entry order. A contest of fewer than two entries carries no
+     * information and is left out, as is an example without a contest.
+     *
+     * <p>Stage q of a contest is its q-th distinct place within {@code top}; an entry is in the pools of the stages
+     * up to its own place ({@code last}), and is chosen at its own stage when its place is within {@code top}. The
+     * pool sums {@code Z_q = Σ exp(s − m_c)} are kept per stage, shifted by the contest's largest score at the last
+     * {@link #refresh} so they do not overflow.
+     */
+    static final class PlackettLuce extends Objective {
+        private final int[] contestOf;
+        private final int[] last;
+        private final boolean[] chosen;
+        /** Per contest: the first stage index into the flat stage arrays, and its stage count. */
+        private final int[] base, stages;
+        /** Per stage: the entries chosen at it (tied at its place), and the pool sum. */
+        private final int[] size;
+        private final double[] z, a, b;
+        private final double[] shift;
+        private final int[][] rowsOf;
+        private final int[] touched;
+        private final boolean[] isTouched;
+
+        PlackettLuce(final List<Example> examples, final double[] s, final int top, final boolean descending) {
+            super(s);
+            final int n = examples.size();
+            final Map<String, List<Integer>> byContest = new LinkedHashMap<>();
+            for (int i = 0; i < n; i++) {
+                final String c = examples.get(i).contest();
+                if (c != null) byContest.computeIfAbsent(c, x -> new ArrayList<>()).add(i);
+            }
+            contestOf = new int[n];
+            Arrays.fill(contestOf, -1);
+            last = new int[n];
+            chosen = new boolean[n];
+            final List<int[]> kept = new ArrayList<>();
+            final List<Integer> stageSizes = new ArrayList<>();
+            final List<Integer> bases = new ArrayList<>(), counts = new ArrayList<>();
+            for (final List<Integer> rows : byContest.values()) {
+                if (rows.size() < 2) continue;
+                final int c = kept.size();
+                final double[] ys = new double[rows.size()];
+                for (int j = 0; j < ys.length; j++) ys[j] = examples.get(rows.get(j)).y();
+                final int[] place = new int[ys.length];
+                for (int j = 0; j < ys.length; j++) {
+                    int better = 0;
+                    for (final double other : ys) if (descending ? other > ys[j] : other < ys[j]) better++;
+                    place[j] = 1 + better;
+                }
+                final TreeSet<Integer> places = new TreeSet<>();
+                for (final int p : place) if (top <= 0 || p <= top) places.add(p);
+                final List<Integer> ordered = new ArrayList<>(places);
+                bases.add(stageSizes.size());
+                counts.add(ordered.size());
+                for (final int p : ordered) {
+                    int tied = 0;
+                    for (final int other : place) if (other == p) tied++;
+                    stageSizes.add(tied);
+                }
+                for (int j = 0; j < ys.length; j++) {
+                    final int i = rows.get(j);
+                    contestOf[i] = c;
+                    // the stages whose place is at or before the entry's own: it is in their pools
+                    last[i] = places.headSet(place[j], true).size() - 1;
+                    chosen[i] = places.contains(place[j]);
+                }
+                kept.add(rows.stream().mapToInt(Integer::intValue).toArray());
+            }
+            rowsOf = kept.toArray(new int[0][]);
+            base = bases.stream().mapToInt(Integer::intValue).toArray();
+            stages = counts.stream().mapToInt(Integer::intValue).toArray();
+            size = stageSizes.stream().mapToInt(Integer::intValue).toArray();
+            z = new double[size.length];
+            a = new double[size.length];
+            b = new double[size.length];
+            shift = new double[rowsOf.length];
+            touched = new int[rowsOf.length];
+            isTouched = new boolean[rowsOf.length];
+        }
+
+        @Override
+        void refresh() {
+            Arrays.fill(z, 0d);
+            for (int c = 0; c < rowsOf.length; c++) {
+                double max = Double.NEGATIVE_INFINITY;
+                for (final int i : rowsOf[c]) max = Math.max(max, s[i]);
+                shift[c] = max;
+                for (final int i : rowsOf[c]) {
+                    final double e = Math.exp(s[i] - max);
+                    for (int q = 0; q <= last[i]; q++) z[base[c] + q] += e;
+                }
+            }
+        }
+
+        @Override
+        double[] derivatives(final int[] rows, final int from, final int to, final double[] h) {
+            double g = 0, curvature = 0;
+            int count = 0;
+            for (int j = from; j < to; j++) {
+                final int i = rows[j];
+                final int c = contestOf[i];
+                final double slope = h[j - from];
+                if (c < 0 || slope == 0) continue;
+                if (!isTouched[c]) {
+                    isTouched[c] = true;
+                    touched[count++] = c;
+                }
+                final double e = Math.exp(s[i] - shift[c]);
+                for (int q = 0; q <= last[i]; q++) {
+                    a[base[c] + q] += e * slope;
+                    b[base[c] + q] += e * slope * slope;
+                }
+                if (chosen[i]) g += slope;
+            }
+            for (int t = 0; t < count; t++) {
+                final int c = touched[t];
+                isTouched[c] = false;
+                for (int q = base[c]; q < base[c] + stages[c]; q++) {
+                    if (a[q] != 0 || b[q] != 0) {
+                        final double mean = a[q] / z[q];
+                        g -= size[q] * mean;
+                        curvature += size[q] * (b[q] / z[q] - mean * mean);
+                        a[q] = 0;
+                        b[q] = 0;
+                    }
+                }
+            }
+            return new double[]{g, curvature};
+        }
+
+        @Override
+        void shift(final int[] rows, final int from, final int to, final double[] h, final double delta) {
+            if (delta == 0) return;
+            for (int j = from; j < to; j++) {
+                final int i = rows[j];
+                final double slope = h[j - from];
+                if (slope == 0) continue;
+                final int c = contestOf[i];
+                if (c >= 0) {
+                    final double before = Math.exp(s[i] - shift[c]);
+                    final double after = Math.exp(s[i] + delta * slope - shift[c]);
+                    for (int q = 0; q <= last[i]; q++) z[base[c] + q] += after - before;
+                }
+                s[i] += delta * slope;
+            }
+        }
+
+        @Override
+        String describe() {
+            int choices = 0;
+            for (final int[] rows : rowsOf) for (final int i : rows) if (chosen[i]) choices++;
+            return "contests=" + rowsOf.length + " nll/choice=" + (choices == 0 ? 0 : -logLikelihood() / choices);
+        }
+
+        /** From the cached pool sums: call {@link #refresh} after the scores moved outside {@link #shift}. */
+        @Override
+        double logLikelihood() {
+            double ll = 0;
+            for (int c = 0; c < rowsOf.length; c++) {
+                for (final int i : rowsOf[c]) if (chosen[i]) ll += s[i] - shift[c] - Math.log(z[base[c] + last[i]]);
+            }
+            return ll;
+        }
     }
 
     private static double slope(final double[][] r, final double[][] v, final int[] idx, final int i, final int F, final int f, final int d, final int k) {
@@ -584,6 +927,7 @@ public final class Factorization {
             final JsonObject manifest = FitArtifact.manifest(planHash, block);
             manifest.addProperty("variant", model.fieldWeighted ? "fwfm" : "fm");
             manifest.addProperty("latentDim", model.k);
+            manifest.addProperty("loss", model.loss);
             manifest.addProperty("parameters", model.size());
             final JsonArray fields = new JsonArray();
             model.fields.forEach(fields::add);

@@ -970,7 +970,8 @@ is a fold:
     variant: fwfm                                 # fm | fwfm (field-pair weights r_fg; bayesian is v2)
     fields: [seller_id, category, condition_grade] # categorical fields (≥ 2)
     latentDim: 8
-    task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset
+    task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset; loss (below)
+    # linear: false                               # fit no per-value weight w (interactions only, over an offset that carries the main effects)
     fit: {mode: forward, blocks: {size: P30D}, artifact: {uri: "gs://bucket/features"}}   # static (default) | forward | fold
     als: {epochs: 10, warmEpochs: 5, reg: 0.01, seed: 0}
     outputs:
@@ -1015,6 +1016,52 @@ rotation, embeddings are not — so every refit is rotated into a reference befo
 fit into the fit before it, a fold model into the whole-input model (`fit.align`: `procrustes` default, `sign`,
 `none`; see *Alignment of forward fits* under *SVD / PCA*). An embedding column then continues across blocks and
 means the same across folds.
+
+**`task.loss`** — what the target is:
+
+```yaml
+    task: {target: final_price, loss: plackettLuce, contest: session, order: descending, top: 3, offset: market}
+```
+
+| loss | target | score s = offset + ŷ | outputs (`sum`, `pair`) |
+|---|---|---|---|
+| `squared` (default) | a value | the offset in the target's units, subtracted as it is | the target's units |
+| `logistic` | a probability or 0 / 1 in [0, 1] (a row outside is not a training row) | log-odds | log-odds |
+| `plackettLuce` | a place or a score within a **contest** | log-strength | log-strength within a contest |
+| `softmax` | = `plackettLuce` with `top: 1`: the winner alone | | |
+
+- **Contests** (`plackettLuce` / `softmax`): `contest` names a `contexts[].name`; the rows of one group **sharing an event
+  time** are one contest, as for the `rating` op. `order` says which end of the target is better — `ascending` (default:
+  a place, smaller is better) or `descending` (a score or a 1 / 0 win flag: larger is better). Places are 1 + the entries
+  strictly better, so equal targets tie and are chosen from one pool (the likelihood never depends on the row order);
+  `top: k` makes only the first k places choices (the entries behind stay in the earlier pools: a top-k likelihood).
+  A contest of one entry, or a row without a contest key, takes no part. The loss sees score differences within a
+  contest only: there is no global bias, a field that is constant within every contest (a key of the contest, a venue)
+  gets no main effect — its pairs with the fields that vary within a contest are identified, which is where its
+  information is (info `factorization.contest.constant`; a `pair` of two contest keys is warned as noise,
+  `factorization.contest.constantPair`). Under `fit.mode: fold` without `groupBy` the fold unit is the contest
+  (event time + its keys), so a contest is never split; with `groupBy` an entity's rows leave their contests, and the
+  rest is ranked among itself (a Plackett–Luce order restricted to a subset is Plackett–Luce with the same strengths).
+- **Offset**: `task.offset` (a `baselines[].name`) is read in **probability space** under `logistic` / `plackettLuce`
+  (`offsetScale: probability`, default — `ln b` for a contest, `logit b` for logistic; a row whose offset gives no finite
+  score, `b ≤ 0` in a contest or `b ∉ (0, 1)` under logistic, is not a training row) or as a score already
+  (`offsetScale: score`). The outputs never include it.
+- **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
+  parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). The
+  artifact manifest records the `loss`.
+- **Probabilities**: the context `softmax` op over the `sum` column with the same offset turns the log-strengths into win
+  probabilities within the group — the serving-side reading of exactly this model:
+
+```yaml
+  - name: prob
+    scope: context
+    context: session
+    ops:
+      - {type: softmax, field: fm_strength, offset: market, as: pWin}       # prob_pWin_softmax: market · exp(sum), normalised
+```
+
+  For a model that learns only what the main effects leave over, give it an offset that carries them (a `rating`'s mu
+  as a baseline, or the market) with `offsetScale: score` / `probability` as fits, and `linear: false`.
 
 ### Discretize (population, type: discretize)
 
