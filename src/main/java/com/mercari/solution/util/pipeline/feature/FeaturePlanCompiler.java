@@ -4319,7 +4319,13 @@ public final class FeaturePlanCompiler {
             default -> diagnostics.error("factorization.variant", loc, "variant must be fm | fwfm: " + variant);
         }
         if (def.fields.size() < 2) diagnostics.error("factorization.fields", loc, "factorization requires at least two 'fields'");
+        final Set<String> listed = new HashSet<>();
         for (final String f : def.fields) {
+            // a field is one parameter block (and one numeric declaration): the engine reads a name at its first position
+            if (!listed.add(f)) {
+                diagnostics.error("factorization.fields", loc, "field '" + f + "' is listed more than once");
+                continue;
+            }
             final Ref ref = resolve(f);
             if (ref == null) {
                 diagnostics.error("reference.unknown", loc, "unknown field: " + f);
@@ -4438,6 +4444,14 @@ public final class FeaturePlanCompiler {
                 top = 1;
             }
             default -> diagnostics.error("factorization.task.loss", loc, "task.loss must be squared | logistic | plackettLuce | softmax: " + lossText);
+        }
+        if (loss != Factorization.Loss.squared) {
+            for (final String f : def.fields) {
+                if (!"none".equals(def.fmNumeric.get(f))) continue;
+                diagnostics.warning("factorization.fields.scale", loc, "numeric field '" + f + "' keeps its raw value (scale none) under loss " + lossText
+                        + ": the Newton steps are capped at " + Factorization.MAX_STEP + " per parameter, which a value far from ±1 turns into"
+                        + " score moves far from that cap - the fit overshoots or crawls; scale: zscore conditions it (the artifact keeps the scale for serving)");
+            }
         }
         final boolean ranked = loss == Factorization.Loss.plackettLuce;
         List<String> contestKeys = null;
