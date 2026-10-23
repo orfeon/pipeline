@@ -4208,11 +4208,20 @@ public final class FeaturePlanCompiler {
             }
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
             for (final String key : foldAllowed ? List.of("cadence") : List.of("cadence", "warmStart")) {
-                if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored (" + fitted + " on the whole input)");
+                if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored ("
+                        + (foldAllowed ? "a forward fit refits at every fit.blocks block" : fitted + " on the whole input") + ")");
             }
         }
         if (foldAllowed) {
-            if (!modeDeclared && spec.fit.mode == FitMode.fold) mode = FitMode.fold;
+            if (!modeDeclared && spec.fit.mode == FitMode.fold) {
+                if (spec.fit.isTimeFold()) {
+                    // a top-level time fold has no counterpart here: the block stays static, as it did before it could fold
+                    diagnostics.warning(codePrefix + ".fit.fold.time", loc, def.type + " folds by hash only, so it stays static under the top-level fit.fold.by: time ("
+                            + fitted + " on the whole input: training rows read their own target); declare fit.mode forward for a walk-forward fit or fold: {by: row}");
+                } else {
+                    mode = FitMode.fold;
+                }
+            }
             fitSpec.folds = spec.fit.folds;
             fitSpec.groupBy = spec.fit.groupBy;
             fitSpec.foldBy = spec.fit.foldBy;
@@ -4256,6 +4265,11 @@ public final class FeaturePlanCompiler {
             resolveBlockClock(fitSpec, loc);
             if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
+            }
+            if (mode == FitMode.fold && defFit != null) {
+                for (final String key : List.of("blocks", "minBlocks", "window", "minHistory")) {
+                    if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " applies to fit.mode forward only and is ignored by a hash fold");
+                }
             }
             if (mode == FitMode.statik && spec.fit.mode == FitMode.forward) {
                 // an explicit static under a forward spec: the block alone sees the whole input, including the
@@ -4351,6 +4365,9 @@ public final class FeaturePlanCompiler {
                 warmStart = "previous".equals(warmStartText);
             }
         }
+        if (def.warmEpochs != null && !warmStart) {
+            diagnostics.warning("factorization.als", loc, "als.warmEpochs applies to a warm-started fit.mode forward only and is ignored (every fit runs als.epochs)");
+        }
         final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
         final String what = "factorization fits " + variant + " (k = " + latentDim + ") by ALS on one worker per fit";
         switch (mode) {
@@ -4360,6 +4377,8 @@ public final class FeaturePlanCompiler {
                         + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
                         + (warmStart ? ", each started from the fit before it for " + warmEpochs + " epoch(s) (fit.warmStart previous; the first takes " + epochs + ")"
                         : ", each from scratch for " + epochs + " epoch(s) (fit.warmStart none)")
+                        + (warmStart && fitSpec.window != null ? "; a value with no row in the window leaves the fit, but the values in it"
+                        + " start from the fit before, which read older blocks (fit.warmStart none for fits that read the window alone)" : "")
                         + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                         + minRowsPhrase(minRows, null) + alignPhrase(align, "embeddings")
                         + "; the training set of every fit is gathered on one worker and the fits run one after another"
@@ -4368,7 +4387,10 @@ public final class FeaturePlanCompiler {
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
                     + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy : "row identity: time.field + orderTieBreak") + "), each row read from its own"
                     + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
-                    + "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + ")"
+                    + (Alignment.NONE.equals(align) ? "; the embeddings of every fold model are oriented on their own (fit.align none): an embedding column means something else in every fold"
+                    : "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + "): that"
+                    + " rotation (k x k numbers, orientation only) is fitted against a model that read every fold's target - pair / between / sum /"
+                    + " count never depend on it, and fit.align none keeps the embeddings strictly out of fold")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             default -> diagnostics.info("fit.mode.static", loc, what + " on the whole input" + artifactPhrase(fitSpec) + minRowsPhrase(minRows, null)
                     + "; training rows read a model fitted on their own target (fit.mode forward or fold gives them values fitted without it)");
@@ -4468,20 +4490,9 @@ public final class FeaturePlanCompiler {
                     + " - a context softmax over sum (with the same offset) reads them as probabilities");
         }
 
-        // fold unit: the groupBy entity's keys, else the row identity (read at apply time only, like an encoding's folds);
-        // under a ranking loss the contest itself, so a contest is never split across folds
-        final List<String> foldKeys = new ArrayList<>();
-        if (mode == FitMode.fold) {
-            if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
-                foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
-            } else if (contestKeys != null) {
-                foldKeys.add(spec.timeField);
-                foldKeys.addAll(contestKeys);
-            } else {
-                foldKeys.add(spec.timeField);
-                foldKeys.addAll(spec.orderTieBreak);
-            }
-        }
+        // fold unit: read at apply time only, like an encoding's folds; under a ranking loss the contest stands for the
+        // row identity, so a contest is never split across folds
+        final List<String> foldKeys = mode == FitMode.fold ? foldUnitKeys(fitSpec, contestKeys) : List.of();
 
         int produced = 0;
         for (final FmOutput out : def.fmOutputs) {
@@ -5383,6 +5394,27 @@ public final class FeaturePlanCompiler {
         return cols.size();
     }
 
+    /**
+     * The fold unit of a hash fold ({@code fit.mode: fold}): the {@code fit.groupBy} entity's keys, else the row
+     * identity (time.field + orderTieBreak; time.field alone without a tie-break, so rows sharing a timestamp share
+     * a fold).
+     */
+    private List<String> foldUnitKeys(final FeatureSpec.FitSpec fitSpec) {
+        return foldUnitKeys(fitSpec, null);
+    }
+
+    /** {@link #foldUnitKeys(FeatureSpec.FitSpec)} with {@code contestKeys} (when not null) in place of the tie-break. */
+    private List<String> foldUnitKeys(final FeatureSpec.FitSpec fitSpec, final List<String> contestKeys) {
+        final List<String> foldKeys = new ArrayList<>();
+        if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
+            foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
+        } else {
+            foldKeys.add(spec.timeField);
+            foldKeys.addAll(contestKeys != null ? contestKeys : spec.orderTieBreak);
+        }
+        return foldKeys;
+    }
+
     /** Common setup of a population column reading the keySet's own past contributions. */
     private void populationColumn(final OutputColumn c, final KeySet ks, final Window window, final String targetReference,
                                   final String stat, final String offsetColumn, final FitMode mode, final FeatureDef def,
@@ -5396,17 +5428,8 @@ public final class FeaturePlanCompiler {
         if (mode == FitMode.fold && fitSpec.isTimeFold()) {
             timeFoldCoordinates(c, targetReference, offsetColumn, def, fitSpec);
         } else if (mode == FitMode.fold) {
-            // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
-            // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
-            // not a lineage input of the column (hashing must never involve outcome fields)
-            final List<String> foldKeys = new ArrayList<>();
-            if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
-                foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
-            } else {
-                foldKeys.add(spec.timeField);
-                foldKeys.addAll(spec.orderTieBreak);
-            }
-            c.coordinates.put("foldKeys", String.join(",", foldKeys));
+            // read at apply time only — not a lineage input of the column (hashing must never involve outcome fields)
+            c.coordinates.put("foldKeys", String.join(",", foldUnitKeys(fitSpec)));
             c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
         // a target-less level (row counts, share denominators) never reads the baseline: no lag from it either

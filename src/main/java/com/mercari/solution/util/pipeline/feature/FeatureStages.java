@@ -1785,9 +1785,8 @@ public final class FeatureStages {
             for (final Factorization.Example e : c.element().getValue()) examples.add(e);
             final int part = c.element().getKey();
             LOG.info("factorization {}: fitting {} on {} examples", spec.block(), part < 0 ? "the whole input" : "fold " + part + " (out of fold)", examples.size());
-            final Factorization.Fits fits = Factorization.fitAll(spec.options(), examples,
-                    new Factorization.Plan(0, false, 0, spec.plan().minRows(), null, false, 0));
-            if (fits.total != null) c.output(KV.of(part, fits.total));
+            final Factorization.Model model = Factorization.fit(spec.options(), examples, spec.plan().minRows());
+            if (model != null) c.output(KV.of(part, model));
         }
     }
 
