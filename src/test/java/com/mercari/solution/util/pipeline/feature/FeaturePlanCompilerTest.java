@@ -2149,9 +2149,9 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
-     * The Low-Rank + Sparse recipes compile into a valid schedule. (1) batch: a forward factorization's pair is a
-     * baseline, and an encoding of the same cross offset by it keeps only what the low-rank pair does not explain —
-     * the encoding's keyed stage runs after the fit stage that fills the pair. (2) contest: a team rating with a pairing
+     * The Low-Rank + Sparse recipes compile into a valid schedule. (1) batch: a forward factorization's sum is a
+     * baseline, and a shrunk encoding of the cross offset by it keeps only what the factorization does not explain —
+     * the encoding's keyed stage runs after the fit stage that fills the sum. (2) contest: a team rating with a pairing
      * member (main effects + the sparse pairing term, online), its ratingProb as a baseline, and a Plackett–Luce
      * factorization with linear: false on top of it (the low-rank term) — the fit stage after the context stage that
      * reads the rating.
@@ -2159,7 +2159,8 @@ public class FeaturePlanCompilerTest {
     @Test
     public void testFactorizationLowRankPlusSparseRecipes() {
         final String marketLine = "  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}\n";
-        Assertions.assertTrue(SPEC.contains(marketLine), SPEC);
+        final String catLine = "  - {name: cat, keys: [category]}\n";
+        Assertions.assertTrue(SPEC.contains(marketLine) && SPEC.contains(catLine), SPEC);
         final String batch = withEncoding("""
                   - name: fm
                     scope: population
@@ -2170,6 +2171,7 @@ public class FeaturePlanCompilerTest {
                     fit: {mode: forward, blocks: {size: P7D}}
                     outputs:
                       - {pair: [seller_id, category], as: fm_seller_category}
+                      - {sum: true, as: fm_sum}
                   - name: affinity
                     scope: population
                     type: encoding
@@ -2178,13 +2180,16 @@ public class FeaturePlanCompilerTest {
                     targets:
                       - {expr: "sold >= 1", stats: [mean]}
                     offset: lowrank
-            """).replace(marketLine, marketLine + "  - {name: lowrank, expr: \"fm_seller_category\"}\n");
+                    shrinkage: {priorWeight: 20}
+            """).replace(marketLine, marketLine + "  - {name: lowrank, expr: \"fm_sum\"}\n");
         final FeaturePlan plan = compile(SOURCES, batch);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
-        final OutputColumn pair = column(plan, "fm_seller_category");
-        final OutputColumn sparse = plan.getColumns().stream().filter(c -> "affinity".equals(c.getBlock()) && !c.isIntermediate()).findFirst().orElseThrow();
+        final OutputColumn sum = column(plan, "fm_sum");
+        // the leaf level's residual sums carry the offset; the composed (shrunk) column reads them
+        final OutputColumn sparse = column(plan, "affinity__seller_id_category__e1__sum");
         Assertions.assertEquals("lowrank", sparse.getCoordinates().get("offset"), plan::describe);
-        Assertions.assertTrue(stageOf(plan, sparse) > stageOf(plan, pair), plan::describe);
+        Assertions.assertTrue(stageOf(plan, sparse) > stageOf(plan, sum), plan::describe);
+        Assertions.assertFalse(column(plan, "affinity__seller_id_category__e1__mean").isIntermediate(), plan::describe);
 
         final String contest = withEncoding("""
                   - name: skill
@@ -2209,7 +2214,7 @@ public class FeaturePlanCompilerTest {
                     outputs:
                       - {sum: true, as: fm_lowrank}
             """).replace(marketLine, marketLine + "  - {name: ability, expr: \"contest_pRating_ratingProb\"}\n")
-                .replace("  - {name: cat, keys: [category]}\n", "  - {name: cat, keys: [category]}\n  - {name: sellerCat, keys: [seller_id, category]}\n");
+                .replace(catLine, catLine + "  - {name: sellerCat, keys: [seller_id, category]}\n");
         final FeaturePlan contestPlan = compile(SOURCES, contest);
         Assertions.assertFalse(contestPlan.getDiagnostics().hasErrors(), contestPlan::describe);
         Assertions.assertTrue(stageOf(contestPlan, column(contestPlan, "fm_lowrank")) > stageOf(contestPlan, column(contestPlan, "contest_pRating_ratingProb")), contestPlan::describe);
