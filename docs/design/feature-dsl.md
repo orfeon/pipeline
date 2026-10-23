@@ -1201,7 +1201,7 @@ Rules:
    sugar). Under `mode: expanding`, at each point in time only the contributing rows inside the window
    (within `maxAge` / the last `maxEvents`) are aggregated. Same vocabulary, semantics and tokens as
    sequence windows (§4.3: strictly past, near edge from `ingestionLag`, the `{window}` naming axis),
-   and unified with factorization's `fit.window: trailing(...)`. The expansion is the product `keySet ×
+   and unified with the forward fits' `fit.window` (a duration). The expansion is the product `keySet ×
    window × target × stat` (positional under `combine: zip`; counts towards `maxFeatures`). Shrinkage
    (§5.5) applies to the windowed statistics and the parent levels use **the same window** (per-level
    windows are not allowed: leave-node-out subtraction would no longer hold). No window (= all-time

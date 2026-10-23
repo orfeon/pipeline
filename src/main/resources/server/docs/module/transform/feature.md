@@ -881,7 +881,7 @@ freedom and ignore it (`<type>.fit.align` warning on a block that declares one).
 
 A `type: svd`, `type: quantileTransform`, `type: smooth`, `type: copula` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
 *Quantile transform*, *Smooth curve* and *Copula*), and so does a `type: factorization` block (which also inherits a top-level
-`fold`, see *Factorization*); `discretize` is always static and is unaffected.
+hash `fold`, see *Factorization*); `discretize` is always static and is unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -1004,20 +1004,29 @@ refitting modes give training rows values fitted without their own target:
   `epochs`, rounded up; `fit.warmStart: none` fits each from scratch with `epochs`), so a run costs roughly
   `epochs · N₁ + warmEpochs · (N₂ + N₃ + …)` row passes, `Nᵢ` the rows of the i-th fit's window — measure it on a
   subset before a long history. The fits run one after another on one worker. `fit.minRows: n` leaves a fit over
-  fewer than `n` rows unsolved (its rows read null).
-- **`fold`** (`folds`, `groupBy` as in *Out-of-fold fits*; a top-level `fold` is inherited like a top-level
+  fewer than `n` rows unsolved (its rows read null). Under `window`, a value with no row in the window leaves the fit,
+  but a warm-started fit starts the values in it from the fit before, which read older blocks: with few `warmEpochs`
+  that start still shows; `fit.warmStart: none` gives fits that read the window alone. Every change point's model is
+  kept and served to the rows as one side input, so memory grows as change points × values × (k + 2) × 8 bytes (a
+  million values at k = 8 is ~80 MB a model): with a large vocabulary keep the blocks coarse (a month, not a day).
+- **`fold`** (`folds`, `groupBy` as in *Out-of-fold fits*; a top-level hash `fold` is inherited like a top-level
   `forward`) fits one model per fold over the other folds — from scratch, a warm start would carry the fold's own
   targets into it — one worker per fold, in parallel. A row reads its fold's model; a row whose fold unit is null reads
   null. With `groupBy: seller`, a seller's own value is never in the model its rows read (its `count` is 0, its pairs
   null): the pair scores then come from the other fields alone, which is what an unseen seller gets at serving time.
-  `fold: {by: time}` is not implemented for factorization (use `forward`).
+  `fold: {by: time}` is not implemented for factorization (use `forward`): declared on the block it is an error
+  (`factorization.fit.fold.time`); inherited from the top level, the block stays static with a warning under the same
+  code — its training rows then read a model fitted on their own target, so declare `fit.mode: forward` on it.
+  `blocks` / `minBlocks` / `window` / `minHistory` belong to `forward` and are ignored under `fold` (warning).
 
 Both refit modes always re-fit (the artifact holds the whole-input model only, for a static serving run). The latent
 space of a refit is determined only up to a rotation — inner products, hence pair scores and `sum`, are the same in any
 rotation, embeddings are not — so every refit is rotated into a reference before its embeddings are read: a forward
 fit into the fit before it, a fold model into the whole-input model (`fit.align`: `procrustes` default, `sign`,
 `none`; see *Alignment of forward fits* under *SVD / PCA*). An embedding column then continues across blocks and
-means the same across folds.
+means the same across folds. The fold rotation (k × k numbers, orientation only) is fitted against the whole-input
+model, which read every fold's target; the outputs other than `embedding` never depend on it, and `fit.align: none`
+keeps the embeddings strictly out of fold (each fold then has its own orientation).
 
 **`between`** — the affinity of two sides of the row, `Σ_{f ∈ left, g ∈ right} r_fg ⟨v_f, v_g⟩ u_f u_g` over the pairs
 whose both values the model knows (the sides are disjoint lists of the block's fields). Put an entity and its attributes

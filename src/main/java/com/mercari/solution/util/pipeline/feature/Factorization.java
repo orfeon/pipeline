@@ -311,9 +311,7 @@ public final class Factorization {
      * than {@code minRows} examples is not solved; {@code align} the gauge mode of the refits; {@code warmStart} starts a
      * change point's fit from the one before it, for {@code warmEpochs} epochs.
      */
-    public record Plan(int folds, boolean forward, int windowBlocks, int minRows, String align, boolean warmStart, int warmEpochs) implements Serializable {
-        public static final Plan STATIC = new Plan(0, false, 0, 0, null, false, 0);
-    }
+    public record Plan(int folds, boolean forward, int windowBlocks, int minRows, String align, boolean warmStart, int warmEpochs) implements Serializable {}
 
     /** The models a fit stage serves (see {@link #fitAll}). */
     public static final class Fits implements Serializable {
@@ -353,12 +351,7 @@ public final class Factorization {
          */
         public Model modelFor(final Integer fold, final Long usableBlock, final int minBlocks) {
             if (folds != null) return fold == null || fold < 0 || fold >= folds.length ? null : folds[fold];
-            if (blocks != null) {
-                if (usableBlock == null) return null;
-                final Map.Entry<Long, Model> floor = blocks.floorEntry(usableBlock);
-                if (floor == null || observedBlocks.headSet(usableBlock, true).size() < minBlocks) return null;
-                return floor.getValue();
-            }
+            if (blocks != null) return usableBlock == null ? null : BlockSeries.lookup(blocks, observedBlocks, usableBlock, minBlocks);
             return total;
         }
     }
@@ -368,6 +361,13 @@ public final class Factorization {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
         return train(options, sorted, null, options.epochs());
+    }
+
+    /** {@link #fit}, or null over fewer than {@code minRows} examples (none at all included). */
+    public static Model fit(final Options options, final List<Example> examples, final int minRows) {
+        final List<Example> sorted = new ArrayList<>(examples);
+        sorted.sort(ORDER);
+        return trainOrNull(options, sorted, null, options.epochs(), minRows);
     }
 
     /**
