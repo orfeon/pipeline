@@ -1704,8 +1704,8 @@ public final class FeatureStages {
                 if (model != null) {
                     switch (col.getCoordinates().get("kind")) {
                         case "pair" -> {
-                            final String[] pair = col.getCoordinates().get("pair").split(",");
-                            v = model.pair(x, numericValues, fields.indexOf(pair[0]), fields.indexOf(pair[1]), "true".equals(col.getCoordinates().get("perUnit")));
+                            final int[] pair = indices(col.getCoordinates().get("pair"));
+                            v = model.pair(x, numericValues, pair[0], pair[1], "true".equals(col.getCoordinates().get("perUnit")));
                         }
                         case "embedding" -> {
                             final int f = fields.indexOf(col.getCoordinates().get("field"));
