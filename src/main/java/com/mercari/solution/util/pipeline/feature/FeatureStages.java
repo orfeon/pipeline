@@ -1545,13 +1545,15 @@ public final class FeatureStages {
         String contestOf(final Map<String, Object> row) {
             final Long millis = FeatureValues.toEpochMillis(row.get(contestTime), contestTimeType);
             if (millis == null) return null;
-            final Map<String, Object> parts = new HashMap<>();
-            parts.put(CONTEST_TIME, millis);
-            for (final String key : contestKeys) parts.put(key, row.get(key));
-            final List<String> keys = new ArrayList<>();
-            keys.add(CONTEST_TIME);
-            keys.addAll(contestKeys);
-            return FeatureValues.key(parts, keys);
+            // the components FeatureValues.key would join, built in place (once per training row)
+            final StringBuilder sb = new StringBuilder();
+            FeatureValues.appendKeyComponent(sb, millis);
+            for (final String key : contestKeys) {
+                final Object value = row.get(key);
+                if (value == null) return null;
+                FeatureValues.appendKeyComponent(sb, value);
+            }
+            return sb.toString();
         }
 
         @Override
@@ -1579,11 +1581,20 @@ public final class FeatureStages {
                     .apply(prefix + "_View", View.asList());
         }
 
-        /** The row's fold (null without a fold unit, or outside fit.mode fold). */
+        /**
+         * The row's fold (null without a fold unit, or outside fit.mode fold). A fold unit that is the contest (event
+         * time + its keys, no fit.groupBy) is read as {@link #contestOf} reads it, at the event time's millis: hashing
+         * the raw time would split a contest whose rows write one instant two ways across folds.
+         */
         Integer foldOf(final Map<String, Object> row) {
             if (foldKeys == null) return null;
-            final String unit = FeatureValues.key(row, foldKeys);
+            final String unit = foldsByContest() ? contestOf(row) : FeatureValues.key(row, foldKeys);
             return unit == null ? null : VarianceComponents.foldOf(unit, folds);
+        }
+
+        private boolean foldsByContest() {
+            return contestKeys != null && foldKeys.size() == contestKeys.size() + 1 && foldKeys.get(0).equals(contestTime)
+                    && foldKeys.subList(1, foldKeys.size()).equals(contestKeys);
         }
 
         /** Writes the whole-input model: on every fit under static, once (or on refit) under fold / forward. */
@@ -1663,15 +1674,12 @@ public final class FeatureStages {
                     foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan,
                     Factorization.Loss.valueOf(k.getOrDefault("loss", "squared")), k.get("offsetScale"),
-                    contestKeys == null ? null : List.of(contestKeys.split(",")), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
+                    contestKeys == null ? null : FeaturePlanCompiler.keyList(contestKeys), k.get("contestTime"), k.getOrDefault("contestTimeType", "timestamp"),
                     "descending".equals(k.get("order")), Integer.parseInt(k.getOrDefault("top", "0")), !"false".equals(k.get("linear")),
                     scales, e.getValue()));
         }
         return specs;
     }
-
-    /** The key component of a contest's event time ({@link FmSpec#contestOf}). */
-    static final String CONTEST_TIME = "__contestTime";
 
     /**
      * The row's training example, or null when it has none: a missing target, offset or contest; a logistic target

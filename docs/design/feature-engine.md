@@ -630,7 +630,7 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
 ALS, `pair` / `embedding` / `count` / `sum` outputs, r-matrix lineage; `static` / `forward` (warm-started change-point
 refits) / `fold` (one fit per fold, in parallel), refits aligned by Procrustes; `task.loss` squared / logistic /
-plackettLuce (contest = context group × event time, Breslow ties, top-k) by coordinate Newton — exact ALS under
+plackettLuce (contest = context group × event time, Breslow ties, the last place no choice, top-k) by coordinate Newton — exact ALS under
 squared; numeric fields: one parameter set scaled by the per-fit standardised value, `perUnit` pair slopes; `between`
 side affinities that read through an unseen value's attributes), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
