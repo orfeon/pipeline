@@ -1925,7 +1925,7 @@ public class FeaturePlanCompilerTest {
                     fields: [seller_id, category, condition_grade]
                     latentDim: 4
                     task: {expr: "sold >= 1", offset: market}
-                    fit: {artifact: "gs://bucket/features", window: "trailing(P3Y)"}
+                    fit: {artifact: "gs://bucket/features", window: P1000D}
                     outputs:
                       - {pair: [seller_id, category], as: fm_seller_category}
                       - {embedding: category, as: cat_emb, dims: 2}
@@ -1957,6 +1957,74 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fit: {artifact", "fit: {mode: expanding, artifact"))), "factorization.fit.mode"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("pair: [seller_id, category]", "pair: [seller_id, quantity]"))), "factorization.outputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id, category, condition_grade]", "fields: [seller_id, start_price]"))), "factorization.fields"));
+    }
+
+    /**
+     * factorization under fit.mode forward / fold: the refit geometry rides in the coordinates (blocks + the target's
+     * availability lag + warm start, or the fold unit), a refit is aligned, and a top-level forward / fold is inherited.
+     */
+    @Test
+    public void testFactorizationForwardAndFold() {
+        final String forwardBlock = FM_BLOCK.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}",
+                "fit: {mode: forward, blocks: {size: P7D}, window: P28D, minRows: 20, artifact: \"gs://bucket/features\"}")
+                .replace("{sum: true, as: fm_linear}", "{sum: true, as: fm_linear}\n          - {count: seller_id, as: seller_rows}");
+        Assertions.assertTrue(forwardBlock.contains("mode: forward") && forwardBlock.contains("count: seller_id"), forwardBlock);
+        final FeaturePlan forward = compile(SOURCES, withEncoding(forwardBlock));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertTrue(hasCode(forward, "fit.mode.forward"), forward::describe);
+        for (final String name : List.of("fm_seller_category", "cat_emb_0", "fm_linear", "seller_rows")) {
+            final Map<String, String> k = column(forward, name).getCoordinates();
+            Assertions.assertEquals("forward", k.get("fit"), name);
+            Assertions.assertEquals("previous", k.get("warmStart"), name);
+            Assertions.assertEquals("5", k.get("warmEpochs"), name);
+            Assertions.assertEquals("4", k.get("windowBlocks"), name);
+            Assertions.assertEquals("20", k.get("minRows"), name);
+            Assertions.assertEquals("procrustes", k.get("align"), name);
+            // the target (sold) settles 30 minutes after the event and arrives up to 6 days later
+            Assertions.assertEquals(Long.toString(java.time.Duration.parse("P6DT30M").toMillis()), k.get("forwardLagMillis"), name);
+            Assertions.assertNotNull(k.get("blockSizeMillis"), name);
+        }
+        Assertions.assertEquals(Schema.Type.int64, column(forward, "seller_rows").getFieldType().getType());
+        Assertions.assertEquals("seller_id", column(forward, "seller_rows").getCoordinates().get("field"));
+        Assertions.assertEquals("none", column(compile(SOURCES, withEncoding(forwardBlock.replace("mode: forward,", "mode: forward, warmStart: none,"))), "fm_linear")
+                .getCoordinates().get("warmStart"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forwardBlock.replace("mode: forward,", "mode: forward, warmStart: last,"))), "factorization.fit.warmStart"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forwardBlock.replace("count: seller_id", "count: quantity"))), "factorization.outputs"));
+
+        final String foldBlock = FM_BLOCK.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}",
+                "fit: {mode: fold, folds: 4, groupBy: seller, align: sign}");
+        final FeaturePlan fold = compile(SOURCES, withEncoding(foldBlock));
+        Assertions.assertFalse(fold.getDiagnostics().hasErrors(), fold::describe);
+        Assertions.assertTrue(hasCode(fold, "fit.mode.fold"), fold::describe);
+        final Map<String, String> k = column(fold, "fm_linear").getCoordinates();
+        Assertions.assertEquals("fold", k.get("fit"));
+        Assertions.assertEquals("seller_id", k.get("foldKeys"));
+        Assertions.assertEquals("4", k.get("folds"));
+        Assertions.assertEquals("sign", k.get("align"));
+        Assertions.assertNull(k.get("warmStart"));
+        Assertions.assertTrue(fold.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit), fold::describe);
+        // without groupBy: the row identity
+        Assertions.assertEquals("session_time,session_id", column(compile(SOURCES, withEncoding(foldBlock.replace(", groupBy: seller", ""))), "fm_linear")
+                .getCoordinates().get("foldKeys"));
+        // a warm start would carry a fold's own outcomes into its model; a time fold is not implemented
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("mode: fold,", "mode: fold, warmStart: previous,"))), "factorization.fit.warmStart"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("mode: fold,", "mode: fold, fold: {by: time},"))), "factorization.fit.fold.time"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("folds: 4", "folds: 1"))), "fit.folds"));
+        // static: align is reported as ignored
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fit: {artifact", "fit: {align: sign, artifact"))), "factorization.fit.align"));
+        // a top-level hash fold is inherited; a top-level time fold leaves the block static (warned), not a compile error
+        final String topLevel = withEncoding(FM_BLOCK);
+        Assertions.assertEquals("fold", column(compile(SOURCES, topLevel.replace("output:\n  prefix: f_\n", "fit: {mode: fold, folds: 3}\noutput:\n  prefix: f_\n")), "fm_linear")
+                .getCoordinates().get("fit"));
+        final FeaturePlan timeFold = compile(SOURCES, topLevel.replace("output:\n  prefix: f_\n", "fit: {mode: fold, blocks: {bucket: month}, fold: {by: time}}\noutput:\n  prefix: f_\n"));
+        Assertions.assertFalse(timeFold.getDiagnostics().hasErrors(), timeFold::describe);
+        Assertions.assertEquals("static", column(timeFold, "fm_linear").getCoordinates().get("fit"));
+        Assertions.assertTrue(hasCode(timeFold, "factorization.fit.fold.time"), timeFold::describe);
+        // forward-only keys under a hash fold are reported as ignored
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("mode: fold,", "mode: fold, window: P28D,"))), "factorization.fit.window"));
+        // the earlier draft's trailing(...) spelling names the duration to write instead
+        final FeaturePlan trailing = compile(SOURCES, withEncoding(FM_BLOCK.replace("window: P1000D", "window: \"trailing(P3Y)\"")));
+        Assertions.assertTrue(trailing.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("takes the duration alone")), trailing::describe);
     }
 
     private static final String DISCRETIZE_BLOCK = """

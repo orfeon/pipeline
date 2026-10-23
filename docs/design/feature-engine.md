@@ -628,7 +628,8 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `windows`, per-keySet shrinkage, `window.filter`, baselines / offsets, `scale`, `estimator: sequential`,
 `fit.groupBy`); from **v1 / v1 additions**: `fit.mode: static` and `fold` with artifacts,
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
-ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize` (`method: quantile`),
+ALS, `pair` / `embedding` / `count` / `sum` outputs, r-matrix lineage; `static` / `forward` (warm-started change-point
+refits) / `fold` (one fit per fold, in parallel), refits aligned by Procrustes), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 `type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
 `type: copula` (Gaussian copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),
@@ -818,7 +819,7 @@ roughly linear in the input).
 λ for a shrunk `distribution`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
 consumption is not modelled); the general sequence
-form's `probabilistic` dynamics (`sequence.dynamics.family`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
+form's `probabilistic` dynamics (`sequence.dynamics.family`); factorization `variant: bayesian`, `fit.cadence` and time folds; sketch-backed (approximate,
 bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
 keeps the exact values (decision 11); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);

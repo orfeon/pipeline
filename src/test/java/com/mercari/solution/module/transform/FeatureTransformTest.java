@@ -699,6 +699,143 @@ public class FeatureTransformTest {
         Assertions.assertTrue(java.nio.file.Files.readString(new java.io.File(dirs[0], "fm.fm.manifest.json").toPath()).contains("pairWeights"));
     }
 
+    private static final List<String> FM_FIELDS = List.of("seller_id", "category", "condition_grade");
+    private static final com.mercari.solution.util.pipeline.feature.Factorization.Options FM_OPTIONS =
+            new com.mercari.solution.util.pipeline.feature.Factorization.Options(FM_FIELDS, false, 2, 20, 0.1, 1L);
+
+    private static String fmConfig(final String fit) {
+        final String fm = """
+                    - name: fm
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, category, condition_grade]
+                      latentDim: 2
+                      task: {expr: "sold >= 1"}
+                      fit: %s
+                      als: {epochs: 20, reg: 0.1, seed: 1}
+                      outputs:
+                        - {pair: [seller_id, category], as: fm_pair}
+                        - {count: seller_id, as: fm_seller_rows}
+                        - {sum: true, as: fm_linear}
+                """.formatted(fit);
+        return FEATURE_CONFIG.replace("      output:\n", fm.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    /** The source rows as factorization examples (sold ≥ 1 as the target), each with the tag {@code tagOf} gives it. */
+    private static Map<String, com.mercari.solution.util.pipeline.feature.Factorization.Example> fmExamples(
+            final java.util.function.Function<Map<String, Object>, Long> tagOf) {
+        final Map<String, com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = new java.util.LinkedHashMap<>();
+        final Object[][] rows = {
+                {"A", "s1", "electronics", "good", 1, "2025-01-01T10:00:00Z"}, {"A", "s2", "toys", "fair", 0, "2025-01-01T10:00:00Z"},
+                {"B", "s1", "electronics", "good", 0, "2025-01-03T10:00:00Z"}, {"C", "s1", "electronics", "fair", 1, "2025-01-20T10:00:00Z"},
+                {"C", "s2", "toys", "good", 1, "2025-01-20T10:00:00Z"}, {"D", "s1", "electronics", "good", 1, "2025-02-01T10:00:00Z"}};
+        for (final Object[] r : rows) {
+            final Map<String, Object> row = Map.of("session_id", r[0], "seller_id", r[1], "session_time", java.time.Instant.parse((String) r[5]).toEpochMilli());
+            examples.put(r[0] + "/" + r[1], new com.mercari.solution.util.pipeline.feature.Factorization.Example(
+                    new String[]{(String) r[1], (String) r[2], (String) r[3]}, ((Integer) r[4]).doubleValue(), tagOf.apply(row)));
+        }
+        return examples;
+    }
+
+    /** The fm outputs of a row against the model it should read (null: every output null). */
+    private static void assertFm(final MElement row, final com.mercari.solution.util.pipeline.feature.Factorization.Model model, final String[] values) {
+        if (model == null) {
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_linear"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_seller_rows"), row::toString);
+            return;
+        }
+        Assertions.assertEquals(model.predict(values), row.getAsDouble("f_fm_linear"), 1e-9, row::toString);
+        final Double pair = model.pair(values, 0, 1);
+        if (pair == null) Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), row::toString);
+        else Assertions.assertEquals(pair, row.getAsDouble("f_fm_pair"), 1e-9, row::toString);
+        Assertions.assertEquals(model.count(values, 0), ((Number) row.getPrimitiveValue("f_fm_seller_rows")).longValue(), row::toString);
+    }
+
+    /**
+     * factorization under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874): the
+     * target settles and arrives 6 days 30 minutes after the event, so A and B read nothing (no complete block's
+     * targets are known yet), C reads the model of blocks 2869–2870 and D the one of 2869–2872 — warm-started from the
+     * one before. The expected values are the pure model's on the same examples.
+     */
+    @Test
+    public void testFactorizationForward() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG
+                + fmConfig("{mode: forward, blocks: {size: P7D}, artifact: {uri: \"" + dir + "\"}}")));
+        final Map<String, String> options = outputs.get("features").getSchema().getField("f_fm_linear").getOptions();
+        Assertions.assertEquals("forward", options.get("feature.coord.fit"));
+        final long lag = Long.parseLong(options.get("feature.coord.forwardLagMillis"));
+        final long predictOffset = Long.parseLong(options.get("feature.coord.predictOffsetMillis"));
+        final com.mercari.solution.util.pipeline.feature.ForwardBlocks blocks = com.mercari.solution.util.pipeline.feature.ForwardBlocks.ofSize(java.time.Duration.ofDays(7));
+        final Map<String, Long> millis = new HashMap<>();
+        final Map<String, com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = fmExamples(row -> {
+            millis.put(row.get("session_id") + "/" + row.get("seller_id"), (Long) row.get("session_time"));
+            return blocks.indexOf((Long) row.get("session_time"));
+        });
+        final com.mercari.solution.util.pipeline.feature.Factorization.Fits fits = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
+                FM_OPTIONS, new ArrayList<>(examples.values()), new com.mercari.solution.util.pipeline.feature.Factorization.Plan(0, true, 0, 0, "procrustes", true, 10));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int read = 0;
+            for (final MElement row : rows) {
+                final String key = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final com.mercari.solution.util.pipeline.feature.Factorization.Model model =
+                        fits.modelFor(null, blocks.usableBlock(millis.get(key), predictOffset, lag), 1);
+                Assertions.assertEquals(key.startsWith("A/") || key.startsWith("B/"), model == null, key);
+                assertFm(row, model, examples.get(key).values());
+                if (model != null) read++;
+            }
+            Assertions.assertEquals(3, read);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(dirs[0], "fm.fm.avro").exists(), "the whole-input model is persisted for a static serving run");
+        final com.mercari.solution.util.pipeline.feature.Factorization.Model whole = com.mercari.solution.util.pipeline.feature.Factorization.read(
+                dir, dirs[0].getName(), "fm", FM_FIELDS, false, 2);
+        Assertions.assertEquals(fits.total.predict(examples.get("D/s1").values()), whole.predict(examples.get("D/s1").values()), 1e-9);
+        Assertions.assertEquals(4L, whole.count(examples.get("D/s1").values(), 0));
+    }
+
+    /**
+     * factorization under {@code fit.mode: fold} with seller folds (s1 and s2 in different folds): a row reads the
+     * model fitted on the other seller's rows, so its own seller is a value that model never saw — no pair score, a
+     * count of 0 — and its prediction stands on the category and grade alone.
+     */
+    @Test
+    public void testFactorizationFold() throws java.io.IOException {
+        final java.util.function.IntFunction<Integer> foldOf = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s1"), List.of("seller_id")), folds);
+        final java.util.function.IntFunction<Integer> foldOf2 = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s2"), List.of("seller_id")), folds);
+        int n = 2;
+        while (foldOf.apply(n).equals(foldOf2.apply(n))) n++; // the two sellers must land in different folds
+        final int folds = n;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG
+                + fmConfig("{mode: fold, folds: " + folds + ", groupBy: seller}")));
+        final Map<String, com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = fmExamples(row ->
+                (long) com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                        com.mercari.solution.util.pipeline.feature.FeatureValues.key(row, List.of("seller_id")), folds));
+        final com.mercari.solution.util.pipeline.feature.Factorization.Fits fits = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
+                FM_OPTIONS, new ArrayList<>(examples.values()), new com.mercari.solution.util.pipeline.feature.Factorization.Plan(folds, false, 0, 0, "procrustes", false, 0));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final String key = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final com.mercari.solution.util.pipeline.feature.Factorization.Model model = fits.modelFor((int) examples.get(key).tag(), null, 1);
+                Assertions.assertNotNull(model, key);
+                assertFm(row, model, examples.get(key).values());
+                Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), key);
+                Assertions.assertEquals(0L, ((Number) row.getPrimitiveValue("f_fm_seller_rows")).longValue(), key);
+                count++;
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     /**
      * svd {@code outputs}: with one component of (start_price, current_bid_t10) kept, the residual is what the shared
      * price axis does not explain, per input and in input units — it sums to zero over the rows, its norm column is its
