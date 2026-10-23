@@ -4373,7 +4373,9 @@ public final class FeaturePlanCompiler {
                         + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             }
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
-                    + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy : "row identity: time.field + orderTieBreak") + "), each row read from its own"
+                    + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy
+                    : List.of("plackettLuce", "softmax").contains(def.taskLoss) ? "contest: time.field + the keys of " + def.taskContest
+                    : "row identity: time.field + orderTieBreak") + "), each row read from its own"
                     + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
                     + (Alignment.NONE.equals(align) ? "; the embeddings of every fold model are oriented on their own (fit.align none): an embedding column means something else in every fold"
                     : "; the embeddings of every fold model are rotated into the whole-input model's coordinates (fit.align " + align + "): that"
