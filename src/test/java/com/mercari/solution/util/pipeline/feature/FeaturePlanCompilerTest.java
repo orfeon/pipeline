@@ -2022,6 +2022,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(timeFold, "factorization.fit.fold.time"), timeFold::describe);
         // forward-only keys under a hash fold are reported as ignored
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(foldBlock.replace("mode: fold,", "mode: fold, window: P28D,"))), "factorization.fit.window"));
+        // the earlier draft's trailing(...) spelling names the duration to write instead
+        final FeaturePlan trailing = compile(SOURCES, withEncoding(FM_BLOCK.replace("window: P1000D", "window: \"trailing(P3Y)\"")));
+        Assertions.assertTrue(trailing.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("takes the duration alone")), trailing::describe);
     }
 
     /**
