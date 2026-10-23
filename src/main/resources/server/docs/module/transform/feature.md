@@ -978,6 +978,7 @@ is a fold:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
       - {pair: [seller_id, start_price], as: seller_price, perUnit: true}   # a numeric pair per unit: the seller's price slope
+      - {between: {left: [seller_id, category], right: [condition_grade]}, as: seller_side_grade}   # Σ of the cross-side pairs
       - {count: seller_id, as: seller_rows}                    # training rows with the row's seller (int64)
       - {sum: true, as: fm_linear}                             # w0 + Σ w + Σ pairs (without the offset)
 ```
@@ -1017,6 +1018,12 @@ rotation, embeddings are not — so every refit is rotated into a reference befo
 fit into the fit before it, a fold model into the whole-input model (`fit.align`: `procrustes` default, `sign`,
 `none`; see *Alignment of forward fits* under *SVD / PCA*). An embedding column then continues across blocks and
 means the same across folds.
+
+**`between`** — the affinity of two sides of the row, `Σ_{f ∈ left, g ∈ right} r_fg ⟨v_f, v_g⟩ u_f u_g` over the pairs
+whose both values the model knows (the sides are disjoint lists of the block's fields). Put an entity and its attributes
+on one side — `left: [seller_id, category]` — and a value the fit never saw drops out while the attributes still
+speak for it: the affinity of a new seller is read through its category instead of being null as its `pair` is. Null
+only when no cross-side pair is known. Use `count` next to it to tell how much of a side was known.
 
 **Numeric fields** — `{field: <name>, numeric: true, scale: zscore | none}` (a numeric type; an integer field is
 categorical unless declared so). A numeric field has **one** parameter set `(w, v)` instead of one per value, multiplied

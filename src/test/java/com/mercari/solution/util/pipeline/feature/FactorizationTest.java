@@ -72,6 +72,17 @@ public class FactorizationTest {
         }
     }
 
+    /** between: the sum of the known cross-side pairs; an unknown member drops out, nothing known reads null. */
+    @Test
+    public void testBetween() {
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), true, 2, 10, 0.01, 7L), noisy(200, 5));
+        final String[] row = {"a1", "b2", "c0"};
+        Assertions.assertEquals(model.pair(row, 0, 2) + model.pair(row, 1, 2), model.between(row, null, new int[]{0, 1}, new int[]{2}), 1e-12);
+        final String[] unseen = {"a99", "b2", "c0"};
+        Assertions.assertEquals(model.pair(unseen, 1, 2), model.between(unseen, null, new int[]{0, 1}, new int[]{2}), 1e-12);
+        Assertions.assertNull(model.between(new String[]{"a99", null, "c0"}, null, new int[]{0, 1}, new int[]{2}));
+    }
+
     /** The training examples of a value are counted: 0 for a value the fit never saw, null for a missing one. */
     @Test
     public void testCount() {

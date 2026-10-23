@@ -1991,6 +1991,18 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forwardBlock.replace("mode: forward,", "mode: forward, warmStart: last,"))), "factorization.fit.warmStart"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forwardBlock.replace("count: seller_id", "count: quantity"))), "factorization.outputs"));
 
+        // between: two disjoint sides of the block's fields
+        final String between = FM_BLOCK.replace("{sum: true, as: fm_linear}",
+                "{sum: true, as: fm_linear}\n          - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side}");
+        final FeaturePlan sides = compile(SOURCES, withEncoding(between));
+        Assertions.assertFalse(sides.getDiagnostics().hasErrors(), sides::describe);
+        Assertions.assertEquals("between", column(sides, "fm_side").getCoordinates().get("kind"));
+        Assertions.assertEquals("seller_id,category", column(sides, "fm_side").getCoordinates().get("left"));
+        Assertions.assertEquals("condition_grade", column(sides, "fm_side").getCoordinates().get("right"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(between.replace("right: [condition_grade]", "right: [category]"))), "factorization.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(between.replace("right: [condition_grade]", "right: [quantity]"))), "factorization.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(between.replace("right: [condition_grade]", "right: []"))), "factorization.outputs"));
+
         final String foldBlock = FM_BLOCK.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}",
                 "fit: {mode: fold, folds: 4, groupBy: seller, align: sign}");
         final FeaturePlan fold = compile(SOURCES, withEncoding(foldBlock));

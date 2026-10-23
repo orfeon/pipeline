@@ -4525,6 +4525,23 @@ public final class FeaturePlanCompiler {
                         cols.add(c);
                     }
                 }
+                case "between" -> {
+                    if (out.left.isEmpty() || out.right.isEmpty() || !def.fields.containsAll(out.left) || !def.fields.containsAll(out.right)) {
+                        diagnostics.error("factorization.outputs", loc, "between needs left and right lists of the block's fields: " + out.left + " / " + out.right);
+                        continue;
+                    }
+                    final List<String> both = new ArrayList<>(out.left);
+                    both.retainAll(out.right);
+                    if (!both.isEmpty()) {
+                        diagnostics.error("factorization.outputs", loc, "between: a field is on one side only (a pair of a field with itself has no term): " + both);
+                        continue;
+                    }
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_between", Schema.FieldType.FLOAT64, computeAt);
+                    c.coordinates.put("kind", "between");
+                    c.coordinates.put("left", String.join(",", out.left));
+                    c.coordinates.put("right", String.join(",", out.right));
+                    cols.add(c);
+                }
                 case "count" -> {
                     if (out.count == null || !def.fields.contains(out.count)) {
                         diagnostics.error("factorization.outputs", loc, "count must name one of the block's fields: " + out.count);
