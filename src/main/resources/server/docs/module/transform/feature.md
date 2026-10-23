@@ -1006,12 +1006,16 @@ refitting modes give training rows values fitted without their own target:
   subset before a long history. The fits run one after another on one worker. `fit.minRows: n` leaves a fit over
   fewer than `n` rows unsolved (its rows read null). Under `window`, a value with no row in the window leaves the fit,
   but a warm-started fit starts the values in it from the fit before, which read older blocks: with few `warmEpochs`
-  that start still shows; `fit.warmStart: none` gives fits that read the window alone. Every change point's model is
-  kept and served to the rows as one side input, so memory grows as change points × values × (k + 2) × 8 bytes (a
-  million values at k = 8 is ~80 MB a model): with a large vocabulary keep the blocks coarse (a month, not a day).
+  that start still shows; `fit.warmStart: none` gives fits that read the window alone. Each change point's model is
+  handed out as soon as it is fitted and joined with the rows that read it (the rows are grouped by change point), so
+  no worker holds more than a model or two at a time — a model is values × (k + 2) × 8 bytes (a million values at
+  k = 8 is ~80 MB) — at the price of one more shuffle of the rows. The cost that remains grows with the change points:
+  the fits run one after another, so with a large vocabulary keep the blocks coarse (a month, not a day). An input
+  under a non-global windowing strategy reads the models from one side input instead (all of them on every worker).
 - **`fold`** (`folds`, `groupBy` as in *Out-of-fold fits*; a top-level hash `fold` is inherited like a top-level
   `forward`) fits one model per fold over the other folds — from scratch, a warm start would carry the fold's own
-  targets into it — one worker per fold, in parallel. A row reads its fold's model; a row whose fold unit is null reads
+  targets into it — one worker per fold, in parallel; the fold models reach the rows as one side input (the
+  whole-input model, which only the artifact needs, is left out of it). A row reads its fold's model; a row whose fold unit is null reads
   null. With `groupBy: seller`, a seller's own value is never in the model its rows read (its `count` is 0, its pairs
   null): the pair scores then come from the other fields alone, which is what an unseen seller gets at serving time.
   `fold: {by: time}` is not implemented for factorization (use `forward`): declared on the block it is an error

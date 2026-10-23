@@ -780,6 +780,10 @@ public class FeatureTransformTest {
         });
         final com.mercari.solution.util.pipeline.feature.Factorization.Fits fits = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
                 FM_OPTIONS, new ArrayList<>(examples.values()), new com.mercari.solution.util.pipeline.feature.Factorization.Plan(0, true, 0, 0, "procrustes", true, 10));
+        // the change-point models reach the rows by a join, not as one side input of every model
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "_Fm_fm_Join"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_Fm_fm_View"), names::toString);
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             int read = 0;
             for (final MElement row : rows) {
@@ -824,6 +828,10 @@ public class FeatureTransformTest {
                         com.mercari.solution.util.pipeline.feature.FeatureValues.key(row, List.of("seller_id")), folds));
         final com.mercari.solution.util.pipeline.feature.Factorization.Fits fits = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
                 FM_OPTIONS, new ArrayList<>(examples.values()), new com.mercari.solution.util.pipeline.feature.Factorization.Plan(folds, false, 0, 0, "procrustes", false, 0));
+        // a handful of fold models stays a side input: a join keyed by fold would apply on as many workers as folds
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "_Fm_fm_View"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_Fm_fm_Join"), names::toString);
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             int count = 0;
             for (final MElement row : rows) {

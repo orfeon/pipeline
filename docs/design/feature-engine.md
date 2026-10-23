@@ -490,7 +490,13 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   `estimator: joint`): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
-  `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
+  `apply(model, values)` fills the block's columns. One exception to the side input: a forward factorization
+  (`FmSpec.serve`) hands out each change point's model as it is fitted (`Factorization.fitForward` with a sink) and
+  joins it with the rows keyed by the change point they read (`KeyByChangePointDoFn` with a small `FmIndex` side input
+  → `CoGroupByKey` → `ApplyFmJoinDoFn`, rows re-emitted at their own timestamps) ahead of `FitApplyDoFn`, which skips
+  the block — a model per change point on every worker does not scale with daily blocks and a large vocabulary. Fold
+  models stay a side input (a join keyed by fold would apply on as many workers as folds). The examples, models and
+  fits move with `FactorizationCoders`, not Java serialization. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
   discretize and quantileTransform gather the raw values (`Doubles` / `QuantileTransform.Values`, 8 bytes per
   row) because quantiles need the order statistics — quantileTransform per time block, as a `Summary` family
