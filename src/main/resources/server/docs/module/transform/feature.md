@@ -1081,8 +1081,83 @@ fields are all numeric is a quadratic form of the values (warning `factorization
       - {type: softmax, field: fm_strength, offset: market, as: pWin}       # prob_pWin_softmax: market · exp(sum), normalised
 ```
 
-  For a model that learns only what the main effects leave over, give it an offset that carries them (a `rating`'s mu
-  as a baseline, or the market) with `offsetScale: score` / `probability` as fits, and `linear: false`.
+  For a model that learns only what the main effects leave over, give it an offset that carries them and
+  `linear: false` — see *Low-rank + sparse* below.
+
+**Low-rank + sparse.** Three estimators of a pairing's effect, each with its own strength:
+
+| term | what estimates it | strength | blind spot |
+|---|---|---|---|
+| main effects β (entity level, drift) | a `rating` (members), or an encoding per entity | online, contest-relative, uncertainty | none for pairings |
+| sparse pairing γ_ij (what this pair did) | a `rating` member keyed by the pair, or an encoding of the cross (shrinkage) | exact for well-observed pairs | a pair never seen together stays at 0 / its parent |
+| low-rank pairing ⟨v_i, v_j⟩ (what similar pairs did) | `factorization` | non-zero for a pair never seen together, compressed | smooths away a pair's idiosyncratic effect |
+
+They compose through baselines. **Contest** (online main effects + sparse pairing in a rating, the low-rank pairing on
+top of its probability):
+
+```yaml
+entities:
+  - {name: seller, keys: [seller_id]}
+  - {name: sellerCat, keys: [seller_id, category]}              # the pairing as an entity
+baselines:
+  - {name: ability, expr: "contest_pRating_ratingProb"}           # the rating's contest probability
+features:
+  - name: skill                                                    # β + γ: the seller and the pairing, online, one contest likelihood
+    scope: sequence
+    entity: seller
+    ops:
+      - {type: rating, field: final_price, context: session, order: descending, as: parts,
+         with: [{entity: sellerCat, mu: 0, sigma: 1.5}], team: [mu, sigma]}
+  - name: contest
+    scope: context
+    context: session
+    ops:
+      - {type: ratingProb, field: skill_all_parts_team_mu, sigma: skill_all_parts_team_sigma, beta: 4.1667, as: pRating}
+  - name: fm                                                       # ⟨v, v⟩: the low-rank affinity over what the rating explains
+    scope: population
+    type: factorization
+    fields: [seller_id, category, condition_grade]
+    linear: false
+    task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: ability}
+    fit: {mode: forward, blocks: {size: P30D}}
+    outputs:
+      - {sum: true, as: fm_lowrank}                               # log-strength over the rating: softmax it with offset ability
+```
+
+**Batch** (the low-rank pairing first, the sparse pairing on its residual):
+
+```yaml
+baselines:
+  - {name: lowrank, expr: "fm_rate_pair"}
+features:
+  - name: fm_rate
+    scope: population
+    type: factorization
+    fields: [seller_id, category, condition_grade]
+    task: {expr: "sold >= 1"}                                      # squared loss: the pair is on the rate's scale
+    fit: {mode: forward, blocks: {size: P30D}}
+    outputs:
+      - {pair: [seller_id, category], as: fm_rate_pair}
+  - name: affinity                                                 # γ: the cross's rate beyond the low-rank pair
+    scope: population
+    type: encoding
+    keySets: [{keys: [seller_id, category]}]
+    targets: [{expr: "sold >= 1", stats: [mean]}]
+    offset: lowrank
+```
+
+- With few rows of a pair, the encoding's term shrinks to 0 and the factorization's pair carries the affinity; with
+  many, the encoding adds what the low-rank pair cannot express. The rating's pairing member does the same online, and
+  the factorization over its probability (`linear: false`) adds only the part that transfers across pairs.
+- **Time honesty is the user's to keep**: the offset is read from the training rows (each row's baseline next to its
+  outcome), so its own fit must not have seen the row's outcome. A rating's readouts are pre-event by construction; a
+  factorization that serves as an offset must be `forward` (or `fold`), never `static`, when the block reading it trains
+  on the same rows. A row whose offset is null (a pair with an unseen value, a block before the first fit) does not
+  train the block that reads it — `between` fills more rows than `pair` for that reason.
+- The scales must match the reader: a Plackett–Luce factorization reads a contest probability (`ratingProb`, a
+  `share(...)` market) in probability space; an identity-scale encoding subtracts its offset as it is, so offset it
+  by a squared-loss factorization of the same target (its `pair` / `sum` are on the target's scale), not by a log-odds
+  or a log-strength.
 
 ### Discretize (population, type: discretize)
 

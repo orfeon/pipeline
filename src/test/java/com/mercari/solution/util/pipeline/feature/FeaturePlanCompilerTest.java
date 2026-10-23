@@ -2105,6 +2105,79 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(ignored, "factorization.outputs"), ignored::describe);
     }
 
+    /**
+     * The Low-Rank + Sparse recipes compile into a valid schedule. (1) batch: a forward factorization's pair is a
+     * baseline, and an encoding of the same cross offset by it keeps only what the low-rank pair does not explain —
+     * the encoding's keyed stage runs after the fit stage that fills the pair. (2) contest: a team rating with a pairing
+     * member (main effects + the sparse pairing term, online), its ratingProb as a baseline, and a Plackett–Luce
+     * factorization with linear: false on top of it (the low-rank term) — the fit stage after the context stage that
+     * reads the rating.
+     */
+    @Test
+    public void testFactorizationLowRankPlusSparseRecipes() {
+        final String marketLine = "  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}\n";
+        Assertions.assertTrue(SPEC.contains(marketLine), SPEC);
+        final String batch = withEncoding("""
+                  - name: fm
+                    scope: population
+                    type: factorization
+                    fields: [seller_id, category, condition_grade]
+                    latentDim: 4
+                    task: {expr: "sold >= 1"}
+                    fit: {mode: forward, blocks: {size: P7D}}
+                    outputs:
+                      - {pair: [seller_id, category], as: fm_seller_category}
+                  - name: affinity
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id, category]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    offset: lowrank
+            """).replace(marketLine, marketLine + "  - {name: lowrank, expr: \"fm_seller_category\"}\n");
+        final FeaturePlan plan = compile(SOURCES, batch);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn pair = column(plan, "fm_seller_category");
+        final OutputColumn sparse = plan.getColumns().stream().filter(c -> "affinity".equals(c.getBlock()) && !c.isIntermediate()).findFirst().orElseThrow();
+        Assertions.assertEquals("lowrank", sparse.getCoordinates().get("offset"), plan::describe);
+        Assertions.assertTrue(stageOf(plan, sparse) > stageOf(plan, pair), plan::describe);
+
+        final String contest = withEncoding("""
+                  - name: skill
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: rating, field: final_price, context: session, order: descending, as: parts,
+                         with: [{entity: sellerCat, mu: 0, sigma: 1.5}], team: [mu, sigma]}
+                  - name: contest
+                    scope: context
+                    context: session
+                    ops:
+                      - {type: ratingProb, field: skill_all_parts_team_mu, sigma: skill_all_parts_team_sigma, beta: 4.1667, as: pRating}
+                  - name: fm
+                    scope: population
+                    type: factorization
+                    fields: [seller_id, category, condition_grade]
+                    latentDim: 4
+                    linear: false
+                    task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: ability}
+                    fit: {mode: forward, blocks: {size: P7D}}
+                    outputs:
+                      - {sum: true, as: fm_lowrank}
+            """).replace(marketLine, marketLine + "  - {name: ability, expr: \"contest_pRating_ratingProb\"}\n")
+                .replace("  - {name: cat, keys: [category]}\n", "  - {name: cat, keys: [category]}\n  - {name: sellerCat, keys: [seller_id, category]}\n");
+        final FeaturePlan contestPlan = compile(SOURCES, contest);
+        Assertions.assertFalse(contestPlan.getDiagnostics().hasErrors(), contestPlan::describe);
+        Assertions.assertTrue(stageOf(contestPlan, column(contestPlan, "fm_lowrank")) > stageOf(contestPlan, column(contestPlan, "contest_pRating_ratingProb")), contestPlan::describe);
+        Assertions.assertEquals("false", column(contestPlan, "fm_lowrank").getCoordinates().get("linear"));
+    }
+
+    private static int stageOf(final FeaturePlan plan, final OutputColumn column) {
+        for (final FeaturePlan.Stage stage : plan.getStages()) if (stage.columnNames().contains(column.getCanonicalName())) return stage.index();
+        throw new AssertionError("no stage hosts " + column.getCanonicalName() + "\n" + plan.describe());
+    }
+
     private static final String DISCRETIZE_BLOCK = """
                   - name: price_bin
                     scope: population
