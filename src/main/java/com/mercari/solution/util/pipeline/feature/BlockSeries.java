@@ -106,8 +106,21 @@ public final class BlockSeries<S extends Serializable> implements Serializable {
     public static <M> M lookup(final TreeMap<Long, M> models, final TreeSet<Long> observed, final long usable, final int minBlocks) {
         if (models == null || observed == null) return null;
         final Map.Entry<Long, M> floor = models.floorEntry(usable);
-        if (floor == null || observed.headSet(usable, true).size() < minBlocks) return null;
+        if (floor == null || !reached(observed, usable, minBlocks)) return null;
         return floor.getValue();
+    }
+
+    /**
+     * Whether at least {@code minBlocks} observed blocks lie at or before {@code usable}: walks the first
+     * {@code minBlocks} blocks at most, where counting a {@code headSet} view visits every earlier block — once per row.
+     */
+    public static boolean reached(final TreeSet<Long> observed, final long usable, final int minBlocks) {
+        int seen = 0;
+        for (final long block : observed) {
+            if (seen >= minBlocks || block > usable) break;
+            seen++;
+        }
+        return seen >= minBlocks;
     }
 
 }
