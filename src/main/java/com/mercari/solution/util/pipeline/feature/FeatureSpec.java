@@ -697,7 +697,11 @@ public class FeatureSpec implements Serializable {
             }
             // the fit window (a duration on the time axis; ISO-8601 like blocks.size) and the minimum history
             if (fit.has("window") && !fit.get("window").isJsonNull()) {
-                if (fit.get("window").isJsonPrimitive()) {
+                final String text = fit.get("window").isJsonPrimitive() ? fit.get("window").getAsString().trim() : null;
+                if (text != null && text.startsWith("trailing(")) {
+                    // the earlier DSL draft spelled it trailing(P3Y); the fit window is the duration alone
+                    diagnostics.error("fit.window", loc, "fit.window takes the duration alone (e.g. P1095D), not " + text);
+                } else if (text != null) {
                     final Duration window = Json.duration(fit, "window", null, diagnostics, loc);
                     if (window != null) {
                         if (window.isZero() || window.isNegative()) diagnostics.error("fit.window", loc, "fit.window must be a positive duration: " + window);
