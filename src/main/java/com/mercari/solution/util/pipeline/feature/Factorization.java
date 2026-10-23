@@ -340,7 +340,7 @@ public final class Factorization {
     public static Model fit(final Options options, final List<Example> examples) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return train(options, sorted, null, options.epochs());
+        return train(options, informative(options, sorted), null, options.epochs());
     }
 
     /** {@link #fit}, or null over fewer than {@code minRows} examples (none at all included). */
@@ -418,8 +418,34 @@ public final class Factorization {
     }
 
     private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows) {
-        if (sorted.isEmpty() || sorted.size() < minRows) return null;
-        return train(options, sorted, warm, epochs);
+        final List<Example> used = informative(options, sorted);
+        if (used.isEmpty() || used.size() < minRows) return null;
+        return train(options, used, warm, epochs);
+    }
+
+    /**
+     * The examples a fit learns from, in their order: under Plackett–Luce the rows of the contests with at least two
+     * places only — a contest whose entries all share one place (a lone entry, or equal targets throughout) chooses
+     * nothing, and a row without a contest is in none, so neither counts towards {@code minRows} nor gives a value
+     * parameters or a {@code count}; every example otherwise.
+     */
+    static List<Example> informative(final Options options, final List<Example> examples) {
+        if (options.loss() != Loss.plackettLuce) return examples;
+        // per contest: its smallest and largest target (equal = one place)
+        final Map<String, double[]> ranges = new HashMap<>();
+        for (final Example e : examples) {
+            if (e.contest() == null) continue;
+            final double[] range = ranges.computeIfAbsent(e.contest(), c -> new double[]{e.y(), e.y()});
+            range[0] = Math.min(range[0], e.y());
+            range[1] = Math.max(range[1], e.y());
+        }
+        final List<Example> kept = new ArrayList<>(examples.size());
+        for (final Example e : examples) {
+            if (e.contest() == null) continue;
+            final double[] range = ranges.get(e.contest());
+            if (range[0] < range[1]) kept.add(e);
+        }
+        return kept.size() == examples.size() ? examples : kept;
     }
 
     /**
@@ -801,8 +827,11 @@ public final class Factorization {
      * each with probability {@code exp(s_j) / Σ_{l still in} exp(s_l)}. Places come from the target ({@code descending}:
      * larger is better) as 1 + the entries strictly better, so ties share a place; a place deeper than {@code top}
      * (0 = every place) adds no choice, its entries stay in the earlier pools. Tied entries are chosen from one pool
-     * (Breslow), which keeps the likelihood free of the entry order. A contest of fewer than two entries carries no
-     * information and is left out, as is an example without a contest.
+     * (Breslow: a tie group of size m is m choices; the rating op's Weng–Lin tie form weighs it as one, 1 / m each),
+     * which keeps the likelihood free of the entry order. The last place is never a choice: its pool is the entries
+     * at it, so they finish there in some order with probability 1 — one entry or a whole tie group alike (Breslow
+     * would read a tied last group as pulling its entries together). A contest whose entries all share one place (a
+     * lone entry, equal targets throughout) chooses nothing and is left out, as is an example without a contest.
      *
      * <p>Stage q of a contest is its q-th distinct place within {@code top}; an entry is in the pools of the stages
      * up to its own place ({@code last}), and is chosen at its own stage when its place is within {@code top}. The
@@ -840,17 +869,20 @@ public final class Factorization {
             final List<Integer> bases = new ArrayList<>(), counts = new ArrayList<>();
             for (final List<Integer> rows : byContest.values()) {
                 if (rows.size() < 2) continue;
-                final int c = kept.size();
                 final double[] ys = new double[rows.size()];
                 for (int j = 0; j < ys.length; j++) ys[j] = examples.get(rows.get(j)).y();
                 final int[] place = new int[ys.length];
+                int lastPlace = 1;
                 for (int j = 0; j < ys.length; j++) {
                     int better = 0;
                     for (final double other : ys) if (descending ? other > ys[j] : other < ys[j]) better++;
                     place[j] = 1 + better;
+                    lastPlace = Math.max(lastPlace, place[j]);
                 }
                 final TreeSet<Integer> places = new TreeSet<>();
-                for (final int p : place) if (top <= 0 || p <= top) places.add(p);
+                for (final int p : place) if ((top <= 0 || p <= top) && p != lastPlace) places.add(p);
+                if (places.isEmpty()) continue;
+                final int c = kept.size();
                 final List<Integer> ordered = new ArrayList<>(places);
                 bases.add(stageSizes.size());
                 counts.add(ordered.size());

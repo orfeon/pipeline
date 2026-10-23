@@ -215,8 +215,9 @@ public class FactorizationTest {
     }
 
     /**
-     * The Plackett–Luce log-likelihood by hand for one contest with a tie and one without: places (1, 2, 2) choose the
-     * winner from all three and each tied second from the pool of the two; with top 1 only the winner is a choice.
+     * The Plackett–Luce log-likelihood by hand: places (1, 2, 2) choose the winner from all three, and the tied last
+     * pair is no choice (they finish there in some order); places (1, 2, 2, 4) choose each tied second from the pool of
+     * three (Breslow); equal targets throughout choose nothing. With top 1 only the winners are choices.
      */
     @Test
     public void testPlackettLuceLikelihood() {
@@ -225,20 +226,29 @@ public class FactorizationTest {
                 new Factorization.Example(new String[]{"p2"}, 2, 0, 0, "c1"),
                 new Factorization.Example(new String[]{"p3"}, 2, 0, 0, "c1"),
                 new Factorization.Example(new String[]{"p4"}, 5, 0, 0, "c2"),   // alone: no information
-                new Factorization.Example(new String[]{"p5"}, 3, 0, 0, null));  // no contest
-        final double[] s = {0.3, -0.2, 0.5, 2.0, 1.0};
+                new Factorization.Example(new String[]{"p5"}, 3, 0, 0, null),   // no contest
+                new Factorization.Example(new String[]{"p1"}, 1, 0, 0, "c3"),
+                new Factorization.Example(new String[]{"p2"}, 2, 0, 0, "c3"),
+                new Factorization.Example(new String[]{"p3"}, 2, 0, 0, "c3"),
+                new Factorization.Example(new String[]{"p4"}, 3, 0, 0, "c3"),
+                new Factorization.Example(new String[]{"p1"}, 0, 0, 0, "c4"),   // all tied: no information
+                new Factorization.Example(new String[]{"p2"}, 0, 0, 0, "c4"));
+        final double[] s = {0.3, -0.2, 0.5, 2.0, 1.0, 0.1, 0.4, -0.6, 0.8, 1.5, -1.5};
         final Factorization.PlackettLuce full = new Factorization.PlackettLuce(examples, s.clone(), 0, false);
         full.refresh();
         final double all = Math.log(Math.exp(0.3) + Math.exp(-0.2) + Math.exp(0.5));
-        final double tied = Math.log(Math.exp(-0.2) + Math.exp(0.5));
-        Assertions.assertEquals(0.3 - all + (-0.2 - tied) + (0.5 - tied), full.logLikelihood(), 1e-12);
+        final double all3 = Math.log(Math.exp(0.1) + Math.exp(0.4) + Math.exp(-0.6) + Math.exp(0.8));
+        final double second3 = Math.log(Math.exp(0.4) + Math.exp(-0.6) + Math.exp(0.8));
+        Assertions.assertEquals(0.3 - all + (0.1 - all3) + (0.4 - second3) + (-0.6 - second3), full.logLikelihood(), 1e-12);
         final Factorization.PlackettLuce winner = new Factorization.PlackettLuce(examples, s.clone(), 1, false);
         winner.refresh();
-        Assertions.assertEquals(0.3 - all, winner.logLikelihood(), 1e-12);
-        // descending: the larger target is the better place (p2 / p3 tie for the win, p1 is chosen last from its own pool)
+        Assertions.assertEquals(0.3 - all + (0.1 - all3), winner.logLikelihood(), 1e-12);
+        // descending: the larger target is the better place (p2 / p3 tie for the win, p1 is last and chooses nothing)
         final Factorization.PlackettLuce descending = new Factorization.PlackettLuce(examples, s.clone(), 0, true);
         descending.refresh();
-        Assertions.assertEquals((-0.2 - all) + (0.5 - all) + 0, descending.logLikelihood(), 1e-12);
+        final double rest3 = Math.log(Math.exp(0.1) + Math.exp(0.4) + Math.exp(-0.6));
+        Assertions.assertEquals((-0.2 - all) + (0.5 - all) + (0.8 - all3) + (0.4 - rest3) + (-0.6 - rest3),
+                descending.logLikelihood(), 1e-12);
     }
 
     /** The coordinate step's gradient and curvature are those of the log-likelihood along the slope direction. */
@@ -342,6 +352,29 @@ public class FactorizationTest {
         final double even = model.pair(new String[]{"p2", "v0"}, 0, 1) - model.pair(new String[]{"p2", "v1"}, 0, 1);
         final double odd = model.pair(new String[]{"p3", "v0"}, 0, 1) - model.pair(new String[]{"p3", "v1"}, 0, 1);
         Assertions.assertTrue(even > 0.5 && odd < -0.5, "even " + even + " odd " + odd);
+    }
+
+    /**
+     * Plackett–Luce: a lone entry or a contest of equal targets carries no information — it counts towards neither
+     * minRows nor a value's count.
+     */
+    @Test
+    public void testPlackettLuceLoneEntriesTakeNoPart() {
+        final List<Factorization.Example> examples = List.of(
+                new Factorization.Example(new String[]{"p1", "v"}, 1, 0, 0, "c1"),
+                new Factorization.Example(new String[]{"p2", "v"}, 2, 0, 0, "c1"),
+                new Factorization.Example(new String[]{"p3", "v"}, 1, 0, 0, "c2"),    // alone
+                new Factorization.Example(new String[]{"p4", "v"}, 0, 0, 0, "c3"),    // all tied (nobody sold)
+                new Factorization.Example(new String[]{"p1", "v"}, 0, 0, 0, "c3"));
+        final Factorization.Options options = new Factorization.Options(List.of("player", "venue"), false, 2, 5, 0.1, 1L,
+                Factorization.Loss.plackettLuce, 0, false, true);
+        final Factorization.Model model = Factorization.fit(options, examples);
+        Assertions.assertEquals(0L, model.count(new String[]{"p3", "v"}, 0));
+        Assertions.assertEquals(0L, model.count(new String[]{"p4", "v"}, 0));
+        Assertions.assertEquals(1L, model.count(new String[]{"p1", "v"}, 0));
+        Assertions.assertEquals(2L, model.count(new String[]{"p1", "v"}, 1));
+        Assertions.assertNull(Factorization.fit(options, examples, 3));
+        Assertions.assertNotNull(Factorization.fit(options, examples, 2));
     }
 
     /** Logistic loss: the fitted probability of a cell follows its observed rate; linear: false fits no per-value weight. */

@@ -1056,22 +1056,30 @@ fields are all numeric is a quadratic form of the values (warning `factorization
 - **Contests** (`plackettLuce` / `softmax`): `contest` names a `contexts[].name`; the rows of one group **sharing an event
   time** are one contest, as for the `rating` op. `order` says which end of the target is better — `ascending` (default:
   a place, smaller is better) or `descending` (a score or a 1 / 0 win flag: larger is better). Places are 1 + the entries
-  strictly better, so equal targets tie and are chosen from one pool (the likelihood never depends on the row order);
-  `top: k` makes only the first k places choices (the entries behind stay in the earlier pools: a top-k likelihood).
-  A contest of one entry, or a row without a contest key, takes no part. The loss sees score differences within a
+  strictly better, so equal targets tie and are chosen from one pool (the likelihood never depends on the row order):
+  a tie group of m entries is m choices from that pool (Breslow). The `rating` op's tie form weighs the group as one
+  choice (1 / m each), so with ties the two likelihoods differ by that weight — a rating used as the offset is still a
+  valid baseline, but the two fits are the same model only on contests without ties. The last place is never a choice
+  (its entries finish there in some order whatever their scores), so a tie for last — every unsold item of a
+  session, every non-finisher — orders nothing among itself. `top: k` makes only the first k places choices (the
+  entries behind stay in the earlier pools: a top-k likelihood). A contest whose entries all share one place (a single
+  entry, or equal targets throughout: a session where nothing sold) and a row without a contest key take no part (nor
+  count towards `fit.minRows` or a `count` readout). With a 0 / 1 target and many positives per contest, Breslow
+  approximates the exact "these m were picked" likelihood less well; `logistic` is the alternative. The loss sees score differences within a
   contest only: there is no global bias, a field that is constant within every contest (a key of the contest, a venue)
   gets no main effect — its pairs with the fields that vary within a contest are identified, which is where its
   information is (info `factorization.contest.constant`; a `pair` of two contest keys is warned as noise,
   `factorization.contest.constantPair`). Under `fit.mode: fold` without `groupBy` the fold unit is the contest
-  (event time + its keys), so a contest is never split; with `groupBy` an entity's rows leave their contests, and the
+  (event time + its keys, the time read as epoch milliseconds as the contest is), so a contest is never split; with `groupBy` an entity's rows leave their contests, and the
   rest is ranked among itself (a Plackett–Luce order restricted to a subset is Plackett–Luce with the same strengths).
 - **Offset**: `task.offset` (a `baselines[].name`) is read in **probability space** under `logistic` / `plackettLuce`
   (`offsetScale: probability`, default — `ln b` for a contest, `logit b` for logistic; a row whose offset gives no finite
   score, `b ≤ 0` in a contest or `b ∉ (0, 1)` under logistic, is not a training row) or as a score already
   (`offsetScale: score`). The outputs never include it.
 - **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
-  parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). The
-  artifact manifest records the `loss`.
+  parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). Under
+  `plackettLuce` / `softmax` `als.reg` must be > 0: the ridge is what fixes what a contest cannot see (a contest key's
+  main effect). The artifact manifest records the `loss`.
 - **Probabilities**: the context `softmax` op over the `sum` column with the same offset turns the log-strengths into win
   probabilities within the group — the serving-side reading of exactly this model:
 

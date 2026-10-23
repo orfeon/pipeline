@@ -4370,6 +4370,9 @@ public final class FeaturePlanCompiler {
         }
         final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
         final String what = "factorization fits " + variant + " (k = " + latentDim + ") by ALS on one worker per fit";
+        // a ranking loss over a known context folds by its contest (task.loss below, foldUnitKeys)
+        final boolean contestFolds = ("plackettLuce".equals(def.taskLoss) || "softmax".equals(def.taskLoss))
+                && def.taskContest != null && contexts.containsKey(def.taskContest);
         switch (mode) {
             case forward -> {
                 final ForwardBlocks blocks = fitSpec.forwardBlocks();
@@ -4386,7 +4389,7 @@ public final class FeaturePlanCompiler {
             }
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
                     + (fitSpec.groupBy != null ? "fit.groupBy entity " + fitSpec.groupBy
-                    : "plackettLuce".equals(def.taskLoss) || "softmax".equals(def.taskLoss) ? "contest: time.field + the keys of " + def.taskContest
+                    : contestFolds ? "contest: time.field + the keys of " + def.taskContest
                     : "row identity: time.field + orderTieBreak") + "), each row read from its own"
                     + " fold's model, the fits in parallel; a row without a fold unit reads null" + minRowsPhrase(minRows, null)
                     + (Alignment.NONE.equals(align) ? "; the embeddings of every fold model are oriented on their own (fit.align none): an embedding column means something else in every fold"
@@ -4447,6 +4450,14 @@ public final class FeaturePlanCompiler {
                 contestKeys = contest.keys();
             }
             if (top != null && top < 1) diagnostics.error("factorization.task.top", loc, "task.top must be >= 1: " + top);
+            if (def.taskOrder != null && !List.of("ascending", "descending").contains(def.taskOrder)) {
+                diagnostics.error("factorization.task.order", loc, "task.order must be ascending | descending: " + def.taskOrder);
+            }
+            // the likelihood is invariant to a common shift within a contest: the ridge is what fixes what it cannot see
+            // (a contest key's main effect would otherwise follow rounding noise)
+            if (def.reg != null && !(def.reg > 0)) {
+                diagnostics.error("factorization.als", loc, "als.reg must be > 0 under loss " + lossText + " (a contest sees score differences only): " + def.reg);
+            }
         } else {
             for (final String key : new String[]{"contest", "order", "top"}) {
                 final boolean declared = switch (key) {
@@ -4458,7 +4469,6 @@ public final class FeaturePlanCompiler {
             }
         }
         final String order = def.taskOrder == null ? "ascending" : def.taskOrder;
-        if (!List.of("ascending", "descending").contains(order)) diagnostics.error("factorization.task.order", loc, "task.order must be ascending | descending: " + order);
         String offsetScale = null;
         if (def.taskOffsetScale != null && !List.of("probability", "score").contains(def.taskOffsetScale)) {
             diagnostics.error("factorization.task.offsetScale", loc, "task.offsetScale must be probability | score: " + def.taskOffsetScale);
@@ -4466,6 +4476,8 @@ public final class FeaturePlanCompiler {
             if (def.taskOffsetScale != null) diagnostics.warning("factorization.task.offsetScale", loc, "task.offsetScale applies to loss logistic / plackettLuce only (squared subtracts the offset as it is)");
         } else if (def.taskOffset != null) {
             offsetScale = def.taskOffsetScale == null ? "probability" : def.taskOffsetScale;
+        } else if (def.taskOffsetScale != null) {
+            diagnostics.warning("factorization.task.offsetScale", loc, "task.offsetScale reads task.offset, and there is none: it is ignored");
         }
         final boolean linear = def.fmLinear == null || def.fmLinear;
         if (ranked && contestKeys != null) {
@@ -4598,7 +4610,8 @@ public final class FeaturePlanCompiler {
                     c.coordinates.put("warmEpochs", Integer.toString(warmEpochs));
                 }
                 if (offsetColumn != null) {
-                    // read from the training rows only (the example's target minus its baseline), like the target
+                    // read from the training rows only (the score the example starts from: subtracted from the target
+                    // under squared loss, offsetScale under the others), like the target
                     c.coordinates.put("offset", offsetColumn);
                     addPastInput(c, offsetColumn);
                 }
