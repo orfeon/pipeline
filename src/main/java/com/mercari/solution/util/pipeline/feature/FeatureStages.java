@@ -1478,6 +1478,11 @@ public final class FeatureStages {
             return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales);
         }
 
+        /** The indices of a comma-separated list of the block's fields. */
+        int[] indices(final String names) {
+            return Arrays.stream(names.split(",")).mapToInt(fields::indexOf).toArray();
+        }
+
         /** Per field: numeric or categorical. */
         boolean[] numeric() {
             return options().numeric();
@@ -1620,8 +1625,8 @@ public final class FeatureStages {
                 if (model != null) {
                     switch (col.getCoordinates().get("kind")) {
                         case "pair" -> {
-                            final String[] pair = col.getCoordinates().get("pair").split(",");
-                            v = model.pair(x, numericValues, fields.indexOf(pair[0]), fields.indexOf(pair[1]), "true".equals(col.getCoordinates().get("perUnit")));
+                            final int[] pair = indices(col.getCoordinates().get("pair"));
+                            v = model.pair(x, numericValues, pair[0], pair[1], "true".equals(col.getCoordinates().get("perUnit")));
                         }
                         case "embedding" -> {
                             final int f = fields.indexOf(col.getCoordinates().get("field"));
@@ -1629,6 +1634,7 @@ public final class FeatureStages {
                             final double[] e = model.embedding(x, f, d + 1);
                             v = e == null || e.length <= d ? null : e[d];
                         }
+                        case "between" -> v = model.between(x, numericValues, indices(col.getCoordinates().get("left")), indices(col.getCoordinates().get("right")));
                         case "count" -> v = model.count(x, fields.indexOf(col.getCoordinates().get("field")));
                         default -> v = model.predict(x, numericValues);
                     }

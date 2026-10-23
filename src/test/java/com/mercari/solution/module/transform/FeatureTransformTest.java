@@ -716,6 +716,7 @@ public class FeatureTransformTest {
                       outputs:
                         - {pair: [seller_id, category], as: fm_pair}
                         - {count: seller_id, as: fm_seller_rows}
+                        - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side}
                         - {sum: true, as: fm_linear}
                 """.formatted(fit);
         return FEATURE_CONFIG.replace("      output:\n", fm.replaceAll("(?m)^", "    ") + "      output:\n");
@@ -743,8 +744,12 @@ public class FeatureTransformTest {
             Assertions.assertNull(row.getPrimitiveValue("f_fm_linear"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_seller_rows"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_side"), row::toString);
             return;
         }
+        final Double side = model.between(values, null, new int[]{0, 1}, new int[]{2});
+        if (side == null) Assertions.assertNull(row.getPrimitiveValue("f_fm_side"), row::toString);
+        else Assertions.assertEquals(side, row.getAsDouble("f_fm_side"), 1e-9, row::toString);
         Assertions.assertEquals(model.predict(values), row.getAsDouble("f_fm_linear"), 1e-9, row::toString);
         final Double pair = model.pair(values, 0, 1);
         if (pair == null) Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), row::toString);

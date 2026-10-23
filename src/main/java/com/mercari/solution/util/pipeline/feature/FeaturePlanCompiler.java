@@ -4508,6 +4508,16 @@ public final class FeaturePlanCompiler {
                     diagnostics.warning("factorization.contest.constantPair", loc, "pair " + out.pair + " is constant within every contest of " + def.taskContest
                             + ": a ranking loss cannot identify it, its score is noise around 0");
                 }
+                if ("between".equals(out.kind)) {
+                    final List<String> constantPairs = new ArrayList<>();
+                    for (final String f : out.left) {
+                        for (final String g : out.right) if (contestKeys.contains(f) && contestKeys.contains(g)) constantPairs.add(f + " x " + g);
+                    }
+                    if (!constantPairs.isEmpty()) {
+                        diagnostics.warning("factorization.contest.constantPair", loc, "between " + out.left + " / " + out.right + " sums the pairs " + constantPairs
+                                + ", constant within every contest of " + def.taskContest + ": a ranking loss cannot identify them, they add noise around 0");
+                    }
+                }
             }
         }
         if (ranked) {
@@ -4563,6 +4573,28 @@ public final class FeaturePlanCompiler {
                         c.coordinates.put("dim", Integer.toString(d));
                         cols.add(c);
                     }
+                }
+                case "between" -> {
+                    if (out.left.isEmpty() || out.right.isEmpty() || !def.fields.containsAll(out.left) || !def.fields.containsAll(out.right)) {
+                        diagnostics.error("factorization.outputs", loc, "between needs left and right lists of the block's fields: " + out.left + " / " + out.right);
+                        continue;
+                    }
+                    final List<String> both = new ArrayList<>(out.left);
+                    both.retainAll(out.right);
+                    if (!both.isEmpty()) {
+                        diagnostics.error("factorization.outputs", loc, "between: a field is on one side only (a pair of a field with itself has no term): " + both);
+                        continue;
+                    }
+                    if (new HashSet<>(out.left).size() != out.left.size() || new HashSet<>(out.right).size() != out.right.size()) {
+                        diagnostics.error("factorization.outputs", loc, "between: a field is listed once per side (a repeat would count its pairs twice): " + out.left + " / " + out.right);
+                        continue;
+                    }
+                    if (out.perUnit) diagnostics.warning("factorization.outputs", loc, "perUnit applies to pair outputs and is ignored for between " + out.left + " / " + out.right);
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_between", Schema.FieldType.FLOAT64, computeAt);
+                    c.coordinates.put("kind", "between");
+                    c.coordinates.put("left", String.join(",", out.left));
+                    c.coordinates.put("right", String.join(",", out.right));
+                    cols.add(c);
                 }
                 case "count" -> {
                     if (out.count == null || !def.fields.contains(out.count)) {

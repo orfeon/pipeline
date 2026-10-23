@@ -273,14 +273,17 @@ public class FeatureSpec implements Serializable {
         public String as;
     }
 
-    /** One factorization output: {@code pair: [a, b]}, {@code embedding: field (dims)}, {@code count: field} or {@code sum: true}. */
+    /** One factorization output: {@code pair: [a, b]}, {@code between: {left, right}}, {@code embedding: field (dims)}, {@code count: field} or {@code sum: true}. */
     public static class FmOutput implements Serializable {
         public String kind;
         public List<String> pair = new ArrayList<>();
         public String embedding;
         public String count;
-        /** pair: the slope per unit of the numeric fields' standardised values instead of the term at the row's values. */
+        /** pair: the slope per unit of the numeric fields' standardised values instead of the term at the row's values (read on between only to warn that it is ignored). */
         public boolean perUnit;
+        /** between: the fields of the two sides. */
+        public List<String> left = new ArrayList<>();
+        public List<String> right = new ArrayList<>();
         public Integer dims;
         public String as;
     }
@@ -1318,13 +1321,20 @@ public class FeatureSpec implements Serializable {
                 fm.kind = "embedding";
                 fm.embedding = Json.string(out, "embedding");
                 fm.dims = Json.integer(out, "dims");
+            } else if (out.has("between")) {
+                fm.kind = "between";
+                fm.perUnit = Json.bool(out, "perUnit", false);
+                if (out.get("between").isJsonObject()) {
+                    fm.left = Json.strings(out.getAsJsonObject("between"), "left");
+                    fm.right = Json.strings(out.getAsJsonObject("between"), "right");
+                }
             } else if (out.has("count")) {
                 fm.kind = "count";
                 fm.count = Json.string(out, "count");
             } else if (Json.bool(out, "sum", false)) {
                 fm.kind = "sum";
             } else {
-                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], embedding: <field>, count: <field> or sum: true");
+                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], between: {left, right}, embedding: <field>, count: <field> or sum: true");
                 continue;
             }
             def.fmOutputs.add(fm);
