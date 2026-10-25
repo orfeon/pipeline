@@ -42,7 +42,7 @@ This is **not** a Flex Template launcher image. The launcher is built with Jib v
 
 ```sh
 docker build -f containers/dataflow-gpu/Dockerfile \
-  --build-arg BEAM_VERSION=2.76.0 \
+  --build-arg BEAM_VERSION=2.77.0 \
   -t {image} .
 ```
 
