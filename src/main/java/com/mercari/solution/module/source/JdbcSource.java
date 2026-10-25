@@ -1,7 +1,7 @@
 package com.mercari.solution.module.source;
 
 import com.mercari.solution.util.cloud.SecretProviders;
-import com.mercari.solution.config.options.DataflowOptions;
+import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.coder.ElementCoder;
@@ -144,12 +144,12 @@ public class JdbcSource extends Source {
             }
 
             if(user == null) {
-                final String serviceAccount = DataflowOptions.getServiceAccount(pipeline.getOptions());
+                final String serviceAccount = OptionUtil.getWorkerServiceAccount(pipeline.getOptions(), "parameters.user");
                 LOG.info("Using worker service account: '{}' for database user", serviceAccount);
                 user = serviceAccount.replace(".gserviceaccount.com", "");
                 password = "dummy";
                 if(!url.contains("enableIamAuth")) {
-                    url = url + "&enableIamAuth=true";
+                    url = url + (url.contains("?") ? "&" : "?") + "enableIamAuth=true";
                 }
             } else if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
                 LOG.info("parameters.user|password is secret resource.");

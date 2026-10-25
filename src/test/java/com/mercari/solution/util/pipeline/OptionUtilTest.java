@@ -59,6 +59,27 @@ public class OptionUtilTest {
                 () -> OptionUtil.getRunner(optionsWith(UnknownRunner.class)));
     }
 
+    /**
+     * Without options.dataflow.serviceAccount the worker identity is only derived from the current credentials on
+     * the in-process runners; elsewhere a clear error names the parameter to set (no NullPointerException).
+     */
+    @Test
+    public void testGetWorkerServiceAccountFailsClearlyWhenUnknown() {
+        final IllegalArgumentException dataflow = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> OptionUtil.getWorkerServiceAccount(optionsWith(DataflowRunner.class), "parameters.user"));
+        Assertions.assertTrue(dataflow.getMessage().contains("parameters.user"), dataflow.getMessage());
+        Assertions.assertTrue(dataflow.getMessage().contains("options.dataflow.serviceAccount"), dataflow.getMessage());
+
+        // options.dataflow is not applied on the other runners: only parameters.user helps there
+        for(final Class<? extends PipelineRunner<?>> runner : List.<Class<? extends PipelineRunner<?>>>of(
+                FlinkRunner.class, SparkRunner.class, PortableRunner.class, UnknownRunner.class)) {
+            final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> OptionUtil.getWorkerServiceAccount(optionsWith(runner), "parameters.user"));
+            Assertions.assertTrue(e.getMessage().contains("parameters.user"), e.getMessage());
+            Assertions.assertFalse(e.getMessage().contains("options.dataflow.serviceAccount"), e.getMessage());
+        }
+    }
+
     @Test
     public void testIsStreaming() {
         final PipelineOptions options = PipelineOptionsFactory.create();

@@ -807,9 +807,7 @@ public class DataflowAction implements ActionService {
      */
     static String dataflowOption(final PipelineOptions options, final String getter) {
         try {
-            @SuppressWarnings("unchecked")
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>) Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
-            final Object value = clazz.getMethod(getter).invoke(options.as(clazz));
+            final Object value = DataflowOptions.getOption(options, getter);
             return value == null || value.toString().isEmpty() ? null : value.toString();
         } catch (final Throwable e) {
             return null;

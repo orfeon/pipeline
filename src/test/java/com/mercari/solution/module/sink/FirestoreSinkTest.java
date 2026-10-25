@@ -5,6 +5,8 @@ import com.google.firestore.v1.Write;
 import com.google.firestore.v1.WriteResult;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
+import com.mercari.solution.MPipeline;
+import com.mercari.solution.config.Config;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1;
 import org.apache.beam.sdk.testing.PAssert;
@@ -25,6 +27,45 @@ import org.junit.jupiter.api.Test;
 public class FirestoreSinkTest {
 
     private static final String DOCUMENT_NAME = "projects/p/databases/(default)/documents/MyCollection/doc1";
+
+    /**
+     * Assembling the sink reads the Dataflow maxNumWorkers as the rpcQos hint. It must not need the Dataflow
+     * runner on the classpath: the direct / prism / flink / spark builds do not ship it (run with -Pdirect).
+     */
+    @Test
+    public void testAssemblyWithoutDataflowRunner() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ { "id": "a" } ]
+                      },
+                      "schema": {
+                        "fields": [ { "name": "id", "type": "string" } ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "firestoreSink",
+                      "module": "firestore",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "myproject",
+                        "collection": "MyCollection",
+                        "nameFields": ["id"]
+                      }
+                    }
+                  ]
+                }
+                """;
+        final TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(pipeline, Config.load(configJson));
+    }
 
     @Test
     public void testFailureDoFnEmitsBadRecord() {

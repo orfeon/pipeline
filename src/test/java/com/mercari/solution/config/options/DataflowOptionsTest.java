@@ -136,4 +136,38 @@ public class DataflowOptionsTest {
                 """));
     }
 
+    /** Modules read Dataflow options on every runner: an absent runner class yields null instead of an exception. */
+    @Test
+    public void testGetOptionIsNullWithoutTheRunnerClass() {
+        final PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
+        Assertions.assertNull(DataflowOptions.getOption(pipelineOptions,
+                "org.apache.beam.runners.dataflow.options.NoSuchPipelineOptions", "getServiceAccount"));
+    }
+
+    @Test
+    public void testGetServiceAccountAndMaxNumWorkers() throws Exception {
+        try {
+            Class.forName(DataflowOptions.DATAFLOW_PIPELINE_OPTIONS);
+        } catch (final ClassNotFoundException e) {
+            // without the dataflow runner: no service account, maxNumWorkers as if not set
+            final org.apache.beam.sdk.Pipeline pipeline = org.apache.beam.sdk.Pipeline.create(PipelineOptionsFactory.create());
+            Assertions.assertNull(DataflowOptions.getServiceAccount(pipeline.getOptions()));
+            Assertions.assertEquals(0, DataflowOptions.getMaxNumWorkers(org.apache.beam.sdk.values.PBegin.in(pipeline)));
+            return;
+        }
+        Assertions.assertNull(DataflowOptions.getServiceAccount(PipelineOptionsFactory.create()), "not set");
+
+        final PipelineOptions pipelineOptions = applyOptions("""
+                {
+                  "dataflow": {
+                    "serviceAccount": "worker@my-project.iam.gserviceaccount.com",
+                    "maxNumWorkers": 8
+                  }
+                }
+                """);
+        final org.apache.beam.sdk.Pipeline pipeline = org.apache.beam.sdk.Pipeline.create(pipelineOptions);
+        Assertions.assertEquals("worker@my-project.iam.gserviceaccount.com", DataflowOptions.getServiceAccount(pipelineOptions));
+        Assertions.assertEquals(8, DataflowOptions.getMaxNumWorkers(org.apache.beam.sdk.values.PBegin.in(pipeline)));
+    }
+
 }

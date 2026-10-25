@@ -77,6 +77,7 @@ public class FirestoreSource extends Source {
                 this.orderDirection = StructuredQuery.Direction.ASCENDING;
             }
             if(this.partitionCount == null) {
+                // 0 when maxNumWorkers is not set or the dataflow runner is absent
                 final int hintMaxNumWorkers = DataflowOptions.getMaxNumWorkers(input);
                 this.partitionCount = hintMaxNumWorkers > 1 ? hintMaxNumWorkers - 1: 1L;
             }
