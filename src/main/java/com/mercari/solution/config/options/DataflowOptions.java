@@ -44,11 +44,17 @@ public class DataflowOptions implements Serializable {
     private String sdkContainerImage;
     private String sdkHarnessContainerImageOverrides;
     private Boolean enableStreamingEngine;
+    private Integer streamingSideInputCacheMb;
     private Integer streamingSideInputCacheExpirationMillis;
     private Boolean update;
     private Map<String, String> transformNameMapping;
     private List<String> dataflowServiceOptions;
     private List<String> experiments;
+
+    // debugging
+    private Boolean hotKeyLoggingEnabled;
+    private Boolean dumpHeapOnOOM;
+    private String saveHeapDumpsToGcsPath;
 
     private String templateLocation;
 
@@ -92,122 +98,80 @@ public class DataflowOptions implements Serializable {
             return;
         }
 
+        final RunnerOptionSetter setter;
         try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName(DATAFLOW_PIPELINE_OPTIONS);
-            final PipelineOptions dataflowOptions = pipelineOptions.as(clazz);
-
-            if(dataflow.tempLocation != null) {
-                pipelineOptions.setTempLocation(dataflow.tempLocation);
-            }
-            if(dataflow.project != null) {
-                clazz.getMethod("setProject", String.class).invoke(dataflowOptions, dataflow.project);
-            }
-            if(dataflow.stagingLocation != null) {
-                clazz.getMethod("setStagingLocation", String.class).invoke(dataflowOptions, dataflow.stagingLocation);
-            }
-            if(dataflow.labels != null && !dataflow.labels.isEmpty()) {
-                clazz.getMethod("setLabels", Map.class).invoke(dataflowOptions, dataflow.labels);
-            }
-            if(dataflow.autoscalingAlgorithm != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineWorkerPoolOptions$AutoscalingAlgorithmType");
-                clazz.getMethod("setAutoscalingAlgorithm", enumClazz).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.autoscalingAlgorithm));
-            }
-            if(dataflow.flexRSGoal != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions$FlexResourceSchedulingGoal");
-                clazz.getMethod("setFlexRSGoal", enumClazz).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.flexRSGoal));
-            }
-            if(dataflow.numWorkers != null && dataflow.numWorkers > 0) {
-                clazz.getMethod("setNumWorkers", int.class).invoke(dataflowOptions, dataflow.numWorkers);
-            }
-            if(dataflow.maxNumWorkers != null && dataflow.maxNumWorkers > 0) {
-                clazz.getMethod("setMaxNumWorkers", int.class).invoke(dataflowOptions, dataflow.maxNumWorkers);
-            }
-            if(dataflow.numberOfWorkerHarnessThreads != null && dataflow.numberOfWorkerHarnessThreads > 0) {
-                clazz.getMethod("setNumberOfWorkerHarnessThreads", int.class).invoke(dataflowOptions, dataflow.numberOfWorkerHarnessThreads);
-            }
-            if(dataflow.workerMachineType != null) {
-                clazz.getMethod("setWorkerMachineType", String.class).invoke(dataflowOptions, dataflow.workerMachineType);
-            }
-            if(dataflow.region != null) {
-                clazz.getMethod("setRegion", String.class).invoke(dataflowOptions, dataflow.region);
-            }
-            if(dataflow.workerRegion != null) {
-                pipelineOptions.as(GcpOptions.class).setWorkerRegion(dataflow.workerRegion);
-            }
-            if(dataflow.workerZone != null) {
-                pipelineOptions.as(GcpOptions.class).setWorkerZone(dataflow.workerZone);
-            }
-            if(dataflow.diskSizeGb != null) {
-                clazz.getMethod("setDiskSizeGb", int.class).invoke(dataflowOptions, dataflow.diskSizeGb);
-            }
-            if(dataflow.workerDiskType != null) {
-                clazz.getMethod("setWorkerDiskType", String.class).invoke(dataflowOptions, dataflow.workerDiskType);
-            }
-            if(dataflow.serviceAccount != null) {
-                clazz.getMethod("setServiceAccount", String.class).invoke(dataflowOptions, dataflow.serviceAccount);
-            }
-            if(dataflow.impersonateServiceAccount != null) {
-                pipelineOptions.as(GcpOptions.class).setImpersonateServiceAccount(dataflow.impersonateServiceAccount);
-            }
-            if(dataflow.network != null) {
-                clazz.getMethod("setNetwork", String.class).invoke(dataflowOptions, dataflow.network);
-            }
-            if(dataflow.subnetwork != null) {
-                clazz.getMethod("setSubnetwork", String.class).invoke(dataflowOptions, dataflow.subnetwork);
-            }
-            if(dataflow.usePublicIps != null) {
-                clazz.getMethod("setUsePublicIps", Boolean.class).invoke(dataflowOptions, dataflow.usePublicIps);
-            }
-            if(dataflow.workerCacheMb != null && dataflow.workerCacheMb > 0) {
-                clazz.getMethod("setWorkerCacheMb", Integer.class).invoke(dataflowOptions, dataflow.workerCacheMb);
-            }
-            if(dataflow.createFromSnapshot != null) {
-                clazz.getMethod("setCreateFromSnapshot", String.class).invoke(dataflowOptions, dataflow.createFromSnapshot);
-            }
-            if(dataflow.sdkContainerImage != null) {
-                clazz.getMethod("setSdkContainerImage", String.class).invoke(dataflowOptions, dataflow.sdkContainerImage);
-            }
-            if(dataflow.sdkHarnessContainerImageOverrides != null) {
-                clazz.getMethod("setSdkHarnessContainerImageOverrides", String.class).invoke(dataflowOptions, dataflow.sdkHarnessContainerImageOverrides);
-            }
-            if(dataflow.streamingSideInputCacheExpirationMillis != null) {
-                clazz.getMethod("setStreamingSideInputCacheExpirationMillis", Integer.class).invoke(dataflowOptions, dataflow.streamingSideInputCacheExpirationMillis);
-            }
-            if(dataflow.update != null) {
-                clazz.getMethod("setUpdate", Boolean.class).invoke(dataflowOptions, dataflow.update);
-                if(dataflow.update) {
-                    if(dataflow.transformNameMapping != null && !dataflow.transformNameMapping.isEmpty()) {
-                        clazz.getMethod("setTransformNameMapping", Map.class).invoke(dataflowOptions, dataflow.transformNameMapping);
-                    }
-                }
-            }
-            if(dataflow.enableStreamingEngine != null && pipelineOptions.as(StreamingOptions.class).isStreaming()) {
-                dataflowOptions.as(GcpOptions.class).setEnableStreamingEngine(dataflow.enableStreamingEngine);
-            }
-            if(dataflow.dataflowServiceOptions != null && !dataflow.dataflowServiceOptions.isEmpty()) {
-                final List<String> existingDataflowServiceOptions = Optional
-                        .ofNullable((List<String>)clazz.getMethod("getDataflowServiceOptions").invoke(dataflowOptions))
-                        .orElseGet(ArrayList::new);
-                existingDataflowServiceOptions.addAll(dataflow.dataflowServiceOptions);
-                clazz.getMethod("setDataflowServiceOptions", List.class).invoke(dataflowOptions, existingDataflowServiceOptions.stream().distinct().toList());
-            }
-            if(dataflow.experiments != null && !dataflow.experiments.isEmpty()) {
-                final List<String> existingExperiments = Optional
-                        .ofNullable((List<String>)clazz.getMethod("getExperiments").invoke(dataflowOptions))
-                        .orElseGet(ArrayList::new);
-                existingExperiments.addAll(dataflow.experiments);
-                clazz.getMethod("setExperiments", List.class).invoke(dataflowOptions, existingExperiments.stream().distinct().toList());
-            }
-            /*
-            if(dataflow.templateLocation != null) {
-                clazz.getMethod("setTemplateLocation", String.class).invoke(dataflowOptions, dataflow.templateLocation);
-            }
-             */
-
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+            setter = RunnerOptionSetter.of(pipelineOptions, DATAFLOW_PIPELINE_OPTIONS);
+        } catch (final ClassNotFoundException e) {
             throw new RuntimeException("Failed to set dataflow runner pipeline options", e);
         }
 
+        if(dataflow.tempLocation != null) {
+            pipelineOptions.setTempLocation(dataflow.tempLocation);
+        }
+        setter.set("project", dataflow.project)
+                .set("stagingLocation", dataflow.stagingLocation)
+                .set("autoscalingAlgorithm", dataflow.autoscalingAlgorithm)
+                .set("flexRSGoal", dataflow.flexRSGoal)
+                .set("workerMachineType", dataflow.workerMachineType)
+                .set("region", dataflow.region)
+                .set("workerRegion", dataflow.workerRegion)
+                .set("workerZone", dataflow.workerZone)
+                .set("diskSizeGb", dataflow.diskSizeGb)
+                .set("workerDiskType", dataflow.workerDiskType)
+                .set("serviceAccount", dataflow.serviceAccount)
+                .set("impersonateServiceAccount", dataflow.impersonateServiceAccount)
+                .set("network", dataflow.network)
+                .set("subnetwork", dataflow.subnetwork)
+                .set("usePublicIps", dataflow.usePublicIps)
+                .set("createFromSnapshot", dataflow.createFromSnapshot)
+                .set("sdkContainerImage", dataflow.sdkContainerImage)
+                .set("sdkHarnessContainerImageOverrides", dataflow.sdkHarnessContainerImageOverrides)
+                .set("streamingSideInputCacheMb", dataflow.streamingSideInputCacheMb)
+                .set("streamingSideInputCacheExpirationMillis", dataflow.streamingSideInputCacheExpirationMillis)
+                .set("hotKeyLoggingEnabled", dataflow.hotKeyLoggingEnabled)
+                .set("dumpHeapOnOOM", dataflow.dumpHeapOnOOM)
+                .set("saveHeapDumpsToGcsPath", dataflow.saveHeapDumpsToGcsPath)
+                .set("update", dataflow.update);
+
+        if(dataflow.labels != null && !dataflow.labels.isEmpty()) {
+            setter.set("labels", dataflow.labels);
+        }
+        if(dataflow.numWorkers != null && dataflow.numWorkers > 0) {
+            setter.set("numWorkers", dataflow.numWorkers);
+        }
+        if(dataflow.maxNumWorkers != null && dataflow.maxNumWorkers > 0) {
+            setter.set("maxNumWorkers", dataflow.maxNumWorkers);
+        }
+        if(dataflow.numberOfWorkerHarnessThreads != null && dataflow.numberOfWorkerHarnessThreads > 0) {
+            setter.set("numberOfWorkerHarnessThreads", dataflow.numberOfWorkerHarnessThreads);
+        }
+        if(dataflow.workerCacheMb != null && dataflow.workerCacheMb > 0) {
+            setter.set("workerCacheMb", dataflow.workerCacheMb);
+        }
+        if(Boolean.TRUE.equals(dataflow.update)
+                && dataflow.transformNameMapping != null && !dataflow.transformNameMapping.isEmpty()) {
+            setter.set("transformNameMapping", dataflow.transformNameMapping);
+        }
+        if(dataflow.enableStreamingEngine != null && pipelineOptions.as(StreamingOptions.class).isStreaming()) {
+            pipelineOptions.as(GcpOptions.class).setEnableStreamingEngine(dataflow.enableStreamingEngine);
+        }
+        if(dataflow.dataflowServiceOptions != null && !dataflow.dataflowServiceOptions.isEmpty()) {
+            setter.set("dataflowServiceOptions", merge((List<String>) setter.get("dataflowServiceOptions"), dataflow.dataflowServiceOptions));
+        }
+        if(dataflow.experiments != null && !dataflow.experiments.isEmpty()) {
+            setter.set("experiments", merge((List<String>) setter.get("experiments"), dataflow.experiments));
+        }
+        /*
+        if(dataflow.templateLocation != null) {
+            setter.set("templateLocation", dataflow.templateLocation);
+        }
+         */
+    }
+
+    private static List<String> merge(final List<String> existing, final List<String> additional) {
+        final List<String> merged = new ArrayList<>(Optional.ofNullable(existing).orElseGet(ArrayList::new));
+        merged.addAll(additional);
+        return merged.stream().distinct().toList();
     }
 
     static final String DATAFLOW_PIPELINE_OPTIONS = "org.apache.beam.runners.dataflow.options.DataflowPipelineOptions";
