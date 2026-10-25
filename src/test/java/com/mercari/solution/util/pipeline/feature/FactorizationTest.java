@@ -198,6 +198,17 @@ public class FactorizationTest {
         final Factorization.Model cut = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 1, 0.01, 7L), xor(5));
         Assertions.assertTrue(cut.report.flags().contains(Factorization.FitReport.UNCONVERGED), cut.report::summary);
         Assertions.assertTrue(cut.report.describe(Factorization.FitReport.UNCONVERGED).contains("still moved"));
+
+        // a diverged fit (an infinite target) is flagged although no comparison of a NaN holds, and its manifest entry
+        // stays strict JSON (the non-finite numbers as strings)
+        final List<Factorization.Example> infinite = new ArrayList<>(xor(5));
+        infinite.add(new Factorization.Example(new String[]{"a1", "b1", "c0"}, Double.POSITIVE_INFINITY, 0));
+        final Factorization.Model diverged = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 3, 0.01, 7L), infinite);
+        Assertions.assertFalse(Double.isFinite(diverged.report.objectiveEnd()), diverged.report::summary);
+        Assertions.assertTrue(diverged.report.flags().contains(Factorization.FitReport.UNCONVERGED), diverged.report::summary);
+        Assertions.assertTrue(diverged.report.describe(Factorization.FitReport.UNCONVERGED).contains("diverged"));
+        final String json = diverged.report.toJson().toString();
+        Assertions.assertFalse(json.matches(".*:\\s*-?(NaN|Infinity).*"), json);
     }
 
     /** perRow scales a value's ridge, never the bias: a constant target is read as itself, not shrunk towards 0. */

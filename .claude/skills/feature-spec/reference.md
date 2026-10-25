@@ -275,10 +275,12 @@ bias and fwfm's pair weights keep theirs). Give the
 factors a stronger ridge than the linear weights, and id-like fields (few rows per value) the strongest: a weakly
 penalized pair of ids memorizes the training targets, while one large λ for everything collapses every factor to 0.
 Choose λ on the walk-forward loss; the plan reports it (info `factorization.als.reg`). `als.tol: t` stops a fit once
-an epoch moves the penalised objective by less than `t` (epochs become a cap; a forward warm start then only shortens a
-fit instead of changing it — without it a non-converged fit depends on how many fits came before). Every fit logs its
-rows, epochs, objective, loss against the offset alone, parameter sizes and score spread; the warnings `spread`
-(within-contest sd > 5), `memorizing` (training loss < 1/10 of the offset's) and `unconverged` are counted as
+an epoch moves the penalised objective by less than `t` (epochs become a cap; a forward warm start then mostly shortens
+a fit rather than changing it — up to `t` for a convex fit, while a factorization is not convex and two starts can
+still settle in different optima; without tol a non-converged fit depends on how many fits came before). Every fit
+logs its rows, epochs, objective, loss against the offset alone, parameter sizes and score spread; the warnings
+`spread` (mean within-contest sd > 5), `memorizing` (training loss < 1/10 of the offset's) and `unconverged` (still
+moving, or diverged) are counted as
 `feature/fm_<block>_<flag>` — read them after a run before trusting the columns.
 
 ### `type: discretize` (always static)

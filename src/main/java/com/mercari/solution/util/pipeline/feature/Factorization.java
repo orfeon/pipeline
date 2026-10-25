@@ -358,7 +358,10 @@ public final class Factorization {
         public static final String SPREAD = "spread";
         /** The training loss fell below a tenth of the offset's (logistic / contest): the parameters learn the rows by heart. */
         public static final String MEMORIZING = "memorizing";
-        /** The objective was still moving at the last epoch: above {@code als.tol} at the cap, or (no tol) by more than {@link #MOVING}. */
+        /**
+         * The objective was still moving at the last epoch: above {@code als.tol} at the cap, or (no tol) by more than
+         * {@link #MOVING}; or it is not finite (the fit diverged).
+         */
         public static final String UNCONVERGED = "unconverged";
         static final double SPREAD_LIMIT = 5, MEMORIZING_RATIO = 0.1, MOVING = 1e-3;
 
@@ -369,8 +372,11 @@ public final class Factorization {
                         + " - the factors are under-regularised (als.reg factors)", scoreSd, SPREAD_LIMIT);
                 case MEMORIZING -> String.format("the training %s %.4g is below a tenth of the offset's %.4g: the model learns the training"
                         + " rows by heart (a pair close to unique per row, a weak factor ridge)", unit, loss, baselineLoss);
-                case UNCONVERGED -> converged || Double.isNaN(lastChange) ? flag : String.format("the objective still moved %.3g%% in the last epoch:"
-                        + " the result depends on the epoch count (and, warm-started, on how many fits came before) - more epochs or als.tol", 100 * lastChange);
+                case UNCONVERGED -> !Double.isFinite(objectiveEnd) ? "the objective is " + objectiveEnd + " after the fit: it diverged"
+                        + " (a non-finite target or score, or a ridge too weak to hold the parameters)"
+                        : converged || Double.isNaN(lastChange) ? flag : String.format("the objective still moved %.3g%% in the last epoch:"
+                        + " the result depends on the epoch count (and, warm-started, on how many fits came before) - als.tol to stop at"
+                        + " convergence, or more epochs when it is set (they are its cap)", 100 * lastChange);
                 default -> flag;
             };
         }
@@ -383,24 +389,28 @@ public final class Factorization {
                     maxLinear, factorNormP50, factorNormP99, maxFactorNorm, scoreSd, contest ? " within a contest" : "", maxScore);
         }
 
-        /** The manifest entry (no timing: the manifest describes the model, not the run). */
+        /**
+         * The manifest entry (no timing: the manifest describes the model, not the run). A non-finite number (the
+         * lastChange of a fit that ran no epoch, the values of a diverged fit) is written as its string form
+         * ({@link FitArtifact#lambdaJson}): JSON has no NaN / ±Infinity.
+         */
         public JsonObject toJson() {
             final JsonObject json = new JsonObject();
             json.addProperty("rows", rows);
             json.addProperty("epochs", epochs);
             json.addProperty("converged", converged);
-            json.addProperty("objectiveStart", objectiveStart);
-            json.addProperty("objectiveEnd", objectiveEnd);
-            json.addProperty("lastChange", lastChange);
+            json.add("objectiveStart", FitArtifact.lambdaJson(objectiveStart));
+            json.add("objectiveEnd", FitArtifact.lambdaJson(objectiveEnd));
+            json.add("lastChange", FitArtifact.lambdaJson(lastChange));
             json.addProperty("unit", unit);
-            json.addProperty("loss", loss);
-            json.addProperty("baselineLoss", baselineLoss);
-            json.addProperty("maxLinear", maxLinear);
-            json.addProperty("factorNormP50", factorNormP50);
-            json.addProperty("factorNormP99", factorNormP99);
-            json.addProperty("maxFactorNorm", maxFactorNorm);
-            json.addProperty("scoreSd", scoreSd);
-            json.addProperty("maxScore", maxScore);
+            json.add("loss", FitArtifact.lambdaJson(loss));
+            json.add("baselineLoss", FitArtifact.lambdaJson(baselineLoss));
+            json.add("maxLinear", FitArtifact.lambdaJson(maxLinear));
+            json.add("factorNormP50", FitArtifact.lambdaJson(factorNormP50));
+            json.add("factorNormP99", FitArtifact.lambdaJson(factorNormP99));
+            json.add("maxFactorNorm", FitArtifact.lambdaJson(maxFactorNorm));
+            json.add("scoreSd", FitArtifact.lambdaJson(scoreSd));
+            json.add("maxScore", FitArtifact.lambdaJson(maxScore));
             final JsonArray array = new JsonArray();
             flags.forEach(array::add);
             json.add("flags", array);
@@ -636,7 +646,8 @@ public final class Factorization {
                                      final String what) {
         final List<Example> used = informative(options, sorted);
         if (used.isEmpty() || used.size() < minRows) {
-            LOG.info("factorization {}{}: {} example(s), not solved (fit.minRows {})", options.label() == null ? "" : options.label() + " ", what, used.size(), minRows);
+            LOG.info("{}: {} example(s), not solved ({})", name(options, what), used.size(),
+                    used.isEmpty() ? "no training example" : "fewer than fit.minRows " + minRows);
             return null;
         }
         final Model model = train(options, used, warm, epochs);
@@ -646,9 +657,14 @@ public final class Factorization {
 
     /** The fit's log line, and a warning per flag it raised. */
     private static void log(final Options options, final String what, final Model model) {
-        final String name = "factorization " + (options.label() == null ? "" : options.label() + " ") + what;
+        final String name = name(options, what);
         LOG.info("{}: {}", name, model.report.summary());
         for (final String flag : model.report.flags()) LOG.warn("{}: {}", name, model.report.describe(flag));
+    }
+
+    /** How the log names a fit: the block ({@link Options#label}) and which of its fits. */
+    private static String name(final Options options, final String what) {
+        return "factorization " + (options.label() == null ? "" : options.label() + " ") + what;
     }
 
     /**
@@ -848,13 +864,14 @@ public final class Factorization {
         final int[] all = new int[n];
         for (int i = 0; i < n; i++) all[i] = i;
 
+        // refreshed here and after every epoch (what the loss caches, so rounding does not accumulate): each epoch
+        // starts from fresh caches, and the objective is read from them
         objective.refresh();
         final double objectiveStart = -objective.logLikelihood() + penalty(reg, w0, w, v, r, start, k, contest, options.linear(), fm);
         double previous = objectiveStart, lastChange = Double.NaN;
         int ran = 0;
         boolean converged = false;
         for (int epoch = 0; epoch < epochs; epoch++) {
-            objective.refresh();
             // global bias
             if (!contest) {
                 Arrays.fill(h, 0, n, 1d);
@@ -921,7 +938,6 @@ public final class Factorization {
                 break;
             }
         }
-        objective.refresh();
 
         final Model model = new Model(options.fields(), numeric, options.fieldWeighted(), k);
         model.w0 = w0;
@@ -961,31 +977,34 @@ public final class Factorization {
         return sum / 2;
     }
 
+    /**
+     * The report of a fit whose {@code objective} holds the final scores (refreshed). The objective is spent here: its
+     * scores are then set to the offsets alone for the baseline loss (the same examples, so the same loss structure,
+     * without building a second one).
+     */
     private static FitReport report(final Options options, final List<Example> examples, final Objective objective, final double objectiveStart,
                                     final double objectiveEnd, final double lastChange, final int epochs, final boolean converged,
                                     final double[][] w, final double[][] v, final int k, final boolean contest, final long millis) {
         final int n = examples.size();
-        // the loss of the offset alone (ŷ = 0)
-        final double[] offsets = new double[n];
-        for (int i = 0; i < n; i++) offsets[i] = examples.get(i).offset();
-        final Objective baseline = Objective.of(options, examples, offsets);
-        baseline.refresh();
         double maxLinear = 0;
-        final List<Double> norms = new ArrayList<>();
+        int values = 0;
+        for (final double[] factors : v) values += factors.length / k;
+        final double[] norms = new double[values];
+        int at = 0;
         for (int f = 0; f < w.length; f++) {
             for (final double value : w[f]) maxLinear = Math.max(maxLinear, Math.abs(value));
             for (int id = 0; id * k < v[f].length; id++) {
                 double norm = 0;
                 for (int d = 0; d < k; d++) norm += v[f][id * k + d] * v[f][id * k + d];
-                norms.add(Math.sqrt(norm));
+                norms[at++] = Math.sqrt(norm);
             }
         }
-        Collections.sort(norms);
+        Arrays.sort(norms);
         // the scores without the offset: per contest under a contest loss, over the rows otherwise
         final Map<String, double[]> groups = new HashMap<>();
         double maxScore = 0;
         for (int i = 0; i < n; i++) {
-            final double score = objective.s[i] - offsets[i];
+            final double score = objective.s[i] - examples.get(i).offset();
             maxScore = Math.max(maxScore, Math.abs(score));
             final double[] moments = groups.computeIfAbsent(contest ? examples.get(i).contest() : "", c -> new double[3]);
             moments[0]++;
@@ -1001,18 +1020,23 @@ public final class Factorization {
             counted++;
         }
         sd = counted == 0 ? 0 : sd / counted;
-        final double loss = objective.unitLoss(), baselineLoss = baseline.unitLoss();
+        final double loss = objective.unitLoss();
+        // the loss of the offset alone (ŷ = 0)
+        for (int i = 0; i < n; i++) objective.s[i] = examples.get(i).offset();
+        objective.refresh();
+        final double baselineLoss = objective.unitLoss();
         final List<String> flags = new ArrayList<>();
         if (contest && sd > FitReport.SPREAD_LIMIT) flags.add(FitReport.SPREAD);
         if (options.loss() != Loss.squared && baselineLoss > 0 && loss < FitReport.MEMORIZING_RATIO * baselineLoss) flags.add(FitReport.MEMORIZING);
-        if (options.tol() > 0 ? !converged : lastChange > FitReport.MOVING) flags.add(FitReport.UNCONVERGED);
+        // a diverged fit (a non-finite objective) passes every comparison above: it is unconverged whatever the tol
+        if (!Double.isFinite(objectiveEnd) || (options.tol() > 0 ? !converged : lastChange > FitReport.MOVING)) flags.add(FitReport.UNCONVERGED);
         return new FitReport(n, epochs, converged, objectiveStart, objectiveEnd, lastChange, objective.unit(), loss, baselineLoss, maxLinear,
-                quantile(norms, 0.5), quantile(norms, 0.99), norms.isEmpty() ? 0 : norms.get(norms.size() - 1), sd, maxScore, contest, millis,
+                quantile(norms, 0.5), quantile(norms, 0.99), norms.length == 0 ? 0 : norms[norms.length - 1], sd, maxScore, contest, millis,
                 List.copyOf(flags));
     }
 
-    private static double quantile(final List<Double> sorted, final double p) {
-        return sorted.isEmpty() ? 0 : sorted.get((int) Math.min(sorted.size() - 1, Math.floor(p * sorted.size())));
+    private static double quantile(final double[] sorted, final double p) {
+        return sorted.length == 0 ? 0 : sorted[(int) Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
     }
 
     /** The largest single coordinate step under a loss whose Newton step is not exact (logistic, Plackett–Luce). */
@@ -1072,7 +1096,9 @@ public final class Factorization {
         }
 
         /** The loss of the current scores, for the log. */
-        abstract String describe();
+        String describe() {
+            return unit() + "=" + unitLoss();
+        }
 
         /** The name of {@link #unitLoss}. */
         abstract String unit();
@@ -1113,11 +1139,6 @@ public final class Factorization {
         @Override
         boolean exact() {
             return true;
-        }
-
-        @Override
-        String describe() {
-            return "rmse=" + unitLoss();
         }
 
         @Override
@@ -1163,11 +1184,6 @@ public final class Factorization {
                 curvature += slope * slope * p * (1 - p);
             }
             return new double[]{g, curvature};
-        }
-
-        @Override
-        String describe() {
-            return "logloss=" + unitLoss();
         }
 
         @Override
