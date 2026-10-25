@@ -696,7 +696,14 @@ public class FeatureTransformTest {
         Assertions.assertNotNull(dirs);
         Assertions.assertTrue(new java.io.File(dirs[0], "fm.fm.avro").exists());
         Assertions.assertTrue(new java.io.File(dirs[0], "fm.fm.manifest.json").exists());
-        Assertions.assertTrue(java.nio.file.Files.readString(new java.io.File(dirs[0], "fm.fm.manifest.json").toPath()).contains("pairWeights"));
+        final String manifest = java.nio.file.Files.readString(new java.io.File(dirs[0], "fm.fm.manifest.json").toPath());
+        Assertions.assertTrue(manifest.contains("pairWeights"));
+        // the fit report of the whole-input model
+        final com.google.gson.JsonObject fit = com.google.gson.JsonParser.parseString(manifest).getAsJsonObject().getAsJsonObject("fit");
+        Assertions.assertNotNull(fit, manifest);
+        Assertions.assertEquals(20, fit.get("epochs").getAsInt());
+        Assertions.assertTrue(fit.get("rows").getAsInt() > 0);
+        Assertions.assertEquals("rmse", fit.get("unit").getAsString());
     }
 
     private static final List<String> FM_FIELDS = List.of("seller_id", "category", "condition_grade");

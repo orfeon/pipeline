@@ -92,6 +92,21 @@ final class FactorizationCoders {
                     writeDoubles(e.getValue(), out);
                 }
             }
+            // the fit's report (the artifact manifest of a fold run's whole-input model is written after this coder)
+            final Factorization.FitReport r = m.report;
+            data.writeBoolean(r != null);
+            if (r != null) {
+                VarInt.encode(r.rows(), out);
+                VarInt.encode(r.epochs(), out);
+                data.writeBoolean(r.converged());
+                data.writeBoolean(r.contest());
+                writeString(r.unit(), out);
+                writeDoubles(new double[]{r.objectiveStart(), r.objectiveEnd(), r.lastChange(), r.loss(), r.baselineLoss(), r.maxLinear(),
+                        r.factorNormP50(), r.factorNormP99(), r.maxFactorNorm(), r.scoreSd(), r.maxScore()}, out);
+                data.writeLong(r.millis());
+                VarInt.encode(r.flags().size(), out);
+                for (final String flag : r.flags()) writeString(flag, out);
+            }
             data.flush();
         }
 
@@ -119,6 +134,20 @@ final class FactorizationCoders {
                 final int size = VarInt.decodeInt(in);
                 final Map<String, double[]> params = m.params.get(f);
                 for (int i = 0; i < size; i++) params.put(readString(in), readDoubles(in));
+            }
+            if (data.readBoolean()) {
+                final int rows = VarInt.decodeInt(in);
+                final int epochs = VarInt.decodeInt(in);
+                final boolean converged = data.readBoolean();
+                final boolean contest = data.readBoolean();
+                final String unit = readString(in);
+                final double[] d = readDoubles(in);
+                final long millis = data.readLong();
+                final int count = VarInt.decodeInt(in);
+                final List<String> flags = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) flags.add(readString(in));
+                m.report = new Factorization.FitReport(rows, epochs, converged, d[0], d[1], d[2], unit, d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10],
+                        contest, millis, List.copyOf(flags));
             }
             return m;
         }

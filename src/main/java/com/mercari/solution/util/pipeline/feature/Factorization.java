@@ -122,6 +122,8 @@ public final class Factorization {
         public final boolean[] numeric;
         /** Per numeric field: the centre and the scale its value is standardised by (0 and 1 when not standardised). */
         public final double[] mean, scale;
+        /** What the fit that produced the model did (null for a model read from an artifact). */
+        public FitReport report;
 
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
@@ -273,6 +275,7 @@ public final class Factorization {
             final Model rotated = new Model(fields, numeric, fieldWeighted, k);
             rotated.w0 = w0;
             rotated.loss = loss;
+            rotated.report = report;
             System.arraycopy(mean, 0, rotated.mean, 0, mean.length);
             System.arraycopy(scale, 0, rotated.scale, 0, scale.length);
             for (int f = 0; f < fields.size(); f++) {
@@ -298,9 +301,13 @@ public final class Factorization {
      * @param scales     per field: null for a categorical field, {@code zscore} / {@code none} for a numeric one (how its
      *                   value is standardised; the mean and standard deviation are the fit's own); null = all categorical
      * @param reg        the ridge per kind of parameter and field (a number: {@link Regularization#uniform})
+     * @param tol        stop a fit once an epoch moves the penalised objective by less than this fraction ({@code als.tol};
+     *                   0 = run every epoch); {@code epochs} is then the cap
+     * @param label      the block, for the fit log (null: none)
      */
     public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, Regularization reg, long seed,
-                          Loss loss, int top, boolean descending, boolean linear, List<String> scales) implements Serializable {
+                          Loss loss, int top, boolean descending, boolean linear, List<String> scales,
+                          double tol, String label) implements Serializable {
         public Options {
             Objects.requireNonNull(reg, "reg");
         }
@@ -320,11 +327,94 @@ public final class Factorization {
             this(fields, fieldWeighted, latentDim, epochs, Regularization.uniform(reg, fields.size()), seed, loss, top, descending, linear, scales);
         }
 
+        /** Every epoch runs, no label. */
+        public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final Regularization reg, final long seed,
+                       final Loss loss, final int top, final boolean descending, final boolean linear, final List<String> scales) {
+            this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, scales, 0, null);
+        }
+
         /** Per field: numeric or categorical. */
         public boolean[] numeric() {
             final boolean[] numeric = new boolean[fields.size()];
             for (int f = 0; f < numeric.length; f++) numeric[f] = scales != null && scales.get(f) != null;
             return numeric;
+        }
+    }
+
+    /**
+     * What one fit did (logged per fit, counted per block, kept with the model and in the artifact manifest): its
+     * training rows and epochs, whether it converged ({@code als.tol}), the penalised objective (negative
+     * log-likelihood + ½ Σ λ θ²) before the first and after the last epoch and the relative move of that last epoch,
+     * the per-unit loss ({@code unit}: rmse | logloss | nll/choice) against the offset alone (ŷ = 0), the size of the
+     * parameters (largest |w|, the per-value factor norms ‖v‖) and the spread of the scores ŷ (the offset excluded: the
+     * mean within-contest standard deviation under a contest loss, the standard deviation over the rows otherwise).
+     * {@code flags} are the warnings it raised: {@link #SPREAD}, {@link #MEMORIZING}, {@link #UNCONVERGED}.
+     */
+    public record FitReport(int rows, int epochs, boolean converged, double objectiveStart, double objectiveEnd, double lastChange,
+                            String unit, double loss, double baselineLoss, double maxLinear, double factorNormP50, double factorNormP99,
+                            double maxFactorNorm, double scoreSd, double maxScore, boolean contest, long millis,
+                            List<String> flags) implements Serializable {
+        /** A contest's scores spread by more than {@link #SPREAD_LIMIT} (sd within a contest): the probability piles onto one entry. */
+        public static final String SPREAD = "spread";
+        /** The training loss fell below a tenth of the offset's (logistic / contest): the parameters learn the rows by heart. */
+        public static final String MEMORIZING = "memorizing";
+        /**
+         * The objective was still moving at the last epoch: above {@code als.tol} at the cap, or (no tol) by more than
+         * {@link #MOVING}; or it is not finite (the fit diverged).
+         */
+        public static final String UNCONVERGED = "unconverged";
+        static final double SPREAD_LIMIT = 5, MEMORIZING_RATIO = 0.1, MOVING = 1e-3;
+
+        /** The log text of a flag. */
+        public String describe(final String flag) {
+            return switch (flag) {
+                case SPREAD -> String.format("the scores spread by sd %.3g within a contest (> %.0f): the probabilities pile onto one entry"
+                        + " - the factors are under-regularised (als.reg factors)", scoreSd, SPREAD_LIMIT);
+                case MEMORIZING -> String.format("the training %s %.4g is below a tenth of the offset's %.4g: the model learns the training"
+                        + " rows by heart (a pair close to unique per row, a weak factor ridge)", unit, loss, baselineLoss);
+                case UNCONVERGED -> !Double.isFinite(objectiveEnd) ? "the objective is " + objectiveEnd + " after the fit: it diverged"
+                        + " (a non-finite target or score, or a ridge too weak to hold the parameters)"
+                        : converged || Double.isNaN(lastChange) ? flag : String.format("the objective still moved %.3g%% in the last epoch:"
+                        + " the result depends on the epoch count (and, warm-started, on how many fits came before) - als.tol to stop at"
+                        + " convergence, or more epochs when it is set (they are its cap)", 100 * lastChange);
+                default -> flag;
+            };
+        }
+
+        /** The per-fit log line. */
+        public String summary() {
+            return String.format("%d example(s), %d epoch(s)%s, %d ms; objective %.6g -> %.6g (last epoch %.3g%%); %s %.4g (offset only %.4g);"
+                            + " |w| max %.3g, |v| p50 %.3g p99 %.3g max %.3g; score sd %.3g%s, max |score| %.3g",
+                    rows, epochs, converged ? ", converged" : "", millis, objectiveStart, objectiveEnd, 100 * lastChange, unit, loss, baselineLoss,
+                    maxLinear, factorNormP50, factorNormP99, maxFactorNorm, scoreSd, contest ? " within a contest" : "", maxScore);
+        }
+
+        /**
+         * The manifest entry (no timing: the manifest describes the model, not the run). A non-finite number (the
+         * lastChange of a fit that ran no epoch, the values of a diverged fit) is written as its string form
+         * ({@link FitArtifact#lambdaJson}): JSON has no NaN / ±Infinity.
+         */
+        public JsonObject toJson() {
+            final JsonObject json = new JsonObject();
+            json.addProperty("rows", rows);
+            json.addProperty("epochs", epochs);
+            json.addProperty("converged", converged);
+            json.add("objectiveStart", FitArtifact.lambdaJson(objectiveStart));
+            json.add("objectiveEnd", FitArtifact.lambdaJson(objectiveEnd));
+            json.add("lastChange", FitArtifact.lambdaJson(lastChange));
+            json.addProperty("unit", unit);
+            json.add("loss", FitArtifact.lambdaJson(loss));
+            json.add("baselineLoss", FitArtifact.lambdaJson(baselineLoss));
+            json.add("maxLinear", FitArtifact.lambdaJson(maxLinear));
+            json.add("factorNormP50", FitArtifact.lambdaJson(factorNormP50));
+            json.add("factorNormP99", FitArtifact.lambdaJson(factorNormP99));
+            json.add("maxFactorNorm", FitArtifact.lambdaJson(maxFactorNorm));
+            json.add("scoreSd", FitArtifact.lambdaJson(scoreSd));
+            json.add("maxScore", FitArtifact.lambdaJson(maxScore));
+            final JsonArray array = new JsonArray();
+            flags.forEach(array::add);
+            json.add("flags", array);
+            return json;
         }
     }
 
@@ -435,14 +525,21 @@ public final class Factorization {
     public static Model fit(final Options options, final List<Example> examples) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return train(options, informative(options, sorted), null, options.epochs());
+        final Model model = train(options, informative(options, sorted), null, options.epochs());
+        log(options, "fit", model);
+        return model;
     }
 
     /** {@link #fit}, or null over fewer than {@code minRows} examples (none at all included). */
     public static Model fit(final Options options, final List<Example> examples, final int minRows) {
+        return fit(options, examples, minRows, "fit");
+    }
+
+    /** {@link #fit(Options, List, int)}, logged as {@code what} (the fold it is for). */
+    public static Model fit(final Options options, final List<Example> examples, final int minRows, final String what) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return trainOrNull(options, sorted, null, options.epochs(), minRows);
+        return trainOrNull(options, sorted, null, options.epochs(), minRows, what);
     }
 
     /**
@@ -455,12 +552,12 @@ public final class Factorization {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
         if (plan.folds() > 1) {
-            final Model total = trainOrNull(options, sorted, null, options.epochs(), plan.minRows());
+            final Model total = trainOrNull(options, sorted, null, options.epochs(), plan.minRows(), "whole input");
             final Model[] folds = new Model[plan.folds()];
-            for (int f = 0; f < folds.length; f++) folds[f] = trainOrNull(options, outOfFold(sorted, f), null, options.epochs(), plan.minRows());
+            for (int f = 0; f < folds.length; f++) folds[f] = trainOrNull(options, outOfFold(sorted, f), null, options.epochs(), plan.minRows(), "fold " + f);
             return Fits.ofFolds(total, folds, plan.align());
         }
-        if (!plan.forward()) return Fits.ofTotal(trainOrNull(options, sorted, null, options.epochs(), plan.minRows()));
+        if (!plan.forward()) return Fits.ofTotal(trainOrNull(options, sorted, null, options.epochs(), plan.minRows(), "fit"));
         final TreeMap<Long, Model> models = new TreeMap<>();
         final Model total = forward(options, sorted, plan, true, models::put);
         return new Fits(total, null, models, observedBlocks(sorted));
@@ -522,14 +619,14 @@ public final class Factorization {
             final List<Example> window = first == null || last == null || first > last ? List.of()
                     : sorted.subList(ranges.get(first)[0], ranges.get(last)[1]);
             final boolean warm = plan.warmStart() && previous != null;
-            Model model = trainOrNull(options, window, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows());
+            Model model = trainOrNull(options, window, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
+                    "forward change point " + at + (warm ? " (warm start)" : ""));
             if (model != null) {
                 model = model.alignTo(previous, plan.align());
                 previous = model;
             }
             sink.accept(at, model);
             latest = model;
-            LOG.info("factorization forward: change point {} - {} example(s){}", at, window.size(), model == null ? ", not solved (fit.minRows)" : "");
         }
         if (!withTotal) return null;
         // the whole-input model (a static serving run loads it): the last change point when it reads every block
@@ -538,16 +635,36 @@ public final class Factorization {
             total = latest;
         } else {
             final boolean warm = plan.warmStart() && previous != null;
-            total = trainOrNull(options, sorted, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows());
+            total = trainOrNull(options, sorted, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
+                    "whole input" + (warm ? " (warm start)" : ""));
             if (total != null) total = total.alignTo(previous, plan.align());
         }
         return total;
     }
 
-    private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows) {
+    private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows,
+                                     final String what) {
         final List<Example> used = informative(options, sorted);
-        if (used.isEmpty() || used.size() < minRows) return null;
-        return train(options, used, warm, epochs);
+        if (used.isEmpty() || used.size() < minRows) {
+            LOG.info("{}: {} example(s), not solved ({})", name(options, what), used.size(),
+                    used.isEmpty() ? "no training example" : "fewer than fit.minRows " + minRows);
+            return null;
+        }
+        final Model model = train(options, used, warm, epochs);
+        log(options, what, model);
+        return model;
+    }
+
+    /** The fit's log line, and a warning per flag it raised. */
+    private static void log(final Options options, final String what, final Model model) {
+        final String name = name(options, what);
+        LOG.info("{}: {}", name, model.report.summary());
+        for (final String flag : model.report.flags()) LOG.warn("{}: {}", name, model.report.describe(flag));
+    }
+
+    /** How the log names a fit: the block ({@link Options#label}) and which of its fits. */
+    private static String name(final Options options, final String what) {
+        return "factorization " + (options.label() == null ? "" : options.label() + " ") + what;
     }
 
     /**
@@ -586,6 +703,7 @@ public final class Factorization {
      * every single parameter, it is one step towards it (capped at {@link #MAX_STEP}).
      */
     private static Model train(final Options options, final List<Example> examples, final Model warm, final int epochs) {
+        final long started = System.nanoTime();
         final int F = options.fields().size();
         final int k = options.latentDim();
         final int n = examples.size();
@@ -746,8 +864,14 @@ public final class Factorization {
         final int[] all = new int[n];
         for (int i = 0; i < n; i++) all[i] = i;
 
+        // refreshed here and after every epoch (what the loss caches, so rounding does not accumulate): each epoch
+        // starts from fresh caches, and the objective is read from them
+        objective.refresh();
+        final double objectiveStart = -objective.logLikelihood() + penalty(reg, w0, w, v, r, start, k, contest, options.linear(), fm);
+        double previous = objectiveStart, lastChange = Double.NaN;
+        int ran = 0;
+        boolean converged = false;
         for (int epoch = 0; epoch < epochs; epoch++) {
-            objective.refresh();
             // global bias
             if (!contest) {
                 Arrays.fill(h, 0, n, 1d);
@@ -802,10 +926,18 @@ public final class Factorization {
                     }
                 }
             }
-            if (LOG.isDebugEnabled()) LOG.debug("factorization epoch {}: {}", epoch + 1, objective.describe());
+            ran++;
+            // the penalised objective the coordinate steps descend: its relative move decides convergence
+            objective.refresh();
+            final double current = -objective.logLikelihood() + penalty(reg, w0, w, v, r, start, k, contest, options.linear(), fm);
+            lastChange = Math.abs(previous - current) / Math.max(Math.abs(previous), 1e-12);
+            previous = current;
+            if (LOG.isDebugEnabled()) LOG.debug("factorization epoch {}: {} objective={}", epoch + 1, objective.describe(), current);
+            if (options.tol() > 0 && lastChange <= options.tol()) {
+                converged = true;
+                break;
+            }
         }
-        objective.refresh();
-        LOG.info("factorization fit: {} example(s), {} epoch(s){}, {}", n, epochs, warm == null ? "" : " (warm start)", objective.describe());
 
         final Model model = new Model(options.fields(), numeric, options.fieldWeighted(), k);
         model.w0 = w0;
@@ -822,7 +954,89 @@ public final class Factorization {
             }
             if (!fm) System.arraycopy(r[f], 0, model.r[f], 0, F);
         }
+        model.report = report(options, examples, objective, objectiveStart, previous, lastChange, ran, converged, w, v, k, contest,
+                (System.nanoTime() - started) / 1_000_000L);
         return model;
+    }
+
+    /** ½ Σ λ θ² over every fitted parameter (the ridge part of the objective). */
+    private static double penalty(final Regularization reg, final double w0, final double[][] w, final double[][] v, final double[][] r,
+                                  final int[][] start, final int k, final boolean contest,
+                                  final boolean linear, final boolean fm) {
+        double sum = contest ? 0 : reg.bias() * w0 * w0;
+        for (int f = 0; f < w.length; f++) {
+            for (int id = 0; id + 1 < start[f].length; id++) {
+                final int rows = start[f][id + 1] - start[f][id];
+                if (linear) sum += reg.of(reg.linear()[f], rows) * w[f][id] * w[f][id];
+                double norm = 0;
+                for (int d = 0; d < k; d++) norm += v[f][id * k + d] * v[f][id * k + d];
+                sum += reg.of(reg.factors()[f], rows) * norm;
+            }
+            if (!fm) for (int g = f + 1; g < w.length; g++) sum += reg.pairWeights() * r[f][g] * r[f][g];
+        }
+        return sum / 2;
+    }
+
+    /**
+     * The report of a fit whose {@code objective} holds the final scores (refreshed). The objective is spent here: its
+     * scores are then set to the offsets alone for the baseline loss (the same examples, so the same loss structure,
+     * without building a second one).
+     */
+    private static FitReport report(final Options options, final List<Example> examples, final Objective objective, final double objectiveStart,
+                                    final double objectiveEnd, final double lastChange, final int epochs, final boolean converged,
+                                    final double[][] w, final double[][] v, final int k, final boolean contest, final long millis) {
+        final int n = examples.size();
+        double maxLinear = 0;
+        int values = 0;
+        for (final double[] factors : v) values += factors.length / k;
+        final double[] norms = new double[values];
+        int at = 0;
+        for (int f = 0; f < w.length; f++) {
+            for (final double value : w[f]) maxLinear = Math.max(maxLinear, Math.abs(value));
+            for (int id = 0; id * k < v[f].length; id++) {
+                double norm = 0;
+                for (int d = 0; d < k; d++) norm += v[f][id * k + d] * v[f][id * k + d];
+                norms[at++] = Math.sqrt(norm);
+            }
+        }
+        Arrays.sort(norms);
+        // the scores without the offset: per contest under a contest loss, over the rows otherwise
+        final Map<String, double[]> groups = new HashMap<>();
+        double maxScore = 0;
+        for (int i = 0; i < n; i++) {
+            final double score = objective.s[i] - examples.get(i).offset();
+            maxScore = Math.max(maxScore, Math.abs(score));
+            final double[] moments = groups.computeIfAbsent(contest ? examples.get(i).contest() : "", c -> new double[3]);
+            moments[0]++;
+            moments[1] += score;
+            moments[2] += score * score;
+        }
+        double sd = 0;
+        int counted = 0;
+        for (final double[] moments : groups.values()) {
+            if (moments[0] < 2) continue;
+            final double mean = moments[1] / moments[0];
+            sd += Math.sqrt(Math.max(0, moments[2] / moments[0] - mean * mean));
+            counted++;
+        }
+        sd = counted == 0 ? 0 : sd / counted;
+        final double loss = objective.unitLoss();
+        // the loss of the offset alone (ŷ = 0)
+        for (int i = 0; i < n; i++) objective.s[i] = examples.get(i).offset();
+        objective.refresh();
+        final double baselineLoss = objective.unitLoss();
+        final List<String> flags = new ArrayList<>();
+        if (contest && sd > FitReport.SPREAD_LIMIT) flags.add(FitReport.SPREAD);
+        if (options.loss() != Loss.squared && baselineLoss > 0 && loss < FitReport.MEMORIZING_RATIO * baselineLoss) flags.add(FitReport.MEMORIZING);
+        // a diverged fit (a non-finite objective) passes every comparison above: it is unconverged whatever the tol
+        if (!Double.isFinite(objectiveEnd) || (options.tol() > 0 ? !converged : lastChange > FitReport.MOVING)) flags.add(FitReport.UNCONVERGED);
+        return new FitReport(n, epochs, converged, objectiveStart, objectiveEnd, lastChange, objective.unit(), loss, baselineLoss, maxLinear,
+                quantile(norms, 0.5), quantile(norms, 0.99), norms.length == 0 ? 0 : norms[norms.length - 1], sd, maxScore, contest, millis,
+                List.copyOf(flags));
+    }
+
+    private static double quantile(final double[] sorted, final double p) {
+        return sorted.length == 0 ? 0 : sorted[(int) Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
     }
 
     /** The largest single coordinate step under a loss whose Newton step is not exact (logistic, Plackett–Luce). */
@@ -882,7 +1096,15 @@ public final class Factorization {
         }
 
         /** The loss of the current scores, for the log. */
-        abstract String describe();
+        String describe() {
+            return unit() + "=" + unitLoss();
+        }
+
+        /** The name of {@link #unitLoss}. */
+        abstract String unit();
+
+        /** The loss per unit (row / choice) of the current scores (after a {@link #refresh}). */
+        abstract double unitLoss();
 
         /** The log-likelihood of the current scores (the negative half squared error under squared loss). */
         abstract double logLikelihood();
@@ -920,8 +1142,13 @@ public final class Factorization {
         }
 
         @Override
-        String describe() {
-            return "rmse=" + Math.sqrt(-2 * logLikelihood() / Math.max(1, y.length));
+        String unit() {
+            return "rmse";
+        }
+
+        @Override
+        double unitLoss() {
+            return Math.sqrt(-2 * logLikelihood() / Math.max(1, y.length));
         }
 
         @Override
@@ -960,8 +1187,13 @@ public final class Factorization {
         }
 
         @Override
-        String describe() {
-            return "logloss=" + -logLikelihood() / Math.max(1, y.length);
+        String unit() {
+            return "logloss";
+        }
+
+        @Override
+        double unitLoss() {
+            return -logLikelihood() / Math.max(1, y.length);
         }
 
         @Override
@@ -1134,9 +1366,19 @@ public final class Factorization {
 
         @Override
         String describe() {
+            return "contests=" + rowsOf.length + " nll/choice=" + unitLoss();
+        }
+
+        @Override
+        String unit() {
+            return "nll/choice";
+        }
+
+        @Override
+        double unitLoss() {
             int choices = 0;
             for (final int[] rows : rowsOf) for (final int i : rows) if (chosen[i]) choices++;
-            return "contests=" + rowsOf.length + " nll/choice=" + (choices == 0 ? 0 : -logLikelihood() / choices);
+            return choices == 0 ? 0 : -logLikelihood() / choices;
         }
 
         /** From the cached pool sums: call {@link #refresh} after the scores moved outside {@link #shift}. */
@@ -1242,6 +1484,7 @@ public final class Factorization {
                 }
             }
             manifest.add("pairWeights", pairs);
+            if (model.report != null) manifest.add("fit", model.report.toJson());
             ResourceUtil.writeString(FitArtifact.directory(artifactUri, planHash) + "/" + block + ".fm.manifest.json", manifest.toString());
             LOG.info("wrote factorization artifact {} ({} parameters)", path, model.size());
         } catch (final IOException e) {

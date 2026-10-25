@@ -1499,13 +1499,13 @@ public final class FeatureStages {
      * whole-input model; fold / forward models are always re-fitted.
      */
     record FmSpec(String block, List<String> fields, boolean fieldWeighted, int k, String target, String offsetColumn,
-                  int epochs, Factorization.Regularization reg, long seed, String artifactUri, boolean refit,
+                  int epochs, Factorization.Regularization reg, double tol, long seed, String artifactUri, boolean refit,
                   List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis, Factorization.Plan plan,
                   Factorization.Loss loss, String offsetScale, List<String> contestKeys, String contestTime, String contestTimeType,
                   boolean descending, int top, boolean linear, List<String> scales,
                   List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
-            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales);
+            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales, tol, block);
         }
 
         /** The indices of a comma-separated list of the block's fields. */
@@ -1778,7 +1778,7 @@ public final class FeatureStages {
             }
             specs.add(new FmSpec(e.getKey(), fields, "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
-                    epochs, regularization(k, fields.size()), Long.parseLong(k.get("seed")),
+                    epochs, regularization(k, fields.size()), Double.parseDouble(k.getOrDefault("tol", "0")), Long.parseLong(k.get("seed")),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan,
@@ -1870,6 +1870,17 @@ public final class FeatureStages {
         }
     }
 
+    /**
+     * Counts a fitted model under the block: {@code feature/fm_<block>_fits} and one {@code feature/fm_<block>_<flag>} per
+     * warning its fit raised ({@link Factorization.FitReport#flags}), so a run's monitoring shows how many fits diverged,
+     * memorized or stopped unconverged without reading the logs.
+     */
+    static void countFit(final FmSpec spec, final Factorization.Model model) {
+        if (model == null || model.report == null) return;
+        Metrics.counter("feature", "fm_" + spec.block() + "_fits").inc();
+        for (final String flag : model.report.flags()) Metrics.counter("feature", "fm_" + spec.block() + "_" + flag).inc();
+    }
+
     static class FitFmDoFn extends DoFn<ArrayList<Factorization.Example>, Factorization.Fits> {
         private final FmSpec spec;
         private final String planHash;
@@ -1884,6 +1895,9 @@ public final class FeatureStages {
             final ArrayList<Factorization.Example> examples = c.element();
             LOG.info("factorization {}: fitting on {} examples{}", spec.block(), examples.size(), spec.forward() == null ? "" : " (forward)");
             final Factorization.Fits fits = Factorization.fitAll(spec.options(), examples, spec.plan());
+            countFit(spec, fits.total);
+            if (fits.folds != null) for (final Factorization.Model fold : fits.folds) countFit(spec, fold);
+            if (fits.blocks != null) for (final Factorization.Model block : fits.blocks.values()) if (block != fits.total) countFit(spec, block);
             spec.writeTotal(fits.total, planHash);
             c.output(fits.served());
         }
@@ -1903,7 +1917,8 @@ public final class FeatureStages {
             for (final Factorization.Example e : c.element().getValue()) examples.add(e);
             final int part = c.element().getKey();
             LOG.info("factorization {}: fitting {} on {} examples", spec.block(), part < 0 ? "the whole input" : "fold " + part + " (out of fold)", examples.size());
-            final Factorization.Model model = Factorization.fit(spec.options(), examples, spec.plan().minRows());
+            final Factorization.Model model = Factorization.fit(spec.options(), examples, spec.plan().minRows(), part < 0 ? "whole input" : "fold " + part);
+            countFit(spec, model);
             if (model != null) c.output(KV.of(part, model));
         }
     }
@@ -1961,10 +1976,17 @@ public final class FeatureStages {
             final TreeSet<Long> changePoints = new TreeSet<>();
             // no row reads the whole-input model: it is fitted only when the artifact will be written
             final boolean writesTotal = spec.writesTotal(planHash);
+            final Factorization.FitReport[] last = new Factorization.FitReport[1];
             final Factorization.Model total = Factorization.fitForward(spec.options(), examples, spec.plan(), writesTotal, (at, model) -> {
                 changePoints.add(at);
-                if (model != null) c.output(KV.of(at, model));
+                countFit(spec, model);
+                if (model != null) {
+                    last[0] = model.report;
+                    c.output(KV.of(at, model));
+                }
             });
+            // the whole-input model is a fit of its own unless it is the last change point's model
+            if (total != null && total.report != last[0]) countFit(spec, total);
             if (writesTotal && total != null) Factorization.write(spec.artifactUri(), planHash, spec.block(), total);
             c.output(indexTag, new FmIndex(changePoints, Factorization.observedBlocks(examples)));
         }

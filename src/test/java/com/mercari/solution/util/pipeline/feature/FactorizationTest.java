@@ -103,6 +103,114 @@ public class FactorizationTest {
         }
     }
 
+    /** Additive data over two fields (unequal value counts), tagged with a time block of 50 rows. */
+    private static List<Factorization.Example> additive() {
+        final double[] effectA = {1.0, -0.5, 0.3, 2.0, -1.2}, effectB = {0.4, -0.8, 1.5, 0.0};
+        final java.util.Random random = new java.util.Random(3);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 300; i++) {
+            final int a = (i * i + i / 7) % 5, b = i % 3 == 0 ? 3 : (i / 3) % 3;
+            examples.add(new Factorization.Example(new String[]{"a" + a, "b" + b}, 0.7 + effectA[a] + effectB[b] + random.nextGaussian() * 0.2, i / 50));
+        }
+        return examples;
+    }
+
+    /** A main-effects model: the factors held at 0, so every fit is convex. */
+    private static Factorization.Options convex(final int epochs, final double tol) {
+        return new Factorization.Options(List.of("a", "b"), false, 2, epochs,
+                new Factorization.Regularization(0, new double[]{1, 1}, new double[]{1e9, 1e9}, 1e9, false), 1L,
+                Factorization.Loss.squared, 0, false, true, null, tol, "test");
+    }
+
+    /**
+     * als.tol stops a fit at convergence, at the same model the full epoch count reaches; without it every epoch runs.
+     * A forward warm start under tol is then only a shortcut: every change point's model matches the fit from scratch.
+     */
+    @Test
+    public void testToleranceStopsAtConvergence() {
+        final Factorization.Model full = Factorization.fit(convex(3000, 0), additive());
+        Assertions.assertEquals(3000, full.report.epochs());
+        Assertions.assertFalse(full.report.converged());
+        final Factorization.Model stopped = Factorization.fit(convex(3000, 1e-10), additive());
+        Assertions.assertTrue(stopped.report.converged(), stopped.report::summary);
+        Assertions.assertTrue(stopped.report.epochs() < 3000, stopped.report::summary);
+        Assertions.assertTrue(stopped.report.objectiveEnd() <= stopped.report.objectiveStart());
+        Assertions.assertTrue(stopped.report.flags().isEmpty(), stopped.report.flags()::toString);
+        for (final Factorization.Example e : additive()) Assertions.assertEquals(full.predict(e.values()), stopped.predict(e.values()), 1e-3);
+
+        final Factorization.Fits warm = Factorization.fitAll(convex(3000, 1e-10), additive(), new Factorization.Plan(0, true, 0, 0, Alignment.PROCRUSTES, true, 3000));
+        final Factorization.Fits cold = Factorization.fitAll(convex(3000, 1e-10), additive(), new Factorization.Plan(0, true, 0, 0, Alignment.PROCRUSTES, false, 3000));
+        int saved = 0;
+        for (final long at : cold.blocks.keySet()) {
+            for (final Factorization.Example e : additive()) {
+                Assertions.assertEquals(cold.blocks.get(at).predict(e.values()), warm.blocks.get(at).predict(e.values()), 1e-3, "change point " + at);
+            }
+            saved += cold.blocks.get(at).report.epochs() - warm.blocks.get(at).report.epochs();
+        }
+        Assertions.assertTrue(saved > 0, "the warm start takes fewer epochs");
+    }
+
+    /**
+     * The fit report: rows, the loss against the offset alone, and the flags — a weakly penalised pair that is close to
+     * unique per row memorizes a contest's winners, a separable contest under a weak ridge spreads its scores, a strong
+     * ridge does neither; a fit cut short is unconverged.
+     */
+    @Test
+    public void testFitReportFlags() {
+        final java.util.Random random = new java.util.Random(11);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int c = 0; c < 150; c++) {
+            final int winner = random.nextInt(6);
+            for (int j = 0; j < 6; j++) {
+                // seller x buyer: almost every pair is seen once
+                examples.add(new Factorization.Example(new String[]{"s" + random.nextInt(40), "b" + random.nextInt(400)},
+                        j == winner ? 1 : 0, 0, 0, "c" + c));
+            }
+        }
+        final Factorization.Options loose = new Factorization.Options(List.of("seller", "buyer"), false, 4, 80,
+                Factorization.Regularization.uniform(1e-4, 2), 2L, Factorization.Loss.plackettLuce, 1, true, true, null, 0, "loose");
+        final Factorization.Model memorized = Factorization.fit(loose, examples);
+        Assertions.assertEquals(examples.size(), memorized.report.rows());
+        Assertions.assertEquals("nll/choice", memorized.report.unit());
+        Assertions.assertEquals(Math.log(6), memorized.report.baselineLoss(), 1e-9, "no offset: the uniform choice");
+        Assertions.assertTrue(memorized.report.flags().contains(Factorization.FitReport.MEMORIZING), memorized.report::summary);
+        Assertions.assertTrue(memorized.report.contest());
+
+        // a separable contest (the "top" grade always wins) under a weak ridge: the scores run away
+        final List<Factorization.Example> separable = new ArrayList<>();
+        for (int c = 0; c < 100; c++) {
+            for (int j = 0; j < 6; j++) {
+                separable.add(new Factorization.Example(new String[]{j == 0 ? "top" : "low", "s" + random.nextInt(20)}, j == 0 ? 1 : 0, 0, 0, "c" + c));
+            }
+        }
+        final Factorization.Model spread = Factorization.fit(new Factorization.Options(List.of("grade", "seller"), false, 2, 80,
+                Factorization.Regularization.uniform(1e-4, 2), 2L, Factorization.Loss.plackettLuce, 1, true, true, null, 0, "separable"), separable);
+        Assertions.assertTrue(spread.report.flags().contains(Factorization.FitReport.SPREAD), spread.report::summary);
+
+        final Factorization.Options tight = new Factorization.Options(List.of("seller", "buyer"), false, 4, 80,
+                new Factorization.Regularization(0, new double[]{5, 5}, new double[]{100, 100}, 1, false), 2L,
+                Factorization.Loss.plackettLuce, 1, true, true, null, 0, "tight");
+        final Factorization.Model regularized = Factorization.fit(tight, examples);
+        Assertions.assertFalse(regularized.report.flags().contains(Factorization.FitReport.MEMORIZING), regularized.report::summary);
+        Assertions.assertFalse(regularized.report.flags().contains(Factorization.FitReport.SPREAD), regularized.report::summary);
+        Assertions.assertTrue(regularized.report.scoreSd() < memorized.report.scoreSd());
+
+        final Factorization.Model cut = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 1, 0.01, 7L), xor(5));
+        Assertions.assertTrue(cut.report.flags().contains(Factorization.FitReport.UNCONVERGED), cut.report::summary);
+        Assertions.assertTrue(cut.report.describe(Factorization.FitReport.UNCONVERGED).contains("still moved"));
+
+        // a diverged fit (an infinite target) is flagged although no comparison of a NaN holds, and its manifest entry
+        // stays strict JSON (the non-finite numbers as strings)
+        final List<Factorization.Example> infinite = new ArrayList<>(xor(5));
+        infinite.add(new Factorization.Example(new String[]{"a1", "b1", "c0"}, Double.POSITIVE_INFINITY, 0));
+        final Factorization.Model diverged = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 3, 0.01, 7L), infinite);
+        Assertions.assertFalse(Double.isFinite(diverged.report.objectiveEnd()), diverged.report::summary);
+        Assertions.assertTrue(diverged.report.flags().contains(Factorization.FitReport.UNCONVERGED), diverged.report::summary);
+        Assertions.assertTrue(diverged.report.describe(Factorization.FitReport.UNCONVERGED).contains("diverged"));
+        final String json = diverged.report.toJson().toString();
+        Assertions.assertFalse(json.matches(".*:\\s*-?(NaN|Infinity).*"), json);
+    }
+
     /** perRow scales a value's ridge, never the bias: a constant target is read as itself, not shrunk towards 0. */
     @Test
     public void testPerRowKeepsTheBias() {
