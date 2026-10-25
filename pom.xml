@@ -283,6 +283,11 @@
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.mercari.solution.server.PipelineMcpStreamableServer</mainClass>
+                  <!-- dependencies ship classes under META-INF/versions/N (dnsjava's InetAddressResolverProvider
+                       exists only there): without this entry the merged jar ignores them and the service lookup fails -->
+                  <manifestEntries>
+                    <Multi-Release>true</Multi-Release>
+                  </manifestEntries>
                 </transformer>
               </transformers>
             </configuration>
