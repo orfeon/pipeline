@@ -4322,21 +4322,24 @@ public final class FeaturePlanCompiler {
             diagnostics.error("factorization.als", loc, "als.regScale must be absolute | perRow: " + def.regScale);
         }
         final boolean perRow = "perRow".equals(def.regScale);
-        final String[] names = {"reg", "reg.bias", "reg.pairWeights"};
-        final double[] values = {base, bias, pairWeights};
-        for (int i = 0; i < names.length; i++) {
-            if (!(values[i] >= 0) || Double.isInfinite(values[i])) diagnostics.error("factorization.als", loc, "als." + names[i] + " must be a finite number >= 0: " + values[i]);
+        // every declared number once, where it is declared: a block part is checked even when every field overrides it,
+        // and is not reported again per field that inherits it
+        final Map<String, Double> declared = new LinkedHashMap<>();
+        declared.put("als.reg", base);
+        for (final Map.Entry<String, Double> e : parts.entrySet()) declared.put("als.reg." + e.getKey(), e.getValue());
+        for (final Map.Entry<String, Double> e : declared.entrySet()) {
+            if (!(e.getValue() >= 0) || Double.isInfinite(e.getValue())) diagnostics.error("factorization.als", loc, e.getKey() + " must be a finite number >= 0: " + e.getValue());
         }
         final List<String> linearPer = new ArrayList<>(), factorsPer = new ArrayList<>(), unfixed = new ArrayList<>();
         for (final String f : def.fields) {
             final Map<String, Double> own = def.fmFieldReg.getOrDefault(f, Map.of());
-            final double l = own.getOrDefault("linear", parts.getOrDefault("linear", base));
-            final double v = own.getOrDefault("factors", parts.getOrDefault("factors", base));
-            for (final double value : new double[]{l, v}) {
-                if (!(value >= 0) || Double.isInfinite(value)) {
-                    diagnostics.error(own.isEmpty() ? "factorization.als" : "factorization.fields", loc, "the ridge of field " + f + " must be a finite number >= 0: " + value);
+            for (final Map.Entry<String, Double> e : own.entrySet()) {
+                if (!(e.getValue() >= 0) || Double.isInfinite(e.getValue())) {
+                    diagnostics.error("factorization.fields", loc, "fields[" + f + "].reg." + e.getKey() + " must be a finite number >= 0: " + e.getValue());
                 }
             }
+            final double l = own.getOrDefault("linear", parts.getOrDefault("linear", base));
+            final double v = own.getOrDefault("factors", parts.getOrDefault("factors", base));
             if (ranked && (linear && !(l > 0) || !(v > 0))) unfixed.add(f);
             linearPer.add(Double.toString(l));
             factorsPer.add(Double.toString(v));
@@ -4345,7 +4348,7 @@ public final class FeaturePlanCompiler {
         // (a contest key's main effect would otherwise follow rounding noise)
         if (!unfixed.isEmpty()) {
             diagnostics.error("factorization.als", loc, "als.reg must be > 0 under loss " + lossText + " (a contest sees score differences only):"
-                    + " the " + (linear ? "linear weights and factors" : "factors") + " of " + unfixed + " have none");
+                    + " the " + (linear ? "linear weights or the factors" : "factors") + " of " + unfixed + " have none");
         }
         if (ranked && parts.containsKey("bias")) {
             diagnostics.warning("factorization.als", loc, "als.reg.bias is ignored under loss " + lossText + ": a contest loss fits no global bias");
@@ -4353,8 +4356,10 @@ public final class FeaturePlanCompiler {
         if (!"fwfm".equals(variant) && parts.containsKey("pairWeights")) {
             diagnostics.warning("factorization.als", loc, "als.reg.pairWeights applies to variant fwfm (the field-pair weights r_fg) and is ignored");
         }
-        if (!linear && parts.containsKey("linear")) {
-            diagnostics.warning("factorization.als", loc, "a linear ridge is ignored under linear: false (no per-value weight is fitted)");
+        if (!linear && (parts.containsKey("linear") || !def.fmFieldRegLinear.isEmpty())) {
+            diagnostics.warning("factorization.als", loc, "a linear ridge is ignored under linear: false (no per-value weight is fitted): "
+                    + (parts.containsKey("linear") ? "als.reg.linear" : "") + (parts.containsKey("linear") && !def.fmFieldRegLinear.isEmpty() ? ", " : "")
+                    + (def.fmFieldRegLinear.isEmpty() ? "" : "the reg.linear of " + def.fmFieldRegLinear));
         }
         final boolean uniform = parts.isEmpty() && def.fmFieldReg.isEmpty() && !perRow;
         final String curvature = switch (lossText) {
@@ -4364,7 +4369,8 @@ public final class FeaturePlanCompiler {
         };
         diagnostics.info("factorization.als.reg", loc, (uniform ? "ridge " + base + " on every parameter" : "ridge bias " + bias + ", linear " + linearPer
                 + ", factors " + factorsPer + ("fwfm".equals(variant) ? ", pairWeights " + pairWeights : "") + " (fields " + def.fields + ")")
-                + (perRow ? ", multiplied by the training rows that carry each parameter (regScale perRow): every value is shrunk by about the same proportion"
+                + (perRow ? ", the linear and factor ridge multiplied by each value's training rows (regScale perRow; the bias and pairWeights as they are):"
+                + " every value is shrunk by about the same proportion"
                 : ", added as it is to a parameter's curvature summed over its training rows (regScale absolute) - compare it with " + curvature
                 + ": a value with far more than that is barely shrunk"));
         final Map<String, String> coordinates = new LinkedHashMap<>();
