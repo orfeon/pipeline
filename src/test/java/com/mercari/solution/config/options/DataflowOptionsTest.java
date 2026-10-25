@@ -83,10 +83,10 @@ public class DataflowOptionsTest {
         try {
             Class.forName(DataflowOptions.DATAFLOW_PIPELINE_OPTIONS);
         } catch (final ClassNotFoundException e) {
-            // without the dataflow runner both are null
+            // without the dataflow runner: no service account, maxNumWorkers as if not set
             final org.apache.beam.sdk.Pipeline pipeline = org.apache.beam.sdk.Pipeline.create(PipelineOptionsFactory.create());
             Assertions.assertNull(DataflowOptions.getServiceAccount(pipeline.getOptions()));
-            Assertions.assertNull(DataflowOptions.getMaxNumWorkers(org.apache.beam.sdk.values.PBegin.in(pipeline)));
+            Assertions.assertEquals(0, DataflowOptions.getMaxNumWorkers(org.apache.beam.sdk.values.PBegin.in(pipeline)));
             return;
         }
         Assertions.assertNull(DataflowOptions.getServiceAccount(PipelineOptionsFactory.create()), "not set");

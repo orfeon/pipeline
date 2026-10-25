@@ -117,15 +117,31 @@ public class OptionUtil {
         if(serviceAccount != null && !serviceAccount.isBlank()) {
             return serviceAccount;
         }
-        final MPipeline.Runner runner = getRunner(options);
+        MPipeline.Runner runner;
+        try {
+            runner = getRunner(options);
+        } catch (final IllegalArgumentException e) {
+            // a runner outside MPipeline.Runner (e.g. a test runner): no safe guess
+            runner = null;
+        }
+        RuntimeException cause = null;
         if(runner == MPipeline.Runner.direct || runner == MPipeline.Runner.prism) {
-            final String account = IAMUtil.getAccount();
-            if(account != null && !account.isBlank()) {
-                return account;
+            try {
+                final String account = IAMUtil.getAccount();
+                if(account != null && !account.isBlank()) {
+                    return account;
+                }
+            } catch (final RuntimeException e) {
+                // no application default credentials, or the account lookup failed
+                cause = e;
             }
         }
-        throw new IllegalArgumentException("Could not determine the worker service account on the " + runner
-                + " runner: set " + parameterHint + " or options.dataflow.serviceAccount");
+        // options.dataflow is only applied on the dataflow runner (Options.setOptions)
+        final String remedy = runner == MPipeline.Runner.dataflow
+                ? parameterHint + " or options.dataflow.serviceAccount"
+                : parameterHint;
+        throw new IllegalArgumentException("Could not determine the worker service account on the "
+                + (runner == null ? options.getRunner().getSimpleName() : runner) + " runner: set " + remedy, cause);
     }
 
     public static boolean isDirectRunner(final PInput input) {

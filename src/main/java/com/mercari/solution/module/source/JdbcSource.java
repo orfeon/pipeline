@@ -149,7 +149,7 @@ public class JdbcSource extends Source {
                 user = serviceAccount.replace(".gserviceaccount.com", "");
                 password = "dummy";
                 if(!url.contains("enableIamAuth")) {
-                    url = url + "&enableIamAuth=true";
+                    url = url + (url.contains("?") ? "&" : "?") + "enableIamAuth=true";
                 }
             } else if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
                 LOG.info("parameters.user|password is secret resource.");

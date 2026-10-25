@@ -65,12 +65,18 @@ public class OptionUtilTest {
      */
     @Test
     public void testGetWorkerServiceAccountFailsClearlyWhenUnknown() {
+        final IllegalArgumentException dataflow = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> OptionUtil.getWorkerServiceAccount(optionsWith(DataflowRunner.class), "parameters.user"));
+        Assertions.assertTrue(dataflow.getMessage().contains("parameters.user"), dataflow.getMessage());
+        Assertions.assertTrue(dataflow.getMessage().contains("options.dataflow.serviceAccount"), dataflow.getMessage());
+
+        // options.dataflow is not applied on the other runners: only parameters.user helps there
         for(final Class<? extends PipelineRunner<?>> runner : List.<Class<? extends PipelineRunner<?>>>of(
-                DataflowRunner.class, FlinkRunner.class, SparkRunner.class, PortableRunner.class)) {
+                FlinkRunner.class, SparkRunner.class, PortableRunner.class, UnknownRunner.class)) {
             final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
                     () -> OptionUtil.getWorkerServiceAccount(optionsWith(runner), "parameters.user"));
             Assertions.assertTrue(e.getMessage().contains("parameters.user"), e.getMessage());
-            Assertions.assertTrue(e.getMessage().contains("options.dataflow.serviceAccount"), e.getMessage());
+            Assertions.assertFalse(e.getMessage().contains("options.dataflow.serviceAccount"), e.getMessage());
         }
     }
 

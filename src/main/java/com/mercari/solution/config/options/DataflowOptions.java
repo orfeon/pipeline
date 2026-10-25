@@ -93,7 +93,7 @@ public class DataflowOptions implements Serializable {
         }
 
         try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
+            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName(DATAFLOW_PIPELINE_OPTIONS);
             final PipelineOptions dataflowOptions = pipelineOptions.as(clazz);
 
             if(dataflow.tempLocation != null) {
@@ -213,11 +213,12 @@ public class DataflowOptions implements Serializable {
     static final String DATAFLOW_PIPELINE_OPTIONS = "org.apache.beam.runners.dataflow.options.DataflowPipelineOptions";
 
     /**
-     * The Dataflow maxNumWorkers, as a parallelism hint for modules (0 when not set); {@code null} when the Dataflow
-     * runner is not on the classpath (the direct / prism / portable / flink / spark builds do not ship it).
+     * The Dataflow maxNumWorkers, as a parallelism hint for modules; 0 when it is not set or the Dataflow runner is
+     * not on the classpath (the direct / prism / portable / flink / spark builds do not ship it).
      */
-    public static Integer getMaxNumWorkers(final PInput input) {
-        return (Integer) getOption(input.getPipeline().getOptions(), DATAFLOW_PIPELINE_OPTIONS, "getMaxNumWorkers");
+    public static int getMaxNumWorkers(final PInput input) {
+        final Object value = getOption(input.getPipeline().getOptions(), "getMaxNumWorkers");
+        return value == null ? 0 : (Integer) value;
     }
 
     public static String getProject(final PipelineOptions options) {
@@ -230,7 +231,15 @@ public class DataflowOptions implements Serializable {
      * Dataflow runner is not on the classpath.
      */
     public static String getServiceAccount(final PipelineOptions options) {
-        return (String) getOption(options, DATAFLOW_PIPELINE_OPTIONS, "getServiceAccount");
+        return (String) getOption(options, "getServiceAccount");
+    }
+
+    /**
+     * Invokes a {@code DataflowPipelineOptions} getter by name; {@code null} when the Dataflow runner is not on the
+     * classpath.
+     */
+    public static Object getOption(final PipelineOptions options, final String getter) {
+        return getOption(options, DATAFLOW_PIPELINE_OPTIONS, getter);
     }
 
     /**

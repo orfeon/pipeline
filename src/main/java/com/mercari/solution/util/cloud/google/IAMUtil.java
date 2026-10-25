@@ -337,12 +337,13 @@ public class IAMUtil {
                 final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
                 final JsonObject json = new Gson().fromJson(response.body(), JsonObject.class);
+                // getAsString: toString() would keep the JSON quotes
                 if (json.has("email")) {
-                    return json.get("email").toString();
+                    return json.get("email").getAsString();
                 }
                 // If Workload Identity, email is sub (Subject)
                 if (json.has("sub")) {
-                    return json.get("sub").toString();
+                    return json.get("sub").getAsString();
                 }
                 return null;
             }

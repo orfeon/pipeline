@@ -352,7 +352,8 @@ public class PostgresUtil {
         if(user == null) {
             final String serviceAccount = OptionUtil.getWorkerServiceAccount(options, "parameters.user");
             LOG.info("Using worker service account: '{}' for database user", serviceAccount);
-            final String iamUrl = url.contains("enableIamAuth") ? url : url + "&enableIamAuth=true";
+            final String iamUrl = url.contains("enableIamAuth")
+                    ? url : url + (url.contains("?") ? "&" : "?") + "enableIamAuth=true";
             return new Credentials(iamUrl, serviceAccount.replace(".gserviceaccount.com", ""), "dummy");
         }
         if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
