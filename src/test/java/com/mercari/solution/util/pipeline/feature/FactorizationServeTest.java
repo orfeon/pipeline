@@ -176,6 +176,29 @@ public class FactorizationServeTest {
         Assertions.assertEquals(12, BlockSeries.changePoints(Factorization.observedBlocks(examples), 3).size());
     }
 
+    /**
+     * A parallel forward fit that fails hands back the permits of the fits it ran ahead: the JVM-wide bound would
+     * otherwise shrink with every failure until a later fit waits forever for its next change point.
+     */
+    @Test
+    public void testFailedParallelForwardReleasesItsFitsAhead() {
+        final List<Factorization.Example> examples = examples(900, 9);
+        final Factorization.Plan plan = new Factorization.Plan(0, true, 3, 0, Alignment.PROCRUSTES, false, 0);
+        final TreeMap<Long, Factorization.Model> sequential = new TreeMap<>();
+        Factorization.fitForward(OPTIONS, examples, plan, false, false, sequential::put);
+        Assertions.assertTimeoutPreemptively(java.time.Duration.ofMinutes(2), () -> {
+            for (int run = 0; run < 2 * Factorization.FIT_THREADS + 1; run++) {
+                Assertions.assertThrows(IllegalStateException.class, () -> Factorization.fitForward(OPTIONS, examples, plan, false, true, (at, model) -> {
+                    throw new IllegalStateException("sink failed");
+                }));
+            }
+            final TreeMap<Long, Factorization.Model> parallel = new TreeMap<>();
+            Factorization.fitForward(OPTIONS, examples, plan, false, true, parallel::put);
+            Assertions.assertEquals(sequential.keySet(), parallel.keySet());
+            for (final long at : sequential.keySet()) assertSameModel(sequential.get(at), parallel.get(at));
+        });
+    }
+
     /** The change point a row is keyed by is the one whose model the side-input lookup would serve it. */
     @Test
     public void testIndexFindsTheLookupChangePoint() {

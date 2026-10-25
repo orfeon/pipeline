@@ -1066,7 +1066,8 @@ refitting modes give training rows values fitted without their own target:
   a warm start that worker's cores run its change points in parallel too (handed out in time order, the models
   unchanged), with one they run one after another. Blocks that read the same examples — the same fields, target,
   offset, contest and blocks, whatever their ridge, size, epochs or warm start (a grid of settings over one task) —
-  share one gather of the examples and one join. `fit.minRows: n` leaves a fit over
+  share one extraction of the examples and one join; each block still gathers its own copy of them (one shuffle of the
+  examples per block). `fit.minRows: n` leaves a fit over
   fewer than `n` rows unsolved (its rows read null). Under `window`, a value with no row in the window leaves the fit,
   but a warm-started fit starts the values in it from the fit before, which read older blocks: with few `warmEpochs`
   that start still shows; `fit.warmStart: none` gives fits that read the window alone. Each change point's model is
@@ -1074,9 +1075,10 @@ refitting modes give training rows values fitted without their own target:
   a worker applying the models holds, per change point it serves, the models of that change point only — one per
   block over the same examples, never every change point's — a model is values × (k + 2)
   × 8 bytes (a million values at k = 8 is ~80 MB) — at the price of one more shuffle of the rows per set of blocks
-  over the same examples. A block's fit keeps a few models (up to twice its worker's cores fitted ahead without a warm
-  start, a model or two with one), and a worker fitting several blocks at once holds that and a copy of the examples
-  for each, where the runner streams a step's outputs as they come (Dataflow); a runner that buffers them until
+  over the same examples. A worker applying a set holds one model per block at a time, so a grid of ten settings over a
+  large vocabulary holds ten. A worker fitting holds at most twice its cores of models fitted ahead of the ones handed
+  out, however many blocks it fits at once (a model or two per warm-started block), and a copy of the examples per
+  block it fits, where the runner streams a step's outputs as they come (Dataflow); a runner that buffers them until
   the step returns (the DirectRunner, possibly Spark) holds every change point's model there for the length of the fit. The cost that remains grows with the change points:
   a block's fits share the cores of one worker, so with a large vocabulary keep the blocks coarse (a month, not a day). An input
   under a non-global windowing strategy, or a non-default trigger, reads the models from one side input instead (all

@@ -4477,9 +4477,9 @@ public final class FeaturePlanCompiler {
                         + " start from the fit before, which read older blocks (fit.warmStart none for fits that read the window alone)" : "")
                         + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                         + minRowsPhrase(minRows, null) + alignPhrase(align, "embeddings")
-                        + "; the training set is gathered on one worker (once for every block over the same examples when the rows read"
-                        + " the models through a join: a global-window input under the default trigger), and the blocks are"
-                        + " fitted in parallel, each on one worker whose cores run its change points " + (warmStart ? "one after another (warm start)" : "in parallel")
+                        + "; each block's training set is gathered on one worker (blocks over the same examples share their extraction"
+                        + " and join when the rows read the models through a join: a global-window input under the default trigger),"
+                        + " and the blocks are fitted in parallel, each on one worker whose cores run its change points " + (warmStart ? "one after another (warm start)" : "in parallel")
                         + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             }
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "

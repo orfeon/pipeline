@@ -141,10 +141,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   point, set in `forward()` after `alignTo` and read out as `fitBlock`;
   forward models are NOT a side input: `serveForward` joins each change point's models with the rows keyed by the change point
   they read, `FitApplyDoFn` skips the block (`blockServed`); a windowed input or a non-default trigger falls back to the
-  side input. The forward blocks of a stage fit in ONE step, a work item per block reading its example set from a side input,
-  change points on the shared `Factorization` fit pool (`fitForward(..., parallel)`, bit-identical to sequential, in time
-  order for `alignTo`); blocks with one `FmSpec.exampleSet` (coordinates minus `FM_FIT_ONLY` — a new fit-only coordinate
-  belongs there, a missing one only keeps blocks apart) share one gather and one join. Never go back to a step or a
+  side input. The forward blocks of a stage fit in ONE step, a `GroupByKey` on (set, slot) — each block its own gather of
+  its set's examples, never an examples side input (Spark / Flink broadcast it through the driver) —, change points on the
+  shared `Factorization` fit pool (`fitForward(..., parallel)`, bit-identical to sequential, in time order for `alignTo`,
+  at most `2 × cores` fitted ahead per JVM: `FitPool.AHEAD`; a failure cancels the queued fits and interrupts the running
+  ones, which `train` checks every epoch); blocks with one `FmSpec.exampleSet` (coordinates minus `FM_FIT_ONLY` — a new
+  fit-only coordinate belongs there, a missing one only keeps blocks apart) share one extraction, one index (from the time
+  blocks alone) and one join. Never go back to a step or a
   join per block: Dataflow ran 40 independent per-block fit stages strictly one after another; the whole-input model is fitted only when the artifact is written (`writesTotal`); coders in
   `FactorizationCoders` — a new `Model` field must be added there too), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding

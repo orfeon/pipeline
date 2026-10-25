@@ -10,9 +10,11 @@ import com.mercari.solution.util.pipeline.feature.FeatureSpec.Scope;
 import com.mercari.solution.util.pipeline.feature.SequenceEvaluator.Past;
 import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.DoubleCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
+import org.apache.beam.sdk.coders.SetCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
@@ -1495,9 +1497,9 @@ public final class FeatureStages {
 
     /**
      * One factorization block of a fit stage, rebuilt from its output columns' coordinates. Static: one model over the
-     * whole input, gathered on one worker. Forward: every row's example tagged with its time block, gathered once for
-     * the blocks over the same examples and fitted change point by change point on one worker (on its cores in parallel
-     * unless warm-started from the one before), the models joined with the rows that read them ({@link FeatureStages#serveForward}). Fold: every example sent to the whole-input fit and to the fit of every
+     * whole input, gathered on one worker. Forward: every row's example tagged with its time block, extracted once for
+     * the blocks over the same examples, gathered per block and fitted change point by change point on one worker (on
+     * its cores in parallel unless warm-started from the one before), the models joined with the rows that read them ({@link FeatureStages#serveForward}). Fold: every example sent to the whole-input fit and to the fit of every
      * fold but its own, one worker per fit, the fold models assembled into one side input. The artifact holds the
      * whole-input model; fold / forward models are always re-fitted.
      */
@@ -1630,7 +1632,7 @@ public final class FeatureStages {
          * fit.mode forward: what the block's training examples and the change point a row reads depend on — its
          * coordinates but those of the fit itself and of one output column ({@link FeatureStages#FM_FIT_ONLY}). Blocks with one key
          * read the same examples and the same change points: a grid of settings over one task shares one extraction,
-         * one gather and one join ({@link FeatureStages#serveForward}). A coordinate missing from FM_FIT_ONLY only keeps apart blocks
+         * one index and one join ({@link FeatureStages#serveForward}). A coordinate missing from FM_FIT_ONLY only keeps apart blocks
          * that could have shared.
          */
         Map<String, String> exampleSet() {
@@ -1734,15 +1736,18 @@ public final class FeatureStages {
 
     /**
      * fit.mode forward: the rows with the columns of every forward factorization block of a fit stage filled from the
-     * model of the change point each reads. The blocks are grouped by {@link FmSpec#exampleSet}, and each set's examples
-     * are extracted and gathered once. The fits are one step whose work item is a block, reading its set's examples
-     * from a side input: the items spread over the workers, and a block's change points run on every core of its
-     * worker ({@link Factorization#fitForward}, parallel) — one stage the runner schedules as a whole, where a step per
-     * block ran one block after another. A set's rows are keyed by the change point they read (the set's index, from
-     * the examples alone: keying waits for no fit) and joined once with the models of all its blocks. Neither the fit
-     * nor the apply holds more than a few models of a block at a time, where a side input would hold every change
-     * point's model on every worker. A row before the first usable model, or of a change point a block left unsolved
-     * (fit.minRows), reads null.
+     * model of the change point each reads. The blocks are grouped by {@link FmSpec#exampleSet}: a set's examples are
+     * extracted once and shuffled to every block of the set, keyed by (set, slot), so the fits are one step whose keys
+     * — the blocks — spread over the workers, a block's change points running on every core of its worker
+     * ({@link Factorization#fitForward}, parallel): one stage the runner schedules as a whole, where a step per block
+     * ran one block after another. The examples are never a side input: a runner that broadcasts one (Spark, Flink)
+     * would collect every set on one machine and copy it to every worker, and a set read whole would be one element,
+     * read again for every block. A set's rows are keyed by the change point they read (the set's index, from the time
+     * blocks of its examples alone: keying waits for no fit) and joined once with the models of all its blocks. The
+     * apply holds the models of one change point, one per block of the set, and a worker fitting at most
+     * {@code 2 × cores} models ahead of the ones handed out, where a side input would hold every change point's model on
+     * every worker. A row before the first usable model, or of a change point a block left unsolved (fit.minRows), reads
+     * null.
      *
      * @param rows     the stage input, in the global window under the default trigger (the models are global-window,
      *                 and one pane carries a change point's models and its rows together)
@@ -1755,23 +1760,23 @@ public final class FeatureStages {
         for (final FmSpec spec : specs) byExamples.computeIfAbsent(spec.exampleSet(), k -> new ArrayList<>()).add(spec);
         final List<List<FmSpec>> sets = new ArrayList<>(byExamples.values());
         final String prefix = label + "_FmForward";
-        final PCollection<KV<Integer, ArrayList<Factorization.Example>>> examples = fitInput
-                .apply(prefix + "_Examples", ParDo.of(new ExtractExampleSetsDoFn(sets)))
-                .setCoder(KvCoder.of(VarIntCoder.of(), FactorizationCoders.ExampleCoder.of()))
-                .apply(prefix + "_Gather", Combine.perKey(new GatherFn<Factorization.Example>()));
-        final PCollectionView<Map<Integer, FmIndex>> index = examples
+        final TupleTag<KV<KV<Integer, Integer>, Factorization.Example>> examplesTag = new TupleTag<>() {};
+        final TupleTag<KV<Integer, Long>> blocksTag = new TupleTag<>() {};
+        final PCollectionTuple extracted = fitInput.apply(prefix + "_Examples", ParDo
+                .of(new ExtractExampleSetsDoFn(sets, blocksTag))
+                .withOutputTags(examplesTag, TupleTagList.of(blocksTag)));
+        final PCollectionView<Map<Integer, FmIndex>> index = extracted.get(blocksTag)
+                .setCoder(KvCoder.of(VarIntCoder.of(), VarLongCoder.of()))
+                .apply(prefix + "_Blocks", Combine.perKey(new ObservedBlocksFn()))
                 .apply(prefix + "_Index", ParDo.of(new IndexExampleSetDoFn(sets)))
                 .setCoder(KvCoder.of(VarIntCoder.of(), SerializableCoder.of(FmIndex.class)))
                 .apply(prefix + "_IndexView", View.asMap());
-        final PCollectionView<Map<Integer, ArrayList<Factorization.Example>>> examplesView = examples.apply(prefix + "_ExamplesView", View.asMap());
         final List<TupleTag<KV<Long, KV<Integer, Factorization.Model>>>> modelTags = new ArrayList<>();
         for (int set = 0; set < sets.size(); set++) modelTags.add(new TupleTag<>() {});
-        final PCollectionTuple fitted = examples
-                .apply(prefix + "_Work", ParDo.of(new FmWorkDoFn(sets)))
-                .setCoder(KvCoder.of(VarIntCoder.of(), VarIntCoder.of()))
-                .apply(prefix + "_Spread", Reshuffle.viaRandomKey())
-                .apply(prefix + "_Fit", ParDo.of(new FitFmForwardDoFn(sets, planHash, examplesView, modelTags))
-                        .withSideInputs(examplesView)
+        final PCollectionTuple fitted = extracted.get(examplesTag)
+                .setCoder(KvCoder.of(KvCoder.of(VarIntCoder.of(), VarIntCoder.of()), FactorizationCoders.ExampleCoder.of()))
+                .apply(prefix + "_Gather", GroupByKey.create())
+                .apply(prefix + "_Fit", ParDo.of(new FitFmForwardDoFn(sets, planHash, modelTags))
                         .withOutputTags(modelTags.get(0), TupleTagList.of(new ArrayList<TupleTag<?>>(modelTags.subList(1, modelTags.size())))));
         final Coder<KV<Long, KV<Integer, Factorization.Model>>> modelCoder = KvCoder.of(VarLongCoder.of(),
                 KvCoder.of(VarIntCoder.of(), NullableCoder.of(FactorizationCoders.ModelCoder.of())));
@@ -2009,13 +2014,24 @@ public final class FeatureStages {
         }
     }
 
-    /** fit.mode forward: a row's example of every example set it has one for, keyed by the set. */
-    static class ExtractExampleSetsDoFn extends DoFn<MElement, KV<Integer, Factorization.Example>> {
+    /**
+     * fit.mode forward: a row's example of every example set it has one for, once per block of the set — keyed by
+     * (set, slot): each block gathers its own copy — and its time block, keyed by the set, on {@code blocksTag} (the
+     * set's index).
+     */
+    static class ExtractExampleSetsDoFn extends DoFn<MElement, KV<KV<Integer, Integer>, Factorization.Example>> {
         private final List<FmSpec> sets;
+        private final List<Integer> sizes;
+        private final TupleTag<KV<Integer, Long>> blocksTag;
 
-        ExtractExampleSetsDoFn(final List<List<FmSpec>> sets) {
+        ExtractExampleSetsDoFn(final List<List<FmSpec>> sets, final TupleTag<KV<Integer, Long>> blocksTag) {
             this.sets = new ArrayList<>();
-            for (final List<FmSpec> set : sets) this.sets.add(set.get(0));
+            this.sizes = new ArrayList<>();
+            for (final List<FmSpec> set : sets) {
+                this.sets.add(set.get(0));
+                this.sizes.add(set.size());
+            }
+            this.blocksTag = blocksTag;
         }
 
         @ProcessElement
@@ -2028,13 +2044,47 @@ public final class FeatureStages {
                 final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
                 if (millis == null) continue;
                 final Factorization.Example example = example(spec, row, spec.forward().blocks().indexOf(millis));
-                if (example != null) c.output(KV.of(set, example));
+                if (example == null) continue;
+                for (int slot = 0; slot < sizes.get(set); slot++) c.output(KV.of(KV.of(set, slot), example));
+                c.output(blocksTag, KV.of(set, example.tag()));
             }
         }
     }
 
-    /** fit.mode forward: an example set's index — its change points follow from its examples alone. */
-    static class IndexExampleSetDoFn extends DoFn<KV<Integer, ArrayList<Factorization.Example>>, KV<Integer, FmIndex>> {
+    /** fit.mode forward: the time blocks an example set has examples in — all its index needs of them. */
+    static class ObservedBlocksFn extends Combine.CombineFn<Long, Set<Long>, Set<Long>> {
+        @Override
+        public Set<Long> createAccumulator() { return new HashSet<>(); }
+
+        @Override
+        public Set<Long> addInput(final Set<Long> acc, final Long block) {
+            acc.add(block);
+            return acc;
+        }
+
+        @Override
+        public Set<Long> mergeAccumulators(final Iterable<Set<Long>> accs) {
+            final Set<Long> out = new HashSet<>();
+            for (final Set<Long> a : accs) out.addAll(a);
+            return out;
+        }
+
+        @Override
+        public Set<Long> extractOutput(final Set<Long> acc) { return acc; }
+
+        @Override
+        public Coder<Set<Long>> getAccumulatorCoder(final CoderRegistry registry, final Coder<Long> inputCoder) {
+            return SetCoder.of(VarLongCoder.of());
+        }
+
+        @Override
+        public Coder<Set<Long>> getDefaultOutputCoder(final CoderRegistry registry, final Coder<Long> inputCoder) {
+            return SetCoder.of(VarLongCoder.of());
+        }
+    }
+
+    /** fit.mode forward: an example set's index — its change points follow from the time blocks of its examples alone. */
+    static class IndexExampleSetDoFn extends DoFn<KV<Integer, Set<Long>>, KV<Integer, FmIndex>> {
         private final List<Integer> windowBlocks = new ArrayList<>();
 
         IndexExampleSetDoFn(final List<List<FmSpec>> sets) {
@@ -2043,53 +2093,36 @@ public final class FeatureStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final TreeSet<Long> observed = Factorization.observedBlocks(c.element().getValue());
+            final TreeSet<Long> observed = new TreeSet<>(c.element().getValue());
             c.output(KV.of(c.element().getKey(), new FmIndex(BlockSeries.changePoints(observed, windowBlocks.get(c.element().getKey())), observed)));
-        }
-    }
-
-    /** fit.mode forward: the work items of an example set with examples — one (set, slot) per block of the set. */
-    static class FmWorkDoFn extends DoFn<KV<Integer, ArrayList<Factorization.Example>>, KV<Integer, Integer>> {
-        private final List<Integer> sizes = new ArrayList<>();
-
-        FmWorkDoFn(final List<List<FmSpec>> sets) {
-            for (final List<FmSpec> set : sets) sizes.add(set.size());
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final int set = c.element().getKey();
-            for (int slot = 0; slot < sizes.get(set); slot++) c.output(KV.of(set, slot));
         }
     }
 
     /**
      * fit.mode forward, served by a join: one block's model of every change point as soon as it is fitted — null when
      * left unsolved (fit.minRows), so every change point of a set carries one entry per block — keyed by the change
-     * point and tagged with the block's slot in its set, on the output of its set.
+     * point and tagged with the block's slot in its set, on the output of its set. The block's examples are its own
+     * gather of its set's.
      */
-    static class FitFmForwardDoFn extends DoFn<KV<Integer, Integer>, KV<Long, KV<Integer, Factorization.Model>>> {
+    static class FitFmForwardDoFn extends DoFn<KV<KV<Integer, Integer>, Iterable<Factorization.Example>>, KV<Long, KV<Integer, Factorization.Model>>> {
         private final List<List<FmSpec>> sets;
         private final String planHash;
-        private final PCollectionView<Map<Integer, ArrayList<Factorization.Example>>> examplesView;
         private final List<TupleTag<KV<Long, KV<Integer, Factorization.Model>>>> modelTags;
 
         FitFmForwardDoFn(final List<List<FmSpec>> sets, final String planHash,
-                         final PCollectionView<Map<Integer, ArrayList<Factorization.Example>>> examplesView,
                          final List<TupleTag<KV<Long, KV<Integer, Factorization.Model>>>> modelTags) {
             this.sets = sets;
             this.planHash = planHash;
-            this.examplesView = examplesView;
             this.modelTags = modelTags;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final int set = c.element().getKey();
-            final int slot = c.element().getValue();
+            final int set = c.element().getKey().getKey();
+            final int slot = c.element().getKey().getValue();
             final FmSpec spec = sets.get(set).get(slot);
-            final ArrayList<Factorization.Example> examples = c.sideInput(examplesView).get(set);
-            if (examples == null) return;
+            final List<Factorization.Example> examples = new ArrayList<>();
+            for (final Factorization.Example e : c.element().getValue()) examples.add(e);
             LOG.info("factorization {}: fitting on {} examples (forward)", spec.block(), examples.size());
             // no row reads the whole-input model: it is fitted only when the artifact will be written
             final boolean writesTotal = spec.writesTotal(planHash);
