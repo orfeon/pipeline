@@ -771,12 +771,6 @@ public class FeatureTransformTest {
         Assertions.assertEquals(model.count(values, 0), ((Number) row.getPrimitiveValue("f_fm_seller_rows")).longValue(), row::toString);
     }
 
-    /**
-     * factorization under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874): the
-     * target settles and arrives 6 days 30 minutes after the event, so A and B read nothing (no complete block's
-     * targets are known yet), C reads the model of blocks 2869–2870 and D the one of 2869–2872 — warm-started from the
-     * one before. The expected values are the pure model's on the same examples.
-     */
     /** als.reg per part and per field reaches the fit: a huge factor ridge on seller_id holds its pairs at 0. */
     @Test
     public void testFactorizationRidgePerField() throws java.io.IOException {
@@ -809,6 +803,12 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * factorization under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874): the
+     * target settles and arrives 6 days 30 minutes after the event, so A and B read nothing (no complete block's
+     * targets are known yet), C reads the model of blocks 2869–2870 and D the one of 2869–2872 — warm-started from the
+     * one before. The expected values are the pure model's on the same examples.
+     */
     @Test
     public void testFactorizationForward() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();

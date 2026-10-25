@@ -1505,7 +1505,7 @@ public final class FeatureStages {
                   boolean descending, int top, boolean linear, List<String> scales,
                   List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
-            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg.bias(), seed, loss, top, descending, linear, scales, reg, tol, block);
+            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales, tol, block);
         }
 
         /** The indices of a comma-separated list of the block's fields. */

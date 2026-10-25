@@ -429,6 +429,8 @@ public class FeatureSpec implements Serializable {
         public String regScale;
         /** factorization {@code fields[].reg}: per field, its linear / factors ridge (a number sets both). */
         public Map<String, Map<String, Double>> fmFieldReg = new LinkedHashMap<>();
+        /** factorization: the fields whose {@code reg} names {@code linear} explicitly (an object), not as a number setting both. */
+        public java.util.Set<String> fmFieldRegLinear = new java.util.LinkedHashSet<>();
         public Long seed;
         // discretize / quantileTransform ({@code bins}, {@code distribution} shared with noise)
         public String method;
@@ -1215,9 +1217,10 @@ public class FeatureSpec implements Serializable {
                 for (final String key : field.keySet()) {
                     if (!List.of("field", "numeric", "scale", "reg").contains(key)) diagnostics.error("factorization.fields", loc, "unknown key '" + key + "' in field " + name + " (field, numeric, scale, reg)");
                 }
-                if (field.has("reg")) {
+                if (field.has("reg") && !field.get("reg").isJsonNull()) {
                     final Map<String, Double> reg = regParts(field.get("reg"), List.of("linear", "factors"), "fields[" + name + "].reg", "factorization.fields", diagnostics, loc);
                     if (reg != null) def.fmFieldReg.put(name, reg);
+                    if (reg != null && field.get("reg").isJsonObject() && reg.containsKey("linear")) def.fmFieldRegLinear.add(name);
                 }
                 if (Json.bool(field, "numeric", false)) {
                     def.fmNumeric.put(name, Json.string(field, "scale") == null ? "zscore" : Json.string(field, "scale"));
@@ -1387,8 +1390,10 @@ public class FeatureSpec implements Serializable {
                                                 final Diagnostics diagnostics, final String loc) {
         final Map<String, Double> parts = new LinkedHashMap<>();
         try {
-            if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
-                for (final String key : keys) parts.put(key, element.getAsDouble());
+            // a number, or its text (as als.reg and the object's parts take it)
+            if (element.isJsonPrimitive()) {
+                final double value = Double.parseDouble(element.getAsString().trim());
+                for (final String key : keys) parts.put(key, value);
                 return parts;
             }
             if (element.isJsonObject()) {
@@ -1397,7 +1402,7 @@ public class FeatureSpec implements Serializable {
                         diagnostics.error(code, loc, "unknown key '" + e.getKey() + "' in " + what + " (" + String.join(", ", keys) + ")");
                         return null;
                     }
-                    parts.put(e.getKey(), Double.parseDouble(e.getValue().getAsString()));
+                    parts.put(e.getKey(), Double.parseDouble(e.getValue().getAsString().trim()));
                 }
                 return parts;
             }
