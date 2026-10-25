@@ -229,6 +229,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.
   Work shared by several columns of one group is cached on the group's list identity (`harvillePlaces`: every
   place of a `top` is one pass — a new group is a new list, so the cache cannot outlive it).
+  `harville` with `shape` ≠ 1 is `GroupOps.racePlaces` (the gamma race model: rates calibrated per group by Newton on
+  log θ against the input win probabilities, one Simpson pass in log time per step for the win probabilities, their
+  Jacobian and the Poisson-binomial within-k; `raceRates` / `raceWithin` are package-private for the Monte Carlo
+  reference test; shape 1 routes to the closed form bit for bit; the cache key carries the shape; 10–50 ms per group,
+  measured — never call it per column).
   A new solver is a `GroupOps` function + a branch in `solve` + a record in `Plan`; it must take its sums in an
   order the *values* decide (`GroupOps.sort`, a primitive merge sort — no boxed index per row) — the rows of a
   group arrive in runner order, and the parallel / linear equality is compared bit for bit — and declare its

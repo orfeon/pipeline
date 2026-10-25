@@ -140,8 +140,8 @@ public class ContextEvaluator implements Serializable {
 
     private record Residualize(String[] against) {}
 
-    /** {@code key} names the pass this column reads: the same field, discount and bound are computed once per group. */
-    private record Harville(int top, double[] discount, int maxGroupSize, String key) {}
+    /** {@code key} names the pass this column reads: the same field, discount, shape and bound are computed once per group ({@code shape} 1 = the Harville closed form). */
+    private record Harville(int top, double[] discount, double shape, int maxGroupSize, String key) {}
 
     /** {@code order} is the row identity followed by the tie break, {@code contextKeys} the group key. */
     private record Shuffle(long seed, List<String> order, List<String> contextKeys) {}
@@ -174,8 +174,9 @@ public class ContextEvaluator implements Serializable {
             case "harville" -> {
                 final String discount = at.get("discount");
                 final int maxGroupSize = Integer.parseInt(at.get("maxGroupSize"));
-                yield plan.with(new Harville(Integer.parseInt(at.get("top")), doubles(discount), maxGroupSize,
-                        field + "\u0000" + discount + "\u0000" + maxGroupSize));
+                final String shape = at.getOrDefault("shape", "1");
+                yield plan.with(new Harville(Integer.parseInt(at.get("top")), doubles(discount), Double.parseDouble(shape), maxGroupSize,
+                        field + "\u0000" + discount + "\u0000" + shape + "\u0000" + maxGroupSize));
             }
             case "shuffle" -> {
                 final List<String> order = new ArrayList<>(List.of(split(at.get("order"))));
@@ -378,7 +379,9 @@ public class ContextEvaluator implements Serializable {
         double[][] cached = harvilleCache.get(harville.key());
         if (cached == null || cached.length < harville.top()) {
             final int maxTop = Math.max(harville.top(), places == null ? 0 : places.getOrDefault(harville.key(), 0));
-            cached = GroupOps.harvillePlaces(channel(rows, plan.field()), maxTop, harville.discount(), harville.maxGroupSize());
+            cached = harville.shape() == 1d
+                    ? GroupOps.harvillePlaces(channel(rows, plan.field()), maxTop, harville.discount(), harville.maxGroupSize())
+                    : GroupOps.racePlaces(channel(rows, plan.field()), maxTop, harville.shape(), harville.maxGroupSize());
             harvilleCache.put(harville.key(), cached);
         }
         return cached;

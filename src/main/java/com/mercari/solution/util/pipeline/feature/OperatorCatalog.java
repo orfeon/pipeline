@@ -87,7 +87,7 @@ public final class OperatorCatalog {
         register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
         register(Scope.context, "ratingProb", InputKind.numeric, F64, false, "the probability a rating model gives the row within the group: exp(mu / c) normalised over the group, c = sqrt(sum(sigma^2 + beta^2)) over the group (the Plackett-Luce contest of a rating); offset = a benchmark read in probability space like softmax's (offsetScale probability | log): w exp(mu / c) normalised");
         register(Scope.context, "residualize", InputKind.numeric, F64, false, "residual of the field regressed (with an intercept) on the 'against' fields over the rows of the group; excludeSelf fits on the other rows");
-        register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place)");
+        register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place) or the gamma race model (shape: Stern's gamma shape, 1 = Harville)");
         register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");
 
         // sequence (deterministic; a strictly-past window, or a strictly-future one for labels)

@@ -135,6 +135,8 @@ public class FeatureSpec implements Serializable {
         public List<Double> discount = new ArrayList<>();
         /** harville: groups with more valid rows than this read null (the op is cubic in the group size). */
         public Integer maxGroupSize;
+        /** harville: the gamma shape of the race model (Stern); null / 1 = the Harville closed form. */
+        public Double shape;
         /**
          * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by
          * name and the current row's through {@code $self.<field>} (a similarity kernel). Null / NaN / non-positive
@@ -1639,6 +1641,7 @@ public class FeatureSpec implements Serializable {
         }
         op.discount = doubles(o, "discount", diagnostics, loc);
         op.maxGroupSize = Json.integer(o, "maxGroupSize");
+        op.shape = doubleOf(o, "shape", diagnostics, loc);
         if (o.has("temperature") && !o.get("temperature").isJsonNull()) {
             final JsonElement t = o.get("temperature");
             if (t.isJsonPrimitive() && t.getAsJsonPrimitive().isNumber()) {

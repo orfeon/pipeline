@@ -1233,12 +1233,29 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.op.maxGroupSize", loc, "maxGroupSize must be >= 2: " + maxGroupSize);
                     return null;
                 }
+                // shape: the gamma race model (Stern) solved numerically per group; 1 is the Harville closed form, and the
+                // discount exponents approximate what the shape models, so the two are not combined
+                final double shape = op.shape == null ? 1d : op.shape;
+                if (!(shape > 0) || Double.isInfinite(shape)) {
+                    diagnostics.error("context.harville.shape", loc, "harville shape must be a positive number (the gamma shape of the running times; 1 = Harville): " + op.shape);
+                    return null;
+                }
+                if (op.shape != null && shape != 1d && !op.discount.isEmpty()) {
+                    diagnostics.error("context.harville.shape", loc, "discount and shape correct the same bias (the later places plain Harville gives the favourites): declare one of them"
+                            + " - shape is the exact gamma race model, discount its power approximation");
+                    return null;
+                }
                 if (def.excludeSelf) diagnostics.warning("context.harville.excludeSelf", loc, "excludeSelf has no effect on harville (the row is part of its own field)");
                 if (hintedBlocks.add("context.op.groupSolver:" + def.name)) {
-                    diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker - quadratic in the group size for the 2nd place, cubic for the 3rd:"
-                            + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)");
+                    diagnostics.info("context.op.groupSolver", loc, shape == 1d
+                            ? "harville solves every group on one worker - quadratic in the group size for the 2nd place, cubic for the 3rd:"
+                            + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)"
+                            : "harville with shape " + shape + " calibrates the gamma race model of every group on one worker (Newton on the rates, a few hundred"
+                            + " quadrature nodes per step: quadratic in the group size, tens of milliseconds per group): a group with more than " + maxGroupSize
+                            + " valid rows reads null (maxGroupSize)");
                 }
                 if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
+                if (shape != 1d) coordinates.put("shape", Double.toString(shape));
                 coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
             }
             case "ratingProb" -> {
