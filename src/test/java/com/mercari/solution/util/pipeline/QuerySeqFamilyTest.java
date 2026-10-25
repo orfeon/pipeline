@@ -16,7 +16,7 @@ import java.util.Map;
  * aggregation as an expression), SEQ_SPLIT (sessionization) and SEQ_COLLECT
  * (key-ordered collection), ported from orfeon/calcite-multi-engine.
  */
-public class Query2SeqFamilyTest {
+public class QuerySeqFamilyTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
 
@@ -51,7 +51,7 @@ public class Query2SeqFamilyTest {
 
     @Test
     public void testStepsAggregateExactlyTheMatchedPurchases() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT i.userId AS userId, s.matchNo AS matchNo,
@@ -86,7 +86,7 @@ public class Query2SeqFamilyTest {
 
     @Test
     public void testShortestModePinsFirstOccurrence() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT m.endIdx AS e
@@ -111,7 +111,7 @@ public class Query2SeqFamilyTest {
 
     @Test
     public void testFoldAggregatesMatchRangeAsExpression() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -144,7 +144,7 @@ public class Query2SeqFamilyTest {
 
     @Test
     public void testSplitSessionsAndMatchPerSession() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT i.userId AS userId, s.sessionNo AS sessionNo,
@@ -178,7 +178,7 @@ public class Query2SeqFamilyTest {
     public void testCollectBuildsOrderedSequenceFromGroupedRows() {
         // Rows arrive shuffled; SEQ_COLLECT sorts by ts, then the rising run
         // over amounts (1,2 at ts 100,200) is detected and folded.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT r.userId AS userId,

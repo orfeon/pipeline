@@ -11,7 +11,7 @@ import com.google.datastore.v1.client.DatastoreOptions;
 import com.google.protobuf.Timestamp;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
@@ -108,7 +108,7 @@ public class DatastoreQueryLookupIT {
 
     @Test
     public void testLookupJoinAndLeftJoinNull() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(source()
@@ -157,7 +157,7 @@ public class DatastoreQueryLookupIT {
 
     @Test
     public void testNumericIdKeyLookup() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("itemId", Schema.FieldType.INT64),
                         Schema.Field.of("qty", Schema.FieldType.INT64))))

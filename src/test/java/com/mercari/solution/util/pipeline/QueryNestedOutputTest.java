@@ -14,7 +14,7 @@ import java.util.Map;
  * Output columns that JDBC metadata cannot describe — a struct, an array of structs, a map: their schema comes from the planned row type and their values are converted
  * by that type.
  */
-public class Query2NestedOutputTest {
+public class QueryNestedOutputTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2026-10-03T00:00:00Z");
     private static final long AT = 1_790_000_000_000_000L;
@@ -46,11 +46,11 @@ public class Query2NestedOutputTest {
                 "laps", List.of(120L, 0L, 118L)), TIMESTAMP);
     }
 
-    private static MElement evaluate(final Query2 query) {
+    private static MElement evaluate(final Query query) {
         return evaluate(query, input());
     }
 
-    private static MElement evaluate(final Query2 query, final MElement input) {
+    private static MElement evaluate(final Query query, final MElement input) {
         query.setup();
         try {
             return query.execute(List.of(input), TIMESTAMP).getFirst();
@@ -66,7 +66,7 @@ public class Query2NestedOutputTest {
     @Test
     public void testPassThrough() {
         // An array of structs, a struct and a map column passed through as they are.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT i.id, i.info AS info, i.head AS head, i.attrs AS attrs, i.laps AS laps
                 FROM INPUT AS i
                 """);
@@ -107,7 +107,7 @@ public class Query2NestedOutputTest {
         final Schema schema = Schema.of(List.of(
                 Schema.Field.of("id", Schema.FieldType.STRING),
                 Schema.Field.of("info", Schema.FieldType.array(Schema.FieldType.element(oddsSchema())))));
-        final Query2 query = Query2.of("INPUT", schema, "SELECT i.*, CARDINALITY(i.info) AS n FROM INPUT AS i");
+        final Query query = Query.of("INPUT", schema, "SELECT i.*, CARDINALITY(i.info) AS n FROM INPUT AS i");
         Assertions.assertEquals(List.of("id", "info", "n"), fieldNames(query.getOutputSchema()));
         query.setup();
         try {
@@ -126,7 +126,7 @@ public class Query2NestedOutputTest {
     @Test
     public void testRebuiltArrayOfStructs() {
         // A multi-column ARRAY subquery is an array of structs named by the column aliases.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT
                   ARRAY(SELECT e.Umaban AS umaban, e.Odds / 10e0 AS odds
                         FROM UNNEST(i.info) AS e WHERE e.Odds > 0) AS odds,
@@ -149,7 +149,7 @@ public class Query2NestedOutputTest {
 
     @Test
     public void testStruct() {
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT CAST(ROW(i.id, 1) AS ROW(x VARCHAR, y BIGINT)) AS s
                 FROM INPUT AS i
                 """);
@@ -166,7 +166,7 @@ public class Query2NestedOutputTest {
         // The element coder cannot encode a list directly inside a list: rejected at
         // construction rather than failing when the pipeline runs.
         final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(),
+                () -> Query.of("INPUT", inputSchema(),
                         "SELECT ARRAY[i.laps, i.laps] AS nested FROM INPUT AS i"));
         final StringBuilder messages = new StringBuilder();
         for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
@@ -178,7 +178,7 @@ public class Query2NestedOutputTest {
 
     @Test
     public void testNullNestedValues() {
-        final Query2 query = Query2.of("INPUT", inputSchema(),
+        final Query query = Query.of("INPUT", inputSchema(),
                 "SELECT i.info AS info, i.head AS head, i.attrs AS attrs FROM INPUT AS i");
         query.setup();
         try {
@@ -196,7 +196,7 @@ public class Query2NestedOutputTest {
     public void testUnnamedStructFieldIsRejected() {
         // ROW(...) has no field names: rejected at construction, as an unnamed column is.
         final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), """
+                () -> Query.of("INPUT", inputSchema(), """
                         SELECT ARRAY(SELECT ROW(e.Umaban, e.Odds / 10e0) FROM UNNEST(i.info) AS e) AS odds
                         FROM INPUT AS i
                         """));
@@ -224,7 +224,7 @@ public class Query2NestedOutputTest {
                 "stamps", Map.of("k", AT),
                 "times", Map.of("k", time),
                 "ratios", Map.of("k", 1.5f)), TIMESTAMP);
-        final Query2 query = Query2.of("INPUT", schema, """
+        final Query query = Query.of("INPUT", schema, """
                 SELECT
                   i.stamps AS stamps, i.times AS times, i.ratios AS ratios,
                   i.stamps['k'] AS stamp, i.times['k'] AS t, i.ratios['k'] AS ratio
@@ -258,7 +258,7 @@ public class Query2NestedOutputTest {
                 "lists", Map.of("k", List.of(1L, 2L)),
                 "structs", Map.of("k", Map.of("Umaban", 1L, "Odds", 25L, "At", AT)),
                 "maps", Map.of("k", Map.of("x", "y"))), TIMESTAMP);
-        final Query2 query = Query2.of("INPUT", schema,
+        final Query query = Query.of("INPUT", schema,
                 "SELECT i.*, i.lists['k'] AS list, i.structs['k'].Odds AS odds FROM INPUT AS i");
         final Schema output = query.getOutputSchema();
         Assertions.assertEquals(Schema.Type.int64, output.getField("lists")
@@ -292,7 +292,7 @@ public class Query2NestedOutputTest {
                 "solo", Map.of("v", 7L),
                 "deep", Map.of("inner", Map.of("v", 8L))), TIMESTAMP);
 
-        final Query2 passed = Query2.of("INPUT", schema, "SELECT i.solo AS solo FROM INPUT AS i");
+        final Query passed = Query.of("INPUT", schema, "SELECT i.solo AS solo FROM INPUT AS i");
         Assertions.assertEquals(Map.of("v", 7L), evaluate(passed, input).getPrimitiveValue("solo"));
         // a NULL field is not a NULL struct, and a NULL struct stays one
         final Map<String, Object> nullField = new HashMap<>();
@@ -302,23 +302,23 @@ public class Query2NestedOutputTest {
         Assertions.assertNull(evaluate(passed, MElement.of(
                 Map.of("id", "a"), TIMESTAMP)).getPrimitiveValue("solo"));
 
-        final Query2 nested = Query2.of("INPUT", schema, "SELECT i.deep AS deep FROM INPUT AS i");
+        final Query nested = Query.of("INPUT", schema, "SELECT i.deep AS deep FROM INPUT AS i");
         Assertions.assertEquals(Map.of("inner", Map.of("v", 8L)),
                 evaluate(nested, input).getPrimitiveValue("deep"));
 
-        final Query2 built = Query2.of("INPUT", schema,
+        final Query built = Query.of("INPUT", schema,
                 "SELECT CAST(ROW(i.id) AS ROW(x VARCHAR)) AS s FROM INPUT AS i");
         Assertions.assertEquals(Map.of("x", "a"), evaluate(built, input).getPrimitiveValue("s"));
 
         // a single scalar column is unaffected
-        final Query2 scalar = Query2.of("INPUT", schema, "SELECT i.id FROM INPUT AS i");
+        final Query scalar = Query.of("INPUT", schema, "SELECT i.id FROM INPUT AS i");
         Assertions.assertEquals("a", evaluate(scalar, input).getPrimitiveValue("id"));
     }
 
     @Test
     public void testUntypedNullStructField() {
         // An untyped NULL inside a struct is a string, as a top-level one is.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT
                   NULL AS n,
                   ARRAY(SELECT e.Umaban AS umaban, NULL AS note FROM UNNEST(i.info) AS e) AS noted

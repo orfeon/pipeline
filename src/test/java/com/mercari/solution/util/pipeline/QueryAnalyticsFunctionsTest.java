@@ -21,7 +21,7 @@ import java.util.Map;
  * UDAF: the standard operators run natively on the enumerable runtime, and a
  * same-name user aggregate breaks the validator's overload resolution).
  */
-public class Query2AnalyticsFunctionsTest {
+public class QueryAnalyticsFunctionsTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
 
@@ -70,7 +70,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testFunnelMaxStepAndWindow() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -112,7 +112,7 @@ public class Query2AnalyticsFunctionsTest {
     public void testFunnelOverCollectedRows() {
         // Rows arrive shuffled; SEQ_COLLECT sorts by ts, the funnel then sees
         // view -> cart -> buy in order. Field names are positional.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT r.userId AS userId,
@@ -137,7 +137,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testRetentionAnchorsOnFirstCondition() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", trailSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -172,7 +172,7 @@ public class Query2AnalyticsFunctionsTest {
         // Deliberately NOT custom UDAFs: Calcite's standard ARG_MAX/ARG_MIN
         // execute on the enumerable runtime, return the value's own type and
         // ignore NULL keys. This pins that contract.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT r.userId AS userId,
@@ -199,7 +199,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testQuantileInterpolates() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT r.userId AS userId,
@@ -226,7 +226,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testApproxDistinctSmallCardinalityIsExact() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT r.userId AS userId,
@@ -249,7 +249,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testArrayTransformsComposeWithSeqMatch() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -280,7 +280,7 @@ public class Query2AnalyticsFunctionsTest {
 
     @Test
     public void testArrayDifferenceAndCumSumProject() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -307,7 +307,7 @@ public class Query2AnalyticsFunctionsTest {
     public void testTimeBucketGroupsFixedWidthWindows() {
         final long base = 1_700_000_100_000L; // not on a 5-min boundary
         final long bucket = base - base % 300_000;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", readingSchema())
                 .withSql("""
                         SELECT UNIX_MILLIS(TIME_BUCKET(r.ts, 300000)) AS bucket,

@@ -17,7 +17,7 @@ import java.util.Map;
  * SEQ_HOLT), the deterministic Thompson-sampling primitive (BETA_SAMPLE), and
  * the time-decayed aggregates (DECAY_SUM / DECAY_AVG / DECAY_COUNT).
  */
-public class Query2ModelFunctionsTest {
+public class QueryModelFunctionsTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
     private static final double DELTA = 1e-9;
@@ -50,7 +50,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testPageHinkleyDetectsShift() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,
@@ -83,7 +83,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testCusumDetectsShift() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,
@@ -112,7 +112,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testExpSmoothAndHolt() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,
@@ -152,7 +152,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testBetaSampleDeterministicAndInRange() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,
@@ -188,7 +188,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testDecayAggregates() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,
@@ -228,7 +228,7 @@ public class Query2ModelFunctionsTest {
 
     @Test
     public void testDecayOverAllNullRows() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", seriesSchema())
                 .withSql("""
                         SELECT i.id AS id,

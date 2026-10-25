@@ -177,7 +177,8 @@ exposes the files as `docs://` resources (read from the same classpath tree). Al
 | Data type conversions                  | `util/schema/converter/`                               |
 | Field selection / expressions          | `util/pipeline/select/`                                |
 | Aggregations                           | `util/pipeline/aggregation/`                           |
-| SQL (BeamSQL / Calcite)                | `util/domain/sql/`                                     |
+| SQL: BeamSQL UDFs                      | `util/domain/sql/`                                     |
+| SQL: per-element Calcite (`query`)     | `util/pipeline/Query.java`, `util/pipeline/lookup/`    |
 | Server / MCP / API                     | `server/`                                              |
 | Runnable examples                      | `examples/` (`examples/README.md`)                    |
 | Per-module config reference            | `src/main/resources/server/docs/module/`               |

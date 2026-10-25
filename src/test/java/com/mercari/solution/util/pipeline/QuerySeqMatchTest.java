@@ -15,7 +15,7 @@ import java.util.Map;
  * over an array column, fanned out with UNNEST, with matched values extracted
  * via dynamic array indexing ({@code events[m.startIdx].amount}).
  */
-public class Query2SeqMatchTest {
+public class QuerySeqMatchTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
 
@@ -37,7 +37,7 @@ public class Query2SeqMatchTest {
 
     @Test
     public void testRisingRunsWithValueExtraction() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSql("""
                         SELECT
@@ -93,7 +93,7 @@ public class Query2SeqMatchTest {
     @Test
     public void testAggregatePerMatchViaLateral() {
         // Count matches per element by folding the UNNEST fan-out back.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSql("""
                         SELECT i.userId AS userId, COUNT(*) AS cnt

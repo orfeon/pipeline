@@ -1,7 +1,7 @@
 package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -44,7 +44,7 @@ public class SpannerQueryTableTest {
     public void testPlansLookupJoinOverQueryTable() {
         // Construction plans the SQL and derives the output schema; with explicit
         // fields this must succeed without any Spanner RPC.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(graphSource())
@@ -64,7 +64,7 @@ public class SpannerQueryTableTest {
     public void testPlansLateralOverQueryTable() {
         // The LATERAL machinery is source-agnostic: a point-equality correlation
         // on the query key plans without contacting Spanner.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(graphSource())

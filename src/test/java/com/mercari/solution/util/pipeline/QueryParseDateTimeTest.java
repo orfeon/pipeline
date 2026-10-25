@@ -18,7 +18,7 @@ import java.util.Map;
  * The PARSE_DATE / PARSE_TIME / PARSE_DATETIME / PARSE_TIMESTAMP built-ins, which replace the
  * Calcite BigQuery-library functions: those misread an unseparated time ({@code %H%M}).
  */
-public class Query2ParseDateTimeTest {
+public class QueryParseDateTimeTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2026-10-03T00:00:00Z");
 
@@ -29,7 +29,7 @@ public class Query2ParseDateTimeTest {
     }
 
     private static MElement evaluate(final String sql, final Map<String, Object> input) {
-        final Query2 query = Query2.of("INPUT", inputSchema(), sql);
+        final Query query = Query.of("INPUT", inputSchema(), sql);
         query.setup();
         try {
             return query.execute(List.of(MElement.of(input, TIMESTAMP)), TIMESTAMP).getFirst();
@@ -89,7 +89,7 @@ public class Query2ParseDateTimeTest {
     @Test
     public void testSeparatedFormatsAndTypes() {
         // Separated formats parsed correctly before; they must keep their results and types.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT
                   PARSE_TIME("%H:%M", "19:35") AS t1,
                   PARSE_TIME("%H:%M:%S", "9:5:7") AS t2,
@@ -189,7 +189,7 @@ public class Query2ParseDateTimeTest {
     @Test
     public void testNonStringArgumentIsCast() {
         // As for the library functions, a non-string argument is cast to a string implicitly.
-        final Query2 query = Query2.of("INPUT",
+        final Query query = Query.of("INPUT",
                 Schema.of(List.of(Schema.Field.of("ymd", Schema.FieldType.INT64))), """
                 SELECT
                   PARSE_DATE("%Y%m%d", ymd) AS d1,

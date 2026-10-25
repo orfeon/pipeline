@@ -11,8 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Built-in date/time scalar UDFs registered by {@code Query2} for every query
- * (successor of the deprecated {@code util.domain.sql.calcite.udf} versions):
+ * Built-in date/time scalar UDFs registered by {@code Query} for every query:
  * {@code CURRENT_DATE_()} / {@code CURRENT_DATE_('Asia/Tokyo')} — the current
  * date, optionally in a time zone (the trailing underscore avoids the SQL
  * standard {@code CURRENT_DATE} niladic function).

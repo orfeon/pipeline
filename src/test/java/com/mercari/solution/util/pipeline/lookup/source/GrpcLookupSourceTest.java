@@ -2,7 +2,7 @@ package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
@@ -88,7 +88,7 @@ public class GrpcLookupSourceTest {
     public void testUnaryPointLookupWithDerivedSchema() {
         // Schema fully derived from the descriptor set: the response echoes the
         // key (id), address is a nested element row, tags a string array.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", userInputSchema())
                 .withSource(source().withTable(usersTable()).build())
                 .withSql("""
@@ -143,7 +143,7 @@ public class GrpcLookupSourceTest {
             auth.tokenUrl = "http://127.0.0.1:" + tokenServer.getAddress().getPort() + "/token";
             auth.clientId = "id";
             auth.clientSecret = "secret";
-            final Query2 query = Query2.builder()
+            final Query query = Query.builder()
                     .withInput("INPUT", userInputSchema())
                     .withSource(GrpcLookupSource.builder()
                             .withName("grpc")
@@ -176,7 +176,7 @@ public class GrpcLookupSourceTest {
         // ClassifyResponse does not echo the key: the 'text' column is prepended
         // to the derived schema and filled from the request key. One term fans
         // out to many label rows; a term with no labels survives via LEFT JOIN.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", textInputSchema())
                 .withSource(source().withTable(classifyTable()).build())
                 .withSql("""
@@ -207,7 +207,7 @@ public class GrpcLookupSourceTest {
     @Test
     public void testServerStreamingFanOut() {
         // Note: not named "stream" — STREAM is a Calcite reserved word.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", textInputSchema())
                 .withSource(source().withTable(GrpcLookupSource.TableConfig.builder()
                         .withName("streamedLabels")
@@ -238,7 +238,7 @@ public class GrpcLookupSourceTest {
     public void testExplicitFieldsOverrideDerivedColumns() {
         // Declared fields replace the derived response columns (a subset here);
         // the key column is still prepended and typed from the request field.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", textInputSchema())
                 .withSource(source().withTable(GrpcLookupSource.TableConfig.builder()
                         .withName("classify")
@@ -273,7 +273,7 @@ public class GrpcLookupSourceTest {
         original.setup();
         original.close();
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", userInputSchema())
                 .withSource(original)
                 .withSql("""
@@ -287,10 +287,10 @@ public class GrpcLookupSourceTest {
         try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(
                 new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
         restored.setup();
         try {

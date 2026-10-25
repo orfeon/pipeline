@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
  * An external source that answers <em>key-driven lookups</em>: given a batch of
  * key values (point) or key-prefix + range requests, it returns the matching
  * rows. This is what powers the input-to-source lookup-join of
- * {@link com.mercari.solution.util.pipeline.Query2} across all adapters (JDBC /
+ * {@link com.mercari.solution.util.pipeline.Query} across all adapters (JDBC /
  * Spanner primary keys, Bigtable row keys, REST request parameters, ...).
  *
  * <p>The join condition is restricted to a contiguous prefix of the chosen

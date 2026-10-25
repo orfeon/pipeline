@@ -17,7 +17,7 @@ import java.util.Map;
  * {@code util/domain/math/MatrixOps} — the same core the select module's
  * matrix functions use.
  */
-public class Query2MatrixFunctionsTest {
+public class QueryMatrixFunctionsTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
     private static final double DELTA = 1e-9;
@@ -39,7 +39,7 @@ public class Query2MatrixFunctionsTest {
 
     @Test
     public void testCosineSimilarity() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", vectorSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -68,7 +68,7 @@ public class Query2MatrixFunctionsTest {
 
     @Test
     public void testMatrixMultiplyAndSolveWithLiteralMatrix() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", vectorSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -93,7 +93,7 @@ public class Query2MatrixFunctionsTest {
 
     @Test
     public void testMahalanobisAndPolyFit() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", vectorSchema())
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -129,7 +129,7 @@ public class Query2MatrixFunctionsTest {
                 Schema.Field.of("mat", Schema.FieldType.matrix(
                         Schema.FieldType.FLOAT64, List.of(2, 2))),
                 Schema.Field.of("vec", Schema.FieldType.array(Schema.FieldType.FLOAT64))));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", schema)
                 .withSql("""
                         SELECT i.userId AS userId,
@@ -183,7 +183,7 @@ public class Query2MatrixFunctionsTest {
         nullRow.put("x2", 9d);
         samples.add(nullRow);
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,
@@ -214,7 +214,7 @@ public class Query2MatrixFunctionsTest {
                 Map.of("y", 2d, "x1", 1d, "x2", 0d),
                 Map.of("y", 4d, "x1", 2d, "x2", 0d),
                 Map.of("y", 6d, "x1", 3d, "x2", 0d));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,
@@ -246,7 +246,7 @@ public class Query2MatrixFunctionsTest {
         for (final double[] x : xs) {
             samples.add(Map.of("y", 1 + 2 * x[0] + 3 * x[1], "x1", x[0], "x2", x[1]));
         }
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,
@@ -278,7 +278,7 @@ public class Query2MatrixFunctionsTest {
                 Map.of("y", 2d, "x1", 1d, "x2", 0d),
                 Map.of("y", 4d, "x1", 2d, "x2", 0d),
                 Map.of("y", 6d, "x1", 3d, "x2", 0d));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,
@@ -310,7 +310,7 @@ public class Query2MatrixFunctionsTest {
                 Map.of("y", 2d, "x1", 1d, "x2", 0d),
                 Map.of("y", 4d, "x1", 2d, "x2", 0d),
                 Map.of("y", 6d, "x1", 3d, "x2", 0d));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,
@@ -346,7 +346,7 @@ public class Query2MatrixFunctionsTest {
         nullRow.put("y", null);
         nullRow.put("x1", 1d);
         nullRow.put("x2", 2d);
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", samplesSchema())
                 .withSql("""
                         SELECT i.groupId AS groupId,

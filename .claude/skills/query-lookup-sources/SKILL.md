@@ -1,6 +1,6 @@
 ---
 name: query-lookup-sources
-description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/datastore/firestore/rest/grpc/sideinput/buffer), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, the buffer source's stateful DoFn in QueryTransform, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
+description: Developing and maintaining the query transform's SQL engine (Query), its external lookup sources (jdbc/spanner/bigtable/datastore/firestore/rest/grpc/sideinput/buffer), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query or util/pipeline/lookup, the buffer source's stateful DoFn in QueryTransform, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query, or extending the LATERAL machinery.
 ---
 
 # Query engine & lookup sources
@@ -23,10 +23,10 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
 (`...v1_40_0.com.google.common.*`) when a Calcite API needs it.
 
 - `module/transform/QueryTransform.java` — the `query` module: config parsing
-  (`sql` / `table` / `sources`), builds a `Query2`, runs it per element in a
+  (`sql` / `table` / `sources`), builds a `Query`, runs it per element in a
   DoFn (`@Setup query.setup()`, `@ProcessElement query.execute(element, ts)`,
   `@Teardown query.teardown()`).
-- `util/pipeline/Query2.java` — the reusable in-DoFn SQL engine. Lifecycle:
+- `util/pipeline/Query.java` — the reusable in-DoFn SQL engine. Lifecycle:
   construct at pipeline-construction time (plans the SQL, derives the output
   schema, releases clients) → serialize into the DoFn → `setup()` once per
   worker (re-opens clients, prepares the statement) → `execute()` repeatedly →
@@ -94,11 +94,6 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
 - `util/pipeline/udf/` — `UserDefinedFunctions` (serializable UDF/UDAF
   descriptors) and the built-in `DateTimeFunctions` (`CURRENT_DATE_`).
 
-> The deprecated `util/domain/sql/calcite` package (MemorySchema etc.) is
-> **not** part of this subsystem — only the old `util/pipeline/Query.java`
-> still uses it. New work goes through `Query2`; migrating Query's remaining
-> callers and deleting both is the standing cleanup.
-
 ## Value conventions — Calcite-internal values everywhere
 
 Input-table scans and every `LookupSource.lookup()` produce values in
@@ -140,7 +135,7 @@ Bound expressions may reference input columns **or literals** (that's how a
 REST endpoint is fixed in SQL). INNER and LEFT only. A non-matching condition
 leaves the join alone → the plan keeps a scan of the lookup table → since
 2026-07 that plan is rejected at **pipeline construction time**
-(`Query2.validateLookupAccess` → `LookupAccessValidator`, which compiles each
+(`Query.validateLookupAccess` → `LookupAccessValidator`, which compiles each
 statement via `BindableQuery` in its own planning pass — deliberately NOT
 sharing `deriveOutputSchemas`' pass, whose `RelRunners` prepare may plan on
 the same cluster planner — and walks the physical plan for surviving
@@ -149,7 +144,7 @@ error names the tables and restates the key contract; the runtime
 scan-rejection in `LookupTable.scan` remains as the backstop. When changing
 the rules, remember both layers.
 
-## Runtime guards (`Query2.Guard` / the transform's `guard` parameter)
+## Runtime guards (`Query.Guard` / the transform's `guard` parameter)
 
 `guard: { maxRows, timeoutMillis }` (both optional, 0/absent = off) applies
 per evaluation: `maxRows` caps each statement's result rows, `timeoutMillis`
@@ -222,7 +217,7 @@ each key's rows once and evaluates the rest of the block (aggregation,
 uncorrelated filters, ORDER BY / LIMIT) over that set in memory. How it works —
 and why it's wired the way it is:
 
-- **`Query2.prepare` deliberately does NOT call
+- **`Query.prepare` deliberately does NOT call
   `converter.flattenTypes(root.rel, true)`** (PlannerImpl does; stock JDBC
   prepare does not): the structured-type flattener rewrites any reference to
   a **nested ROW column of a lookup table** (`u.address.city`, or even
@@ -236,7 +231,7 @@ and why it's wired the way it is:
   flag; this is stock Calcite, not a vendoring artifact). Decorrelation
   rewrites equality-correlated blocks into join-of-aggregate-over-scan and
   range-correlated blocks into value-generator joins — both scan the external
-  table. That is why `Query2.prepare` assembles the front-end by hand
+  table. That is why `Query.prepare` assembles the front-end by hand
   (`SqlParser` → `SqlValidatorUtil.newValidator` → `SqlToRelConverter`,
   matching PlannerImpl minus the decorrelate step) and claims lookup
   `LogicalCorrelate`s in a **HepPlanner pre-pass** before handing the tree to
@@ -264,7 +259,7 @@ and why it's wired the way it is:
   identifiers double-quoted) and is compiled once per worker by
   `LookupLateralRuntime` against a mutable buffer table registered under the
   leaf's own `schema.table` name — plan-once/execute-many, one level down.
-  `Query2` owns the runtimes' lifecycle (closed in `teardown`).
+  `Query` owns the runtimes' lifecycle (closed in `teardown`).
 - LATERAL `ON TRUE` semantics: the block evaluates for **every** left row,
   including over the empty set — a global aggregate still yields one row
   (`COUNT(*) = 0`), so INNER keeps unmatched inputs there; a fan-out block
@@ -276,11 +271,11 @@ and why it's wired the way it is:
 
 ## UDF / UDAF
 
-Register on the `Query2` builder — descriptors are serializable (class/method
+Register on the `Query` builder — descriptors are serializable (class/method
 names), materialized reflectively at setup:
 
 ```java
-Query2.builder()
+Query.builder()
     .withScalarFunction("SCALE_", MyUdfs.class, "scale")   // all public static overloads
     .withAggregateFunction("SUM_OF_SQUARES", SumOfSquares.class) // init/add[/merge]/result
     ...
@@ -308,7 +303,7 @@ Query2.builder()
   simply share a library operator's name (two candidates break overload
   resolution), so `UserDefinedFunctions.libraryOperatorTable()` hides the
   replaced operators and the built-in resolves through the schema under the
-  same name. Both front-ends use that table (`Query2.plan` and
+  same name. Both front-ends use that table (`Query.plan` and
   `LookupLateralRuntime.init` — the block's SQL text carries the plain
   function name). It is a **filtering view over the library table**, not a
   table rebuilt from `getOperatorList()`: a rebuilt `SqlOperatorTables.of(...)`
@@ -336,7 +331,7 @@ Query2.builder()
   Known gap: the last field of an unseparated run takes every remaining
   digit (`"202610031"` → day 31); `SimpleDateFormat` cannot enforce a width.
 - Functions are attached to the default schema via `SchemaPlus.add(name, fn)`
-  in `Query2.createRootSchema` (and to the root schema in
+  in `Query.createRootSchema` (and to the root schema in
   `LookupLateralRuntime.init`) — not via a custom operator table.
 
 ## Pitfalls (each of these cost real debugging time)
@@ -351,7 +346,7 @@ Query2.builder()
 - The validator's operator table chains the **BigQuery library**
   (`UserDefinedFunctions.libraryOperatorTable()` — the
   `SqlLibraryOperatorTableFactory` table minus the replaced operators — in
-  `Query2.plan` and mirrored in `LookupLateralRuntime.init`) — that is what
+  `Query.plan` and mirrored in `LookupLateralRuntime.init`) — that is what
   provides `ARRAY_AGG` etc.
   Window functions (`OVER`) work in the enumerable path, both outer and
   inside LATERAL blocks. One roundtrip wart: `ARRAY_AGG(x ORDER BY y)`
@@ -363,7 +358,7 @@ Query2.builder()
   back to internal `List`s (both in the lateral runtime and the outer
   result conversion).
 - **`SELECT * EXCEPT(...)` / `REPLACE(...)` are rewritten before planning**
-  (`util/pipeline/SelectStarModifiers`, called from `Query2.plan`): the
+  (`util/pipeline/SelectStarModifiers`, called from `Query.plan`): the
   vendored parser has neither (no Babel parser in the jar) and the
   validator's star expansion is private. The modifiers are cut out of the
   SQL text by a small lexer and **blanked with spaces** (every other token
@@ -398,7 +393,7 @@ Query2.builder()
   subqueries with a common column name are then ambiguous).
   SQL inside LATERAL blocks is unaffected (it is regenerated from the rel).
 - **Output schema = JDBC metadata + the planned row type.**
-  `Query2.deriveOutputSchemas` prepares the statement and reads
+  `Query.deriveOutputSchemas` prepares the statement and reads
   `ResultSetMetaData`, which has no shape for a struct (a ROW column is a
   bare `STRUCT`, an array of ROWs only a type name). Columns that
   `CalciteSchemaUtil.isNested` (ROW, MAP, array of non-scalars) are derived
@@ -420,7 +415,7 @@ Query2.builder()
   top-level struct column into its fields.
   An array directly inside an array is rejected at construction: the
   ELEMENT coder (`UnionMapCoder`) has no list-in-list branch, so it would
-  only fail in `pipeline.run()` - a `Query2`-level test never reaches the
+  only fail in `pipeline.run()` - a `Query`-level test never reaches the
   coder, so cover a new output shape with a `QueryTransformTest` e2e too.
 - **`float32` → `FLOAT` (double)**: `CalciteSchemaUtil.convertSchema` maps
   float32 to Calcite `FLOAT`, which is 8-byte. Any source returning `Float`
@@ -457,8 +452,8 @@ Query2.builder()
   hooks exist).
 - **Sequence patterns: use the built-in `SEQ_*` family** (ported from / kept in
   sync with orfeon/calcite-multi-engine, whose `sequence-patterns` skill is the
-  full query-authoring guide; tests here: `Query2SeqMatchTest`,
-  `Query2SeqFamilyTest`, `JdbcLookupSourceTest#testLookupHistoryToSequenceInOneQuery`):
+  full query-authoring guide; tests here: `QuerySeqMatchTest`,
+  `QuerySeqFamilyTest`, `JdbcLookupSourceTest#testLookupHistoryToSequenceInOneQuery`):
   - `SEQ_MATCH(rows, fields, pattern, define [, mode])` — match ranges;
     optional mode `longest` (default) / `shortest` (pins the first occurrence)
     / `all` / `overlap` (every trigger evaluates).
@@ -481,7 +476,7 @@ Query2.builder()
     Conditions are positional `;`-separated DEFINE expressions without symbol
     names (`SequencePattern.compileConditions`), double-quoted under the
     BigQuery lex. `timeField` resolves against the *fields list* (ordinals
-    cover SEQ_COLLECT results). Tests: `Query2AnalyticsFunctionsTest`.
+    cover SEQ_COLLECT results). Tests: `QueryAnalyticsFunctionsTest`.
   - Analytics companions (same origin sync): `QUANTILE(value, fraction)`
     (exact interpolated quantile UDAF), `APPROX_DISTINCT(value)` (HLL 2^12 —
     see the naming pitfall below), `ARRAY_DIFFERENCE(_INT)` /
@@ -507,7 +502,7 @@ Query2.builder()
     argument are skipped before `add`, and a group where nothing accumulated
     yields NULL. COUNT-like semantics (0 over all-NULL) cannot be expressed
     in a UDAF; document `COALESCE(…, 0.0)` instead. Tests:
-    `Query2ModelFunctionsTest`.
+    `QueryModelFunctionsTest`.
   - Model-fit built-ins (in `MatrixFunctions`): `LINEAR_REG(y, xs, lambda)`
     ridge arity-overload (intercept unpenalized), `BAYES_LINREG(y, xs,
     priorPrecision [, noiseVar])` (Bishop posterior; noiseVar estimated from
@@ -532,7 +527,7 @@ Query2.builder()
     `LINEAR_REG(y, xs)` UDAF (Gram-matrix accumulator, mergeable; result is
     an opaque List like SEQ_COLLECT — wrap in `AS_DOUBLE_ARRAY(v)` to project
     an `ARRAY<DOUBLE>`, or feed it to `LINREG_PREDICT` — see the model-fit
-    bullet below). Tests: `Query2MatrixFunctionsTest`.
+    bullet below). Tests: `QueryMatrixFunctionsTest`.
   - **BigQuery-lex quoting trap**: a define containing string literals must be
     a *double-quoted* SQL string (`"A: $action = 'promo'"`) — `''` escaping is
     the origin engine's Lex.JAVA convention and fails to parse here.
@@ -573,7 +568,7 @@ Query2.builder()
   and why there is **no custom ARG_MAX/ARG_MIN** — the standard operators
   execute natively on the vendored-1.40 enumerable runtime (value's own
   return type, NULL keys ignored;
-  `Query2AnalyticsFunctionsTest#testStandardArgMaxArgMinRunNatively` pins
+  `QueryAnalyticsFunctionsTest#testStandardArgMaxArgMinRunNatively` pins
   it). Arity-only overloads (SEQ_MATCH 4/5) remain fine.
 - `CalciteValues.asList` accepts `List`, `Object[]` and **primitive arrays**
   — a NOT NULL element type (e.g. SEQ_RETENTION's `ARRAY<BOOLEAN NOT NULL>`)
@@ -693,7 +688,7 @@ Semantics & pitfalls (tests: `LookupSeekableTableTest`,
 
 ## Multi-statement sessions (`queries` / `exclusive` / buffer `insertSql`) — IMPLEMENTED 2026-07
 
-`Query2` holds a list of named `Statement`s evaluated in order per
+`Query` holds a list of named `Statement`s evaluated in order per
 `executeAll()` (the transform's `queries` parameter; the single `sql` form is
 a one-statement session). Facts that matter when touching it:
 
@@ -774,7 +769,7 @@ Implementation facts:
 
 ## Direct Bindable execution (`BindableQuery`) — IMPLEMENTED 2026-07
 
-Per-element evaluation no longer goes through JDBC. `Query2.setup()` (and the
+Per-element evaluation no longer goes through JDBC. `Query.setup()` (and the
 lateral runtime's `init()`) compile the plan once to a Calcite `Bindable` via
 `util/pipeline/lookup/BindableQuery`; `execute()` binds a fresh `DataContext`
 and drains the enumerable. Measured: simple filter+project **35µs → 0.8µs**
@@ -805,7 +800,7 @@ moved. Hard-won facts:
   full `Schemas.enumerable(...)` call expression — wrapping it again
   generates uncompilable nested calls.
 - The pipeline mirrors the JDBC runner: `Programs.standard()` (sub-query
-  removal — needed because `Query2` converts with `withExpand(false)` —
+  removal — needed because `Query` converts with `withExpand(false)` —
   decorrelate, trim, volcano, calc) run on the **cluster's own planner**.
   `RelOptUtil.registerDefaultRules(planner, false, false)` already includes
   the enumerable rules + `TO_INTERPRETER`; `BindableQuery.compile` re-invokes
@@ -822,7 +817,7 @@ moved. Hard-won facts:
 - **SQL output aliases live in `RelRoot.fields`, not the physical row type**:
   a trivial rename projection is removed by `ProjectRemoveRule` (it ignores
   names — `root.project(true)` does NOT survive planning). The JDBC layer
-  renames at the metadata level; `Query2` threads `root.fields` into
+  renames at the metadata level; `Query` threads `root.fields` into
   `CalciteValues.RowConverter`. Symptom when this is wrong: chained/
   derived-table queries silently return null for re-aliased columns.
 - Single-column results may come out of the bindable as bare values or
@@ -842,7 +837,7 @@ Ported 2026-07 from `orfeon/calcite-multi-engine` (regular Calcite 1.42,
 `CalciteConnection`-based). Key deltas vs the origin, all deliberate:
 
 - vendored Calcite instead of standalone (repo house style; zero new deps);
-- one `Query2` engine instead of a per-query `CalciteConnection` (DoFn
+- one `Query` engine instead of a per-query `CalciteConnection` (DoFn
   plan-once/execute-many lifecycle);
 - prefix-only key equality added as a per-source opt-in (the origin required
   point or prefix+range; the fan-out enrich join `ON h.UserId = i.userId`

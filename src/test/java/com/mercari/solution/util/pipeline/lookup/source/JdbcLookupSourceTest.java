@@ -2,7 +2,7 @@ package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
@@ -92,7 +92,7 @@ public class JdbcLookupSourceTest {
 
     @Test
     public void testPointLookupOnPrimaryKey() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -120,7 +120,7 @@ public class JdbcLookupSourceTest {
     public void testStarExceptOverLookupTable() {
         // SELECT * EXCEPT is an explicit column list by the time the join is planned: it stays
         // a key-driven lookup.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -147,7 +147,7 @@ public class JdbcLookupSourceTest {
     public void testStarExceptInsideLateral() {
         // A modified star in a LATERAL block, and one over the block: the outer star is
         // expanded from the block as its own modifiers leave it.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -173,7 +173,7 @@ public class JdbcLookupSourceTest {
 
     @Test
     public void testLeftJoinKeepsUnmatched() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -197,7 +197,7 @@ public class JdbcLookupSourceTest {
 
     @Test
     public void testUniqueIndexLookup() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -221,7 +221,7 @@ public class JdbcLookupSourceTest {
     @Test
     public void testCompositeKeyPrefixWithRange() {
         // Leading key column bound by equality, trailing column by a bounded range.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -260,7 +260,7 @@ public class JdbcLookupSourceTest {
         // trimmer prunes it from the scan. The rule must still choose the
         // lookup-join: a constrained key column is always projected, and
         // unconstrained columns beyond the matched prefix are not needed.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -282,7 +282,7 @@ public class JdbcLookupSourceTest {
     @Test
     public void testAggregationOverLookupFanOut() {
         // Fan-out rows from the lookup can be folded per input row by GROUP BY.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -309,7 +309,7 @@ public class JdbcLookupSourceTest {
         // Lookup fan-out -> SEQ_COLLECT (sorted by SEQ regardless of arrival
         // order) -> SEQ_MATCH: sequence-pattern recognition over DB history in
         // one statement.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -341,9 +341,9 @@ public class JdbcLookupSourceTest {
 
     @Test
     public void testSerializedRoundTripLikeDoFn() throws Exception {
-        // The Query2 instance must survive Java serialization (DoFn shipping):
+        // The Query instance must survive Java serialization (DoFn shipping):
         // metadata derived at construction, clients re-opened at setup().
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -357,10 +357,10 @@ public class JdbcLookupSourceTest {
         try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(
                 new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
 
         restored.setup();

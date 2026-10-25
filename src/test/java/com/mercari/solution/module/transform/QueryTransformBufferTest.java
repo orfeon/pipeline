@@ -7,7 +7,7 @@ import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.coder.ElementCoder;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.mercari.solution.util.pipeline.lookup.source.BufferLookupSource;
 import com.mercari.solution.util.pipeline.lookup.source.LookupSourceConfig;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -479,7 +479,7 @@ public class QueryTransformBufferTest {
                 .withGroupFields(List.of("userId"))
                 .withRowSchema(inputSchema)
                 .build();
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema)
                 .withSource(bufferSource)
                 .withSql("SELECT i.amount AS amount, s.cnt AS cnt FROM INPUT AS i"
@@ -584,7 +584,7 @@ public class QueryTransformBufferTest {
                             .withPassword("")
                             .withTable("HISTORY", "HISTORY")
                             .build();
-            final Query2 query = Query2.builder()
+            final Query query = Query.builder()
                     .withInput("INPUT", inputSchema)
                     .withSource(bufferSource)
                     .withSource(jdbc)

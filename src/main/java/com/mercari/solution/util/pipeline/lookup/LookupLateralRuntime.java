@@ -45,12 +45,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>The statement is compiled once (lazily, on first use inside the worker)
  * against a mutable buffer table registered under the lookup table's own
  * {@code schema.table} name, then re-executed per key set — the same
- * plan-once/execute-many pattern as {@code Query2} itself, one level down.
+ * plan-once/execute-many pattern as {@code Query} itself, one level down.
  * Results are returned in Calcite-internal values so they flow into the outer
  * plan unchanged.
  *
  * <p>Like {@link LookupSourceRegistry}, instances are resolved by generated
- * code through a process-wide id registry; the creator ({@code Query2}) owns
+ * code through a process-wide id registry; the creator ({@code Query}) owns
  * the lifecycle and must {@link #close()} on teardown.
  */
 public final class LookupLateralRuntime implements AutoCloseable {

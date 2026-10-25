@@ -21,7 +21,7 @@ import java.util.Map;
  * evaluated per element, so a PARTITION BY spans only the rows fetched for the
  * current element's evaluation.
  */
-public class Query2WindowTest {
+public class QueryWindowTest {
 
     private static final String URL = "jdbc:h2:mem:windowtest;DB_CLOSE_DELAY=-1";
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
@@ -77,7 +77,7 @@ public class Query2WindowTest {
     @Test
     public void testWindowOverLookupFanOut() {
         // RANK by amount within each user's fetched rows + running total.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source())
                 .withSql("""
@@ -118,7 +118,7 @@ public class Query2WindowTest {
     @Test
     public void testWindowInsideLateralBlock() {
         // Rank within the block's fetched set, filter on it outside.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source())
                 .withSql("""
@@ -153,7 +153,7 @@ public class Query2WindowTest {
         // Folding the fetched set into ONE row per input with an array column
         // (the alternative to the default fan-out): outer GROUP BY + ARRAY_AGG,
         // then pattern-matching the array with SEQ_MATCH.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source())
                 .withSql("""
@@ -188,7 +188,7 @@ public class Query2WindowTest {
         // (with ORDER BY it does not: Calcite unparses the collation as
         // WITHIN GROUP, which its own validator then rejects — use the outer
         // GROUP BY form above when ordering matters).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source())
                 .withSql("""

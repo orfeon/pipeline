@@ -2,7 +2,7 @@ package com.mercari.solution.module;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;
 import org.joda.time.Instant;
@@ -128,7 +128,7 @@ public class SchemaMatrixTest {
 
         // Query: the matrix field surfaces as a flat ARRAY<DOUBLE>; the
         // trailing-columns overload reads it (2x + y = 5, x + 3y = 10 -> [1, 3]).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(fields))
                 .withSql("""
                         SELECT i.userId AS userId,

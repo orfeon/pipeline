@@ -8,7 +8,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupRequest;
@@ -163,9 +163,9 @@ public class DatastoreLookupSourceTest {
 
     @Test
     public void testSerializedRoundTripLikeDoFn() throws Exception {
-        // The Query2 instance must survive Java serialization (DoFn shipping):
+        // The Query instance must survive Java serialization (DoFn shipping):
         // table metadata comes from configuration, planning needs no connectivity.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(source())
@@ -180,10 +180,10 @@ public class DatastoreLookupSourceTest {
         try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (ObjectInputStream in = new ObjectInputStream(
                 new ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
 
         restored.setup();
