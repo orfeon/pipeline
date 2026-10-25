@@ -96,7 +96,8 @@ import java.util.function.Supplier;
  *       to a batched key-driven read — the external table is never scanned.
  *       INNER and LEFT joins are supported.</li>
  *   <li>Any other use of a lookup table (a standalone scan, an unsupported join
- *       condition) fails at execution with an explanatory error.</li>
+ *       condition) is rejected at construction with an explanatory error
+ *       (see {@code validateLookupAccess}).</li>
  * </ul>
  *
  * <p><b>Sessions</b>: an instance holds one or more named statements evaluated in
@@ -353,8 +354,9 @@ public class Query implements Serializable {
     }
 
     public static Query of(final Map<String, Schema> inputSchemas, final String sql) {
-        return new Query(inputSchemas, List.of(), List.of(),
-                List.of(Statement.of("", sql, true)), false, null);
+        final Builder builder = builder();
+        inputSchemas.forEach(builder::withInput);
+        return builder.withSql(sql).build();
     }
 
     public static Builder builder() {

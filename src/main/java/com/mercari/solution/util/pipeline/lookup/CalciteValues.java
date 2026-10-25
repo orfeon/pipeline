@@ -55,7 +55,8 @@ public final class CalciteValues {
             return null;
         }
         return switch (fieldType.getType()) {
-            case bool, string, json, enumeration -> primitive;
+            // uuid surfaces as VARCHAR (CalciteSchemaUtil.convertSqlTypeName), held as its string
+            case bool, string, uuid, json, enumeration -> primitive;
             case int8, int16 -> ((Number) primitive).shortValue();
             case int32 -> ((Number) primitive).intValue();
             case int64 -> ((Number) primitive).longValue();

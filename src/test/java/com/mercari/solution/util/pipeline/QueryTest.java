@@ -1,7 +1,9 @@
 package com.mercari.solution.util.pipeline;
 
+import com.mercari.solution.module.DataType;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupRequest;
@@ -405,6 +407,123 @@ public class QueryTest {
                 Assertions.assertEquals(2L, outputs.getFirst().getAsLong("cnt"));
                 Assertions.assertEquals(i + i * 10, outputs.getFirst().getAsLong("total"));
             }
+
+            // An element whose per-element collection is empty yields zero rows.
+            final MElement empty = MElement.of(Map.of(
+                    "userId", "u0",
+                    "events", List.of()), TIMESTAMP);
+            Assertions.assertTrue(
+                    query.execute(Map.of("MyTable", List.of(empty)), TIMESTAMP).isEmpty());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testLeftJoinLateralOverInputArray() {
+        // A correlated LATERAL block over the input row's own array (no lookup
+        // sources): decorrelated by the standard program; LEFT ... ON TRUE keeps
+        // the input row even when the array is empty.
+        final Schema schema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("category", Schema.FieldType.STRING),
+                        Schema.Field.of("amount", Schema.FieldType.INT64)))))));
+        final String sql = """
+                SELECT t.userId, s.total
+                FROM MyTable AS t
+                LEFT JOIN LATERAL (
+                  SELECT SUM(e.amount) AS total FROM UNNEST(t.events) AS e
+                ) AS s ON TRUE
+                """;
+        final Query query = Query.of("MyTable", schema, sql);
+        query.setup();
+        try {
+            final MElement input = MElement.of(Map.of(
+                    "userId", "u1",
+                    "events", List.of(
+                            Map.of("category", "a", "amount", 1L),
+                            Map.of("category", "b", "amount", 10L))), TIMESTAMP);
+            final List<MElement> outputs =
+                    query.execute(Map.of("MyTable", List.of(input)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals("u1", outputs.getFirst().getAsString("userId"));
+            Assertions.assertEquals(11L, outputs.getFirst().getAsLong("total"));
+
+            final MElement empty = MElement.of(Map.of(
+                    "userId", "u0",
+                    "events", List.of()), TIMESTAMP);
+            final List<MElement> emptyOutputs =
+                    query.execute(Map.of("MyTable", List.of(empty)), TIMESTAMP);
+            Assertions.assertEquals(1, emptyOutputs.size());
+            Assertions.assertEquals("u0", emptyOutputs.getFirst().getAsString("userId"));
+            Assertions.assertNull(emptyOutputs.getFirst().getPrimitiveValue("total"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testJoinOfMultipleInputTables() {
+        // Two in-memory input tables (Query.of(Map, sql)) joined in SQL, fed
+        // AVRO-backed elements, with a CTE over an UNNEST aggregate.
+        final List<Schema.Field> mainFields = List.of(
+                Schema.Field.of("stringField", Schema.FieldType.STRING),
+                Schema.Field.of("nestedField", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("sField", Schema.FieldType.STRING),
+                        Schema.Field.of("lField", Schema.FieldType.INT64))))));
+        final List<Schema.Field> subFields = List.of(
+                Schema.Field.of("stringField", Schema.FieldType.STRING),
+                Schema.Field.of("llField", Schema.FieldType.INT64),
+                Schema.Field.of("ddField", Schema.FieldType.FLOAT64));
+        final String sql = """
+                WITH Source AS (
+                  SELECT stringField, SUM(nn.lField) AS l
+                  FROM TestTable, UNNEST(nestedField) AS nn
+                  GROUP BY stringField
+                )
+                SELECT
+                  Source.stringField,
+                  Source.l,
+                  CAST(SubTestTable.llField AS VARCHAR) AS ss,
+                  SubTestTable.ddField
+                FROM Source
+                LEFT JOIN SubTestTable
+                ON Source.stringField = SubTestTable.stringField
+                """;
+        final Query query = Query.of(Map.of(
+                "TestTable", Schema.of(mainFields),
+                "SubTestTable", Schema.of(subFields)), sql);
+        final Schema outputSchema = query.getOutputSchema();
+        Assertions.assertEquals(Schema.Type.int64, outputSchema.getField("l").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("ss").getFieldType().getType());
+
+        final MElement main = MElement.of(Map.of(
+                "stringField", "a",
+                "nestedField", List.of(
+                        Map.of("sField", "a", "lField", 1L),
+                        Map.of("sField", "a", "lField", 2L),
+                        Map.of("sField", "a", "lField", 3L))), TIMESTAMP);
+        final MElement sub = MElement.of(Map.of(
+                "stringField", "a",
+                "llField", 1L,
+                "ddField", 10D), TIMESTAMP);
+        final MElement mainAvro = main.convert(Schema.of(
+                ElementToAvroConverter.convertSchema(mainFields)), DataType.AVRO);
+        final MElement subAvro = sub.convert(Schema.of(
+                ElementToAvroConverter.convertSchema(subFields)), DataType.AVRO);
+
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(Map.of(
+                    "TestTable", List.of(mainAvro),
+                    "SubTestTable", List.of(subAvro)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            final MElement output = outputs.getFirst();
+            Assertions.assertEquals("a", output.getAsString("stringField"));
+            Assertions.assertEquals(6L, output.getAsLong("l"));
+            Assertions.assertEquals("1", output.getAsString("ss"));
+            Assertions.assertEquals(10D, output.getAsDouble("ddField"));
         } finally {
             query.teardown();
         }

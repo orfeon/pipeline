@@ -110,7 +110,7 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
     Built on the Beam-vendored Calcite 1.40 — never add a regular `org.apache.calcite` dependency.
     Maintain via the **`query-lookup-sources` skill** (`.claude/skills/query-lookup-sources/`).
 - `cloud/` — cloud service clients (`google/`, `amazon/`, `hashicorp/`, `crm/`).
-- `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`.
+- `domain/` — domain logic: `sql/` (BeamSQL UDFs), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`.
 - `pipeline/feature/` — the `feature` transform: `FeaturePlanCompiler` (pure compile layer: sources
   contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &

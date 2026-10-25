@@ -15,7 +15,8 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.cloud.google.SpannerUtil;
 import com.mercari.solution.util.schema.BigtableSchemaUtil;
-import com.mercari.solution.util.schema.CalciteSchemaUtil;
+import com.mercari.solution.util.pipeline.Query;
+import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import org.apache.beam.sdk.values.Row;
 import org.junit.jupiter.api.Test;
@@ -79,7 +80,23 @@ public class UuidConverterTest {
 
     @Test
     public void testCalciteConversion() {
-        assertEquals(UUID_VALUE, CalciteSchemaUtil.convertSqlValue(Schema.FieldType.UUID, UUID_VALUE));
+        assertEquals(UUID_VALUE, CalciteValues.toInternal(Schema.FieldType.UUID, UUID_VALUE));
+
+        // End to end through the per-element SQL engine: a uuid input column is
+        // readable, comparable and projected as a string.
+        final Query query = Query.of("INPUT", SCHEMA,
+                "SELECT id, id = '" + UUID_VALUE + "' AS matched FROM INPUT");
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    MElement.of(VALUES, Instant.parse("2025-05-01T00:00:00Z")),
+                    Instant.parse("2025-05-01T00:00:00Z"));
+            assertEquals(1, outputs.size());
+            assertEquals(UUID_VALUE, outputs.getFirst().getAsString("id"));
+            assertEquals(Boolean.TRUE, outputs.getFirst().getPrimitiveValue("matched"));
+        } finally {
+            query.teardown();
+        }
     }
 
     @Test
