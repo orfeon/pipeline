@@ -18,6 +18,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.*;
+import java.util.function.BiConsumer;
 
 /**
  * Factorization machine over categorical and numeric fields (docs/design/feature-dsl.md §4.4):
@@ -346,6 +347,14 @@ public final class Factorization {
         }
 
         /**
+         * What rows read: under fold / forward the whole-input model is never read by a row (it is the artifact's), so
+         * it is left out of what is served; a static fit is returned as it is.
+         */
+        public Fits served() {
+            return folds == null && blocks == null ? this : new Fits(null, folds, blocks, observedBlocks);
+        }
+
+        /**
          * The fold models, each rotated into the coordinates of the whole-input model so an embedding column means one
          * thing across folds. The rotation is a k × k gauge fitted over every value: it carries no row's outcome into
          * another fold's values.
@@ -397,7 +406,37 @@ public final class Factorization {
             return Fits.ofFolds(total, folds, plan.align());
         }
         if (!plan.forward()) return Fits.ofTotal(trainOrNull(options, sorted, null, options.epochs(), plan.minRows()));
-        return fitForward(options, sorted, plan);
+        final TreeMap<Long, Model> models = new TreeMap<>();
+        final Model total = forward(options, sorted, plan, true, models::put);
+        return new Fits(total, null, models, observedBlocks(sorted));
+    }
+
+    /**
+     * The forward fit change point by change point (every observed block, and every block at which one leaves the
+     * window, in time order): each model is handed to {@code sink} as soon as it is fitted — null when its window had
+     * too few examples — and only the one before it is kept, so the models never sit in memory together. Returns the
+     * whole-input model.
+     */
+    public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final BiConsumer<Long, Model> sink) {
+        return fitForward(options, examples, plan, true, sink);
+    }
+
+    /**
+     * {@link #fitForward}, fitting the whole-input model only when {@code total} (no row reads it: only the artifact
+     * does, so a run that writes none skips its fit — under a window, one more fit over every example); null otherwise.
+     */
+    public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final boolean total,
+                                   final BiConsumer<Long, Model> sink) {
+        final List<Example> sorted = new ArrayList<>(examples);
+        sorted.sort(ORDER);
+        return forward(options, sorted, plan, total, sink);
+    }
+
+    /** The time blocks that carry examples (the tags of a forward fit's examples): what {@code minBlocks} counts. */
+    public static TreeSet<Long> observedBlocks(final List<Example> examples) {
+        final TreeSet<Long> observed = new TreeSet<>();
+        for (final Example e : examples) observed.add(e.tag());
+        return observed;
     }
 
     /** The examples of every fold but {@code fold} (the tag is the fold; an untagged row, tag −1, is in every fold's fit). */
@@ -407,8 +446,8 @@ public final class Factorization {
         return out;
     }
 
-    /** One model per change point (every observed block, and every block at which one leaves the window), in time order. */
-    private static Fits fitForward(final Options options, final List<Example> sorted, final Plan plan) {
+    private static Model forward(final Options options, final List<Example> sorted, final Plan plan, final boolean withTotal,
+                                 final BiConsumer<Long, Model> sink) {
         // sorted by tag first, so a block is a contiguous range [start, end)
         final TreeMap<Long, int[]> ranges = new TreeMap<>();
         for (int i = 0; i < sorted.size(); i++) {
@@ -419,8 +458,8 @@ public final class Factorization {
         final TreeSet<Long> observed = new TreeSet<>(ranges.keySet());
         final TreeSet<Long> changePoints = new TreeSet<>(observed);
         if (plan.windowBlocks() > 0) for (final long block : observed) changePoints.add(block + plan.windowBlocks());
-        final TreeMap<Long, Model> models = new TreeMap<>();
         Model previous = null;
+        Model latest = null;
         for (final long at : changePoints) {
             // the blocks a usable block `at` reads: (at − W, at], every block ≤ at without a window
             final Long first = plan.windowBlocks() > 0 ? observed.ceiling(at - plan.windowBlocks() + 1) : observed.isEmpty() ? null : observed.first();
@@ -433,19 +472,21 @@ public final class Factorization {
                 model = model.alignTo(previous, plan.align());
                 previous = model;
             }
-            models.put(at, model);
+            sink.accept(at, model);
+            latest = model;
             LOG.info("factorization forward: change point {} - {} example(s){}", at, window.size(), model == null ? ", not solved (fit.minRows)" : "");
         }
+        if (!withTotal) return null;
         // the whole-input model (a static serving run loads it): the last change point when it reads every block
         Model total;
-        if (plan.windowBlocks() == 0 && !models.isEmpty() && models.lastEntry().getValue() != null) {
-            total = models.lastEntry().getValue();
+        if (plan.windowBlocks() == 0 && latest != null) {
+            total = latest;
         } else {
             final boolean warm = plan.warmStart() && previous != null;
             total = trainOrNull(options, sorted, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows());
             if (total != null) total = total.alignTo(previous, plan.align());
         }
-        return new Fits(total, null, models, observed);
+        return total;
     }
 
     private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows) {
