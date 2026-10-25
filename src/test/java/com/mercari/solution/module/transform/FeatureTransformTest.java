@@ -861,6 +861,88 @@ public class FeatureTransformTest {
     }
 
     /**
+     * Forward factorization blocks over one task share their examples: {@code fm} and {@code fm_b} differ in the fit
+     * only (latentDim, ridge, epochs, seed, warm start), so they are one example set served by one join, while
+     * {@code fm_c} reads other fields — a set of its own. Every block of the step fits in one stage, and each still
+     * reads its own model: the pure model of its own settings on the same examples.
+     */
+    @Test
+    public void testFactorizationForwardSharesExamples() throws java.io.IOException {
+        final String blocks = """
+                    - name: fm_b
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, category, condition_grade]
+                      latentDim: 3
+                      task: {expr: "sold >= 1"}
+                      fit: {mode: forward, blocks: {size: P7D}, warmStart: none}
+                      als: {epochs: 15, reg: 0.5, seed: 2}
+                      outputs:
+                        - {sum: true, as: fmb_linear}
+                    - name: fm_c
+                      scope: population
+                      type: factorization
+                      fields: [seller_id, category]
+                      latentDim: 2
+                      task: {expr: "sold >= 1"}
+                      fit: {mode: forward, blocks: {size: P7D}, warmStart: none}
+                      als: {epochs: 20, reg: 0.1, seed: 1}
+                      outputs:
+                        - {sum: true, as: fmc_linear}
+                """;
+        final String config = fmConfig("{mode: forward, blocks: {size: P7D}}")
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Set<String> names = transformNames();
+        Assertions.assertEquals(1, names.stream().filter(n -> n.startsWith("features/") && n.endsWith("_FmForward_Fit")).count(), names::toString);
+        Assertions.assertTrue(hasTransform(names, "features", "_Fm_fm_Join"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_Fm_fm_b_"), "fm_b shares the join of fm: " + names);
+        Assertions.assertTrue(hasTransform(names, "features", "_Fm_fm_c_Join"), names::toString);
+
+        final Map<String, String> options = outputs.get("features").getSchema().getField("f_fm_linear").getOptions();
+        final long lag = Long.parseLong(options.get("feature.coord.forwardLagMillis"));
+        final long predictOffset = Long.parseLong(options.get("feature.coord.predictOffsetMillis"));
+        final com.mercari.solution.util.pipeline.feature.ForwardBlocks weeks = com.mercari.solution.util.pipeline.feature.ForwardBlocks.ofSize(java.time.Duration.ofDays(7));
+        final Map<String, Long> millis = new HashMap<>();
+        final Map<String, com.mercari.solution.util.pipeline.feature.Factorization.Example> examples = fmExamples(row -> {
+            millis.put(row.get("session_id") + "/" + row.get("seller_id"), (Long) row.get("session_time"));
+            return weeks.indexOf((Long) row.get("session_time"));
+        });
+        final List<com.mercari.solution.util.pipeline.feature.Factorization.Example> twoFields = new ArrayList<>();
+        for (final com.mercari.solution.util.pipeline.feature.Factorization.Example e : examples.values()) {
+            twoFields.add(new com.mercari.solution.util.pipeline.feature.Factorization.Example(new String[]{e.values()[0], e.values()[1]}, e.y(), e.tag()));
+        }
+        final com.mercari.solution.util.pipeline.feature.Factorization.Plan cold = new com.mercari.solution.util.pipeline.feature.Factorization.Plan(0, true, 0, 0, "procrustes", false, 0);
+        final com.mercari.solution.util.pipeline.feature.Factorization.Fits fm = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
+                FM_OPTIONS, new ArrayList<>(examples.values()), new com.mercari.solution.util.pipeline.feature.Factorization.Plan(0, true, 0, 0, "procrustes", true, 10));
+        final com.mercari.solution.util.pipeline.feature.Factorization.Fits fmB = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
+                new com.mercari.solution.util.pipeline.feature.Factorization.Options(FM_FIELDS, false, 3, 15, 0.5, 2L), new ArrayList<>(examples.values()), cold);
+        final com.mercari.solution.util.pipeline.feature.Factorization.Fits fmC = com.mercari.solution.util.pipeline.feature.Factorization.fitAll(
+                new com.mercari.solution.util.pipeline.feature.Factorization.Options(List.of("seller_id", "category"), false, 2, 20, 0.1, 1L), twoFields, cold);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int read = 0;
+            for (final MElement row : rows) {
+                final String key = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final Long usable = weeks.usableBlock(millis.get(key), predictOffset, lag);
+                final String[] values = examples.get(key).values();
+                assertFm(row, fm.modelFor(null, usable, 1), values);
+                final com.mercari.solution.util.pipeline.feature.Factorization.Model b = fmB.modelFor(null, usable, 1);
+                final com.mercari.solution.util.pipeline.feature.Factorization.Model c = fmC.modelFor(null, usable, 1);
+                Assertions.assertEquals(b == null, row.getPrimitiveValue("f_fmb_linear") == null, key);
+                Assertions.assertEquals(c == null, row.getPrimitiveValue("f_fmc_linear") == null, key);
+                if (b != null) {
+                    read++;
+                    Assertions.assertEquals(b.predict(values), row.getAsDouble("f_fmb_linear"), 1e-9, key);
+                    Assertions.assertEquals(c.predict(new String[]{values[0], values[1]}), row.getAsDouble("f_fmc_linear"), 1e-9, key);
+                }
+            }
+            Assertions.assertEquals(3, read);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * factorization under {@code fit.mode: fold} with seller folds (s1 and s2 in different folds): a row reads the
      * model fitted on the other seller's rows, so its own seller is a value that model never saw — no pair score, a
      * count of 0 — and its prediction stands on the category and grade alone.

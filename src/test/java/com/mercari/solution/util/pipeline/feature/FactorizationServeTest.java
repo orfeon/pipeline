@@ -129,7 +129,7 @@ public class FactorizationServeTest {
             Assertions.assertEquals(fits.observedBlocks, Factorization.observedBlocks(examples));
             // without an artifact to write, the whole-input model is not fitted; the change points are the same
             final TreeMap<Long, Factorization.Model> withoutTotal = new TreeMap<>();
-            Assertions.assertNull(Factorization.fitForward(OPTIONS, examples, plan, false, withoutTotal::put));
+            Assertions.assertNull(Factorization.fitForward(OPTIONS, examples, plan, false, false, withoutTotal::put));
             Assertions.assertEquals(fits.blocks.keySet(), withoutTotal.keySet());
             for (final long at : fits.blocks.keySet()) assertSameModel(fits.blocks.get(at), withoutTotal.get(at));
         }
@@ -147,6 +147,33 @@ public class FactorizationServeTest {
         }
         Assertions.assertFalse(BlockSeries.reached(new TreeSet<>(), 4L, 1));
         Assertions.assertTrue(BlockSeries.reached(new TreeSet<>(), 4L, 0));
+    }
+
+    /**
+     * The parallel forward fit (change points run ahead on the pool, handed out in time order) gives the sequential
+     * models bit for bit - with or without a window, a change point left unsolved (minRows) and the whole-input fit.
+     */
+    @Test
+    public void testParallelForwardMatchesSequential() {
+        final List<Factorization.Example> examples = examples(900, 9);
+        for (final int window : new int[]{0, 3}) {
+            for (final int minRows : new int[]{0, 150}) {
+                final Factorization.Plan plan = new Factorization.Plan(0, true, window, minRows, Alignment.PROCRUSTES, false, 0);
+                final TreeMap<Long, Factorization.Model> sequential = new TreeMap<>();
+                final Factorization.Model sequentialTotal = Factorization.fitForward(OPTIONS, examples, plan, true, false, sequential::put);
+                final TreeMap<Long, Factorization.Model> parallel = new TreeMap<>();
+                final List<Long> order = new ArrayList<>();
+                final Factorization.Model parallelTotal = Factorization.fitForward(OPTIONS, examples, plan, true, true, (at, model) -> {
+                    order.add(at);
+                    parallel.put(at, model);
+                });
+                Assertions.assertEquals(new ArrayList<>(sequential.keySet()), order, "in time order, every change point once");
+                for (final long at : sequential.keySet()) assertSameModel(sequential.get(at), parallel.get(at));
+                assertSameModel(sequentialTotal, parallelTotal);
+                if (minRows > 0) Assertions.assertTrue(sequential.containsValue(null), "a change point left unsolved");
+            }
+        }
+        Assertions.assertEquals(Factorization.changePoints(Factorization.observedBlocks(examples), 3).size(), 12);
     }
 
     /** The change point a row is keyed by is the one whose model the side-input lookup would serve it. */
