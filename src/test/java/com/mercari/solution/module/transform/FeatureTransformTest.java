@@ -763,6 +763,38 @@ public class FeatureTransformTest {
      * targets are known yet), C reads the model of blocks 2869–2870 and D the one of 2869–2872 — warm-started from the
      * one before. The expected values are the pure model's on the same examples.
      */
+    /** als.reg per part and per field reaches the fit: a huge factor ridge on seller_id holds its pairs at 0. */
+    @Test
+    public void testFactorizationRidgePerField() throws java.io.IOException {
+        final String fm = """
+                    - name: fm
+                      scope: population
+                      type: factorization
+                      variant: fwfm
+                      fields: [{field: seller_id, reg: {factors: 1000000000}}, category, condition_grade]
+                      latentDim: 2
+                      task: {expr: "sold >= 1"}
+                      als: {epochs: 20, reg: {linear: 0.1, factors: 0.1}, regScale: perRow, seed: 1}
+                      outputs:
+                        - {pair: [seller_id, category], as: fm_seller_category}
+                        - {pair: [category, condition_grade], as: fm_category_grade}
+                        - {sum: true, as: fm_linear}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", fm.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            boolean anyPair = false;
+            for (final MElement row : rows) {
+                Assertions.assertEquals(0, row.getAsDouble("f_fm_seller_category"), 1e-6, row.toString());
+                Assertions.assertNotNull(row.getPrimitiveValue("f_fm_linear"), row.toString());
+                anyPair |= Math.abs(row.getAsDouble("f_fm_category_grade")) > 1e-4;
+            }
+            Assertions.assertTrue(anyPair, "the other fields' pairs still learn");
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testFactorizationForward() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();

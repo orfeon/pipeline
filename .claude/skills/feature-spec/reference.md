@@ -257,14 +257,23 @@ level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and n
 
 ### `type: factorization` (always static)
 
-`variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}]`,
-`latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as,
+`variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}; either may add
+`reg: <n> | {linear, factors}`]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, regScale,
+seed}`, `outputs: [{pair: [a, b], as,
 perUnit}, {between: {left: [...], right: [...]}, as}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
 rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
 (independent of the row's value). `between` sums the cross-side pairs whose both values are known (disjoint sides,
 each field once): an entity with its attributes on one side still reads through the attributes when the entity is
 unseen; null only when no cross-side pair is known.
+
+`als.reg` (a number, or `{bias, linear, factors, pairWeights}`; default 0.01 each) is an **absolute** ridge added to a
+parameter's curvature summed over its training rows — compare it with a value's training rows (squared) or its
+`Σ p (1 − p)` (logistic / contest), not with a per-row rate: 0.01 on a value with thousands of rows is no
+regularization. `regScale: perRow` multiplies it by the parameter's rows (equal proportional shrinkage). Give the
+factors a stronger ridge than the linear weights, and id-like fields (few rows per value) the strongest: a weakly
+penalized pair of ids memorizes the training targets, while one large λ for everything collapses every factor to 0.
+Choose λ on the walk-forward loss; the plan reports it (info `factorization.als.reg`).
 
 ### `type: discretize` (always static)
 

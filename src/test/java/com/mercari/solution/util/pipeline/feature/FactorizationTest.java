@@ -45,6 +45,104 @@ public class FactorizationTest {
         Assertions.assertEquals(model.predict(new String[]{"a1", "b1", "c0"}), again.predict(new String[]{"a1", "b1", "c0"}), 1e-12);
     }
 
+    /** The ridge as one number and as the same number on every part are one fit, bit for bit (fm and fwfm). */
+    @Test
+    public void testUniformRegularizationIsTheScalar() {
+        for (final boolean fieldWeighted : new boolean[]{false, true}) {
+            final List<String> fields = List.of("a", "b", "c");
+            final Factorization.Model scalar = Factorization.fit(new Factorization.Options(fields, fieldWeighted, 2, 15, 0.05, 7L), xor(5));
+            final Factorization.Model parts = Factorization.fit(new Factorization.Options(fields, fieldWeighted, 2, 15, 0.05, 7L,
+                    Factorization.Loss.squared, 0, false, true, null, Factorization.Regularization.uniform(0.05, 3)), xor(5));
+            for (final Factorization.Example e : xor(1)) Assertions.assertEquals(scalar.predict(e.values()), parts.predict(e.values()), 0d);
+        }
+    }
+
+    /**
+     * Additive data, factors held at 0 by a huge factor ridge: the linear weights are the exact ridge solution with the
+     * declared per-field ridge — absolute, or multiplied by each value's training rows under perRow — solved here from
+     * the normal equations.
+     */
+    @Test
+    public void testLinearRidgeIsTheExactRidgeSolution() {
+        final double[] effectA = {1.0, -0.5, 0.3, 2.0, -1.2}, effectB = {0.4, -0.8, 1.5, 0.0};
+        final java.util.Random random = new java.util.Random(3);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 300; i++) {
+            // unequal value counts, so perRow differs from absolute
+            final int a = (i * i + i / 7) % 5, b = i % 3 == 0 ? 3 : (i / 3) % 3;
+            examples.add(new Factorization.Example(new String[]{"a" + a, "b" + b}, 0.7 + effectA[a] + effectB[b] + random.nextGaussian() * 0.2));
+        }
+        for (final boolean perRow : new boolean[]{false, true}) {
+            final double[] linear = perRow ? new double[]{0.05, 0.4} : new double[]{8, 30};
+            final Factorization.Regularization reg = new Factorization.Regularization(0, linear, new double[]{1e9, 1e9}, 1e9, perRow);
+            final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b"), false, 2, 400, 0, 1L,
+                    Factorization.Loss.squared, 0, false, true, null, reg), examples);
+            // normal equations of [1, onehot(a), onehot(b)] with a diagonal ridge
+            final int p = 1 + 5 + 4;
+            final double[][] m = new double[p][p + 1];
+            final int[] rows = new int[p];
+            for (final Factorization.Example e : examples) {
+                final int[] cols = {0, 1 + Integer.parseInt(e.values()[0].substring(1)), 6 + Integer.parseInt(e.values()[1].substring(1))};
+                for (final int c : cols) {
+                    rows[c]++;
+                    for (final int d : cols) m[c][d]++;
+                    m[c][p] += e.y();
+                }
+            }
+            for (int c = 1; c < p; c++) m[c][c] += (c < 6 ? linear[0] : linear[1]) * (perRow ? rows[c] : 1);
+            final double[] beta = solve(m);
+            Assertions.assertEquals(beta[0], model.w0, 1e-6, "perRow=" + perRow);
+            for (int v = 0; v < 5; v++) Assertions.assertEquals(beta[1 + v], model.param(0, "a" + v)[0], 1e-6, "a" + v + " perRow=" + perRow);
+            for (int v = 0; v < 4; v++) Assertions.assertEquals(beta[6 + v], model.param(1, "b" + v)[0], 1e-6, "b" + v + " perRow=" + perRow);
+        }
+    }
+
+    /** Gaussian elimination with partial pivoting of an augmented system. */
+    private static double[] solve(final double[][] m) {
+        final int n = m.length;
+        for (int c = 0; c < n; c++) {
+            int pivot = c;
+            for (int r = c + 1; r < n; r++) if (Math.abs(m[r][c]) > Math.abs(m[pivot][c])) pivot = r;
+            final double[] t = m[c];
+            m[c] = m[pivot];
+            m[pivot] = t;
+            for (int r = 0; r < n; r++) {
+                if (r == c) continue;
+                final double f = m[r][c] / m[c][c];
+                for (int d = c; d <= n; d++) m[r][d] -= f * m[c][d];
+            }
+        }
+        final double[] x = new double[n];
+        for (int c = 0; c < n; c++) x[c] = m[c][n] / m[c][c];
+        return x;
+    }
+
+    /** A field's own factor ridge holds its factors at 0 while the other fields' pair still learns; pairWeights holds r. */
+    @Test
+    public void testPerFieldAndPairWeightRidge() {
+        // the interaction lives in (b, c); a is noise
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            for (final String b : List.of("b1", "b2")) {
+                for (final String c : List.of("c1", "c2")) {
+                    examples.add(new Factorization.Example(new String[]{"a" + (i % 3), b, c}, b.substring(1).equals(c.substring(1)) ? 1 : 0));
+                }
+            }
+        }
+        final Factorization.Regularization reg = new Factorization.Regularization(0.01, new double[]{0.01, 0.01, 0.01},
+                new double[]{1e9, 0.01, 0.01}, 0.01, false);
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 60, 0.01, 5L,
+                Factorization.Loss.squared, 0, false, true, null, reg), examples);
+        for (int v = 0; v < 3; v++) for (int d = 1; d <= 2; d++) Assertions.assertEquals(0, model.param(0, "a" + v)[d], 1e-6);
+        Assertions.assertTrue(model.pair(new String[]{"a0", "b1", "c1"}, 1, 2) > model.pair(new String[]{"a0", "b1", "c2"}, 1, 2) + 0.3);
+
+        final Factorization.Regularization heldR = new Factorization.Regularization(0.01, new double[]{0.01, 0.01, 0.01},
+                new double[]{0.01, 0.01, 0.01}, 1e9, false);
+        final Factorization.Model fwfm = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), true, 2, 20, 0.01, 5L,
+                Factorization.Loss.squared, 0, false, true, null, heldR), examples);
+        for (int f = 0; f < 3; f++) for (int g = 0; g < 3; g++) if (f != g) Assertions.assertEquals(0, fwfm.r[f][g], 1e-6);
+    }
+
     @Test
     public void testFieldWeightedVariantRanksPairs() {
         final Factorization.Options options = new Factorization.Options(List.of("a", "b", "c"), true, 2, 40, 0.01, 3L);

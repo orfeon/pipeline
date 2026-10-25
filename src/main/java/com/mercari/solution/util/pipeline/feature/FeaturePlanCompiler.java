@@ -4307,6 +4307,80 @@ public final class FeaturePlanCompiler {
     }
 
     /**
+     * The ridge of a factorization block ({@code als.reg} as a number or {@code {bias, linear, factors, pairWeights}},
+     * {@code als.regScale}, {@code fields[].reg}) as the coordinates the engine reads: {@code reg} alone when one number
+     * covers every parameter (the default 0.01), else {@code regBias}, {@code regLinear} / {@code regFactors} (per field,
+     * in field order), {@code regPairWeights} and {@code regScale}. An omitted part takes the block's number.
+     */
+    private Map<String, String> fmRegularization(final FeatureSpec.FeatureDef def, final String variant, final boolean linear,
+                                                 final boolean ranked, final String lossText, final String loc) {
+        final double base = def.reg == null ? 0.01 : def.reg;
+        final Map<String, Double> parts = def.regParts;
+        final double bias = parts.getOrDefault("bias", base);
+        final double pairWeights = parts.getOrDefault("pairWeights", base);
+        if (def.regScale != null && !List.of("absolute", "perRow").contains(def.regScale)) {
+            diagnostics.error("factorization.als", loc, "als.regScale must be absolute | perRow: " + def.regScale);
+        }
+        final boolean perRow = "perRow".equals(def.regScale);
+        final String[] names = {"reg", "reg.bias", "reg.pairWeights"};
+        final double[] values = {base, bias, pairWeights};
+        for (int i = 0; i < names.length; i++) {
+            if (!(values[i] >= 0) || Double.isInfinite(values[i])) diagnostics.error("factorization.als", loc, "als." + names[i] + " must be a finite number >= 0: " + values[i]);
+        }
+        final List<String> linearPer = new ArrayList<>(), factorsPer = new ArrayList<>(), unfixed = new ArrayList<>();
+        for (final String f : def.fields) {
+            final Map<String, Double> own = def.fmFieldReg.getOrDefault(f, Map.of());
+            final double l = own.getOrDefault("linear", parts.getOrDefault("linear", base));
+            final double v = own.getOrDefault("factors", parts.getOrDefault("factors", base));
+            for (final double value : new double[]{l, v}) {
+                if (!(value >= 0) || Double.isInfinite(value)) {
+                    diagnostics.error(own.isEmpty() ? "factorization.als" : "factorization.fields", loc, "the ridge of field " + f + " must be a finite number >= 0: " + value);
+                }
+            }
+            if (ranked && (linear && !(l > 0) || !(v > 0))) unfixed.add(f);
+            linearPer.add(Double.toString(l));
+            factorsPer.add(Double.toString(v));
+        }
+        // the likelihood is invariant to a common shift within a contest: the ridge is what fixes what it cannot see
+        // (a contest key's main effect would otherwise follow rounding noise)
+        if (!unfixed.isEmpty()) {
+            diagnostics.error("factorization.als", loc, "als.reg must be > 0 under loss " + lossText + " (a contest sees score differences only):"
+                    + " the " + (linear ? "linear weights and factors" : "factors") + " of " + unfixed + " have none");
+        }
+        if (ranked && parts.containsKey("bias")) {
+            diagnostics.warning("factorization.als", loc, "als.reg.bias is ignored under loss " + lossText + ": a contest loss fits no global bias");
+        }
+        if (!"fwfm".equals(variant) && parts.containsKey("pairWeights")) {
+            diagnostics.warning("factorization.als", loc, "als.reg.pairWeights applies to variant fwfm (the field-pair weights r_fg) and is ignored");
+        }
+        if (!linear && parts.containsKey("linear")) {
+            diagnostics.warning("factorization.als", loc, "a linear ridge is ignored under linear: false (no per-value weight is fitted)");
+        }
+        final boolean uniform = parts.isEmpty() && def.fmFieldReg.isEmpty() && !perRow;
+        final String curvature = switch (lossText) {
+            case "squared" -> "its training rows (times u² for a numeric field)";
+            case "logistic" -> "the sum of p (1 - p) over its training rows";
+            default -> "the sum of p (1 - p) over its choices in the contests";
+        };
+        diagnostics.info("factorization.als.reg", loc, (uniform ? "ridge " + base + " on every parameter" : "ridge bias " + bias + ", linear " + linearPer
+                + ", factors " + factorsPer + ("fwfm".equals(variant) ? ", pairWeights " + pairWeights : "") + " (fields " + def.fields + ")")
+                + (perRow ? ", multiplied by the training rows that carry each parameter (regScale perRow): every value is shrunk by about the same proportion"
+                : ", added as it is to a parameter's curvature summed over its training rows (regScale absolute) - compare it with " + curvature
+                + ": a value with far more than that is barely shrunk"));
+        final Map<String, String> coordinates = new LinkedHashMap<>();
+        if (uniform) {
+            coordinates.put("reg", Double.toString(base));
+            return coordinates;
+        }
+        coordinates.put("regBias", Double.toString(bias));
+        coordinates.put("regLinear", String.join(",", linearPer));
+        coordinates.put("regFactors", String.join(",", factorsPer));
+        coordinates.put("regPairWeights", Double.toString(pairWeights));
+        coordinates.put("regScale", perRow ? "perRow" : "absolute");
+        return coordinates;
+    }
+
+    /**
      * §4.4 factorization: an ALS fit applied by lookup — over the whole input (static), per fold (out-of-fold models)
      * or per forward change point; outputs are pair scores, embeddings, value counts or the linear predictor.
      */
@@ -4467,11 +4541,6 @@ public final class FeaturePlanCompiler {
             if (def.taskOrder != null && !List.of("ascending", "descending").contains(def.taskOrder)) {
                 diagnostics.error("factorization.task.order", loc, "task.order must be ascending | descending: " + def.taskOrder);
             }
-            // the likelihood is invariant to a common shift within a contest: the ridge is what fixes what it cannot see
-            // (a contest key's main effect would otherwise follow rounding noise)
-            if (def.reg != null && !(def.reg > 0)) {
-                diagnostics.error("factorization.als", loc, "als.reg must be > 0 under loss " + lossText + " (a contest sees score differences only): " + def.reg);
-            }
         } else {
             for (final String key : new String[]{"contest", "order", "top"}) {
                 final boolean declared = switch (key) {
@@ -4494,6 +4563,7 @@ public final class FeaturePlanCompiler {
             diagnostics.warning("factorization.task.offsetScale", loc, "task.offsetScale reads task.offset, and there is none: it is ignored");
         }
         final boolean linear = def.fmLinear == null || def.fmLinear;
+        final Map<String, String> regCoordinates = fmRegularization(def, variant, linear, ranked, lossText, loc);
         if (ranked && contestKeys != null) {
             // a contest sees score differences only: what is constant within one has no main effect
             final List<String> constant = new ArrayList<>();
@@ -4626,7 +4696,7 @@ public final class FeaturePlanCompiler {
                 c.coordinates.put("latentDim", Integer.toString(latentDim));
                 c.coordinates.put("target", target);
                 c.coordinates.put("epochs", Integer.toString(epochs));
-                c.coordinates.put("reg", Double.toString(def.reg == null ? 0.01 : def.reg));
+                c.coordinates.putAll(regCoordinates);
                 c.coordinates.put("seed", Long.toString(def.seed == null ? 0L : def.seed));
                 c.coordinates.put("loss", loss.name());
                 if (!linear) c.coordinates.put("linear", "false");

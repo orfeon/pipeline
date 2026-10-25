@@ -2149,6 +2149,65 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * factorization als.reg: one number stays one coordinate; an object, a field's own ridge or regScale write the
+     * ridge per part (per field, in field order), and the contest rule (> 0) names the fields it fails for.
+     */
+    @Test
+    public void testFactorizationRegularization() {
+        final FeaturePlan scalar = compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: 0.5}")));
+        Assertions.assertFalse(scalar.getDiagnostics().hasErrors(), scalar::describe);
+        Assertions.assertTrue(hasCode(scalar, "factorization.als.reg"), scalar::describe);
+        Assertions.assertEquals("0.5", column(scalar, "fm_linear").getCoordinates().get("reg"));
+        Assertions.assertNull(column(scalar, "fm_linear").getCoordinates().get("regLinear"));
+        Assertions.assertEquals("0.01", column(compile(SOURCES, withEncoding(FM_BLOCK)), "fm_linear").getCoordinates().get("reg"));
+
+        final String split = FM_BLOCK
+                .replace("fields: [seller_id, category, condition_grade]", "fields: [{field: seller_id, reg: {factors: 50}}, {field: category, reg: 3}, condition_grade]")
+                .replace("latentDim: 4", "latentDim: 4\n        als: {reg: {linear: 1, factors: 10, pairWeights: 0.5}, regScale: perRow}");
+        final FeaturePlan plan = compile(SOURCES, withEncoding(split));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final Map<String, String> k = column(plan, "fm_linear").getCoordinates();
+        Assertions.assertNull(k.get("reg"));
+        Assertions.assertEquals("0.01", k.get("regBias"), "an omitted part takes the default");
+        Assertions.assertEquals("1.0,3.0,1.0", k.get("regLinear"));
+        Assertions.assertEquals("50.0,3.0,10.0", k.get("regFactors"));
+        Assertions.assertEquals("0.5", k.get("regPairWeights"));
+        Assertions.assertEquals("perRow", k.get("regScale"));
+        Assertions.assertEquals("seller_id,category,condition_grade", k.get("fields"));
+        final Factorization.Regularization r = FeatureStages.regularization(k, 3);
+        Assertions.assertTrue(r.perRow());
+        Assertions.assertArrayEquals(new double[]{50, 3, 10}, r.factors());
+        Assertions.assertEquals(0.5, FeatureStages.regularization(column(scalar, "fm_linear").getCoordinates(), 3).linear()[2]);
+
+        // invalid values, keys and scales
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {linear: -1}}"))), "factorization.als"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {weights: 1}}"))), "factorization.als"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {regScale: perValue}"))), "factorization.als"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {bias: 1}},"))), "factorization.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: -2},"))), "factorization.fields"));
+        // pairWeights belongs to fwfm
+        final FeaturePlan fm = compile(SOURCES, withEncoding(FM_BLOCK.replace("variant: fwfm", "variant: fm").replace("latentDim: 4", "latentDim: 4\n        als: {reg: {pairWeights: 1}}")));
+        Assertions.assertFalse(fm.getDiagnostics().hasErrors(), fm::describe);
+        Assertions.assertTrue(fm.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.als".equals(m.code()) && m.message().contains("pairWeights")), fm::describe);
+
+        // a contest: every field's linear weights and factors need a ridge > 0; the bias is ignored
+        final String ranked = FM_BLOCK.replace("task: {expr: \"sold >= 1\", offset: market}",
+                "task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: market}");
+        final FeaturePlan zero = compile(SOURCES, withEncoding(ranked.replace("latentDim: 4", "latentDim: 4\n        als: {reg: 0}")));
+        Assertions.assertTrue(hasCode(zero, "factorization.als"), zero::describe);
+        final FeaturePlan oneField = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {linear: 0}},")));
+        Assertions.assertTrue(oneField.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("[seller_id]")), oneField::describe);
+        final FeaturePlan interactionsOnly = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {linear: 0}},")
+                .replace("latentDim: 4", "latentDim: 4\n        linear: false")));
+        Assertions.assertFalse(interactionsOnly.getDiagnostics().hasErrors(), interactionsOnly::describe);
+        final FeaturePlan bias = compile(SOURCES, withEncoding(ranked.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {bias: 1}}")));
+        Assertions.assertFalse(bias.getDiagnostics().hasErrors(), bias::describe);
+        Assertions.assertTrue(bias.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.als".equals(m.code()) && m.message().contains("bias")), bias::describe);
+    }
+
+    /**
      * The Low-Rank + Sparse recipes compile into a valid schedule. (1) batch: a forward factorization's sum is a
      * baseline, and a shrunk encoding of the cross offset by it keeps only what the factorization does not explain —
      * the encoding's keyed stage runs after the fit stage that fills the sum. (2) contest: a team rating with a pairing

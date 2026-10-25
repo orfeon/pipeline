@@ -419,7 +419,14 @@ public class FeatureSpec implements Serializable {
         public Integer epochs;
         /** factorization {@code als.warmEpochs}: the epochs of a warm-started forward refit (default: half of {@code epochs}, rounded up). */
         public Integer warmEpochs;
+        /** factorization {@code als.reg} as one number: the ridge of every parameter. */
         public Double reg;
+        /** factorization {@code als.reg} as an object: the ridge per kind of parameter (bias / linear / factors / pairWeights). */
+        public Map<String, Double> regParts = new LinkedHashMap<>();
+        /** factorization {@code als.regScale}: absolute (default) | perRow. */
+        public String regScale;
+        /** factorization {@code fields[].reg}: per field, its linear / factors ridge (a number sets both). */
+        public Map<String, Map<String, Double>> fmFieldReg = new LinkedHashMap<>();
         public Long seed;
         // discretize / quantileTransform ({@code bins}, {@code distribution} shared with noise)
         public String method;
@@ -1188,7 +1195,8 @@ public class FeatureSpec implements Serializable {
         def.variant = Json.string(o, "variant");
         def.fields = Json.strings(o, "fields");
         if ("factorization".equals(def.type) && o.has("fields") && o.get("fields").isJsonArray()) {
-            // a factorization field is a name, or {field, numeric: true, scale: zscore | none} for a numeric one
+            // a factorization field is a name, or {field, numeric: true, scale: zscore | none} for a numeric one, and
+            // {field, reg} for a ridge of its own
             def.fields = new ArrayList<>();
             for (final JsonElement e : o.getAsJsonArray("fields")) {
                 if (e.isJsonPrimitive()) {
@@ -1203,7 +1211,11 @@ public class FeatureSpec implements Serializable {
                 }
                 def.fields.add(name);
                 for (final String key : field.keySet()) {
-                    if (!List.of("field", "numeric", "scale").contains(key)) diagnostics.error("factorization.fields", loc, "unknown key '" + key + "' in field " + name + " (field, numeric, scale)");
+                    if (!List.of("field", "numeric", "scale", "reg").contains(key)) diagnostics.error("factorization.fields", loc, "unknown key '" + key + "' in field " + name + " (field, numeric, scale, reg)");
+                }
+                if (field.has("reg")) {
+                    final Map<String, Double> reg = regParts(field.get("reg"), List.of("linear", "factors"), "fields[" + name + "].reg", "factorization.fields", diagnostics, loc);
+                    if (reg != null) def.fmFieldReg.put(name, reg);
                 }
                 if (Json.bool(field, "numeric", false)) {
                     def.fmNumeric.put(name, Json.string(field, "scale") == null ? "zscore" : Json.string(field, "scale"));
@@ -1344,7 +1356,13 @@ public class FeatureSpec implements Serializable {
             try {
                 def.epochs = Json.integer(als, "epochs");
                 def.warmEpochs = Json.integer(als, "warmEpochs");
-                def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
+                if (als.has("reg") && als.get("reg").isJsonObject()) {
+                    final Map<String, Double> parts = regParts(als.get("reg"), List.of("bias", "linear", "factors", "pairWeights"), "als.reg", "factorization.als", diagnostics, loc);
+                    if (parts != null) def.regParts = parts;
+                } else {
+                    def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
+                }
+                def.regScale = Json.string(als, "regScale");
                 def.seed = Json.string(als, "seed") == null ? null : Long.parseLong(Json.string(als, "seed"));
             } catch (final RuntimeException e) {
                 diagnostics.error("factorization.als", loc, "als.epochs / warmEpochs / reg / seed must be numeric: " + als);
@@ -1352,6 +1370,35 @@ public class FeatureSpec implements Serializable {
         }
         def.fitJson = o.has("fit") && o.get("fit").isJsonObject() ? o.get("fit").toString() : null;
         return def;
+    }
+
+    /**
+     * A factorization ridge: a number (every key in {@code keys}) or an object over {@code keys}; null (reported) when it
+     * is neither, names another key or holds something other than a number.
+     */
+    private static Map<String, Double> regParts(final JsonElement element, final List<String> keys, final String what, final String code,
+                                                final Diagnostics diagnostics, final String loc) {
+        final Map<String, Double> parts = new LinkedHashMap<>();
+        try {
+            if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
+                for (final String key : keys) parts.put(key, element.getAsDouble());
+                return parts;
+            }
+            if (element.isJsonObject()) {
+                for (final Map.Entry<String, JsonElement> e : element.getAsJsonObject().entrySet()) {
+                    if (!keys.contains(e.getKey())) {
+                        diagnostics.error(code, loc, "unknown key '" + e.getKey() + "' in " + what + " (" + String.join(", ", keys) + ")");
+                        return null;
+                    }
+                    parts.put(e.getKey(), Double.parseDouble(e.getValue().getAsString()));
+                }
+                return parts;
+            }
+        } catch (final RuntimeException e) {
+            // reported below
+        }
+        diagnostics.error(code, loc, what + " must be a number or {" + String.join(", ", keys) + "} of numbers: " + element);
+        return null;
     }
 
     /**

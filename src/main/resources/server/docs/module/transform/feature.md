@@ -973,7 +973,7 @@ is a fold:
     task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset; loss (below)
     # linear: false                               # fit no per-value weight w (interactions only, over an offset that carries the main effects)
     fit: {mode: forward, blocks: {size: P30D}, artifact: {uri: "gs://bucket/features"}}   # static (default) | forward | fold
-    als: {epochs: 10, warmEpochs: 5, reg: 0.01, seed: 0}
+    als: {epochs: 10, warmEpochs: 5, reg: {linear: 1, factors: 10}, seed: 0}   # reg: one number, or per part (below)
     outputs:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
@@ -993,6 +993,42 @@ falls back to its parent for an unseen pair. A value the fit never saw yields nu
 number of training rows that carried the row's value in the model the row reads — the support behind its factors. The
 artifact (`<planHash>/<block>.fm.avro` with the per-value counts + manifest with the fwfm `pairWeights` ranking) holds
 the whole-input model and is written and reused like the static encoding artifacts.
+
+**Regularization (`als.reg`, `als.regScale`, `fields[].reg`).** Every parameter θ takes the step
+`θ += (g − λ θ) / (H + λ)`, where `H` is the curvature of the loss summed over the training rows that carry θ and λ is
+the ridge — an **absolute** amount added to that sum, not a per-row penalty as in the SGD implementations of
+factorization machines (libFM's reg0 / regw / regv). What a λ does depends on what it is compared with:
+
+| loss | `H` of a value's parameter | λ reads as |
+|---|---|---|
+| `squared` | its training rows (times `u²` for a numeric field) | λ pseudo-rows at 0: a mean over `n` rows is shrunk by `n / (n + λ)` |
+| `logistic` | `Σ p (1 − p)` over its training rows (≤ 1/4 each) | the same, in units of that information |
+| `plackettLuce` / `softmax` | `Σ p (1 − p)` over its choices (small in a large field, where every `p` is small) | the same |
+
+So `reg: 0.01` on a seller with 1,000 training rows is no regularization at all, and the default (0.01) is a
+placeholder, not a recommendation — choose λ on the walk-forward loss (`fit.mode: forward`). The plan reports the
+ridge in effect (info `factorization.als.reg`).
+
+- `reg: <number>` — every parameter (default 0.01).
+- `reg: {bias, linear, factors, pairWeights}` — per kind of parameter: the global bias `w0` (a contest loss has none),
+  the per-value weights `w`, the latent factors `v`, and fwfm's field-pair weights `r_fg`; an omitted part takes 0.01.
+- `fields: [{field: seller_id, reg: {linear: 10, factors: 100}}, ...]` — a field's own linear / factor ridge (a number
+  sets both; an omitted part takes the block's). A field with few rows per value (an id) usually needs a stronger
+  ridge than one with many (a category).
+- `regScale: perRow` multiplies λ by the training rows that carry the parameter (a value's rows; the rows with both
+  fields for `r_fg`; every row for `w0`): every value is then shrunk by about the same proportion (`1 / (1 + λ)` under
+  `squared`) whatever its count — the per-row reading. `absolute` (the default) shrinks a rare value more than a
+  frequent one: a fixed prior per value, the Bayesian ridge.
+
+Why the factors want a ridge of their own: a pair of two fields whose combination nearly identifies a training row
+(an entity × entity pair seen once or twice) can memorize the training targets when its factors are weakly penalized
+— the training loss falls far below the uninformative level, and under a contest loss the scores grow to tens
+(probabilities pile onto one entry). One λ for everything cannot avoid it: large enough to stop the memorizing, it also
+drives every factor to 0 — 0 is a fixed point of the factor update (once one field's factors are 0 the others get no
+slope from it), so the factors collapse together at some λ — and below that the pairs memorize. A strong `factors`
+ridge with moderate `linear` keeps the main effects and only the part of the pairing that the data supports. Under
+`plackettLuce` / `softmax` the linear (when fitted) and factor ridge of every field must be > 0 (error
+`factorization.als`).
 
 **`fit.mode`.** Under `static` (the default) every row reads the model fitted on the whole input — its own target
 included, so use it for serving and analysis, not for training rows (the plan says so, `fit.mode.static`). The two
@@ -1098,8 +1134,8 @@ fields are all numeric is a quadratic form of the values (warning `factorization
   (`offsetScale: score`). The outputs never include it.
 - **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
   parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). Under
-  `plackettLuce` / `softmax` `als.reg` must be > 0: the ridge is what fixes what a contest cannot see (a contest key's
-  main effect). The artifact manifest records the `loss`.
+  `plackettLuce` / `softmax` the ridge (see *Regularization* above) must be > 0: it is what fixes what a contest cannot
+  see (a contest key's main effect). The artifact manifest records the `loss`.
 - **Probabilities**: the context `softmax` op over the `sum` column with the same offset turns the log-strengths into win
   probabilities within the group — the serving-side reading of exactly this model:
 
