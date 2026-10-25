@@ -53,6 +53,72 @@ public class DataflowOptionsTest {
         Assertions.assertEquals(12, clazz.getMethod("getMaxNumWorkers").invoke(dataflowOptions));
     }
 
+    /** update / allowNonRestored-style boolean setters take a primitive: a Boolean.class lookup used to fail. */
+    @Test
+    public void testUpdateAndDebugOptions() throws Exception {
+        final Class<?> clazz;
+        try {
+            clazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
+        } catch (final ClassNotFoundException e) {
+            Assumptions.abort("dataflow runner is not on the classpath");
+            return;
+        }
+
+        final PipelineOptions pipelineOptions = applyOptions("""
+                {
+                  "dataflow": {
+                    "update": true,
+                    "transformNameMapping": { "oldStep": "newStep" },
+                    "usePublicIps": false,
+                    "hotKeyLoggingEnabled": true,
+                    "dumpHeapOnOOM": true,
+                    "saveHeapDumpsToGcsPath": "gs://bucket/heapdumps",
+                    "streamingSideInputCacheMb": 200,
+                    "experiments": ["use_runner_v2"]
+                  }
+                }
+                """);
+        final Object dataflowOptions = as(pipelineOptions, clazz);
+        Assertions.assertEquals(true, clazz.getMethod("isUpdate").invoke(dataflowOptions));
+        Assertions.assertEquals(java.util.Map.of("oldStep", "newStep"), clazz.getMethod("getTransformNameMapping").invoke(dataflowOptions));
+        Assertions.assertEquals(false, clazz.getMethod("getUsePublicIps").invoke(dataflowOptions));
+        Assertions.assertEquals(true, clazz.getMethod("isHotKeyLoggingEnabled").invoke(dataflowOptions));
+        Assertions.assertEquals(true, clazz.getMethod("getDumpHeapOnOOM").invoke(dataflowOptions));
+        Assertions.assertEquals("gs://bucket/heapdumps", clazz.getMethod("getSaveHeapDumpsToGcsPath").invoke(dataflowOptions));
+        Assertions.assertEquals(200, clazz.getMethod("getStreamingSideInputCacheMb").invoke(dataflowOptions));
+        Assertions.assertTrue(((java.util.List<?>) clazz.getMethod("getExperiments").invoke(dataflowOptions)).contains("use_runner_v2"));
+    }
+
+    /**
+     * The SDK harness log levels are not copied to the deprecated DataflowWorkerLoggingOptions: the legacy worker
+     * falls back to SdkHarnessOptions while the deprecated ones keep their defaults (INFO / unset).
+     */
+    @Test
+    public void testSdkHarnessLogLevelsLeaveDeprecatedWorkerLoggingAlone() throws Exception {
+        final Class<?> clazz;
+        try {
+            clazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions");
+        } catch (final ClassNotFoundException e) {
+            Assumptions.abort("dataflow runner is not on the classpath");
+            return;
+        }
+        final Options options = JsonUtil.fromJson("""
+                {
+                  "sdkHarness": {
+                    "defaultSdkHarnessLogLevel": "WARN",
+                    "sdkHarnessLogLevelOverrides": { "com.mercari.solution": "DEBUG" }
+                  }
+                }
+                """, Options.class);
+        final PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
+        SdkHarnessOptions.setOptions(pipelineOptions, options.getSdkHarness());
+        final Object logging = as(pipelineOptions, clazz);
+        Assertions.assertEquals("INFO", clazz.getMethod("getDefaultWorkerLogLevel").invoke(logging).toString());
+        Assertions.assertNull(clazz.getMethod("getWorkerLogLevelOverrides").invoke(logging));
+        Assertions.assertEquals(org.apache.beam.sdk.options.SdkHarnessOptions.LogLevel.WARN,
+                pipelineOptions.as(org.apache.beam.sdk.options.SdkHarnessOptions.class).getDefaultSdkHarnessLogLevel());
+    }
+
     @Test
     public void testUnknownAutoscalingAlgorithmThrows() throws Exception {
         try {
