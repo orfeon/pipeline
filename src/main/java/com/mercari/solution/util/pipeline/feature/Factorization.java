@@ -605,13 +605,6 @@ public final class Factorization {
         return forward(options, sorted, plan, total, parallel, sink);
     }
 
-    /** The change points of a forward fit over the {@code observed} blocks: each of them, and each block at which one leaves a window of {@code windowBlocks}. */
-    public static TreeSet<Long> changePoints(final TreeSet<Long> observed, final int windowBlocks) {
-        final TreeSet<Long> changePoints = new TreeSet<>(observed);
-        if (windowBlocks > 0) for (final long block : observed) changePoints.add(block + windowBlocks);
-        return changePoints;
-    }
-
     /** How many fits a parallel forward fit runs at once: the cores of the JVM (a worker's). */
     static final int FIT_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors());
 
@@ -660,7 +653,7 @@ public final class Factorization {
             ranges.computeIfAbsent(block, b -> new int[]{index, index})[1] = index + 1;
         }
         final TreeSet<Long> observed = new TreeSet<>(ranges.keySet());
-        final List<Long> points = new ArrayList<>(changePoints(observed, plan.windowBlocks()));
+        final List<Long> points = new ArrayList<>(BlockSeries.changePoints(observed, plan.windowBlocks()));
         final List<List<Example>> windows = new ArrayList<>(points.size());
         for (final long at : points) {
             // the blocks a usable block `at` reads: (at − W, at], every block ≤ at without a window

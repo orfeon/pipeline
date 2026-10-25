@@ -1633,12 +1633,13 @@ public final class FeatureStages {
          * one gather and one join ({@link FeatureStages#serveForward}). A coordinate missing from FM_FIT_ONLY only keeps apart blocks
          * that could have shared.
          */
-        String exampleSet() {
+        Map<String, String> exampleSet() {
             final TreeMap<String, String> key = new TreeMap<>(columns.get(0).getCoordinates());
             key.keySet().removeAll(FM_FIT_ONLY);
             // a task.expr target: each block reads a column of its own, one expression computes them alike
             if (key.containsKey("targetExpr")) key.remove("target");
-            return key.toString();
+            // compared as a map: a joined string would let a value holding ", k=v" (an expression) match another set
+            return key;
         }
 
         /** fit.mode forward: the row's usable time block, or null without an event time. */
@@ -1750,7 +1751,7 @@ public final class FeatureStages {
     static PCollection<MElement> serveForward(final List<FmSpec> specs, final PCollection<MElement> rows, final PCollection<MElement> fitInput,
                                               final String label, final String planHash, final boolean failFast,
                                               final TupleTag<BadRecord> failureTag, final List<PCollection<BadRecord>> failures) {
-        final Map<String, List<FmSpec>> byExamples = new LinkedHashMap<>();
+        final Map<Map<String, String>, List<FmSpec>> byExamples = new LinkedHashMap<>();
         for (final FmSpec spec : specs) byExamples.computeIfAbsent(spec.exampleSet(), k -> new ArrayList<>()).add(spec);
         final List<List<FmSpec>> sets = new ArrayList<>(byExamples.values());
         final String prefix = label + "_FmForward";
@@ -1767,7 +1768,7 @@ public final class FeatureStages {
         for (int set = 0; set < sets.size(); set++) modelTags.add(new TupleTag<>() {});
         final PCollectionTuple fitted = examples
                 .apply(prefix + "_Work", ParDo.of(new FmWorkDoFn(sets)))
-                .setCoder(VarIntCoder.of())
+                .setCoder(KvCoder.of(VarIntCoder.of(), VarIntCoder.of()))
                 .apply(prefix + "_Spread", Reshuffle.viaRandomKey())
                 .apply(prefix + "_Fit", ParDo.of(new FitFmForwardDoFn(sets, planHash, examplesView, modelTags))
                         .withSideInputs(examplesView)
@@ -2043,12 +2044,12 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final TreeSet<Long> observed = Factorization.observedBlocks(c.element().getValue());
-            c.output(KV.of(c.element().getKey(), new FmIndex(Factorization.changePoints(observed, windowBlocks.get(c.element().getKey())), observed)));
+            c.output(KV.of(c.element().getKey(), new FmIndex(BlockSeries.changePoints(observed, windowBlocks.get(c.element().getKey())), observed)));
         }
     }
 
-    /** fit.mode forward: the work items of an example set with examples — one per block, numbered across the sets ({@link #workItem}). */
-    static class FmWorkDoFn extends DoFn<KV<Integer, ArrayList<Factorization.Example>>, Integer> {
+    /** fit.mode forward: the work items of an example set with examples — one (set, slot) per block of the set. */
+    static class FmWorkDoFn extends DoFn<KV<Integer, ArrayList<Factorization.Example>>, KV<Integer, Integer>> {
         private final List<Integer> sizes = new ArrayList<>();
 
         FmWorkDoFn(final List<List<FmSpec>> sets) {
@@ -2058,20 +2059,8 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final int set = c.element().getKey();
-            int first = 0;
-            for (int s = 0; s < set; s++) first += sizes.get(s);
-            for (int slot = 0; slot < sizes.get(set); slot++) c.output(first + slot);
+            for (int slot = 0; slot < sizes.get(set); slot++) c.output(KV.of(set, slot));
         }
-    }
-
-    /** The (set, slot) of work item {@code id}: the blocks numbered across the sets in order. */
-    static int[] workItem(final List<List<FmSpec>> sets, final int id) {
-        int first = 0;
-        for (int set = 0; set < sets.size(); set++) {
-            if (id < first + sets.get(set).size()) return new int[]{set, id - first};
-            first += sets.get(set).size();
-        }
-        throw new IllegalArgumentException("factorization work item " + id + " out of range");
     }
 
     /**
@@ -2079,7 +2068,7 @@ public final class FeatureStages {
      * left unsolved (fit.minRows), so every change point of a set carries one entry per block — keyed by the change
      * point and tagged with the block's slot in its set, on the output of its set.
      */
-    static class FitFmForwardDoFn extends DoFn<Integer, KV<Long, KV<Integer, Factorization.Model>>> {
+    static class FitFmForwardDoFn extends DoFn<KV<Integer, Integer>, KV<Long, KV<Integer, Factorization.Model>>> {
         private final List<List<FmSpec>> sets;
         private final String planHash;
         private final PCollectionView<Map<Integer, ArrayList<Factorization.Example>>> examplesView;
@@ -2096,19 +2085,20 @@ public final class FeatureStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final int[] item = workItem(sets, c.element());
-            final FmSpec spec = sets.get(item[0]).get(item[1]);
-            final ArrayList<Factorization.Example> examples = c.sideInput(examplesView).get(item[0]);
+            final int set = c.element().getKey();
+            final int slot = c.element().getValue();
+            final FmSpec spec = sets.get(set).get(slot);
+            final ArrayList<Factorization.Example> examples = c.sideInput(examplesView).get(set);
             if (examples == null) return;
             LOG.info("factorization {}: fitting on {} examples (forward)", spec.block(), examples.size());
             // no row reads the whole-input model: it is fitted only when the artifact will be written
             final boolean writesTotal = spec.writesTotal(planHash);
             final Factorization.FitReport[] last = new Factorization.FitReport[1];
-            final TupleTag<KV<Long, KV<Integer, Factorization.Model>>> tag = modelTags.get(item[0]);
+            final TupleTag<KV<Long, KV<Integer, Factorization.Model>>> tag = modelTags.get(set);
             final Factorization.Model total = Factorization.fitForward(spec.options(), examples, spec.plan(), writesTotal, true, (at, model) -> {
                 countFit(spec, model);
                 if (model != null) last[0] = model.report;
-                c.output(tag, KV.of(at, KV.of(item[1], model)));
+                c.output(tag, KV.of(at, KV.of(slot, model)));
             });
             // the whole-input model is a fit of its own unless it is the last change point's model
             if (total != null && total.report != last[0]) countFit(spec, total);

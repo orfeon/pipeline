@@ -173,7 +173,7 @@ public class FactorizationServeTest {
                 if (minRows > 0) Assertions.assertTrue(sequential.containsValue(null), "a change point left unsolved");
             }
         }
-        Assertions.assertEquals(Factorization.changePoints(Factorization.observedBlocks(examples), 3).size(), 12);
+        Assertions.assertEquals(12, BlockSeries.changePoints(Factorization.observedBlocks(examples), 3).size());
     }
 
     /** The change point a row is keyed by is the one whose model the side-input lookup would serve it. */
