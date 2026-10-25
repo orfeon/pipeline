@@ -1613,7 +1613,7 @@ the same clock (`clock.fit`), where it is counted in blocks.
 **Open questions**
 
 - Expression typing: the Lucene engine is double-only. Admitting the spec's general expressions
-  (string comparisons, `nullif`) means delegating to the per-element Calcite engine (`Query2`) or
+  (string comparisons, `nullif`) means delegating to the per-element Calcite engine (`Query`) or
   extending the expression engine; v0 stays numeric.
 - `varianceComponents` as a whole-batch estimate (the structural-leak class) vs. `fixed` weights only.
 - Pending-contribution state for very long settlement lags on high-frequency keys (a `maxPending`

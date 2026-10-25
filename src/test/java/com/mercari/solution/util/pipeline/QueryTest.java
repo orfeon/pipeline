@@ -16,7 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public class Query2Test {
+public class QueryTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
 
@@ -185,7 +185,7 @@ public class Query2Test {
                 ON
                   u.userId = i.userId
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -230,7 +230,7 @@ public class Query2Test {
                 ON
                   u.userId = i.userId
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -261,7 +261,7 @@ public class Query2Test {
         // execute, so construction (submission time) rejects it — not the
         // per-element evaluation on the workers.
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
-                () -> Query2.builder()
+                () -> Query.builder()
                         .withInput("INPUT", inputSchema())
                         .withSource(usersSource())
                         .withSql("SELECT userId, name FROM mem.users")
@@ -286,7 +286,7 @@ public class Query2Test {
                 Schema.Field.of("userId", Schema.FieldType.INT64),
                 Schema.Field.of("tag", Schema.FieldType.STRING)));
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
-                () -> Query2.builder()
+                () -> Query.builder()
                         .withInput("INPUT", input)
                         .withSource(usersSource())
                         .withSql(sql)
@@ -305,10 +305,10 @@ public class Query2Test {
                         Schema.Field.of("category", Schema.FieldType.STRING),
                         Schema.Field.of("amount", Schema.FieldType.INT64)))))));
         final String sql = "SELECT e.category, e.amount FROM MyTable, UNNEST(events) AS e";
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("MyTable", schema)
                 .withSql(sql)
-                .withGuard(new Query2.Guard(2, 0))
+                .withGuard(new Query.Guard(2, 0))
                 .build();
         query.setup();
         try {
@@ -356,11 +356,11 @@ public class Query2Test {
                         Schema.Field.of("millis", Schema.FieldType.INT64)))))));
         final String sql = "SELECT w.label, SLEEP_(w.millis) AS slept"
                 + " FROM MyTable, UNNEST(waits) AS w";
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("MyTable", schema)
                 .withScalarFunction("SLEEP_", SleepUdfs.class, "sleep")
                 .withSql(sql)
-                .withGuard(new Query2.Guard(0, 100))
+                .withGuard(new Query.Guard(0, 100))
                 .build();
         query.setup();
         try {
@@ -379,7 +379,7 @@ public class Query2Test {
 
     @Test
     public void testRepeatedExecutionWithoutSources() {
-        // Query2 must cover the plain per-element SQL of Query (no sources).
+        // Plain per-element SQL (no sources).
         final Schema schema = Schema.of(List.of(
                 Schema.Field.of("userId", Schema.FieldType.STRING),
                 Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
@@ -390,7 +390,7 @@ public class Query2Test {
                 FROM MyTable, UNNEST(events) AS e
                 GROUP BY userId
                 """;
-        final Query2 query = Query2.of("MyTable", schema, sql);
+        final Query query = Query.of("MyTable", schema, sql);
         query.setup();
         try {
             for (long i = 1; i <= 3; i++) {
@@ -452,7 +452,7 @@ public class Query2Test {
 
     @Test
     public void testScalarUdf() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withScalarFunction("SCALE_", TestUdfs.class, "scale")
                 .withSql("SELECT userId, SCALE_(qty, 10) AS scaled FROM INPUT")
@@ -475,7 +475,7 @@ public class Query2Test {
                 Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
                         Schema.Field.of("category", Schema.FieldType.STRING),
                         Schema.Field.of("amount", Schema.FieldType.INT64)))))));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("MyTable", schema)
                 .withAggregateFunction("SUM_OF_SQUARES", SumOfSquares.class)
                 .withSql("""
@@ -504,7 +504,7 @@ public class Query2Test {
     public void testStandardFunctionSurface() {
         // Smoke test over representative functions from each documented
         // category (string / numeric / datetime / conditional / array / cast).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSql("""
                         SELECT
@@ -549,8 +549,8 @@ public class Query2Test {
 
     @Test
     public void testBuiltinCurrentDateFunction() {
-        // Parity with the old Query core: CURRENT_DATE_ is registered by default.
-        final Query2 query = Query2.builder()
+        // CURRENT_DATE_ is registered by default.
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSql("SELECT userId, CURRENT_DATE_('Asia/Tokyo') AS today FROM INPUT")
                 .build();
@@ -575,7 +575,7 @@ public class Query2Test {
     @Test
     public void testBuiltinDivFunction() {
         // DIV is BigQuery's integer division; the Calcite BigQuery library does not ship it.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSql("""
                         SELECT
@@ -612,7 +612,7 @@ public class Query2Test {
                 Schema.Field.of("qty", Schema.FieldType.INT64),
                 Schema.Field.of("n32", Schema.FieldType.INT32.withNullable(true)),
                 Schema.Field.of("name", Schema.FieldType.STRING)));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", schema)
                 .withSql("""
                         SELECT
@@ -664,7 +664,7 @@ public class Query2Test {
         expectedMessages.put("DIV(qty, 25e-1)", "DIV divisor must be an integer");
         expectedMessages.put("DIV('10', qty)", "DIV dividend must be an integer");
         for(final Map.Entry<String, String> entry : expectedMessages.entrySet()) {
-            final Query2 query = Query2.builder()
+            final Query query = Query.builder()
                     .withInput("INPUT", inputSchema())
                     .withSql("SELECT " + entry.getKey() + " AS d FROM INPUT")
                     .build();

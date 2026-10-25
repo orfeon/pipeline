@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Built-in numeric scalar UDFs registered by {@code Query2} for every query:
+ * Built-in numeric scalar UDFs registered by {@code Query} for every query:
  * {@code DIV(x, y)} — BigQuery's integer division (the quotient truncated
  * toward zero), which the Calcite BigQuery function library does not provide.
  *

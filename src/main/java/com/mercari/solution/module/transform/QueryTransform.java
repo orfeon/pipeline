@@ -6,7 +6,7 @@ import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.Filter;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
 import com.mercari.solution.util.pipeline.lookup.source.BufferLookupSource;
@@ -101,13 +101,13 @@ public class QueryTransform extends Transform {
         }
 
         /** The session statements: the single {@code sql} or the {@code queries} list. */
-        private List<Query2.Statement> statements() {
+        private List<Query.Statement> statements() {
             if(queries == null) {
-                return List.of(Query2.Statement.of("", sql, true));
+                return List.of(Query.Statement.of("", sql, true));
             }
-            final List<Query2.Statement> statements = new ArrayList<>();
+            final List<Query.Statement> statements = new ArrayList<>();
             for(final QueryParameters query : queries) {
-                statements.add(Query2.Statement.of(
+                statements.add(Query.Statement.of(
                         query.name, query.sql, !Boolean.FALSE.equals(query.output)));
             }
             return statements;
@@ -150,11 +150,11 @@ public class QueryTransform extends Transform {
             }
         }
 
-        private Query2.Guard queryGuard() {
+        private Query.Guard queryGuard() {
             if(guard == null) {
                 return null;
             }
-            return new Query2.Guard(
+            return new Query.Guard(
                     guard.maxRows == null ? 0 : guard.maxRows,
                     guard.timeoutMillis == null ? 0 : guard.timeoutMillis);
         }
@@ -292,7 +292,7 @@ public class QueryTransform extends Transform {
         if(bufferConfig != null) {
             if(bufferInsertSql != null) {
                 try {
-                    bufferRowSchema = Query2.builder()
+                    bufferRowSchema = Query.builder()
                             .withInput(parameters.table, inputSchema)
                             .withSources(LookupSourceConfig.createSources(
                                     LookupSourceConfig.nonBufferSources(parameters.sources),
@@ -310,7 +310,7 @@ public class QueryTransform extends Transform {
             }
             if(bufferRestoreSql != null) {
                 try {
-                    Query2.builder()
+                    Query.builder()
                             .withInput(parameters.table, inputSchema)
                             .withSources(LookupSourceConfig.createSources(
                                     LookupSourceConfig.nonBufferSources(parameters.sources),
@@ -325,9 +325,9 @@ public class QueryTransform extends Transform {
             }
         }
 
-        final Query2 query;
+        final Query query;
         try {
-            final Query2.Builder builder = Query2.builder()
+            final Query.Builder builder = Query.builder()
                     .withInput(parameters.table, inputSchema)
                     .withSources(LookupSourceConfig.createSources(parameters.sources, sideInputSchemas,
                             bufferRowSchema))
@@ -441,7 +441,7 @@ public class QueryTransform extends Transform {
      */
     private void validateBufferRecovery(
             final LookupSourceConfig.BufferConfig bufferConfig,
-            final Query2 query,
+            final Query query,
             final List<String> storedFields,
             final Set<String> outputNames) {
 
@@ -505,7 +505,7 @@ public class QueryTransform extends Transform {
             final MCollectionTuple inputs,
             final Schema inputSchema,
             final LookupSourceConfig.BufferConfig bufferConfig,
-            final Query2 query,
+            final Query query,
             final Parameters parameters,
             final List<String> storedFields,
             final Schema stateSchema,
@@ -617,7 +617,7 @@ public class QueryTransform extends Transform {
             final DoFn<?, MElement>.ProcessContext c,
             final Map<String, TupleTag<MElement>> outputTags,
             final Map<String, Logging> logs,
-            final Query2.SessionResult result) {
+            final Query.SessionResult result) {
         for(final Map.Entry<String, List<MElement>> entry : result.outputs().entrySet()) {
             final TupleTag<MElement> tag = outputTags.get(entry.getKey());
             for(final MElement output : entry.getValue()) {
@@ -629,7 +629,7 @@ public class QueryTransform extends Transform {
 
     private static class QueryDoFn extends DoFn<MElement, MElement> {
 
-        private final Query2 query;
+        private final Query query;
         private final String table;
         private final String filterJson;
         private final Schema inputSchema;
@@ -642,7 +642,7 @@ public class QueryTransform extends Transform {
         private transient Filter.ConditionNode filterCondition;
 
         QueryDoFn(
-                final Query2 query,
+                final Query query,
                 final String table,
                 final String filterJson,
                 final Schema inputSchema,
@@ -699,7 +699,7 @@ public class QueryTransform extends Transform {
                     }
                 }
                 Logging.log(LOG, logs, "input", input);
-                final Query2.SessionResult result =
+                final Query.SessionResult result =
                         query.executeAll(Map.of(table, List.of(input)), c.timestamp());
                 emitOutputs(c, outputTags, logs, result);
             } catch (final Throwable e) {
@@ -731,7 +731,7 @@ public class QueryTransform extends Transform {
      */
     static class BufferQueryProcessor implements Serializable {
 
-        private final Query2 query;
+        private final Query query;
         private final String table;
         private final String filterJson;
         private final List<String> groupFields;
@@ -760,7 +760,7 @@ public class QueryTransform extends Transform {
         private transient Filter.ConditionNode triggerCondition;
 
         BufferQueryProcessor(
-                final Query2 query,
+                final Query query,
                 final String table,
                 final String filterJson,
                 final LookupSourceConfig.BufferConfig bufferConfig,
@@ -888,9 +888,9 @@ public class QueryTransform extends Transform {
                 List<MElement> currentRows = List.of();
                 if(persist || (trigger && includeCurrent)) {
                     if(insertMode) {
-                        final Query2.SessionResult insertResult = query.executeAll(
+                        final Query.SessionResult insertResult = query.executeAll(
                                 Map.of(table, List.of(input)), timestamp,
-                                EnumSet.of(Query2.Statement.Kind.BUFFER_INSERT));
+                                EnumSet.of(Query.Statement.Kind.BUFFER_INSERT));
                         final List<MElement> insertRows = insertResult.bufferRows() == null
                                 ? List.of() : insertResult.bufferRows();
                         final List<MElement> converted = new ArrayList<>(insertRows.size());
@@ -931,9 +931,9 @@ public class QueryTransform extends Transform {
                             .createBufferElement(input, timestamp, inputName, groupFields);
                     bufferSource.setData(visible, keyElement);
                     Logging.log(LOG, logs, "input", input);
-                    final Query2.SessionResult result = query.executeAll(
+                    final Query.SessionResult result = query.executeAll(
                             Map.of(table, List.of(input)), timestamp,
-                            EnumSet.of(Query2.Statement.Kind.QUERY));
+                            EnumSet.of(Query.Statement.Kind.QUERY));
                     emitOutputs(c, outputTags, logs, result);
                 }
             } catch (final Throwable e) {
@@ -955,9 +955,9 @@ public class QueryTransform extends Transform {
                 final MElement input,
                 final Instant timestamp) {
 
-            final Query2.SessionResult restoreResult = query.executeAll(
+            final Query.SessionResult restoreResult = query.executeAll(
                     Map.of(table, List.of(input)), timestamp,
-                    EnumSet.of(Query2.Statement.Kind.STATE_RESTORE));
+                    EnumSet.of(Query.Statement.Kind.STATE_RESTORE));
             final List<MElement> restoreRows = restoreResult.restoreRows() == null
                     ? List.of() : restoreResult.restoreRows();
             final Instant cutoff = maxDurationMillis == null

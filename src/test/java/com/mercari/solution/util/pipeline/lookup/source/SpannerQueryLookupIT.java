@@ -11,7 +11,7 @@ import com.google.cloud.spanner.Spanner;
 import com.google.cloud.spanner.SpannerOptions;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
@@ -161,7 +161,7 @@ public class SpannerQueryLookupIT {
     @Test
     public void testArrayBindWithDerivedSchema() {
         // No fields given: the result schema is derived via analyzeQuery(PLAN).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("itemId", Schema.FieldType.INT64),
                         Schema.Field.of("qty", Schema.FieldType.INT64))))
@@ -202,7 +202,7 @@ public class SpannerQueryLookupIT {
     public void testGraphTraversalLookupJoin() {
         // The graph-source shape: a GQL traversal keyed by the start node,
         // ARRAY-binding the batch's distinct start keys to @keys.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(source("graph")
@@ -268,7 +268,7 @@ public class SpannerQueryLookupIT {
 
     @Test
     public void testSearchLookupJoinFansOut() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("term", Schema.FieldType.STRING))))
                 .withSource(searchSource())
@@ -297,7 +297,7 @@ public class SpannerQueryLookupIT {
     public void testLateralTopNOverSearchHits() {
         // Per-term best hit: ORDER BY score DESC LIMIT 1 inside a correlated
         // LATERAL block, evaluated over each term's fetched hits in-process.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("term", Schema.FieldType.STRING))))
                 .withSource(searchSource())

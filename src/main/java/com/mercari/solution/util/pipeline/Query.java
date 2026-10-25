@@ -83,11 +83,9 @@ import java.util.function.Supplier;
  * optionally joined against external {@link LookupSource}s (JDBC / Spanner /
  * Bigtable / Datastore / Firestore / REST / gRPC) via <em>key-driven lookup-joins</em>.
  *
- * <p>This is the successor of {@link Query}: the same "SQL inside a DoFn" core
- * (plan and compile once per worker, evaluate repeatedly against small in-memory
- * inputs, no shuffle, windowing/timestamps untouched), self-contained (it does not
- * depend on the deprecated {@code util.domain.sql.calcite} package), plus external
- * source support:
+ * <p>The core is "SQL inside a DoFn" (plan and compile once per worker, evaluate
+ * repeatedly against small in-memory inputs, no shuffle, windowing/timestamps
+ * untouched), plus external source support:
  *
  * <ul>
  *   <li>Register a source with {@link Builder#withSource}; its tables are
@@ -129,10 +127,10 @@ import java.util.function.Supplier;
  * <p>Instances are not thread-safe after {@link #setup()}; use one instance per
  * DoFn instance (Beam guarantees a DoFn instance is not called concurrently).
  */
-public class Query2 implements Serializable {
+public class Query implements Serializable {
 
     private static final String DEFAULT_TABLE_NAME = "INPUT";
-    private static final Logger LOG = LoggerFactory.getLogger(Query2.class);
+    private static final Logger LOG = LoggerFactory.getLogger(Query.class);
 
     /**
      * One named statement of the session. {@code output} statements contribute
@@ -232,7 +230,7 @@ public class Query2 implements Serializable {
         }
     }
 
-    private Query2(
+    private Query(
             final Map<String, Schema> inputSchemas,
             final List<LookupSource> sources,
             final List<UserDefinedFunctions.FunctionSpec> functions,
@@ -342,11 +340,11 @@ public class Query2 implements Serializable {
         }
     }
 
-    public static Query2 of(final String name, final Schema inputSchema, final String sql) {
+    public static Query of(final String name, final Schema inputSchema, final String sql) {
         return builder().withInput(name, inputSchema).withSql(sql).build();
     }
 
-    public static Query2 of(
+    public static Query of(
             final String name,
             final List<Schema.Field> inputFields,
             final String sql) {
@@ -354,8 +352,8 @@ public class Query2 implements Serializable {
         return of(name, Schema.of(inputFields), sql);
     }
 
-    public static Query2 of(final Map<String, Schema> inputSchemas, final String sql) {
-        return new Query2(inputSchemas, List.of(), List.of(),
+    public static Query of(final Map<String, Schema> inputSchemas, final String sql) {
+        return new Query(inputSchemas, List.of(), List.of(),
                 List.of(Statement.of("", sql, true)), false, null);
     }
 
@@ -470,7 +468,7 @@ public class Query2 implements Serializable {
             return this;
         }
 
-        public Query2 build() {
+        public Query build() {
             final List<Statement> all = new ArrayList<>();
             if (stateRestoreSql != null) {
                 all.add(new Statement("", stateRestoreSql, false, Statement.Kind.STATE_RESTORE));
@@ -479,7 +477,7 @@ public class Query2 implements Serializable {
                 all.add(new Statement("", bufferInsertSql, false, Statement.Kind.BUFFER_INSERT));
             }
             all.addAll(statements);
-            return new Query2(inputSchemas, sources, functions, all, exclusive, guard);
+            return new Query(inputSchemas, sources, functions, all, exclusive, guard);
         }
     }
 

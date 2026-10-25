@@ -4,7 +4,7 @@ import com.google.cloud.firestore.Firestore;
 import com.google.cloud.firestore.FirestoreOptions;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -74,7 +74,7 @@ public class FirestoreQueryLookupIT {
 
     @Test
     public void testLookupJoinAndLeftJoinNull() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("userId", Schema.FieldType.STRING))))
                 .withSource(source()
@@ -128,7 +128,7 @@ public class FirestoreQueryLookupIT {
 
     @Test
     public void testSubcollectionLookup() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", Schema.of(List.of(
                         Schema.Field.of("orderId", Schema.FieldType.STRING))))
                 .withSource(source()

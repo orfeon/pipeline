@@ -762,7 +762,7 @@ Division differs from BigQuery in two ways:
 
 - `MATCH_RECOGNIZE` and its navigation functions (`PREV` `NEXT` `FIRST` `LAST` `CLASSIFIER` `MATCH_NUMBER`) — use `SEQ_MATCH` instead.
 - Streaming group-window functions (`TUMBLE` `HOP` `SESSION`) — windowing belongs to the surrounding pipeline, not to this per-element SQL.
-- User-defined functions can be added when using `Query2` directly (Java API: `withScalarFunction` / `withAggregateFunction`); the `query` module config does not currently expose UDF registration.
+- User-defined functions can be added when using `Query` directly (Java API: `withScalarFunction` / `withAggregateFunction`); the `query` module config does not currently expose UDF registration.
 
 ## Examples
 

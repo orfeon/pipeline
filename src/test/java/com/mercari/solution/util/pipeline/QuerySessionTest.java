@@ -21,7 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-public class Query2SessionTest {
+public class QuerySessionTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
 
@@ -113,8 +113,8 @@ public class Query2SessionTest {
         return MElement.of(values, TIMESTAMP);
     }
 
-    private static Query2.Builder sessionBuilder(MemoryLookupSource source) {
-        return Query2.builder()
+    private static Query.Builder sessionBuilder(MemoryLookupSource source) {
+        return Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withQuery("enriched", """
@@ -133,7 +133,7 @@ public class Query2SessionTest {
     @Test
     public void testChainedStatementsShareIntermediate() {
         final MemoryLookupSource source = new MemoryLookupSource();
-        final Query2 query = sessionBuilder(source).build();
+        final Query query = sessionBuilder(source).build();
 
         Assertions.assertEquals(List.of("big", "small"),
                 new ArrayList<>(query.getOutputSchemas().keySet()));
@@ -141,7 +141,7 @@ public class Query2SessionTest {
         query.setup();
         try {
             source.lookupCount = 0;
-            final Query2.SessionResult result =
+            final Query.SessionResult result =
                     query.executeAll(Map.of("INPUT", List.of(input(1L))), TIMESTAMP);
             // both output statements read the intermediate: the expensive
             // LATERAL fetch ran exactly once for the element
@@ -150,7 +150,7 @@ public class Query2SessionTest {
             Assertions.assertEquals(1, result.outputs().get("small").size());
             Assertions.assertEquals(30L, result.outputs().get("small").get(0).getAsLong("total"));
 
-            final Query2.SessionResult result2 =
+            final Query.SessionResult result2 =
                     query.executeAll(Map.of("INPUT", List.of(input(2L))), TIMESTAMP);
             Assertions.assertEquals(1, result2.outputs().get("big").size());
             Assertions.assertEquals(150L, result2.outputs().get("big").get(0).getAsLong("total"));
@@ -163,18 +163,18 @@ public class Query2SessionTest {
     @Test
     public void testExclusiveStopsAfterFirstNonEmptyOutput() {
         final MemoryLookupSource source = new MemoryLookupSource();
-        final Query2 query = sessionBuilder(source).withExclusive(true).build();
+        final Query query = sessionBuilder(source).withExclusive(true).build();
 
         query.setup();
         try {
             // u2 matches 'big' → 'small' is never evaluated (no entry at all)
-            final Query2.SessionResult big =
+            final Query.SessionResult big =
                     query.executeAll(Map.of("INPUT", List.of(input(2L))), TIMESTAMP);
             Assertions.assertEquals(1, big.outputs().get("big").size());
             Assertions.assertFalse(big.outputs().containsKey("small"));
 
             // u1 does not match 'big' (empty output does not stop) → 'small' runs
-            final Query2.SessionResult small =
+            final Query.SessionResult small =
                     query.executeAll(Map.of("INPUT", List.of(input(1L))), TIMESTAMP);
             Assertions.assertEquals(0, small.outputs().get("big").size());
             Assertions.assertEquals(1, small.outputs().get("small").size());
@@ -185,7 +185,7 @@ public class Query2SessionTest {
 
     @Test
     public void testStateRestoreKindEvaluation() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withStateRestore("SELECT userId FROM INPUT")
                 .withSql("SELECT userId FROM INPUT")
@@ -194,13 +194,13 @@ public class Query2SessionTest {
         try {
             final Map<String, List<MElement>> inputs = Map.of("INPUT", List.of(input(1L)));
             // restore-only: restore rows returned, no outputs evaluated
-            final Query2.SessionResult restoreOnly = query.executeAll(inputs, TIMESTAMP,
-                    java.util.EnumSet.of(Query2.Statement.Kind.STATE_RESTORE));
+            final Query.SessionResult restoreOnly = query.executeAll(inputs, TIMESTAMP,
+                    java.util.EnumSet.of(Query.Statement.Kind.STATE_RESTORE));
             Assertions.assertEquals(1, restoreOnly.restoreRows().size());
             Assertions.assertTrue(restoreOnly.outputs().isEmpty());
             // query-only: outputs evaluated, restore skipped
-            final Query2.SessionResult queryOnly = query.executeAll(inputs, TIMESTAMP,
-                    java.util.EnumSet.of(Query2.Statement.Kind.QUERY));
+            final Query.SessionResult queryOnly = query.executeAll(inputs, TIMESTAMP,
+                    java.util.EnumSet.of(Query.Statement.Kind.QUERY));
             Assertions.assertNull(queryOnly.restoreRows());
             Assertions.assertEquals(1, queryOnly.outputs().get("").size());
         } finally {
@@ -211,7 +211,7 @@ public class Query2SessionTest {
     @Test
     public void testForwardReferenceRejected() {
         // statement order matters: a statement may only reference earlier ones
-        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()
+        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withQuery("first", "SELECT userId FROM later", true)
                 .withQuery("later", "SELECT userId FROM INPUT", true)
@@ -222,7 +222,7 @@ public class Query2SessionTest {
 
     @Test
     public void testStatementNameCollisionRejected() {
-        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()
+        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withQuery("INPUT", "SELECT userId FROM INPUT", true)
                 .build());
@@ -232,7 +232,7 @@ public class Query2SessionTest {
 
     @Test
     public void testNoOutputStatementRejected() {
-        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()
+        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withQuery("a", "SELECT userId FROM INPUT", false)
                 .build());
@@ -243,21 +243,21 @@ public class Query2SessionTest {
     @Test
     public void testSerializedRoundTripLikeDoFn() throws Exception {
         final MemoryLookupSource source = new MemoryLookupSource();
-        final Query2 query = sessionBuilder(source).build();
+        final Query query = sessionBuilder(source).build();
 
         final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (final ObjectOutputStream out = new ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (final ObjectInputStream in = new ObjectInputStream(
                 new ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
 
         restored.setup();
         try {
-            final Query2.SessionResult result =
+            final Query.SessionResult result =
                     restored.executeAll(Map.of("INPUT", List.of(input(2L))), TIMESTAMP);
             Assertions.assertEquals(1, result.outputs().get("big").size());
             Assertions.assertEquals(150L, result.outputs().get("big").get(0).getAsLong("total"));

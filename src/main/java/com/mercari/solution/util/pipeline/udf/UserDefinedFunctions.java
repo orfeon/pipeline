@@ -21,7 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * User-defined function registration for {@code Query2}: serializable
+ * User-defined function registration for {@code Query}: serializable
  * descriptors (a class name + method name travel to the workers; the Calcite
  * function objects are built reflectively at setup time) covering:
  *

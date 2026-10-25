@@ -13,7 +13,7 @@ import java.util.Map;
  * {@code SELECT * EXCEPT(...)} / {@code SELECT * REPLACE(...)}: not in the parser, rewritten into
  * an explicit column list before planning.
  */
-public class Query2StarModifierTest {
+public class QueryStarModifierTest {
 
     private static final Instant TIMESTAMP = Instant.parse("2026-10-03T00:00:00Z");
 
@@ -55,7 +55,7 @@ public class Query2StarModifierTest {
                 "n", 3L), TIMESTAMP);
     }
 
-    private static Map<String, Object> evaluate(final Query2 query, final MElement input) {
+    private static Map<String, Object> evaluate(final Query query, final MElement input) {
         query.setup();
         try {
             return query.execute(List.of(input), TIMESTAMP).getFirst().asPrimitiveMap();
@@ -64,7 +64,7 @@ public class Query2StarModifierTest {
         }
     }
 
-    private static List<String> fieldNames(final Query2 query) {
+    private static List<String> fieldNames(final Query query) {
         return query.getOutputSchema().getFields().stream().map(Schema.Field::getName).toList();
     }
 
@@ -78,7 +78,7 @@ public class Query2StarModifierTest {
 
     @Test
     public void testExcept() {
-        final Query2 query = Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, laps) FROM INPUT");
+        final Query query = Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, laps) FROM INPUT");
         Assertions.assertEquals(List.of("id", "n"), fieldNames(query));
         Assertions.assertEquals(Map.of("id", "a", "n", 3L), evaluate(query, input()));
     }
@@ -86,7 +86,7 @@ public class Query2StarModifierTest {
     @Test
     public void testExceptAndRebuildColumn() {
         // The use this is for: every column as it is, but one rebuilt.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT
                   i.* EXCEPT (items),
                   ARRAY(SELECT e.num AS num, e.price / 10e0 AS price FROM UNNEST(i.items) AS e WHERE e.price > 0) AS items
@@ -102,7 +102,7 @@ public class Query2StarModifierTest {
     @Test
     public void testReplace() {
         // The replaced columns keep their place.
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT * REPLACE (UPPER(id) AS id, CARDINALITY(laps) AS laps)
                 FROM INPUT
                 """);
@@ -116,7 +116,7 @@ public class Query2StarModifierTest {
 
     @Test
     public void testExceptAndReplace() {
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT i.* EXCEPT(items, laps) REPLACE(i.n * 2 AS n), 'x' AS tag
                 FROM INPUT AS i
                 """);
@@ -133,32 +133,32 @@ public class Query2StarModifierTest {
                 + "\tREPLACE ( CONCAT(i.id, ' * EXCEPT(n), ') AS `id` ),\r\n"
                 + "  '* EXCEPT(n)' AS s\r\n"
                 + "FROM INPUT AS i";
-        final Query2 query = Query2.of("INPUT", inputSchema(), sql);
+        final Query query = Query.of("INPUT", inputSchema(), sql);
         Assertions.assertEquals(List.of("id", "n", "s"), fieldNames(query));
         Assertions.assertEquals(
                 Map.of("id", "a * EXCEPT(n), ", "n", 3L, "s", "* EXCEPT(n)"), evaluate(query, input()));
 
         // a // comment is a comment as well: its quote does not open a string
-        final Query2 slashes = Query2.of("INPUT", inputSchema(),
+        final Query slashes = Query.of("INPUT", inputSchema(),
                 "SELECT // don't keep the arrays\n * EXCEPT(items, laps) // SELECT * EXCEPT(n)\nFROM INPUT");
         Assertions.assertEquals(List.of("id", "n"), fieldNames(slashes));
 
         // a quoted name with an escaped backtick
-        final Query2 escaped = Query2.of("INPUT", inputSchema(),
+        final Query escaped = Query.of("INPUT", inputSchema(),
                 "SELECT t.* EXCEPT(`a\\`b`) FROM (SELECT id AS `a\\`b`, n FROM INPUT) AS t");
         Assertions.assertEquals(List.of("n"), fieldNames(escaped));
     }
 
     @Test
     public void testSubqueryAndWith() {
-        final Query2 inSubquery = Query2.of("INPUT", inputSchema(), """
+        final Query inSubquery = Query.of("INPUT", inputSchema(), """
                 SELECT t.id, t.n + 1 AS m
                 FROM (SELECT * EXCEPT(items) FROM INPUT) AS t
                 """);
         Assertions.assertEquals(Map.of("id", "a", "m", 4L), evaluate(inSubquery, input()));
 
         // over a subquery without an alias, and a common table expression
-        final Query2 overSubquery = Query2.of("INPUT", inputSchema(), """
+        final Query overSubquery = Query.of("INPUT", inputSchema(), """
                 WITH c AS (SELECT * REPLACE(n * 10 AS n) FROM (SELECT id, n, laps FROM INPUT))
                 SELECT * EXCEPT(laps) FROM c
                 """);
@@ -170,13 +170,13 @@ public class Query2StarModifierTest {
     public void testNestedModifiers() {
         // A modified star over a select list that has modifiers itself is expanded from what
         // those leave: `items` is no column of t.
-        final Query2 overSubquery = Query2.of("INPUT", inputSchema(), """
+        final Query overSubquery = Query.of("INPUT", inputSchema(), """
                 SELECT t.* EXCEPT(n) FROM (SELECT * EXCEPT(items) FROM INPUT) AS t
                 """);
         Assertions.assertEquals(List.of("id", "laps"), fieldNames(overSubquery));
         Assertions.assertEquals(Map.of("id", "a", "laps", List.of(120L, 0L, 118L)), evaluate(overSubquery, input()));
 
-        final Query2 chained = Query2.of("INPUT", inputSchema(), """
+        final Query chained = Query.of("INPUT", inputSchema(), """
                 WITH base AS (SELECT * EXCEPT(items, laps) FROM INPUT),
                      bumped AS (SELECT * REPLACE(n + 1 AS n) FROM base)
                 SELECT a.* EXCEPT(id), b.n AS n2, 'x' AS tag
@@ -186,7 +186,7 @@ public class Query2StarModifierTest {
         Assertions.assertEquals(Map.of("n", 4L, "n2", 3L, "tag", "x"), evaluate(chained, input()));
 
         // in a replacement expression: an array of structs rebuilt in place, one field changed
-        final Query2 inReplace = Query2.of("INPUT", inputSchema(), """
+        final Query inReplace = Query.of("INPUT", inputSchema(), """
                 SELECT * EXCEPT(laps)
                   REPLACE(ARRAY(SELECT e.* REPLACE(e.price * 2 AS price) FROM UNNEST(items) AS e) AS items)
                 FROM INPUT
@@ -197,7 +197,7 @@ public class Query2StarModifierTest {
                 evaluate(inReplace, input()).get("items"));
 
         // in the same select list as a modified star
-        final Query2 sideBySide = Query2.of("INPUT", inputSchema(), """
+        final Query sideBySide = Query.of("INPUT", inputSchema(), """
                 SELECT i.* EXCEPT(items, laps), ARRAY(SELECT e.* EXCEPT(num) FROM UNNEST(i.items) AS e) AS prices
                 FROM INPUT AS i
                 """);
@@ -208,7 +208,7 @@ public class Query2StarModifierTest {
     public void testValidOnlyWithTheModifiers() {
         // The statement with the bare star does not validate: the star has more columns than
         // the other side of the UNION, and a column that is not grouped.
-        final Query2 union = Query2.of("INPUT", inputSchema(), """
+        final Query union = Query.of("INPUT", inputSchema(), """
                 SELECT * EXCEPT(items, laps) FROM INPUT
                 UNION ALL
                 SELECT id, 1.5e0 AS n FROM INPUT
@@ -216,21 +216,21 @@ public class Query2StarModifierTest {
         Assertions.assertEquals(List.of("id", "n"), fieldNames(union));
 
         // the columns of a UNION are cast to a common type: `n` of the star here
-        final Query2 coerced = Query2.of("INPUT", inputSchema(), """
+        final Query coerced = Query.of("INPUT", inputSchema(), """
                 SELECT * REPLACE(UPPER(id) AS id) FROM (SELECT id, n FROM INPUT)
                 UNION ALL
                 SELECT id, 1.5e0 AS n FROM INPUT
                 """);
         Assertions.assertEquals(List.of("id", "n"), fieldNames(coerced));
 
-        final Query2 grouped = Query2.of("INPUT", inputSchema(), """
+        final Query grouped = Query.of("INPUT", inputSchema(), """
                 SELECT * REPLACE(SUM(n) AS n) FROM (SELECT id, n FROM INPUT) GROUP BY id
                 """);
         Assertions.assertEquals(Map.of("id", "a", "n", 3L), evaluate(grouped, input()));
 
         // what does not validate with the modifiers either is reported
         final RuntimeException notGrouped = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(),
+                () -> Query.of("INPUT", inputSchema(),
                         "SELECT * REPLACE(SUM(n) AS n) FROM (SELECT id, n FROM INPUT)"));
         Assertions.assertTrue(messages(notGrouped).contains("'id' is not being grouped"), messages(notGrouped));
     }
@@ -240,29 +240,29 @@ public class Query2StarModifierTest {
         // A bare star has the key of a NATURAL / USING join once, first.
         final String from = " FROM (SELECT id, n FROM INPUT) AS a %s (SELECT id, n * 2 AS m FROM INPUT) AS b %s";
         for (final String join : List.of(from.formatted("JOIN", "USING (id)"), from.formatted("NATURAL JOIN", ""))) {
-            final Query2 all = Query2.of("INPUT", inputSchema(), "SELECT *" + join);
+            final Query all = Query.of("INPUT", inputSchema(), "SELECT *" + join);
             Assertions.assertEquals(List.of("id", "n", "m"), fieldNames(all), join);
 
-            final Query2 except = Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(m)" + join);
+            final Query except = Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(m)" + join);
             Assertions.assertEquals(List.of("id", "n"), fieldNames(except), join);
             Assertions.assertEquals(Map.of("id", "a", "n", 3L), evaluate(except, input()), join);
 
-            final Query2 exceptKey = Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(id)" + join);
+            final Query exceptKey = Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(id)" + join);
             Assertions.assertEquals(List.of("n", "m"), fieldNames(exceptKey), join);
 
-            final Query2 replaceKey = Query2.of("INPUT", inputSchema(), "SELECT * REPLACE(UPPER(a.id) AS id)" + join);
+            final Query replaceKey = Query.of("INPUT", inputSchema(), "SELECT * REPLACE(UPPER(a.id) AS id)" + join);
             Assertions.assertEquals(Map.of("id", "A", "n", 3L, "m", 6L), evaluate(replaceKey, input()), join);
         }
 
         // the key given after a modified star is not a column of that star
-        final Query2 keyAfterStar = Query2.of("INPUT", inputSchema(),
+        final Query keyAfterStar = Query.of("INPUT", inputSchema(),
                 "SELECT a.* EXCEPT(id), id" + from.formatted("JOIN", "USING (id)"));
         Assertions.assertEquals(List.of("n", "id"), fieldNames(keyAfterStar));
     }
 
     @Test
     public void testSeveralStars() {
-        final Query2 query = Query2.of("INPUT", inputSchema(), """
+        final Query query = Query.of("INPUT", inputSchema(), """
                 SELECT i.* EXCEPT(items, laps), j.* EXCEPT(k), i.n AS n2
                 FROM INPUT AS i, (SELECT id AS k, n * 2 AS m FROM INPUT) AS j
                 """);
@@ -270,7 +270,7 @@ public class Query2StarModifierTest {
         Assertions.assertEquals(Map.of("id", "a", "n", 3L, "m", 6L, "n2", 3L), evaluate(query, input()));
 
         // a star without a modifier next to one with
-        final Query2 mixed = Query2.of("INPUT", inputSchema(), """
+        final Query mixed = Query.of("INPUT", inputSchema(), """
                 SELECT j.*, i.* EXCEPT(items, laps, id)
                 FROM INPUT AS i, (SELECT id AS k FROM INPUT) AS j
                 """);
@@ -281,22 +281,22 @@ public class Query2StarModifierTest {
     public void testStructColumn() {
         // A star expands a top-level struct column into its fields: the modifiers take the
         // column as a whole.
-        final Query2 all = Query2.of("INPUT", withHeadSchema(), "SELECT * FROM INPUT");
+        final Query all = Query.of("INPUT", withHeadSchema(), "SELECT * FROM INPUT");
         Assertions.assertEquals(List.of("id", "num", "price", "n"), fieldNames(all));
 
         for (final String star : List.of("*", "i.*")) {
-            final Query2 except = Query2.of("INPUT", withHeadSchema(),
+            final Query except = Query.of("INPUT", withHeadSchema(),
                     "SELECT " + star + " EXCEPT(head) FROM INPUT AS i");
             Assertions.assertEquals(List.of("id", "n"), fieldNames(except), star);
             Assertions.assertEquals(Map.of("id", "a", "n", 3L), evaluate(except, withHead()), star);
 
-            final Query2 replace = Query2.of("INPUT", withHeadSchema(),
+            final Query replace = Query.of("INPUT", withHeadSchema(),
                     "SELECT " + star + " REPLACE(i.head.price AS head) FROM INPUT AS i");
             Assertions.assertEquals(List.of("id", "head", "n"), fieldNames(replace), star);
             Assertions.assertEquals(Map.of("id", "a", "head", 99L, "n", 3L), evaluate(replace, withHead()), star);
 
             // one of the fields the star expanded the column into
-            final Query2 field = Query2.of("INPUT", withHeadSchema(),
+            final Query field = Query.of("INPUT", withHeadSchema(),
                     "SELECT " + star + " EXCEPT(price) FROM INPUT AS i");
             Assertions.assertEquals(List.of("id", "num", "n"), fieldNames(field), star);
         }
@@ -312,17 +312,17 @@ public class Query2StarModifierTest {
                 Schema.Field.of("n", Schema.FieldType.INT64)));
 
         for (final String star : List.of("*", "i.*")) {
-            final Query2 except = Query2.of("INPUT", schema, "SELECT " + star + " EXCEPT(n) FROM INPUT AS i");
+            final Query except = Query.of("INPUT", schema, "SELECT " + star + " EXCEPT(n) FROM INPUT AS i");
             Assertions.assertEquals(List.of("num", "price", "id"), fieldNames(except), star);
             Assertions.assertEquals(Map.of("num", 9L, "price", 99L, "id", "a"), evaluate(except, withHead()), star);
 
-            final Query2 replace = Query2.of("INPUT", schema,
+            final Query replace = Query.of("INPUT", schema,
                     "SELECT " + star + " REPLACE(i.head.price AS head) FROM INPUT AS i");
             Assertions.assertEquals(List.of("head", "id", "n"), fieldNames(replace), star);
         }
 
         // ... and those of a star without a modifier are not columns of the modified star before it
-        final Query2 mixed = Query2.of("INPUT", schema, """
+        final Query mixed = Query.of("INPUT", schema, """
                 SELECT j.* EXCEPT(k), *
                 FROM INPUT AS i, (SELECT id AS k, n AS m FROM INPUT) AS j
                 """);
@@ -332,7 +332,7 @@ public class Query2StarModifierTest {
     @Test
     public void testReplaceKeepsColumnName() {
         // REPLACE changes the value of a column, not the spelling of its name.
-        final Query2 query = Query2.of("INPUT", inputSchema(),
+        final Query query = Query.of("INPUT", inputSchema(),
                 "SELECT * EXCEPT(ITEMS, Laps) REPLACE(UPPER(id) AS ID, n + 1 AS N) FROM INPUT");
         Assertions.assertEquals(List.of("id", "n"), fieldNames(query));
         Assertions.assertEquals(Map.of("id", "A", "n", 4L), evaluate(query, input()));
@@ -349,12 +349,12 @@ public class Query2StarModifierTest {
                 "SELECT * EXCEPT(items) REPLACE(n + 1) FROM INPUT",
                 "SELECT * REPLACE(n + 1 AS n) EXCEPT(items) FROM INPUT")) {
             final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
-                    () -> Query2.of("INPUT", inputSchema(), sql), sql);
+                    () -> Query.of("INPUT", inputSchema(), sql), sql);
             Assertions.assertTrue(messages(e).contains("SELECT * EXCEPT / REPLACE: malformed"),
                     sql + ": " + messages(e));
         }
         final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(items)\n  REPLACE(n + 1) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(items)\n  REPLACE(n + 1) FROM INPUT"));
         Assertions.assertTrue(messages(e).contains("malformed REPLACE at line 2, column 3"), messages(e));
 
         // the set operator is not a modifier
@@ -374,7 +374,7 @@ public class Query2StarModifierTest {
         Assertions.assertTrue(SelectStarModifiers
                 .extract("SELECT a // was: SELECT * EXCEPT(b)\nFROM t").modifiers().isEmpty());
 
-        final Query2 query = Query2.of("INPUT", inputSchema(),
+        final Query query = Query.of("INPUT", inputSchema(),
                 "SELECT i.n * CHAR_LENGTH(REPLACE(i.id, 'a', 'bb')) AS m FROM INPUT AS i");
         Assertions.assertEquals(Map.of("m", 6L), evaluate(query, input()));
     }
@@ -406,48 +406,48 @@ public class Query2StarModifierTest {
     @Test
     public void testErrors() {
         final RuntimeException unknown = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(nope) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(nope) FROM INPUT"));
         Assertions.assertTrue(messages(unknown).contains(
                 "SELECT * EXCEPT: column nope is not a column of the star at line 1, column 8"
                         + " (columns: id, n, items, laps)"), messages(unknown));
 
         final RuntimeException unknownReplace = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * REPLACE(1 AS nope) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * REPLACE(1 AS nope) FROM INPUT"));
         Assertions.assertTrue(messages(unknownReplace).contains("SELECT * REPLACE: column nope is not a column"),
                 messages(unknownReplace));
 
         final RuntimeException nothingLeft = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(id, n, items, laps) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(id, n, items, laps) FROM INPUT"));
         Assertions.assertTrue(messages(nothingLeft).contains("no column is left"), messages(nothingLeft));
 
         final RuntimeException twice = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(n) REPLACE(1 AS n) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(n) REPLACE(1 AS n) FROM INPUT"));
         Assertions.assertTrue(messages(twice).contains("given more than once"), messages(twice));
 
         final RuntimeException exceptTwice = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, ITEMS) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, ITEMS) FROM INPUT"));
         Assertions.assertTrue(messages(exceptTwice).contains(
                 "SELECT * EXCEPT: column ITEMS is given more than once"), messages(exceptTwice));
 
         // a struct column is named in the list of the columns, not its fields
         final RuntimeException unknownOfStruct = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", withHeadSchema(), "SELECT * EXCEPT(nope) FROM INPUT"));
+                () -> Query.of("INPUT", withHeadSchema(), "SELECT * EXCEPT(nope) FROM INPUT"));
         Assertions.assertTrue(messages(unknownOfStruct).contains("(columns: id, head, n)"), messages(unknownOfStruct));
 
         // an error in a select list over a rewritten one
         final RuntimeException overRewritten = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(),
+                () -> Query.of("INPUT", inputSchema(),
                         "SELECT t.* EXCEPT(n), t.items AS x FROM (SELECT * EXCEPT(items) FROM INPUT) AS t"));
         Assertions.assertTrue(messages(overRewritten).contains("Column 'items' not found in table 't'"),
                 messages(overRewritten));
 
         // an error elsewhere in the statement is reported at its place in the original SQL
         final RuntimeException elsewhere = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, laps), nope AS x FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * EXCEPT(items, laps), nope AS x FROM INPUT"));
         Assertions.assertTrue(messages(elsewhere).contains("line 1, column 31"), messages(elsewhere));
 
         final RuntimeException inExpression = Assertions.assertThrows(RuntimeException.class,
-                () -> Query2.of("INPUT", inputSchema(), "SELECT * REPLACE(nope + 1 AS n) FROM INPUT"));
+                () -> Query.of("INPUT", inputSchema(), "SELECT * REPLACE(nope + 1 AS n) FROM INPUT"));
         Assertions.assertTrue(messages(inExpression).contains("line 1, column 18"), messages(inExpression));
     }
 

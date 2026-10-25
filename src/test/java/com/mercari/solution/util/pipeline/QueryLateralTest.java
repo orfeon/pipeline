@@ -23,7 +23,7 @@ import java.util.Map;
  * uncorrelated filters, ORDER BY / LIMIT — runs over the fetched per-key row
  * set in memory. The external table is never scanned.
  */
-public class Query2LateralTest {
+public class QueryLateralTest {
 
     private static final String URL = "jdbc:h2:mem:lateraltest;DB_CLOSE_DELAY=-1";
     private static final Instant TIMESTAMP = Instant.parse("2025-05-01T00:00:00Z");
@@ -90,7 +90,7 @@ public class Query2LateralTest {
         // The inner aggregate folds each key's fetched set into one row; a key
         // that matches nothing aggregates over the empty set (COUNT = 0), so the
         // input row survives even with an INNER lateral.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -125,7 +125,7 @@ public class Query2LateralTest {
     public void testRangeCorrelatedLateral() {
         // The range bounds come from input columns; the bounded set is fetched
         // per key (prefix equality + range on the next key column) and folded.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -168,7 +168,7 @@ public class Query2LateralTest {
         // ORDER BY / LIMIT inside the block runs per key over the fetched set —
         // per-input top-N without any shuffle. Uncorrelated predicates stay in
         // the block and are applied after the fetch.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -204,7 +204,7 @@ public class Query2LateralTest {
     public void testLeftLateralFanOutKeepsUnmatched() {
         // A fan-out block (no aggregate) yields no rows for an unmatched key;
         // LEFT ... ON TRUE keeps the input row with nulls.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -243,7 +243,7 @@ public class Query2LateralTest {
     public void testPureRangeJoinFetchesMultipleRows() {
         // Plain (non-LATERAL) join with only a bounded range on the leading key
         // column: one range fetch per input row, fan-out to every row in range.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("USERS").build())
                 .withSql("""
@@ -274,7 +274,7 @@ public class Query2LateralTest {
     public void testLateralIsRepeatable() {
         // The prepared statement (outer and inner) must be reusable across
         // executions, as in a DoFn.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -307,7 +307,7 @@ public class Query2LateralTest {
         // SqlToRelConverter limitation forbids one block referencing two
         // different namespaces (e.g. i AND s1); chain via a derived table for
         // that (see the chained test).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").withTable("USERS").build())
                 .withSql("""
@@ -347,7 +347,7 @@ public class Query2LateralTest {
         // join in a derived table, so the block correlates to that single
         // namespace — here a composite-key point lookup (USER_ID, SEQ) whose
         // SEQ comes from the first block's aggregate.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -389,7 +389,7 @@ public class Query2LateralTest {
         // FROM-subquery nesting inside the block flattens to a single
         // Project/Filter/Aggregate chain over the one lookup scan — supported
         // at any depth (two levels here).
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -424,7 +424,7 @@ public class Query2LateralTest {
     public void testCteAndDerivedTableOutsideLateral() {
         // Outside the block, ordinary SQL nesting (WITH / derived tables) is
         // unrestricted; the lateral applies to the derived input rows.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""
@@ -460,10 +460,10 @@ public class Query2LateralTest {
     public void testUdfInsideLateralBlock() {
         // A UDF referenced inside the block travels through the generated inner
         // SQL and resolves in the per-block evaluator.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
-                .withScalarFunction("SCALE_", Query2Test.TestUdfs.class, "scale")
+                .withScalarFunction("SCALE_", QueryTest.TestUdfs.class, "scale")
                 .withSql("""
                         SELECT i.userId AS userId, s.total AS total
                         FROM INPUT AS i
@@ -489,7 +489,7 @@ public class Query2LateralTest {
     public void testParseTimeInsideLateralBlock() {
         // The PARSE_* built-ins replace the library functions in the per-block evaluator too
         // (the block travels as SQL text): an unseparated time must not be misread there.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source().withTable("EVENTS").build())
                 .withSql("""

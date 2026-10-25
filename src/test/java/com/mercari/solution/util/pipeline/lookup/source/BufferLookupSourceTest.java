@@ -2,7 +2,7 @@ package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupRequest;
 import org.joda.time.Instant;
@@ -71,7 +71,7 @@ public class BufferLookupSourceTest {
                   WHERE b.userId = i.userId
                 ) AS s ON TRUE
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -126,7 +126,7 @@ public class BufferLookupSourceTest {
                 JOIN buf.history AS b
                 ON b.userId = i.userId
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -172,7 +172,7 @@ public class BufferLookupSourceTest {
                     AND b.__timestamp <= TIMESTAMP '2025-05-01 00:00:03'
                 ) AS s ON TRUE
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -211,7 +211,7 @@ public class BufferLookupSourceTest {
                   WHERE b.userId = i.category
                 ) AS s ON TRUE
                 """;
-        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()
+        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -240,7 +240,7 @@ public class BufferLookupSourceTest {
                   WHERE b.userId = i.userId
                 ) AS s ON TRUE
                 """;
-        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()
+        final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -304,7 +304,7 @@ public class BufferLookupSourceTest {
                   WHERE b.userId = i.userId
                 ) AS s ON TRUE
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -341,7 +341,7 @@ public class BufferLookupSourceTest {
                   WHERE b.userId = i.userId
                 ) AS s ON TRUE
                 """;
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql(sql)
@@ -351,10 +351,10 @@ public class BufferLookupSourceTest {
         try (final ObjectOutputStream out = new ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (final ObjectInputStream in = new ObjectInputStream(
                 new ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
 
         restored.setup();

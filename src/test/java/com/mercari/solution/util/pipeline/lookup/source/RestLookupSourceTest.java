@@ -2,7 +2,7 @@ package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import com.sun.net.httpserver.HttpServer;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.AfterAll;
@@ -126,7 +126,7 @@ public class RestLookupSourceTest {
                         .build())
                 .build();
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql("""
@@ -172,7 +172,7 @@ public class RestLookupSourceTest {
                         .build())
                 .build();
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql("""
@@ -227,7 +227,7 @@ public class RestLookupSourceTest {
                         .build())
                 .build();
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql("SELECT i.uid AS uid, s.name AS name FROM INPUT AS i JOIN api.secure AS s ON s.id = i.uid")
@@ -262,7 +262,7 @@ public class RestLookupSourceTest {
                         .build())
                 .build();
 
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(source)
                 .withSql("""

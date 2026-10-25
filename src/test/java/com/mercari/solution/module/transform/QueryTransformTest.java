@@ -807,7 +807,7 @@ public class QueryTransformTest {
 
             // The correlated LATERAL block: the key + range correlations become
             // the batched fetch; COUNT/SUM run per key inside the DoFn. This
-            // exercises the full module path: Gson config parsing, Query2
+            // exercises the full module path: Gson config parsing, Query
             // serialization into the DoFn, and worker-side setup of the lateral
             // inner-plan evaluator.
             final String configJson = """

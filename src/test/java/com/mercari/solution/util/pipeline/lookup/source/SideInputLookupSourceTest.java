@@ -2,7 +2,7 @@ package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.pipeline.Query2;
+import com.mercari.solution.util.pipeline.Query;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -53,7 +53,7 @@ public class SideInputLookupSourceTest {
                 MElement.of(Map.of("userId", "u2", "name", "bob", "score", 20L), TIMESTAMP));
     }
 
-    private static SideInputLookupSource findSideInputSource(final Query2 query) {
+    private static SideInputLookupSource findSideInputSource(final Query query) {
         return (SideInputLookupSource) query.getSources().stream()
                 .filter(s -> s instanceof SideInputLookupSource)
                 .findAny()
@@ -62,7 +62,7 @@ public class SideInputLookupSourceTest {
 
     @Test
     public void testPointLookupJoin() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(usersSource())
                 .withSql("""
@@ -93,7 +93,7 @@ public class SideInputLookupSourceTest {
 
     @Test
     public void testLeftJoinPadsNullForMissingKey() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(usersSource())
                 .withSql("""
@@ -126,7 +126,7 @@ public class SideInputLookupSourceTest {
     public void testPrefixLookupOverCompositeKey() {
         // Equality on the leading key column only: an index-backed prefix
         // lookup (the source opts in) fanning out all rows under the prefix.
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(SideInputLookupSource.builder()
                         .withName("side")
@@ -167,7 +167,7 @@ public class SideInputLookupSourceTest {
                 Schema.Field.of("userId", Schema.FieldType.STRING),
                 Schema.Field.of("fromSeq", Schema.FieldType.INT64),
                 Schema.Field.of("toSeq", Schema.FieldType.INT64)));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema)
                 .withSource(SideInputLookupSource.builder()
                         .withName("side")
@@ -212,7 +212,7 @@ public class SideInputLookupSourceTest {
         final Schema inputSchema = Schema.of(List.of(
                 Schema.Field.of("userId", Schema.FieldType.STRING),
                 Schema.Field.of("categoryId", Schema.FieldType.STRING)));
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema)
                 .withSource(SideInputLookupSource.builder()
                         .withName("side")
@@ -257,7 +257,7 @@ public class SideInputLookupSourceTest {
 
     @Test
     public void testSameTokenKeepsIndexAndNewTokenRebuilds() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(usersSource())
                 .withSql("""
@@ -295,7 +295,7 @@ public class SideInputLookupSourceTest {
 
     @Test
     public void testLookupWithoutDataFails() {
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(usersSource())
                 .withSql("""
@@ -332,9 +332,9 @@ public class SideInputLookupSourceTest {
 
     @Test
     public void testSerializedRoundTripLikeDoFn() throws Exception {
-        // The Query2 instance must survive Java serialization (DoFn shipping);
+        // The Query instance must survive Java serialization (DoFn shipping);
         // the side input data is runtime state and is re-fed after setup().
-        final Query2 query = Query2.builder()
+        final Query query = Query.builder()
                 .withInput("INPUT", inputSchema())
                 .withSource(usersSource())
                 .withSql("""
@@ -348,10 +348,10 @@ public class SideInputLookupSourceTest {
         try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
             out.writeObject(query);
         }
-        final Query2 restored;
+        final Query restored;
         try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(
                 new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
-            restored = (Query2) in.readObject();
+            restored = (Query) in.readObject();
         }
 
         restored.setup();
