@@ -31,7 +31,7 @@ mvn test -Dtest=ConfigTest#testMethodName  # single method
 
 ### Maven Profiles (runners)
 
-`dataflow` (default) · `direct` · `prism` · `portable` · `flink` · `spark` · `server` (WAR) · `dataflow-gpu`.
+`dataflow` (default) · `direct` · `prism` · `portable` · `flink` · `spark` · `server` (WAR).
 The active runner is also resolved at runtime from pipeline options (see `MPipeline.Runner`).
 
 ## Architecture

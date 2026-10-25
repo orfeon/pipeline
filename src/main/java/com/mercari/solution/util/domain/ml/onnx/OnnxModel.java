@@ -78,10 +78,6 @@ public class OnnxModel implements Serializable {
         private Boolean memoryPatternOptimization;
         private Boolean disablePerSessionThreads;
 
-        public static class CUDAOptions implements Serializable {
-            private Integer deviceNum;
-            private Map<String,String> providerOptions;
-        }
     }
 
     public static class OnnxRunOptions implements Serializable {

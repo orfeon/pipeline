@@ -45,7 +45,6 @@
     <forms.version>v1-rev20250422-2.0.0</forms.version>
 
     <onnxruntime.version>1.31.0</onnxruntime.version>
-    <onnx.version>1.22.0-1.5.14</onnx.version>
 
     <!-- datasketches-java 7.x/8.x/9.x cannot run on Java 21 (their datasketches-memory versions
          require jdk.incubator.foreign (removed), Java 21 preview, or Java 25 respectively).
@@ -648,39 +647,6 @@
       </dependencies>
     </profile>
 
-    <!-- Makes the DataflowRunner available with GPU support when running a dataflow pipeline job. -->
-    <!-- Launcher image is built with Jib (standard Dataflow base). -->
-    <!-- Worker SDK container image with CUDA is built separately via containers/dataflow-gpu/Dockerfile. -->
-    <profile>
-      <id>dataflow-gpu</id>
-      <activation>
-        <activeByDefault>false</activeByDefault>
-      </activation>
-      <dependencyManagement>
-        <dependencies>
-          <!-- Override onnxruntime CPU to provided scope so onnxruntime_gpu is used instead -->
-          <dependency>
-            <groupId>com.microsoft.onnxruntime</groupId>
-            <artifactId>onnxruntime</artifactId>
-            <version>${onnxruntime.version}</version>
-            <scope>provided</scope>
-          </dependency>
-        </dependencies>
-      </dependencyManagement>
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
-          <scope>runtime</scope>
-        </dependency>
-        <dependency>
-          <groupId>com.microsoft.onnxruntime</groupId>
-          <artifactId>onnxruntime_gpu</artifactId>
-          <version>${onnxruntime.version}</version>
-        </dependency>
-      </dependencies>
-    </profile>
-
   </profiles>
 
   <dependencyManagement>
@@ -839,13 +805,6 @@
       <groupId>com.microsoft.onnxruntime</groupId>
       <artifactId>onnxruntime</artifactId>
       <version>${onnxruntime.version}</version>
-    </dependency>
-
-    <!-- https://mvnrepository.com/artifact/org.bytedeco/onnx-platform -->
-    <dependency>
-      <groupId>org.bytedeco</groupId>
-      <artifactId>onnx-platform</artifactId>
-      <version>${onnx.version}</version>
     </dependency>
 
     <!-- Search Engine -->
