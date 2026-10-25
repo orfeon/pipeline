@@ -66,8 +66,13 @@ public final class BlockSeries<S extends Serializable> implements Serializable {
      * block by floor lookup.
      */
     public TreeSet<Long> changePoints(final int windowBlocks) {
-        final TreeSet<Long> points = new TreeSet<>(parts.keySet());
-        if (windowBlocks > 0) for (final long block : parts.keySet()) points.add(block + windowBlocks);
+        return changePoints(parts.keySet(), windowBlocks);
+    }
+
+    /** {@link #changePoints(int)} over the {@code observed} blocks (a forward factorization's example tags). */
+    public static TreeSet<Long> changePoints(final Collection<Long> observed, final int windowBlocks) {
+        final TreeSet<Long> points = new TreeSet<>(observed);
+        if (windowBlocks > 0) for (final long block : observed) points.add(block + windowBlocks);
         return points;
     }
 

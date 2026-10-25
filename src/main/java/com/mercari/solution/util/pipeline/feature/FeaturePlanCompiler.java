@@ -4477,7 +4477,9 @@ public final class FeaturePlanCompiler {
                         + " start from the fit before, which read older blocks (fit.warmStart none for fits that read the window alone)" : "")
                         + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                         + minRowsPhrase(minRows, null) + alignPhrase(align, "embeddings")
-                        + "; the training set of every fit is gathered on one worker and the fits run one after another"
+                        + "; each block's training set is gathered on one worker (blocks over the same examples share their extraction"
+                        + " and join when the rows read the models through a join: a global-window input under the default trigger),"
+                        + " and the blocks are fitted in parallel, each on one worker whose cores run its change points " + (warmStart ? "one after another (warm start)" : "in parallel")
                         + (fitSpec.artifactUri == null ? "" : "; the whole-input model is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
             }
             case fold -> diagnostics.info("fit.mode.fold", loc, what + ": one model per fold of " + fitSpec.folds + " over the other folds (hash of the "
@@ -4719,6 +4721,8 @@ public final class FeaturePlanCompiler {
                 }
                 c.coordinates.put("latentDim", Integer.toString(latentDim));
                 c.coordinates.put("target", target);
+                // a task.expr target is a column of the block's own: the expression says which blocks read the same one
+                if (!target.equals(def.taskTarget) && def.taskTargetExpr != null) c.coordinates.put("targetExpr", def.taskTargetExpr);
                 c.coordinates.put("epochs", Integer.toString(epochs));
                 if (tol > 0) c.coordinates.put("tol", Double.toString(tol));
                 c.coordinates.putAll(regCoordinates);

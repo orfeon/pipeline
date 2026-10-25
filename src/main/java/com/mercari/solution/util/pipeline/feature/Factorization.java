@@ -18,6 +18,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
 /**
@@ -570,7 +577,7 @@ public final class Factorization {
         }
         if (!plan.forward()) return Fits.ofTotal(trainOrNull(options, sorted, null, options.epochs(), plan.minRows(), "fit"));
         final TreeMap<Long, Model> models = new TreeMap<>();
-        final Model total = forward(options, sorted, plan, true, models::put);
+        final Model total = forward(options, sorted, plan, true, true, models::put);
         return new Fits(total, null, models, observedBlocks(sorted));
     }
 
@@ -581,18 +588,64 @@ public final class Factorization {
      * whole-input model.
      */
     public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final BiConsumer<Long, Model> sink) {
-        return fitForward(options, examples, plan, true, sink);
+        return fitForward(options, examples, plan, true, false, sink);
     }
 
     /**
      * {@link #fitForward}, fitting the whole-input model only when {@code total} (no row reads it: only the artifact
      * does, so a run that writes none skips its fit — under a window, one more fit over every example); null otherwise.
+     * Under {@code parallel} the change points are fitted {@link #FIT_THREADS} at a time on a pool shared by every fit
+     * of the JVM — unless warm-started, when each starts from the one before it — and still handed to {@code sink} one
+     * by one in time order: every fit is from scratch, so the models are the sequential ones bit for bit, and only the
+     * alignment, which reads the model before, runs in order. At most {@code 2 × FIT_THREADS} change points are fitted
+     * ahead of the ones handed out across the JVM ({@link FitPool#AHEAD}, the whole-input fit aside), however many
+     * forward fits run at once, so a worker fitting several blocks holds no more models than one fitting a block. A
+     * failure stops the fits run ahead: the queued ones never start, a running one at its next epoch.
      */
     public static Model fitForward(final Options options, final List<Example> examples, final Plan plan, final boolean total,
-                                   final BiConsumer<Long, Model> sink) {
+                                   final boolean parallel, final BiConsumer<Long, Model> sink) {
         final List<Example> sorted = new ArrayList<>(examples);
         sorted.sort(ORDER);
-        return forward(options, sorted, plan, total, sink);
+        return forward(options, sorted, plan, total, parallel, sink);
+    }
+
+    /** How many fits a parallel forward fit runs at once: the cores of the JVM (a worker's). */
+    static final int FIT_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors());
+
+    /** The pool of the parallel forward fits, created on first use: daemon threads shared by every fit of the JVM. */
+    private static final class FitPool {
+        private static final AtomicInteger COUNT = new AtomicInteger();
+        /** A permit per change point fitted ahead of the ones handed out, shared by every forward fit of the JVM. */
+        static final Semaphore AHEAD = new Semaphore(2 * FIT_THREADS);
+        static final ExecutorService POOL = Executors.newFixedThreadPool(FIT_THREADS, runnable -> {
+            final Thread thread = new Thread(runnable, "factorization-fit-" + COUNT.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    /** The model of a fit run on the pool, its failure rethrown as it was raised. */
+    private static Model await(final Future<Model> fit) {
+        try {
+            return fit.get();
+        } catch (final ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException runtime) throw runtime;
+            if (e.getCause() instanceof Error error) throw error;
+            throw new IllegalStateException(e.getCause());
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CancellationException("factorization fit interrupted");
+        }
+    }
+
+    /** A permit to fit a change point ahead ({@link FitPool#AHEAD}), waited for. */
+    private static void acquireAhead() {
+        try {
+            FitPool.AHEAD.acquire();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CancellationException("factorization fit interrupted");
+        }
     }
 
     /** The time blocks that carry examples (the tags of a forward fit's examples): what {@code minBlocks} counts. */
@@ -610,7 +663,7 @@ public final class Factorization {
     }
 
     private static Model forward(final Options options, final List<Example> sorted, final Plan plan, final boolean withTotal,
-                                 final BiConsumer<Long, Model> sink) {
+                                 final boolean parallel, final BiConsumer<Long, Model> sink) {
         // sorted by tag first, so a block is a contiguous range [start, end)
         final TreeMap<Long, int[]> ranges = new TreeMap<>();
         for (int i = 0; i < sorted.size(); i++) {
@@ -619,39 +672,81 @@ public final class Factorization {
             ranges.computeIfAbsent(block, b -> new int[]{index, index})[1] = index + 1;
         }
         final TreeSet<Long> observed = new TreeSet<>(ranges.keySet());
-        final TreeSet<Long> changePoints = new TreeSet<>(observed);
-        if (plan.windowBlocks() > 0) for (final long block : observed) changePoints.add(block + plan.windowBlocks());
-        Model previous = null;
-        Model latest = null;
-        for (final long at : changePoints) {
+        final List<Long> points = new ArrayList<>(BlockSeries.changePoints(observed, plan.windowBlocks()));
+        final List<List<Example>> windows = new ArrayList<>(points.size());
+        for (final long at : points) {
             // the blocks a usable block `at` reads: (at − W, at], every block ≤ at without a window
             final Long first = plan.windowBlocks() > 0 ? observed.ceiling(at - plan.windowBlocks() + 1) : observed.isEmpty() ? null : observed.first();
             final Long last = observed.floor(at);
-            final List<Example> window = first == null || last == null || first > last ? List.of()
-                    : sorted.subList(ranges.get(first)[0], ranges.get(last)[1]);
-            final boolean warm = plan.warmStart() && previous != null;
-            Model model = trainOrNull(options, window, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
-                    "forward change point " + at + (warm ? " (warm start)" : ""));
-            if (model != null) {
-                model = model.alignTo(previous, plan.align());
-                model.changePoint = at;
-                previous = model;
+            windows.add(first == null || last == null || first > last ? List.of() : sorted.subList(ranges.get(first)[0], ranges.get(last)[1]));
+        }
+        // concurrent: every fit from scratch, run ahead on the pool and taken in time order (the whole-input fit too,
+        // when it is one of its own: under a window); on one core as well, where the pool runs one fit at a time
+        final boolean concurrent = parallel && !plan.warmStart();
+        // the fits run ahead, each holding a permit of FitPool.AHEAD until it is taken
+        final ArrayDeque<Future<Model>> ahead = new ArrayDeque<>();
+        Future<Model> totalFit = null;
+        try {
+            if (concurrent && withTotal && plan.windowBlocks() > 0) {
+                totalFit = FitPool.POOL.submit(() -> trainOrNull(options, sorted, null, options.epochs(), plan.minRows(), "whole input"));
             }
-            sink.accept(at, model);
-            latest = model;
+            Model previous = null;
+            Model latest = null;
+            int submitted = 0;
+            for (int i = 0; i < points.size(); i++) {
+                final long at = points.get(i);
+                final Model fitted;
+                if (concurrent) {
+                    for (; submitted < points.size() && submitted < i + 2 * FIT_THREADS; submitted++) {
+                        // the next one to hand out waits for a permit (this fit holds none then: nothing is ahead of
+                        // it), the others take a free one or wait for a later turn
+                        if (submitted == i) acquireAhead();
+                        else if (!FitPool.AHEAD.tryAcquire()) break;
+                        final List<Example> window = windows.get(submitted);
+                        final String what = "forward change point " + points.get(submitted);
+                        ahead.add(FitPool.POOL.submit(() -> trainOrNull(options, window, null, options.epochs(), plan.minRows(), what)));
+                    }
+                    final Future<Model> next = ahead.poll();
+                    try {
+                        fitted = await(next);
+                    } finally {
+                        FitPool.AHEAD.release();
+                    }
+                } else {
+                    final boolean warm = plan.warmStart() && previous != null;
+                    fitted = trainOrNull(options, windows.get(i), warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
+                            "forward change point " + at + (warm ? " (warm start)" : ""));
+                }
+                Model model = fitted;
+                if (model != null) {
+                    model = model.alignTo(previous, plan.align());
+                    model.changePoint = at;
+                    previous = model;
+                }
+                sink.accept(at, model);
+                latest = model;
+            }
+            if (!withTotal) return null;
+            // the whole-input model (a static serving run loads it): the last change point when it reads every block
+            if (plan.windowBlocks() == 0 && latest != null) return latest;
+            final Model total;
+            if (totalFit != null) {
+                total = await(totalFit);
+            } else {
+                final boolean warm = plan.warmStart() && previous != null;
+                total = trainOrNull(options, sorted, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
+                        "whole input" + (warm ? " (warm start)" : ""));
+            }
+            return total == null ? null : total.alignTo(previous, plan.align());
+        } finally {
+            // after a failure the fits run ahead stop (a queued one never starts, a running one is interrupted and
+            // stops at its next epoch): none is handed out
+            for (final Future<Model> fit : ahead) {
+                fit.cancel(true);
+                FitPool.AHEAD.release();
+            }
+            if (totalFit != null) totalFit.cancel(true);
         }
-        if (!withTotal) return null;
-        // the whole-input model (a static serving run loads it): the last change point when it reads every block
-        Model total;
-        if (plan.windowBlocks() == 0 && latest != null) {
-            total = latest;
-        } else {
-            final boolean warm = plan.warmStart() && previous != null;
-            total = trainOrNull(options, sorted, warm ? previous : null, warm ? plan.warmEpochs() : options.epochs(), plan.minRows(),
-                    "whole input" + (warm ? " (warm start)" : ""));
-            if (total != null) total = total.alignTo(previous, plan.align());
-        }
-        return total;
     }
 
     private static Model trainOrNull(final Options options, final List<Example> sorted, final Model warm, final int epochs, final int minRows,
@@ -884,6 +979,8 @@ public final class Factorization {
         int ran = 0;
         boolean converged = false;
         for (int epoch = 0; epoch < epochs; epoch++) {
+            // a forward fit run ahead and cancelled (the forward fit that ran it failed) stops here
+            if (Thread.currentThread().isInterrupted()) throw new CancellationException("factorization fit interrupted");
             // global bias
             if (!contest) {
                 Arrays.fill(h, 0, n, 1d);

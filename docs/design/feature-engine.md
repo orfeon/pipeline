@@ -490,11 +490,22 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   `estimator: joint`): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
-  `apply(model, values)` fills the block's columns. One exception to the side input: a forward factorization
-  (`FmSpec.serve`) hands out each change point's model as it is fitted (`Factorization.fitForward` with a sink) and
-  joins it with the rows keyed by the change point they read (`KeyByChangePointDoFn` with a small `FmIndex` side input
-  → `CoGroupByKey` → `ApplyFmJoinDoFn`, rows re-emitted at their own timestamps) ahead of `FitApplyDoFn`, which skips
-  the block — a model per change point on every worker does not scale with daily blocks and a large vocabulary. Fold
+  `apply(model, values)` fills the block's columns. One exception to the side input: the forward factorizations of a
+  fit stage (`FeatureStages.serveForward`) hand out each change point's model as it is fitted (`Factorization.fitForward`
+  with a sink) and join it with the rows keyed by the change point they read ahead of `FitApplyDoFn`, which skips the
+  block — a model per change point on every worker does not scale with daily blocks and a large vocabulary. The blocks
+  are grouped by the examples they read (`FmSpec.exampleSet`: the coordinates minus `FM_FIT_ONLY`, a `task.expr` target
+  keyed by its expression): one extraction per set emits each example once per block of the set, keyed by
+  (set, slot), and its time block keyed by set → `ObservedBlocksFn` → `FmIndex` per set (the time blocks alone); the
+  fits are ONE step, `GroupByKey` on (set, slot) → `FitFmForwardDoFn`, whose keys spread over the workers and whose
+  change points run on the JVM-wide `Factorization` fit pool when not warm-started, at most `2 × cores` fitted ahead of
+  the ones handed out per JVM (`FitPool.AHEAD`); per set, `KeyByChangePointDoFn` → `CoGroupByKey` with the
+  models of all its blocks (one entry per block and change point, null when unsolved) → `ApplyFmJoinDoFn`, rows
+  re-emitted at their own timestamps. Measured on Dataflow (40 blocks = 4 sets × 10 settings): a step per block made
+  40 independent fit stages that the runner ran strictly one after another, and 40 joins of the rows in a chain whose
+  first stage carried every block's index side input (Flatten unzipping), so no join started before the last fit. The
+  examples are shuffled once per block rather than shared as a side input: Spark and Flink broadcast a side input (the
+  driver collects it), and a set read whole would be one element read again for every block. Fold
   models stay a side input (a join keyed by fold would apply on as many workers as folds). The examples, models and
   fits move with `FactorizationCoders`, not Java serialization. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
