@@ -973,7 +973,7 @@ is a fold:
     task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset; loss (below)
     # linear: false                               # fit no per-value weight w (interactions only, over an offset that carries the main effects)
     fit: {mode: forward, blocks: {size: P30D}, artifact: {uri: "gs://bucket/features"}}   # static (default) | forward | fold
-    als: {epochs: 10, warmEpochs: 5, reg: {linear: 1, factors: 10}, tol: 0.0001, seed: 0}   # reg: one number, or per part (below)
+    als: {epochs: 200, reg: {linear: 1, factors: 10}, tol: 0.0001, seed: 0}   # reg: one number, or per part (below); epochs: the cap under tol
     outputs:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
@@ -1161,11 +1161,12 @@ fields are all numeric is a quadratic form of the values (warning `factorization
   per-unit loss (`rmse`, `logloss`, `nll/choice`) against the offset alone (ŷ = 0), the largest `|w|`, the per-value
   factor norms `‖v‖` (p50 / p99 / max) and the spread of the scores ŷ (the mean within-contest standard deviation under a
   contest loss). Three warnings, each logged per fit and counted as `feature/fm_<block>_<flag>` next to
-  `feature/fm_<block>_fits`: `spread` (a contest's scores spread by sd > 5: the probabilities pile onto one entry),
+  `feature/fm_<block>_fits`: `spread` (the scores spread by a mean within-contest sd > 5: the probabilities pile onto one entry),
   `memorizing` (`logistic` / contest: the training loss below a tenth of the offset's — the model learns the training
   rows by heart, typically a pair close to unique per row under a weak factor ridge), `unconverged` (the objective
-  still moved more than 0.1% in the last epoch, or did not reach `als.tol`). The artifact manifest carries the
-  whole-input fit's report as `fit` (without the wall time).
+  still moved more than 0.1% in the last epoch, did not reach `als.tol`, or is not finite: the fit diverged). The
+  artifact manifest carries the whole-input fit's report as `fit` (without the wall time; a non-finite number is
+  written as a string, `"NaN"` / `"Infinity"`).
 - **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
   parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). Under
   `plackettLuce` / `softmax` the ridge (see *Regularization* above) must be > 0: it is what fixes what a contest cannot

@@ -565,8 +565,9 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   else `regBias` / `regLinear` / `regFactors` / `regPairWeights` / `regScale` (`FeatureStages.regularization` reads both);
   a uniform one must stay bit-identical to the scalar (`testUniformRegularizationIsTheScalar`), and the linear part is
   pinned to an exact normal-equation solve (`testLinearRidgeIsTheExactRidgeSolution`). Every `train` tracks the
-  penalised objective per epoch (`penalty` + `Objective.logLikelihood` after a `refresh` — an extra refresh is a no-op, so
-  tol 0 stays bit-identical) and attaches a `Factorization.FitReport` to the model (`alignTo` copies it, `ModelCoder`
+  penalised objective per epoch (`penalty` + `Objective.logLikelihood` after the epoch's `refresh`, which moved from the
+  start of an epoch to its end — refresh is idempotent, so tol 0 stays bit-identical; `report` then spends the objective
+  on the offset-only baseline) and attaches a `Factorization.FitReport` to the model (`alignTo` copies it, `ModelCoder`
   encodes it, the manifest writes `toJson()` — no wall time); `trainOrNull(..., what)` logs it with `Options.label` (the
   block) and `FeatureStages.countFit` counts `feature/fm_<block>_fits` / `_<flag>` in every fit DoFn. `als.tol` stops a fit
   at convergence (`Options.tol`, coordinate `tol`; the warm cap then defaults to `epochs`). Contest keys are
