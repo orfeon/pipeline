@@ -4684,6 +4684,17 @@ public final class FeaturePlanCompiler {
                     c.coordinates.put("field", out.count);
                     cols.add(c);
                 }
+                case "fitBlock", "trainRows" -> {
+                    // the geometry of the fit the row reads: what an audit of the fit / apply split needs
+                    if ("fitBlock".equals(out.kind) && mode != FitMode.forward) {
+                        diagnostics.warning("factorization.outputs", loc, "fitBlock is the forward change point of the model a row reads:"
+                                + " it is null under fit.mode " + mode.token());
+                    }
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_" + out.kind,
+                            Schema.FieldType.INT64, computeAt);
+                    c.coordinates.put("kind", out.kind);
+                    cols.add(c);
+                }
                 default -> {
                     final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_sum", Schema.FieldType.FLOAT64, computeAt);
                     c.coordinates.put("kind", "sum");

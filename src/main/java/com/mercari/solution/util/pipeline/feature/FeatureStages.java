@@ -1734,6 +1734,8 @@ public final class FeatureStages {
                         }
                         case "between" -> v = model.between(x, numericValues, indices(col.getCoordinates().get("left")), indices(col.getCoordinates().get("right")));
                         case "count" -> v = model.count(x, fields.indexOf(col.getCoordinates().get("field")));
+                        case "fitBlock" -> v = model.changePoint;
+                        case "trainRows" -> v = model.rows;
                         default -> v = model.predict(x, numericValues);
                     }
                 }

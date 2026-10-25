@@ -1345,10 +1345,14 @@ public class FeatureSpec implements Serializable {
             } else if (out.has("count")) {
                 fm.kind = "count";
                 fm.count = Json.string(out, "count");
+            } else if (Json.bool(out, "fitBlock", false)) {
+                fm.kind = "fitBlock";
+            } else if (Json.bool(out, "trainRows", false)) {
+                fm.kind = "trainRows";
             } else if (Json.bool(out, "sum", false)) {
                 fm.kind = "sum";
             } else {
-                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], between: {left, right}, embedding: <field>, count: <field> or sum: true");
+                diagnostics.error("factorization.outputs", loc, "each output requires pair: [a, b], between: {left, right}, embedding: <field>, count: <field>, fitBlock: true, trainRows: true or sum: true");
                 continue;
             }
             def.fmOutputs.add(fm);

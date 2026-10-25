@@ -124,6 +124,10 @@ public final class Factorization {
         public final double[] mean, scale;
         /** What the fit that produced the model did (null for a model read from an artifact). */
         public FitReport report;
+        /** The training rows of the fit (the rows a contest loss learns from; 0 for an artifact written without them). */
+        public long rows;
+        /** fit.mode forward: the change point (time block) the model was fitted at — it read blocks up to this one; null otherwise. */
+        public Long changePoint;
 
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
@@ -276,6 +280,8 @@ public final class Factorization {
             rotated.w0 = w0;
             rotated.loss = loss;
             rotated.report = report;
+            rotated.rows = rows;
+            rotated.changePoint = changePoint;
             System.arraycopy(mean, 0, rotated.mean, 0, mean.length);
             System.arraycopy(scale, 0, rotated.scale, 0, scale.length);
             for (int f = 0; f < fields.size(); f++) {
@@ -593,6 +599,7 @@ public final class Factorization {
                     "forward change point " + at + (warm ? " (warm start)" : ""));
             if (model != null) {
                 model = model.alignTo(previous, plan.align());
+                model.changePoint = at;
                 previous = model;
             }
             sink.accept(at, model);
@@ -928,6 +935,7 @@ public final class Factorization {
             }
             if (!fm) System.arraycopy(r[f], 0, model.r[f], 0, F);
         }
+        model.rows = n;
         model.report = report(options, examples, objective, objectiveStart, previous, lastChange, ran, converged, w, v, k, contest,
                 (System.nanoTime() - started) / 1_000_000L);
         return model;
@@ -1412,7 +1420,8 @@ public final class Factorization {
             final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             try (final DataFileWriter<GenericRecord> writer = new DataFileWriter<>(new GenericDatumWriter<>(SCHEMA))) {
                 writer.create(SCHEMA, bytes);
-                writer.append(record("__global", "", model.w0, new double[0], 0L, 0, 1));
+                // n of the global record: the training rows of the fit
+                writer.append(record("__global", "", model.w0, new double[0], model.rows, 0, 1));
                 for (int f = 0; f < model.fields.size(); f++) {
                     for (int g = f + 1; g < model.fields.size(); g++) {
                         writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L, 0, 1));
@@ -1503,6 +1512,7 @@ public final class Factorization {
                 final double w = (Double) record.get("w");
                 if ("__global".equals(field)) {
                     model.w0 = w;
+                    model.rows = (Long) record.get("n");
                 } else if ("__r".equals(field)) {
                     final int sep = value.indexOf(SEPARATOR);
                     final int f = fields.indexOf(value.substring(0, sep));
