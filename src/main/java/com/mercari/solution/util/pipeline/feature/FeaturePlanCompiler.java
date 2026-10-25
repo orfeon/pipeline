@@ -3548,20 +3548,34 @@ public final class FeaturePlanCompiler {
         boolean valid = true;
         if (!def.copulaUnknown.isEmpty()) {
             diagnostics.error("copula.parameters", loc, "not understood: " + def.copulaUnknown
-                    + " (family: gaussian; marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
+                    + " (family: gaussian | t (with df: <number>); marginals: scores | {bins, clip}; shrink: oas | none | <number>; eigenFloor: <number>;"
                     + " outputs: [jointRank | logDensity | conditional | conditionalProb | expected | {conditional | conditionalProb | expected: <input>, given: [...], as: <name>}"
                     + " | {jointRank | logDensity: true, as: <name>}]; diagnose: true | {tail: <probability>, pairs: all | [[<input>, <input>], ...]})");
             valid = false;
         }
         final String family = def.copulaFamily == null ? Copula.GAUSSIAN : def.copulaFamily;
+        double df = Double.NaN;
         switch (family) {
-            case Copula.GAUSSIAN -> { }
-            case "t" -> {
-                diagnostics.error("copula.family", loc, "family t is not implemented yet (gaussian is available): its fit iterates over the rows rather than solving their moments");
-                valid = false;
+            case Copula.GAUSSIAN -> {
+                if (def.copulaDf != null) diagnostics.warning("copula.df", loc, "df is read by family t only (this block is family gaussian): ignored");
+            }
+            case Copula.T -> {
+                // the correlation is still solved from the normal scores' moments; the degrees of freedom are declared,
+                // not estimated (a likelihood over the rows would need a pass of its own) - diagnose reports the matching df
+                if (def.copulaDf == null) {
+                    diagnostics.error("copula.df", loc, "family t requires 'df' (the degrees of freedom of the t copula, > 0): the fit solves R from the normal scores' moments and reads"
+                            + " the dependence as a t copula with that df - take it from a Gaussian block's diagnose report (dfSuggested) or choose it by validation");
+                    valid = false;
+                } else if (!(def.copulaDf > 0) || def.copulaDf.isInfinite()) {
+                    diagnostics.error("copula.df", loc, "df must be a positive number: " + def.copulaDf);
+                    valid = false;
+                } else {
+                    df = def.copulaDf;
+                    if (df > 1000) diagnostics.warning("copula.df", loc, "df " + df + " is indistinguishable from the Gaussian copula (which costs no t quantile per input and row)");
+                }
             }
             default -> {
-                diagnostics.error("copula.family", loc, "family must be gaussian: " + family);
+                diagnostics.error("copula.family", loc, "family must be gaussian or t: " + family);
                 valid = false;
             }
         }
@@ -3791,7 +3805,8 @@ public final class FeaturePlanCompiler {
         final boolean forward = fitSpec.mode == FitMode.forward;
         boolean outcome = false;
         for (final Ref ref : refs) outcome |= isOutcomeLike(ref);
-        final String what = "copula fits the correlation of " + d + " normal scores from (n, sum z, sum zz^T) (shrinkage " + shrink + ", eigenvalue floor " + eigenFloor + ")";
+        final String what = "copula fits the correlation of " + d + " normal scores from (n, sum z, sum zz^T) (shrinkage " + shrink + ", eigenvalue floor " + eigenFloor + ")"
+                + (Copula.T.equals(family) ? " and reads it as a t copula with " + df + " degrees of freedom (declared, not fitted; one t quantile per input and row)" : "");
         if (forward) {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves it over the complete blocks"
@@ -3809,8 +3824,10 @@ public final class FeaturePlanCompiler {
             final long withMass = massFields.stream().filter(f -> !f.isEmpty()).count();
             diagnostics.info("copula.diagnose", loc, "the whole-input fit reports, for " + diagnosePairs.size() + " pair(s), the share of rows beyond the " + tail
                     + " quantile of one input that are beyond it in the other too (and the mirror below "
-                    + java.math.BigDecimal.ONE.subtract(java.math.BigDecimal.valueOf(tail)).stripTrailingZeros().toPlainString() + ") against what the fitted Gaussian copula"
-                    + " implies at that threshold - it has no tail dependence, so a share far above it says the model underestimates joint extremes - and, for the "
+                    + java.math.BigDecimal.ONE.subtract(java.math.BigDecimal.valueOf(tail)).stripTrailingZeros().toPlainString() + ") against what the fitted "
+                    + (Copula.T.equals(family) ? "t copula implies at that threshold (with the pair's tail-dependence coefficient at the declared df)"
+                    : "Gaussian copula implies at that threshold - it has no tail dependence, so a share far above it says the model underestimates joint extremes (dfSuggested is the t copula's df that would match)")
+                    + " - and, for the "
                     + withMass + " input(s) with an expanded marginal, how often their point masses (ties of at least 1 / bins of the rows) occur together;"
                     + " in the run log" + (fitSpec.artifactUri == null ? "" : " and the artifact") + ". The fit state grows to the moments of " + 4 * inputs.size()
                     + " numbers per row; the readouts do not change");
@@ -3832,6 +3849,10 @@ public final class FeaturePlanCompiler {
             if (r[3] != null) c.coordinates.put("given", r[3]);
             c.coordinates.put("shrink", shrink);
             c.coordinates.put("eigenFloor", Double.toString(eigenFloor));
+            if (Copula.T.equals(family)) {
+                c.coordinates.put("family", Copula.T);
+                c.coordinates.put("df", Double.toString(df));
+            }
             if (def.diagnose) {
                 c.coordinates.put("diagnoseTail", Double.toString(tail));
                 c.coordinates.put("diagnosePairs", String.join(",", diagnosePairs));

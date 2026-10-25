@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), copula (the Gaussian copula of a few numeric inputs), transitionStats, spectralEmbedding, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), copula (the Gaussian or t copula of a few numeric inputs), transitionStats, spectralEmbedding, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -1020,7 +1020,7 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
   fit: {mode: forward, blocks: {bucket: month}}
 ```
 
-**Copula (implemented, family `gaussian`).** Sklar's decomposition taken literally: the marginals are quantile
+**Copula (implemented, families `gaussian` and `t`).** Sklar's decomposition taken literally: the marginals are quantile
 transforms (expanded per input as synthetic `quantileTransform` blocks with normal scores, or declared by the user and
 read with `marginals: scores`), the dependence is the correlation `R` of the scores, solved from their moments — the
 two-step (IFM) estimate, which under `forward` is leak-free in time: a block's moments are those of the scores its
@@ -1035,15 +1035,23 @@ the conditional median of the input in its own units is a monotone function of i
 any other conditional quantile among rows that observe the same inputs of S), `jointRank` and `logDensity`; a missing
 input is marginalised out (the sub-matrix of `R`). A readout reads on the row only the scores it is computed from, so an
 outcome among the inputs shapes the fit (forward lag, static-fit caveat) while a readout that does not read it on
-the row stays a feature, and one that does is a margin-free normalised label. Left out by design: Archimedean
-families (one exchangeable parameter cannot express mixed-sign dependence among three or more inputs), the `t`
-family (its fit iterates over the rows instead of solving their moments — rejected with `copula.family`), vine
-constructions and Monte Carlo readouts (aggregates of a simulated portfolio are not row features). What the
-Gaussian family cannot see is reported instead of modelled: `diagnose` compares each pair's observed joint-tail share
-beyond a quantile with the share a Gaussian copula implies at that finite threshold (the sample correlation at the
-observed exceedance rates: the dependence alone, not shrinkage or the marginals' shape), and counts how often the inputs'
-point masses (ties) occur together — the evidence a `t` family, a tail feature or a randomised treatment of ties would
-need before it is built.
+the row stays a feature, and one that does is a margin-free normalised label. The `t` family (`family: t`, `df`
+declared) reads the same `R` as a t copula: every standardised score becomes the t quantile at its probability and the
+vector is multivariate t, so joint extremes are more frequent than the correlation alone implies (tail dependence in
+every corner, heavier the smaller `df`). `df` is declared rather than fitted — a maximum-likelihood `df` needs the rows,
+and the fit is a moment solve — and `diagnose` supplies it: for every pair tail beyond the Gaussian's implied share it
+reports the `df` whose t copula would imply that share (`dfMatch`, a bivariate t orthant inverted on `df`) and their
+median `dfSuggested`. The readouts keep their meaning across the families: `conditional` and `expected` are normal
+scores under both (the t conditional, a t with `df + |S|` degrees of freedom scaled by the conditioning inputs'
+quadratic form, is mapped to its normal score), `conditionalProb` / `jointRank` (the F(k, df) CDF of the Mahalanobis
+form over k) / `logDensity` are the t copula's own. Left out by design: Archimedean families (one exchangeable
+parameter cannot express mixed-sign dependence among three or more inputs), a fitted `df` (a likelihood pass over the
+rows), an asymmetric (skew-t) tail, vine constructions and Monte Carlo readouts (aggregates of a simulated portfolio
+are not row features). What a family cannot see is reported instead of modelled: `diagnose` compares each pair's
+observed joint-tail share beyond a quantile with the share the fitted family implies at that finite threshold (the
+sample correlation at the observed exceedance rates: the dependence alone, not shrinkage or the marginals' shape),
+and counts how often the inputs' point masses (ties) occur together — the evidence a `df`, a tail feature or a
+randomised treatment of ties would need before it is used.
 
 Every population definition carries fit metadata (top-level defaults + per-block overrides).
 `mode: expanding` computes statistics from data up to each row's time (the generalisation of ordered

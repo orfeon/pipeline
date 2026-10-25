@@ -5108,7 +5108,24 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price]"))), "copula.inputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price, start_price]"))), "copula.inputs"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("[start_price, quantity, current_bid_t10]", "[start_price, condition_grade]"))), "copula.inputs"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t"))), "copula.family"));
+        // family t: df declared (> 0), carried in the coordinates and the hash; df without family t is a warning
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t"))), "copula.df"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t\n        df: 0"))), "copula.df"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t\n        df: four"))), "copula.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: clayton\n        df: 4"))), "copula.family"));
+        final FeaturePlan studentT = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        family: t\n        df: 4")));
+        Assertions.assertFalse(studentT.getDiagnostics().hasErrors(), studentT::describe);
+        Assertions.assertEquals("t", column(studentT, "cop_cond_start_price").getCoordinates().get("family"));
+        Assertions.assertEquals("4.0", column(studentT, "cop_cond_start_price").getCoordinates().get("df"));
+        Assertions.assertNotEquals(plan.getHash(), studentT.getHash(), "the family and df are in the plan hash");
+        Assertions.assertEquals("t", FeatureStages.copulaSpecs(studentT.getColumns()).get(0).copulaFamily());
+        Assertions.assertEquals(4d, FeatureStages.copulaSpecs(studentT.getColumns()).get(0).df());
+        Assertions.assertNull(column(plan, "cop_cond_start_price").getCoordinates().get("family"), "the Gaussian writes no family coordinate");
+        Assertions.assertTrue(studentT.getDiagnostics().getMessages().stream().anyMatch(d -> d.code().equals("fit.mode.static") && d.message().contains("t copula with 4.0 degrees of freedom")), studentT::describe);
+        final FeaturePlan ignoredDf = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        df: 4")));
+        Assertions.assertFalse(ignoredDf.getDiagnostics().hasErrors(), ignoredDf::describe);
+        Assertions.assertTrue(hasCode(ignoredDf, "copula.df"), ignoredDf::describe);
+        Assertions.assertNotEquals(plan.getHash(), ignoredDf.getHash(), "the hash is of the canonical parameters as written: an ignored df is still in them");
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        shrink: 1.5"))), "copula.shrink"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        shrink: lw"))), "copula.shrink"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        eigenFloor: 0"))), "copula.eigenFloor"));

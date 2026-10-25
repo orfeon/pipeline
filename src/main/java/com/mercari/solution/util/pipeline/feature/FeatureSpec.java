@@ -460,6 +460,8 @@ public class FeatureSpec implements Serializable {
         // copula ({@code inputs} shared with svd)
         /** copula: {@code family} (null = gaussian). */
         public String copulaFamily;
+        /** copula: {@code df} — the degrees of freedom of {@code family: t} (null = not declared). */
+        public Double copulaDf;
         /** copula: {@code marginals: scores} — the inputs are already normal scores (no marginal blocks are expanded). */
         public boolean marginalsScores;
         /** copula: {@code marginals.bins} / {@code marginals.clip} of the expanded quantile transforms (null = the defaults). */
@@ -1746,6 +1748,11 @@ public class FeatureSpec implements Serializable {
      */
     private static void parseCopula(final JsonObject o, final FeatureDef def) {
         def.copulaFamily = Json.string(o, "family");
+        if (o.has("df") && !o.get("df").isJsonNull()) {
+            final JsonElement v = o.get("df");
+            if (v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber()) def.copulaDf = v.getAsDouble();
+            else def.copulaUnknown.add("df " + v + " (the degrees of freedom of family t: a number)");
+        }
         // the quantileTransform spelling at the top level would otherwise be dropped and the defaults used in silence
         for (final String key : List.of("bins", "clip", "distribution")) {
             if (o.has(key) && !o.get(key).isJsonNull()) def.copulaUnknown.add(key + " (the marginals take marginals: {bins, clip})");

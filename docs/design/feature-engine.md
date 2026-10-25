@@ -652,7 +652,7 @@ squared; numeric fields: one parameter set scaled by the per-fit standardised va
 side affinities that read through an unseen value's attributes), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 `type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
-`type: copula` (Gaussian copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),
+`type: copula` (Gaussian or t copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
 `validate --expand`, `estimator: joint` (static / fold / forward), the conjugate families (`family`,
 with the Dirichlet-Multinomial shrinkage of `distribution`), the general sequence form with `lti` dynamics. Everything else is parsed and rejected with a
@@ -1428,6 +1428,27 @@ cached in transient maps on the model; `expected` reads the regression part of t
 missing score is marginalised out (the sub-matrix of `R`). The model has
 no gauge, so `alignTo` is the identity and forward re-fits are continuous by construction. Masks are `int` bits,
 hence at most 31 inputs (`copula.inputs`).
+
+**The t family is a readout change, not a fit change.** `family: t` keeps the fit (the same moments, the same `R`:
+the normal scores' correlation, a close estimate of the t copula's parameter) and declares `df` (coordinates `family`
+/ `df`, in the plan hash; `Copula.df`, NaN for the Gaussian, persisted in the artifact — an artifact without a
+`family` key is Gaussian). A row's standardised scores are mapped to the copula's latent coordinates by
+`Copula.toT` (`T_df⁻¹(Φ(z))` through the lower tail, `StatMath.studentTQuantileOfLowerTail` = the inverse regularized
+incomplete beta on `x = df / (df + t²)`), and the readouts follow the multivariate t: the conditional of `y_j` given
+`y_S` is a t with `df + |S|` degrees of freedom scaled by `sqrt((df + y_Sᵀ R_SS⁻¹ y_S) / (df + |S|))` — the
+`Conditional` record keeps the Cholesky factor of `R_SS` for that quadratic form — and `conditional` /
+`expected` are mapped back to normal scores (`Copula.toNormal`), so the columns stay N(0, 1) and score-unit
+quantities under either family; `jointRank` is the F(k, df) CDF of the Mahalanobis form over k (`StatMath.fCdf`),
+`logDensity` the multivariate t density over the product of t marginals (the quadratic record carries
+`Σ log(1 + y_i²/df)` as its fifth entry). `jointRankOf` / `logDensityOf` are therefore instance methods. `df` is
+not estimated: a profile likelihood over `df` needs `R` first and then every row's quadratic form, a pass the
+one-Combine fit geometry has no place for; `diagnose` closes the gap by inverting the bivariate t orthant
+(`Copula.upperOrthantT`: the normal orthant averaged over the chi-square scale, Simpson in `log W` between the
+1e-7 quantiles, each node a 400-step `upperOrthant`) on `df` per pair tail (`Copula.matchingDf`, bisection on log
+`df` in [1, 1e4]; NaN when the Gaussian already implies the share) and reporting `dfMatch` per tail and `dfSuggested`
+(their median) once a tail is flagged. A t model's report uses its own implied share at the declared `df` and adds
+the pair's `tailDependence` coefficient (`Copula.tailDependence`). The student-t / F / incomplete-beta functions live
+in `StatMath` next to the chi-square ones.
 
 `diagnose` asks whether the Gaussian assumption holds where it matters, without a second pass and without a new
 family: every count it needs is a second moment of indicators. Under `diagnose` a row contributes

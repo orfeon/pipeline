@@ -2715,7 +2715,7 @@ public final class FeatureStages {
      * {@code diagnose} the vector carries tail and point-mass indicators behind the scores ({@link Copula#diagnoseVector}):
      * the correlation is read from the scores' block of the moments, the report from the rest.
      */
-    record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String artifactUri, boolean refit,
+    record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String copulaFamily, double df, String artifactUri, boolean refit,
                       List<OutputColumn> columns, String[] kinds, int[] of, int[][] given,
                       Forward forward, long predictOffsetMillis, long minRows, Diagnose diagnose) implements ForwardFitBlock<double[], Svd.Moments, Copula> {
 
@@ -2800,7 +2800,7 @@ public final class FeatureStages {
 
         @Override
         public Copula fit(final Svd.Moments m, final boolean loud) {
-            final Copula plain = Copula.fit(diagnose == null ? m : Copula.head(m, fields.size()), shrink, eigenFloor, loud);
+            final Copula plain = Copula.fit(diagnose == null ? m : Copula.head(m, fields.size()), shrink, eigenFloor, copulaFamily, df, loud);
             final Copula fitted = loud && diagnose != null ? withReport(this, m, plain) : plain;
             if (loud) LOG.info("copula {}: {}", block, fitted.describe());
             return fitted;
@@ -2824,8 +2824,8 @@ public final class FeatureStages {
                     case "conditional" -> copula.conditional(scores, of[i], given[i]);
                     case "conditionalProb" -> copula.conditionalProb(scores, of[i], given[i]);
                     case "expected" -> copula.expected(scores, of[i], given[i]);
-                    case "jointRank" -> Copula.jointRankOf(quadratic);
-                    case "logDensity" -> Copula.logDensityOf(quadratic);
+                    case "jointRank" -> copula.jointRankOf(quadratic);
+                    case "logDensity" -> copula.logDensityOf(quadratic);
                     default -> throw new IllegalStateException("unknown copula output " + kinds[i]);
                 };
                 values.put(columns.get(i).getCanonicalName(), value);
@@ -2879,8 +2879,10 @@ public final class FeatureStages {
                 diagnose = new CopulaSpec.Diagnose(tail, com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(tail), pairs,
                         massFields, List.of(k.get("inputNames").split(",")));
             }
+            final String family = k.getOrDefault("family", Copula.GAUSSIAN);
             specs.add(new CopulaSpec(e.getKey(), List.of(k.get("fields").split(",")), k.getOrDefault("shrink", Copula.OAS),
                     Double.parseDouble(k.getOrDefault("eigenFloor", Double.toString(Copula.DEFAULT_EIGEN_FLOOR))),
+                    family, Copula.T.equals(family) ? Double.parseDouble(k.get("df")) : Double.NaN,
                     k.get("artifactUri"), "true".equals(k.get("refit")), cs, kinds, of, given,
                     Forward.of(cs.get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")),
                     diagnose));
