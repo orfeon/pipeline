@@ -8,8 +8,10 @@ import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.options.ApplicationNameOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
+import org.apache.beam.sdk.transforms.resourcehints.ResourceHintsOptions;
 
 import java.io.Serializable;
+import java.util.List;
 import java.util.Optional;
 
 public class Options implements Serializable {
@@ -21,6 +23,11 @@ public class Options implements Serializable {
 
     private Boolean streaming;
     private String tempLocation;
+    private String updateCompatibilityVersion;
+    private List<String> resourceHints;
+
+    // SDK harness (worker) options
+    private SdkHarnessOptions sdkHarness;
 
     // runner options
     private DirectOptions direct;
@@ -58,6 +65,18 @@ public class Options implements Serializable {
 
     public String getTempLocation() {
         return tempLocation;
+    }
+
+    public String getUpdateCompatibilityVersion() {
+        return updateCompatibilityVersion;
+    }
+
+    public List<String> getResourceHints() {
+        return resourceHints;
+    }
+
+    public SdkHarnessOptions getSdkHarness() {
+        return sdkHarness;
     }
 
     public DirectOptions getDirect() {
@@ -131,6 +150,12 @@ public class Options implements Serializable {
         if(options.tempLocation != null) {
             pipelineOptions.setTempLocation(options.tempLocation);
         }
+        if(options.updateCompatibilityVersion != null) {
+            pipelineOptions.as(StreamingOptions.class).setUpdateCompatibilityVersion(options.updateCompatibilityVersion);
+        }
+        if(options.resourceHints != null && !options.resourceHints.isEmpty()) {
+            pipelineOptions.as(ResourceHintsOptions.class).setResourceHints(options.resourceHints);
+        }
 
         GCPOptions.setOptions(pipelineOptions, options.gcp);
         AWSOptions.setOptions(pipelineOptions, options.aws);
@@ -138,12 +163,18 @@ public class Options implements Serializable {
         final MPipeline.Runner runner = OptionUtil.getRunner(pipelineOptions);
         switch (runner) {
             case direct -> DirectOptions.setOptions(pipelineOptions, options.direct);
-            case prism -> PrismOptions.setOptions(pipelineOptions, options.prism);
+            case prism -> {
+                // PrismPipelineOptions extends PortablePipelineOptions (sdkWorkerParallelism, environment, ...)
+                PortableOptions.setOptions(pipelineOptions, options.portable);
+                PrismOptions.setOptions(pipelineOptions, options.prism);
+            }
             case portable -> PortableOptions.setOptions(pipelineOptions, options.portable);
             case dataflow -> DataflowOptions.setOptions(pipelineOptions, options.dataflow);
             case flink -> FlinkOptions.setOptions(pipelineOptions, options.flink);
             case spark -> SparkOptions.setOptions(pipelineOptions, options.spark);
         }
+
+        SdkHarnessOptions.setOptions(pipelineOptions, options.sdkHarness, runner);
 
         // after the runner options: options.dataflow.project also sets GcpOptions.project
         GCPOptions.applyDefaultProject(pipelineOptions);

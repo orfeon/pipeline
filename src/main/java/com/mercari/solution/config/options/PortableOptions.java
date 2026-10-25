@@ -1,11 +1,15 @@
 package com.mercari.solution.config.options;
 
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PortablePipelineOptions;
 
 import java.io.Serializable;
-import java.lang.reflect.InvocationTargetException;
 import java.util.List;
 
+/**
+ * {@link PortablePipelineOptions} (Beam core). Applied for the {@code portable} runner and, since
+ * {@code PrismPipelineOptions} extends them, for the {@code prism} runner too.
+ */
 public class PortableOptions implements Serializable {
 
     private String defaultEnvironmentConfig;
@@ -19,6 +23,7 @@ public class PortableOptions implements Serializable {
     private Boolean loadBalanceBundles;
     private String outputExecutablePath;
     private Integer sdkWorkerParallelism;
+    private List<String> filesToStage;
 
     public static void setOptions(
             final PipelineOptions pipelineOptions,
@@ -28,45 +33,42 @@ public class PortableOptions implements Serializable {
             return;
         }
 
-        try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.portable.PortablePipelineOptions");
-            final PipelineOptions portableOptions = pipelineOptions.as(clazz);
-
-            if(portable.defaultEnvironmentConfig != null) {
-                clazz.getMethod("setDefaultEnvironmentConfig", String.class).invoke(portableOptions, portable.defaultEnvironmentConfig);
-            }
-            if(portable.defaultEnvironmentType != null) {
-                clazz.getMethod("setDefaultEnvironmentType", String.class).invoke(portableOptions, portable.defaultEnvironmentType);
-            }
-            if(portable.enableHeapDumps != null) {
-                clazz.getMethod("setEnableHeapDumps", boolean.class).invoke(portableOptions, portable.enableHeapDumps);
-            }
-            if(portable.environmentCacheMillis != null) {
-                clazz.getMethod("setEnvironmentExpirationMillis", int.class).invoke(portableOptions, portable.environmentCacheMillis);
-            }
-            if(portable.environmentExpirationMillis != null) {
-                clazz.getMethod("setEnvironmentCacheMillis", int.class).invoke(portableOptions, portable.environmentExpirationMillis);
-            }
-            if(portable.environmentOptions != null) {
-                clazz.getMethod("setEnvironmentOptions", List.class).invoke(portableOptions, portable.environmentOptions);
-            }
-            if(portable.jobEndpoint != null) {
-                clazz.getMethod("setJobEndpoint", String.class).invoke(portableOptions, portable.jobEndpoint);
-            }
-            if(portable.jobServerTimeout != null) {
-                clazz.getMethod("setJobServerTimeout", int.class).invoke(portableOptions, portable.jobServerTimeout);
-            }
-            if(portable.loadBalanceBundles != null) {
-                clazz.getMethod("setLoadBalanceBundles", boolean.class).invoke(portableOptions, portable.loadBalanceBundles);
-            }
-            if(portable.outputExecutablePath != null) {
-                clazz.getMethod("setOutputExecutablePath", String.class).invoke(portableOptions, portable.outputExecutablePath);
-            }
-            if(portable.sdkWorkerParallelism != null) {
-                clazz.getMethod("setSdkWorkerParallelism", int.class).invoke(portableOptions, portable.sdkWorkerParallelism);
-            }
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
-            throw new RuntimeException("Failed to set portable runner pipeline options", e);
+        final PortablePipelineOptions portableOptions = pipelineOptions.as(PortablePipelineOptions.class);
+        if(portable.defaultEnvironmentConfig != null) {
+            portableOptions.setDefaultEnvironmentConfig(portable.defaultEnvironmentConfig);
+        }
+        if(portable.defaultEnvironmentType != null) {
+            portableOptions.setDefaultEnvironmentType(portable.defaultEnvironmentType);
+        }
+        if(portable.enableHeapDumps != null) {
+            portableOptions.setEnableHeapDumps(portable.enableHeapDumps);
+        }
+        if(portable.environmentCacheMillis != null) {
+            portableOptions.setEnvironmentCacheMillis(portable.environmentCacheMillis);
+        }
+        if(portable.environmentExpirationMillis != null) {
+            portableOptions.setEnvironmentExpirationMillis(portable.environmentExpirationMillis);
+        }
+        if(portable.environmentOptions != null) {
+            portableOptions.setEnvironmentOptions(portable.environmentOptions);
+        }
+        if(portable.jobEndpoint != null) {
+            portableOptions.setJobEndpoint(portable.jobEndpoint);
+        }
+        if(portable.jobServerTimeout != null) {
+            portableOptions.setJobServerTimeout(portable.jobServerTimeout);
+        }
+        if(portable.loadBalanceBundles != null) {
+            portableOptions.setLoadBalanceBundles(portable.loadBalanceBundles);
+        }
+        if(portable.outputExecutablePath != null) {
+            portableOptions.setOutputExecutablePath(portable.outputExecutablePath);
+        }
+        if(portable.sdkWorkerParallelism != null) {
+            portableOptions.setSdkWorkerParallelism(portable.sdkWorkerParallelism);
+        }
+        if(portable.filesToStage != null) {
+            portableOptions.setFilesToStage(portable.filesToStage);
         }
     }
 }

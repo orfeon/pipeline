@@ -21,6 +21,74 @@
       "type": "string",
       "description": "Path for temporary files (gs://... on Dataflow)"
     },
+    "updateCompatibilityVersion": {
+      "type": "string",
+      "description": "Beam version whose transform expansions are kept for update compatibility (e.g. 2.53.0); set when upgrading Beam for an in-place update"
+    },
+    "resourceHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Pipeline-level resource hints, e.g. min_ram=16GB (Dataflow)"
+    },
+    "sdkHarness": {
+      "type": "object",
+      "title": "SDK Harness",
+      "description": "Java SDK harness (worker) settings for every runner (see docs/options/sdkharness.md)",
+      "properties": {
+        "defaultSdkHarnessLogLevel": {
+          "type": "string",
+          "enum": [
+            "OFF",
+            "ERROR",
+            "WARN",
+            "INFO",
+            "DEBUG",
+            "TRACE"
+          ],
+          "description": "Default worker log level"
+        },
+        "sdkHarnessLogLevelOverrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "OFF",
+              "ERROR",
+              "WARN",
+              "INFO",
+              "DEBUG",
+              "TRACE"
+            ]
+          },
+          "description": "Log level per logger (class or package name)"
+        },
+        "logMdc": {
+          "type": "boolean",
+          "description": "Include the SLF4J MDC in worker log entries (default false)"
+        },
+        "maxCacheMemoryUsageMb": {
+          "type": "integer",
+          "description": "Fixed size in MB of the SDK harness cache (side inputs, user state); takes precedence over maxCacheMemoryUsagePercent"
+        },
+        "maxCacheMemoryUsagePercent": {
+          "type": "number",
+          "description": "SDK harness cache size as a percentage of the heap (default 20)"
+        },
+        "elementProcessingTimeoutMinutes": {
+          "type": "integer",
+          "description": "Terminate the SDK harness when one element processes longer than this many minutes (default 0 = no limit)"
+        },
+        "jdkAddOpenModules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "--add-opens flags for the worker JVM, e.g. java.base/java.nio=ALL-UNNAMED"
+        }
+      }
+    },
     "dataflow": {
       "type": "object",
       "title": "Dataflow",
@@ -141,6 +209,10 @@
           "type": "integer",
           "description": "Streaming side-input cache expiration in milliseconds"
         },
+        "streamingSideInputCacheMb": {
+          "type": "integer",
+          "description": "Streaming side-input cache size in MB"
+        },
         "update": {
           "type": "boolean",
           "description": "Update the running streaming job with the same jobName"
@@ -165,6 +237,18 @@
             "type": "string"
           },
           "description": "Experimental or pre-GA Dataflow features to enable"
+        },
+        "hotKeyLoggingEnabled": {
+          "type": "boolean",
+          "description": "Log the key of a detected hot key (default false)"
+        },
+        "dumpHeapOnOOM": {
+          "type": "boolean",
+          "description": "Write a heap dump when a worker runs out of memory (default false)"
+        },
+        "saveHeapDumpsToGcsPath": {
+          "type": "string",
+          "description": "Cloud Storage path (gs://...) to upload heap dumps to"
         },
         "templateLocation": {
           "type": "string",
@@ -202,7 +286,7 @@
     "prism": {
       "type": "object",
       "title": "Prism",
-      "description": "Prism runner options (local portable runner)",
+      "description": "Prism runner options (local portable runner). The portable block is applied too",
       "properties": {
         "enableWebUI": {
           "type": "boolean",
@@ -219,6 +303,16 @@
         "prismVersionOverride": {
           "type": "string",
           "description": "Prism release version to download instead of the SDK's own. Only consulted when prismLocation is unset / empty (the prism image sets it to the bundled binary)."
+        },
+        "prismLogLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Log level of the prism process"
         }
       }
     },
@@ -273,6 +367,13 @@
         "sdkWorkerParallelism": {
           "type": "integer",
           "description": "Number of SDK workers per environment"
+        },
+        "filesToStage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Local files (jars) to stage for the SDK workers; defaults to the classpath"
         }
       }
     },
@@ -308,6 +409,118 @@
             "BATCH"
           ],
           "description": "Execution mode for batch pipelines"
+        },
+        "flinkConfDir": {
+          "type": "string",
+          "description": "Directory of Flink YAML configuration files applied to the job"
+        },
+        "filesToStage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Jar files to ship to the Flink cluster; defaults to the classpath"
+        },
+        "checkpointingInterval": {
+          "type": "integer",
+          "description": "Checkpoint interval in milliseconds. Default: no checkpointing (required for fault-tolerant streaming)"
+        },
+        "checkpointingMode": {
+          "type": "string",
+          "enum": [
+            "EXACTLY_ONCE",
+            "AT_LEAST_ONCE"
+          ],
+          "description": "Checkpoint consistency guarantee"
+        },
+        "checkpointTimeoutMillis": {
+          "type": "integer",
+          "description": "Maximum time in milliseconds a checkpoint may take"
+        },
+        "minPauseBetweenCheckpoints": {
+          "type": "integer",
+          "description": "Minimal pause in milliseconds between checkpoints"
+        },
+        "numConcurrentCheckpoints": {
+          "type": "integer",
+          "description": "Maximum number of concurrent checkpoints (default 1)"
+        },
+        "tolerableCheckpointFailureNumber": {
+          "type": "integer",
+          "description": "Consecutive checkpoint failures tolerated before the job fails (default 0)"
+        },
+        "unalignedCheckpointEnabled": {
+          "type": "boolean",
+          "description": "Use unaligned checkpoints (default false)"
+        },
+        "finishBundleBeforeCheckpointing": {
+          "type": "boolean",
+          "description": "Finish the current bundle before checkpointing (default false)"
+        },
+        "externalizedCheckpointsEnabled": {
+          "type": "boolean",
+          "description": "Persist checkpoints externally (default false)"
+        },
+        "retainExternalizedCheckpointsOnCancellation": {
+          "type": "boolean",
+          "description": "Keep externalized checkpoints when the job is cancelled (default false)"
+        },
+        "stateBackend": {
+          "type": "string",
+          "enum": [
+            "rocksdb",
+            "hashmap",
+            "filesystem"
+          ],
+          "description": "State backend: rocksdb or hashmap (default: the cluster's state.backend)"
+        },
+        "stateBackendStoragePath": {
+          "type": "string",
+          "description": "Durable checkpoint path of the state backend (s3://..., gs://...)"
+        },
+        "savepointPath": {
+          "type": "string",
+          "description": "Savepoint to restore the streaming pipeline from"
+        },
+        "numberOfExecutionRetries": {
+          "type": "integer",
+          "description": "Times failed tasks are re-executed (0 disables fault tolerance; default: cluster restart strategy)"
+        },
+        "executionRetryDelay": {
+          "type": "integer",
+          "description": "Delay in milliseconds between re-executions"
+        },
+        "maxBundleSize": {
+          "type": "integer",
+          "description": "Maximum elements per bundle (default 1000 streaming / 1000000 batch)"
+        },
+        "maxBundleTimeMills": {
+          "type": "integer",
+          "description": "Maximum milliseconds before a bundle is finished (default 1000 streaming / 10000 batch)"
+        },
+        "autoWatermarkInterval": {
+          "type": "integer",
+          "description": "Watermark emission interval in milliseconds"
+        },
+        "objectReuse": {
+          "type": "boolean",
+          "description": "Reuse objects between operators instead of copying (default false)"
+        },
+        "fasterCopy": {
+          "type": "boolean",
+          "description": "Skip unneeded deep copies between operators (default false)"
+        },
+        "operatorChaining": {
+          "type": "boolean",
+          "description": "Chain operators into the same task (default true)"
+        },
+        "shutdownSourcesAfterIdleMs": {
+          "type": "integer",
+          "description": "Shut down sources idle for this many milliseconds"
+        },
+        "disableMetrics": {
+          "type": "boolean",
+          "description": "Disable reporting Beam metrics to Flink (default false)"
         }
       }
     },

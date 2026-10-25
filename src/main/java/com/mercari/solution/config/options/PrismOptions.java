@@ -19,6 +19,7 @@ public class PrismOptions implements Serializable {
     private String idleShutdownTimeout;
     private String prismLocation;
     private String prismVersionOverride;
+    private String prismLogLevel;
 
     public static void setOptions(
             final PipelineOptions pipelineOptions,
@@ -52,6 +53,9 @@ public class PrismOptions implements Serializable {
                 }
                 if(prism.prismVersionOverride != null) {
                     clazz.getMethod("setPrismVersionOverride", String.class).invoke(prismOptions, prism.prismVersionOverride);
+                }
+                if(prism.prismLogLevel != null) {
+                    clazz.getMethod("setPrismLogLevel", String.class).invoke(prismOptions, prism.prismLogLevel);
                 }
             }
 
