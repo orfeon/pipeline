@@ -257,8 +257,8 @@ level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and n
 
 ### `type: factorization` (always static)
 
-`variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}; either may add
-`reg: <n> | {linear, factors}`]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, regScale,
+`variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}; either as {field, ...}
+may add reg: <n> | {linear, factors}]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, regScale,
 seed}`, `outputs: [{pair: [a, b], as,
 perUnit}, {between: {left: [...], right: [...]}, as}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training

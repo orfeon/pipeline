@@ -297,11 +297,14 @@ public final class Factorization {
      *                   that already carries the main effects)
      * @param scales     per field: null for a categorical field, {@code zscore} / {@code none} for a numeric one (how its
      *                   value is standardised; the mean and standard deviation are the fit's own); null = all categorical
-     * @param regularization the ridge per kind of parameter and field; null = {@code reg} on every parameter
+     * @param reg        the ridge per kind of parameter and field (a number: {@link Regularization#uniform})
      */
-    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, double reg, long seed,
-                          Loss loss, int top, boolean descending, boolean linear, List<String> scales,
-                          Regularization regularization) implements Serializable {
+    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, Regularization reg, long seed,
+                          Loss loss, int top, boolean descending, boolean linear, List<String> scales) implements Serializable {
+        public Options {
+            Objects.requireNonNull(reg, "reg");
+        }
+
         public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed) {
             this(fields, fieldWeighted, latentDim, epochs, reg, seed, Loss.squared, 0, false, true, null);
         }
@@ -311,14 +314,10 @@ public final class Factorization {
             this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, null);
         }
 
+        /** {@code reg} on every parameter. */
         public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed,
                        final Loss loss, final int top, final boolean descending, final boolean linear, final List<String> scales) {
-            this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, scales, null);
-        }
-
-        /** The ridge of every parameter: {@link #regularization}, or {@code reg} on all of them. */
-        public Regularization penalty() {
-            return regularization != null ? regularization : Regularization.uniform(reg, fields.size());
+            this(fields, fieldWeighted, latentDim, epochs, Regularization.uniform(reg, fields.size()), seed, loss, top, descending, linear, scales);
         }
 
         /** Per field: numeric or categorical. */
@@ -350,6 +349,24 @@ public final class Factorization {
         /** The ridge of a parameter carried by {@code rows} training rows. */
         double of(final double reg, final int rows) {
             return perRow ? reg * rows : reg;
+        }
+
+        // by value: a record compares and prints its array components by identity
+        @Override
+        public boolean equals(final Object o) {
+            return o instanceof Regularization other && Double.compare(bias, other.bias) == 0 && Arrays.equals(linear, other.linear)
+                    && Arrays.equals(factors, other.factors) && Double.compare(pairWeights, other.pairWeights) == 0 && perRow == other.perRow;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(bias, Arrays.hashCode(linear), Arrays.hashCode(factors), pairWeights, perRow);
+        }
+
+        @Override
+        public String toString() {
+            return "Regularization[bias=" + bias + ", linear=" + Arrays.toString(linear) + ", factors=" + Arrays.toString(factors)
+                    + ", pairWeights=" + pairWeights + ", perRow=" + perRow + "]";
         }
     }
 
@@ -720,7 +737,7 @@ public final class Factorization {
             }
         }
         final Objective objective = Objective.of(options, examples, s);
-        final Regularization reg = options.penalty();
+        final Regularization reg = options.reg();
         // fwfm under perRow: the rows that carry both fields of a pair
         final int[][] pairRows = new int[F][F];
         if (!fm && reg.perRow()) {

@@ -1016,8 +1016,10 @@ ridge in effect (info `factorization.als.reg`).
   sets both; an omitted part takes the block's). A field with few rows per value (an id) usually needs a stronger
   ridge than one with many (a category).
 - `regScale: perRow` multiplies λ by the training rows that carry the parameter (a value's rows; the rows with both
-  fields for `r_fg`; every row for `w0`): every value is then shrunk by about the same proportion (`1 / (1 + λ)` under
-  `squared`) whatever its count — the per-row reading. `absolute` (the default) shrinks a rare value more than a
+  fields for `r_fg`; every row for `w0`): every value is then shrunk by about the same proportion whatever its count —
+  the per-row reading. Under `squared` that proportion is `1 / (1 + λ)` for a categorical value's weight `w` (its slope
+  is 1 on every row); a factor's slope is the other fields' factors and `r_fg`'s the factor products, mostly well below
+  1, so the same λ shrinks them far more (`H / rows / (H / rows + λ)`). `absolute` (the default) shrinks a rare value more than a
   frequent one: a fixed prior per value, the Bayesian ridge.
 
 Why the factors want a ridge of their own: a pair of two fields whose combination nearly identifies a training row

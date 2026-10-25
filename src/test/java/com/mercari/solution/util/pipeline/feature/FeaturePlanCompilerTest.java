@@ -130,6 +130,11 @@ public class FeaturePlanCompilerTest {
         return plan.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals(code));
     }
 
+    /** {@link #hasCode} at level error only (a code may name warnings as well). */
+    private static boolean hasError(final FeaturePlan plan, final String code) {
+        return plan.getDiagnostics().get(Diagnostics.Level.error).stream().anyMatch(m -> m.code().equals(code));
+    }
+
     @Test
     public void testCompileHappyPath() {
         final FeaturePlan plan = compile(SOURCES, SPEC);
@@ -2179,12 +2184,22 @@ public class FeaturePlanCompilerTest {
         Assertions.assertArrayEquals(new double[]{50, 3, 10}, r.factors());
         Assertions.assertEquals(0.5, FeatureStages.regularization(column(scalar, "fm_linear").getCoordinates(), 3).linear()[2]);
 
-        // invalid values, keys and scales
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {linear: -1}}"))), "factorization.als"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {weights: 1}}"))), "factorization.als"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {regScale: perValue}"))), "factorization.als"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {bias: 1}},"))), "factorization.fields"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: -2},"))), "factorization.fields"));
+        // invalid values, keys and scales (errors: factorization.als also names warnings)
+        final FeaturePlan negative = compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {linear: -1}}")));
+        Assertions.assertTrue(hasError(negative, "factorization.als"), negative::describe);
+        Assertions.assertEquals(1, negative.getDiagnostics().get(Diagnostics.Level.error).size(), "a block part is reported once, not per field: " + negative.describe());
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {weights: 1}}"))), "factorization.als"));
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(FM_BLOCK.replace("latentDim: 4", "latentDim: 4\n        als: {regScale: perValue}"))), "factorization.als"));
+        // a block part every field overrides is still checked
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(FM_BLOCK
+                .replace("fields: [seller_id, category, condition_grade]", "fields: [{field: seller_id, reg: 1}, {field: category, reg: 1}, {field: condition_grade, reg: 1}]")
+                .replace("latentDim: 4", "latentDim: 4\n        als: {reg: {factors: -1}}"))), "factorization.als"));
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {bias: 1}},"))), "factorization.fields"));
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: -2},"))), "factorization.fields"));
+        // a number as text, like als.reg
+        final FeaturePlan text = compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: \"2\"},")));
+        Assertions.assertFalse(text.getDiagnostics().hasErrors(), text::describe);
+        Assertions.assertTrue(column(text, "fm_linear").getCoordinates().get("regFactors").startsWith("2.0,"));
         // pairWeights belongs to fwfm
         final FeaturePlan fm = compile(SOURCES, withEncoding(FM_BLOCK.replace("variant: fwfm", "variant: fm").replace("latentDim: 4", "latentDim: 4\n        als: {reg: {pairWeights: 1}}")));
         Assertions.assertFalse(fm.getDiagnostics().hasErrors(), fm::describe);
@@ -2195,7 +2210,7 @@ public class FeaturePlanCompilerTest {
         final String ranked = FM_BLOCK.replace("task: {expr: \"sold >= 1\", offset: market}",
                 "task: {target: final_price, loss: plackettLuce, contest: session, order: descending, offset: market}");
         final FeaturePlan zero = compile(SOURCES, withEncoding(ranked.replace("latentDim: 4", "latentDim: 4\n        als: {reg: 0}")));
-        Assertions.assertTrue(hasCode(zero, "factorization.als"), zero::describe);
+        Assertions.assertTrue(hasError(zero, "factorization.als"), zero::describe);
         final FeaturePlan oneField = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {linear: 0}},")));
         Assertions.assertTrue(oneField.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("[seller_id]")), oneField::describe);
         final FeaturePlan interactionsOnly = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {linear: 0}},")

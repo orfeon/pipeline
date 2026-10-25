@@ -45,14 +45,20 @@ public class FactorizationTest {
         Assertions.assertEquals(model.predict(new String[]{"a1", "b1", "c0"}), again.predict(new String[]{"a1", "b1", "c0"}), 1e-12);
     }
 
-    /** The ridge as one number and as the same number on every part are one fit, bit for bit (fm and fwfm). */
+    /**
+     * The ridge as one number and as the same number on every part — the per-part coordinates the compiler writes for
+     * a non-uniform ridge, read back by the engine — are one fit, bit for bit (fm and fwfm).
+     */
     @Test
     public void testUniformRegularizationIsTheScalar() {
+        final Factorization.Regularization coordinates = FeatureStages.regularization(Map.of("regBias", "0.05", "regLinear", "0.05,0.05,0.05",
+                "regFactors", "0.05,0.05,0.05", "regPairWeights", "0.05", "regScale", "absolute"), 3);
+        Assertions.assertEquals(Factorization.Regularization.uniform(0.05, 3), coordinates);
         for (final boolean fieldWeighted : new boolean[]{false, true}) {
             final List<String> fields = List.of("a", "b", "c");
             final Factorization.Model scalar = Factorization.fit(new Factorization.Options(fields, fieldWeighted, 2, 15, 0.05, 7L), xor(5));
-            final Factorization.Model parts = Factorization.fit(new Factorization.Options(fields, fieldWeighted, 2, 15, 0.05, 7L,
-                    Factorization.Loss.squared, 0, false, true, null, Factorization.Regularization.uniform(0.05, 3)), xor(5));
+            final Factorization.Model parts = Factorization.fit(new Factorization.Options(fields, fieldWeighted, 2, 15, coordinates, 7L,
+                    Factorization.Loss.squared, 0, false, true, null), xor(5));
             for (final Factorization.Example e : xor(1)) Assertions.assertEquals(scalar.predict(e.values()), parts.predict(e.values()), 0d);
         }
     }
@@ -75,8 +81,8 @@ public class FactorizationTest {
         for (final boolean perRow : new boolean[]{false, true}) {
             final double[] linear = perRow ? new double[]{0.05, 0.4} : new double[]{8, 30};
             final Factorization.Regularization reg = new Factorization.Regularization(0, linear, new double[]{1e9, 1e9}, 1e9, perRow);
-            final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b"), false, 2, 400, 0, 1L,
-                    Factorization.Loss.squared, 0, false, true, null, reg), examples);
+            final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b"), false, 2, 400, reg, 1L,
+                    Factorization.Loss.squared, 0, false, true, null), examples);
             // normal equations of [1, onehot(a), onehot(b)] with a diagonal ridge
             final int p = 1 + 5 + 4;
             final double[][] m = new double[p][p + 1];
@@ -131,15 +137,15 @@ public class FactorizationTest {
         }
         final Factorization.Regularization reg = new Factorization.Regularization(0.01, new double[]{0.01, 0.01, 0.01},
                 new double[]{1e9, 0.01, 0.01}, 0.01, false);
-        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 60, 0.01, 5L,
-                Factorization.Loss.squared, 0, false, true, null, reg), examples);
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), false, 2, 60, reg, 5L,
+                Factorization.Loss.squared, 0, false, true, null), examples);
         for (int v = 0; v < 3; v++) for (int d = 1; d <= 2; d++) Assertions.assertEquals(0, model.param(0, "a" + v)[d], 1e-6);
         Assertions.assertTrue(model.pair(new String[]{"a0", "b1", "c1"}, 1, 2) > model.pair(new String[]{"a0", "b1", "c2"}, 1, 2) + 0.3);
 
         final Factorization.Regularization heldR = new Factorization.Regularization(0.01, new double[]{0.01, 0.01, 0.01},
                 new double[]{0.01, 0.01, 0.01}, 1e9, false);
-        final Factorization.Model fwfm = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), true, 2, 20, 0.01, 5L,
-                Factorization.Loss.squared, 0, false, true, null, heldR), examples);
+        final Factorization.Model fwfm = Factorization.fit(new Factorization.Options(List.of("a", "b", "c"), true, 2, 20, heldR, 5L,
+                Factorization.Loss.squared, 0, false, true, null), examples);
         for (int f = 0; f < 3; f++) for (int g = 0; g < 3; g++) if (f != g) Assertions.assertEquals(0, fwfm.r[f][g], 1e-6);
     }
 
