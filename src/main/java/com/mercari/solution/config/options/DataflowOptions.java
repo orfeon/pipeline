@@ -210,143 +210,45 @@ public class DataflowOptions implements Serializable {
 
     }
 
-    public static DataflowOptions copy(final PipelineOptions pipelineOptions) {
-        final DataflowOptions dataflow = new DataflowOptions();
-        try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
-            final PipelineOptions dataflowOptions = pipelineOptions.as(clazz);
+    static final String DATAFLOW_PIPELINE_OPTIONS = "org.apache.beam.runners.dataflow.options.DataflowPipelineOptions";
 
-            if(clazz.getMethod("getProject").invoke(dataflowOptions) != null) {
-                dataflow.project = (String)clazz.getMethod("getProject").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getTempLocation").invoke(dataflowOptions) != null) {
-                dataflow.tempLocation = (String)clazz.getMethod("getTempLocation").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getStagingLocation").invoke(dataflowOptions) != null) {
-                dataflow.stagingLocation = (String)clazz.getMethod("getStagingLocation").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getLabels").invoke(dataflowOptions) != null) {
-                dataflow.labels = (Map<String, String>)clazz.getMethod("getLabels").invoke(dataflowOptions);
-            }
-            /*
-            if(dataflow.autoscalingAlgorithm != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineWorkerPoolOptions.AutoscalingAlgorithmType");
-                clazz.getMethod("setAutoscalingAlgorithm", Enum.class).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.autoscalingAlgorithm));
-            }
-            if(dataflow.flexRSGoal != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions.FlexResourceSchedulingGoal");
-                clazz.getMethod("setFlexRSGoal", Enum.class).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.flexRSGoal));
-            }
-             */
-            if(clazz.getMethod("getNumWorkers").invoke(dataflowOptions) != null) {
-                dataflow.numWorkers = (Integer) clazz.getMethod("getNumWorkers").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getMaxNumWorkers").invoke(dataflowOptions) != null) {
-                dataflow.maxNumWorkers = (Integer) clazz.getMethod("getMaxNumWorkers").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getNumberOfWorkerHarnessThreads").invoke(dataflowOptions) != null) {
-                dataflow.numberOfWorkerHarnessThreads = (Integer) clazz.getMethod("getNumberOfWorkerHarnessThreads").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getWorkerMachineType").invoke(dataflowOptions) != null) {
-                dataflow.workerMachineType = (String)clazz.getMethod("getWorkerMachineType").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getRegion").invoke(dataflowOptions) != null) {
-                dataflow.region = (String)clazz.getMethod("getRegion").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getWorkerRegion").invoke(dataflowOptions) != null) {
-                dataflow.workerRegion = (String)clazz.getMethod("getWorkerRegion").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getWorkerZone").invoke(dataflowOptions) != null) {
-                dataflow.workerZone = (String)clazz.getMethod("getWorkerZone").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getDiskSizeGb").invoke(dataflowOptions) != null) {
-                dataflow.diskSizeGb = (Integer) clazz.getMethod("getDiskSizeGb").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getWorkerDiskType").invoke(dataflowOptions) != null) {
-                dataflow.workerDiskType = (String)clazz.getMethod("getWorkerDiskType").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getServiceAccount").invoke(dataflowOptions) != null) {
-                dataflow.serviceAccount = (String)clazz.getMethod("getServiceAccount").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getImpersonateServiceAccount").invoke(dataflowOptions) != null) {
-                dataflow.impersonateServiceAccount = (String)clazz.getMethod("getImpersonateServiceAccount").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getNetwork").invoke(dataflowOptions) != null) {
-                dataflow.network = (String)clazz.getMethod("getNetwork").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getSubnetwork").invoke(dataflowOptions) != null) {
-                dataflow.subnetwork = (String)clazz.getMethod("getSubnetwork").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getUsePublicIps").invoke(dataflowOptions) != null) {
-                dataflow.usePublicIps = (Boolean) clazz.getMethod("getUsePublicIps").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getWorkerCacheMb").invoke(dataflowOptions) != null) {
-                dataflow.workerCacheMb = (Integer) clazz.getMethod("getWorkerCacheMb").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getCreateFromSnapshot").invoke(dataflowOptions) != null) {
-                dataflow.createFromSnapshot = (String)clazz.getMethod("getCreateFromSnapshot").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getSdkContainerImage").invoke(dataflowOptions) != null) {
-                dataflow.sdkContainerImage = (String)clazz.getMethod("getSdkContainerImage").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getSdkHarnessContainerImageOverrides").invoke(dataflowOptions) != null) {
-                dataflow.sdkHarnessContainerImageOverrides = (String)clazz.getMethod("getSdkHarnessContainerImageOverrides").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getStreamingSideInputCacheExpirationMillis").invoke(dataflowOptions) != null) {
-                dataflow.streamingSideInputCacheExpirationMillis = (Integer) clazz.getMethod("getStreamingSideInputCacheExpirationMillis").invoke(dataflowOptions);
-            }
-            if(pipelineOptions.as(StreamingOptions.class).isStreaming()) {
-                if(clazz.getMethod("getUpdate").invoke(dataflowOptions) != null) {
-                    dataflow.update = (Boolean) clazz.getMethod("getUpdate").invoke(dataflowOptions);
-                    if(dataflow.update) {
-                        if(clazz.getMethod("getTransformNameMapping").invoke(dataflowOptions) != null) {
-                            dataflow.transformNameMapping = (Map<String, String>) clazz.getMethod("getTransformNameMapping").invoke(dataflowOptions);
-                        }
-                    }
-                }
-                if(clazz.getMethod("getEnableStreamingEngine").invoke(dataflowOptions) != null) {
-                    dataflow.enableStreamingEngine = (Boolean) clazz.getMethod("getEnableStreamingEngine").invoke(dataflowOptions);
-                }
-            }
-
-            if(clazz.getMethod("getDataflowServiceOptions").invoke(dataflowOptions) != null) {
-                dataflow.dataflowServiceOptions = (List<String>) clazz.getMethod("getDataflowServiceOptions").invoke(dataflowOptions);
-            }
-            if(clazz.getMethod("getExperiments").invoke(dataflowOptions) != null) {
-                dataflow.experiments = (List<String>) clazz.getMethod("getExperiments").invoke(dataflowOptions);
-            }
-            /*
-            if(clazz.getMethod("getTemplateLocation").invoke(dataflowOptions) != null) {
-                dataflow.templateLocation = (String) clazz.getMethod("getTemplateLocation").invoke(dataflowOptions);
-            }
-             */
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
-            throw new RuntimeException("Failed to set dataflow runner pipeline options", e);
-        }
-        return dataflow;
-    }
-
+    /**
+     * The Dataflow maxNumWorkers, as a parallelism hint for modules (0 when not set); {@code null} when the Dataflow
+     * runner is not on the classpath (the direct / prism / portable / flink / spark builds do not ship it).
+     */
     public static Integer getMaxNumWorkers(final PInput input) {
-        try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
-            final PipelineOptions dataflowOptions = input.getPipeline().getOptions().as(clazz);
-            return (Integer)clazz.getMethod("getMaxNumWorkers").invoke(dataflowOptions);
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
-            throw new RuntimeException("Failed to set dataflow runner pipeline options", e);
-        }
+        return (Integer) getOption(input.getPipeline().getOptions(), DATAFLOW_PIPELINE_OPTIONS, "getMaxNumWorkers");
     }
 
     public static String getProject(final PipelineOptions options) {
         return options.as(GcpOptions.class).getProject();
     }
 
+    /**
+     * The Dataflow worker service account ({@code options.dataflow.serviceAccount} / {@code --serviceAccount});
+     * {@code null} when it is not set (Dataflow then uses the Compute Engine default service account) or the
+     * Dataflow runner is not on the classpath.
+     */
     public static String getServiceAccount(final PipelineOptions options) {
+        return (String) getOption(options, DATAFLOW_PIPELINE_OPTIONS, "getServiceAccount");
+    }
+
+    /**
+     * Invokes a getter of a Dataflow runner options interface referenced by name; {@code null} when the interface
+     * is not on the classpath.
+     */
+    @SuppressWarnings("unchecked")
+    static Object getOption(final PipelineOptions options, final String className, final String getter) {
+        final Class<? extends PipelineOptions> clazz;
         try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
-            final PipelineOptions dataflowOptions = options.as(clazz);
-            return (String)clazz.getMethod("getServiceAccount").invoke(dataflowOptions);
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
-            throw new RuntimeException("Failed to getServiceAccount", e);
+            clazz = (Class<? extends PipelineOptions>) Class.forName(className);
+        } catch (final ClassNotFoundException e) {
+            return null;
+        }
+        try {
+            return clazz.getMethod(getter).invoke(options.as(clazz));
+        } catch (final NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+            throw new IllegalStateException("Failed to get dataflow runner pipeline option: " + getter, e);
         }
     }
 

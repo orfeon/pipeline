@@ -38,7 +38,7 @@ Use the `jdbc` sink for other databases (MySQL, SQL Server, H2). For PostgreSQL,
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | url | required | String | JDBC connection url such as `jdbc:postgresql://{host}:{port}/{database}`. See the [postgres source](../source/postgres.md) for Cloud SQL / AlloyDB url examples. |
-| user | conditional required | String | Database user. Accepts a secret reference (GCP Secret Manager `projects/{proj}/secrets/{name}/versions/latest`, AWS Secrets Manager, Vault). If omitted, the worker's service account is used as the [Cloud SQL IAM database user](https://cloud.google.com/sql/docs/postgres/iam-logins) (`enableIamAuth=true` is appended to the url). |
+| user | conditional required | String | Database user. Accepts a secret reference (GCP Secret Manager `projects/{proj}/secrets/{name}/versions/latest`, AWS Secrets Manager, Vault). If omitted, the worker's service account is used as the [Cloud SQL IAM database user](https://cloud.google.com/sql/docs/postgres/iam-logins) (`enableIamAuth=true` is appended to the url). The worker's service account is `options.dataflow.serviceAccount`; when it is not set, the account of the current credentials is used on the direct / prism runners, and the pipeline fails at startup on the other runners (set `user` or `options.dataflow.serviceAccount`). |
 | password | conditional required | String | Database password. Accepts a secret reference. Not needed with IAM authentication. |
 | settings | optional | Map<String,String\> | Session settings applied with `SET LOCAL` to every write transaction, e.g. `synchronous_commit: "off"` (skips the WAL flush wait per commit) or `work_mem`. Keys must be setting names. |
 

@@ -130,7 +130,8 @@ public class FirestoreSink extends Sink {
             if(this.hintMaxNumWorkers == null) {
                 this.hintMaxNumWorkers = DataflowOptions.getMaxNumWorkers(input);
             }
-            if(this.hintMaxNumWorkers < 1) {
+            // null without the dataflow runner, 0 when maxNumWorkers is not set
+            if(this.hintMaxNumWorkers == null || this.hintMaxNumWorkers < 1) {
                 this.hintMaxNumWorkers = 10;
             }
         }

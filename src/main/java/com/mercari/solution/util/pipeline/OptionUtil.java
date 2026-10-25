@@ -6,6 +6,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.MPipeline;
+import com.mercari.solution.config.options.DataflowOptions;
+import com.mercari.solution.util.cloud.google.IAMUtil;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
@@ -101,6 +103,29 @@ public class OptionUtil {
                             + "Set the module's projectId parameter or the GOOGLE_CLOUD_PROJECT environment variable.");
         }
         return project;
+    }
+
+    /**
+     * The service account the pipeline's workers run as, e.g. the database user for Cloud SQL IAM authentication:
+     * {@code options.dataflow.serviceAccount} when set; otherwise, on the runners whose workers run in this process
+     * (direct / prism), the account of the current credentials. Throws when it cannot be determined (Dataflow
+     * without serviceAccount runs as the Compute Engine default account, and Flink / Spark workers may run as a
+     * different identity than the submitting process).
+     */
+    public static String getWorkerServiceAccount(final PipelineOptions options, final String parameterHint) {
+        final String serviceAccount = DataflowOptions.getServiceAccount(options);
+        if(serviceAccount != null && !serviceAccount.isBlank()) {
+            return serviceAccount;
+        }
+        final MPipeline.Runner runner = getRunner(options);
+        if(runner == MPipeline.Runner.direct || runner == MPipeline.Runner.prism) {
+            final String account = IAMUtil.getAccount();
+            if(account != null && !account.isBlank()) {
+                return account;
+            }
+        }
+        throw new IllegalArgumentException("Could not determine the worker service account on the " + runner
+                + " runner: set " + parameterHint + " or options.dataflow.serviceAccount");
     }
 
     public static boolean isDirectRunner(final PInput input) {
