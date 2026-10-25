@@ -103,6 +103,48 @@ public class FactorizationTest {
         }
     }
 
+    /** perRow scales a value's ridge, never the bias: a constant target is read as itself, not shrunk towards 0. */
+    @Test
+    public void testPerRowKeepsTheBias() {
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 200; i++) examples.add(new Factorization.Example(new String[]{"a" + i % 5, "b" + i % 7}, 100));
+        final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b"), false, 2, 30,
+                new Factorization.Regularization(1, new double[]{1, 1}, new double[]{1, 1}, 1, true), 1L,
+                Factorization.Loss.squared, 0, false, true, null), examples);
+        for (final Factorization.Example e : examples) Assertions.assertEquals(100, model.predict(e.values()), 1.0);
+    }
+
+    /**
+     * A number for als.reg is the fit it always was: the predictions of the scalar path before the ridge was split,
+     * recorded from that code (main at 654d9e76) as bit patterns — squared loss only, whose arithmetic has no
+     * {@code Math.exp} and is therefore the same on every platform. A change that moves them moved every existing fit.
+     */
+    @Test
+    public void testScalarRidgeMatchesTheFitBeforeTheSplit() {
+        final java.util.Random random = new java.util.Random(5);
+        final List<Factorization.Example> examples = new ArrayList<>();
+        for (int i = 0; i < 120; i++) {
+            final int a = random.nextInt(6), b = random.nextInt(4), c = random.nextInt(3);
+            final double x = random.nextGaussian() * 3 + 10;
+            final double y = 0.5 * a - 0.3 * b + (a % 2 == b % 2 ? 1 : 0) + 0.1 * (x - 10) * (c - 1) + random.nextGaussian() * 0.2;
+            examples.add(new Factorization.Example(new String[]{"a" + a, "b" + b, "c" + c, Factorization.NUMERIC}, new double[]{0, 0, 0, x}, y, 0, 0, null));
+        }
+        final long[][] expected = {
+                {0x4004ac4313a38ffaL, 0x40063790ca5d929fL, 0x3fc66fd9ce3cd289L, 0x40064429c6b29ff8L, 0x3fee789239c95330L, 0x3ff58dcc1d524506L,
+                        0x3fe3641bb61e2c17L, 0x40013939cc5b6180L, 0x3ffb7c433dc9df91L, 0x3ff91ddaa2c8f827L, 0x3fe28f1d52cacab2L, 0xbfb7a7b168b165d1L},
+                {0x4003f7da1991c805L, 0x400611a229198352L, 0x3fd13504ae39b292L, 0x4005c87d13e0257eL, 0x3fecf4eb1cfa0a42L, 0x3ff5240565d14f84L,
+                        0x3fe241981e21adc1L, 0x400156130a41d79eL, 0x3ffd2c4b641a4346L, 0x3ff903327371b686L, 0x3fe277ad09cf1795L, 0xbfb3091927d9b89dL}};
+        final java.util.List<String> scales = java.util.Arrays.asList(null, null, null, "zscore");
+        for (int variant = 0; variant < 2; variant++) {
+            final Factorization.Model model = Factorization.fit(new Factorization.Options(List.of("a", "b", "c", "x"), variant == 1, 3, 15, 0.05, 7L,
+                    Factorization.Loss.squared, 0, false, true, scales), examples);
+            for (int i = 0; i < expected[variant].length; i++) {
+                final Factorization.Example e = examples.get(i);
+                Assertions.assertEquals(expected[variant][i], Double.doubleToLongBits(model.predict(e.values(), e.x())), (variant == 1 ? "fwfm" : "fm") + " row " + i);
+            }
+        }
+    }
+
     /** Gaussian elimination with partial pivoting of an augmented system. */
     private static double[] solve(final double[][] m) {
         final int n = m.length;

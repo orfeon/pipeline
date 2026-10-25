@@ -427,6 +427,8 @@ public class FeatureSpec implements Serializable {
         public String regScale;
         /** factorization {@code fields[].reg}: per field, its linear / factors ridge (a number sets both). */
         public Map<String, Map<String, Double>> fmFieldReg = new LinkedHashMap<>();
+        /** factorization: the fields whose {@code reg} names {@code linear} explicitly (an object), not as a number setting both. */
+        public java.util.Set<String> fmFieldRegLinear = new java.util.LinkedHashSet<>();
         public Long seed;
         // discretize / quantileTransform ({@code bins}, {@code distribution} shared with noise)
         public String method;
@@ -1216,6 +1218,7 @@ public class FeatureSpec implements Serializable {
                 if (field.has("reg") && !field.get("reg").isJsonNull()) {
                     final Map<String, Double> reg = regParts(field.get("reg"), List.of("linear", "factors"), "fields[" + name + "].reg", "factorization.fields", diagnostics, loc);
                     if (reg != null) def.fmFieldReg.put(name, reg);
+                    if (reg != null && field.get("reg").isJsonObject() && reg.containsKey("linear")) def.fmFieldRegLinear.add(name);
                 }
                 if (Json.bool(field, "numeric", false)) {
                     def.fmNumeric.put(name, Json.string(field, "scale") == null ? "zscore" : Json.string(field, "scale"));

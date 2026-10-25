@@ -331,8 +331,10 @@ public final class Factorization {
     /**
      * The ridge {@code (g − λ θ) / (H + λ)} of every parameter ({@code als.reg}): an absolute amount added to the
      * parameter's curvature H, which is summed over the training rows that carry it — not a per-row penalty. Under
-     * {@code perRow} ({@code als.regScale: perRow}) λ is multiplied by those rows: a value's weight and factors by the
-     * value's training rows, a field-pair weight by the rows that carry both fields, the bias by every row.
+     * {@code perRow} ({@code als.regScale: perRow}) the λ of a value's weight and factors is multiplied by the value's
+     * training rows. The bias and the field-pair weights are not per value: one parameter shared by (nearly) every row,
+     * so a per-row λ would shrink it towards 0 by λ / (1 + λ) of its size (a constant target of 100 read as 75 at λ = 1)
+     * — they keep their λ as it is.
      *
      * @param bias        the global bias w0 (a contest loss has none)
      * @param linear      per field: its per-value weights w
@@ -738,16 +740,6 @@ public final class Factorization {
         }
         final Objective objective = Objective.of(options, examples, s);
         final Regularization reg = options.reg();
-        // fwfm under perRow: the rows that carry both fields of a pair
-        final int[][] pairRows = new int[F][F];
-        if (!fm && reg.perRow()) {
-            for (int i = 0; i < n; i++) {
-                for (int f = 0; f < F; f++) {
-                    if (idx[i * F + f] < 0) continue;
-                    for (int g = f + 1; g < F; g++) if (idx[i * F + g] >= 0) pairRows[f][g]++;
-                }
-            }
-        }
         int longest = 0;
         for (int f = 0; f < F; f++) for (int id = 0; id + 1 < start[f].length; id++) longest = Math.max(longest, start[f][id + 1] - start[f][id]);
         final double[] h = new double[Math.max(longest, n)];
@@ -759,7 +751,7 @@ public final class Factorization {
             // global bias
             if (!contest) {
                 Arrays.fill(h, 0, n, 1d);
-                final double delta = objective.delta(all, 0, n, h, w0, reg.of(reg.bias(), n));
+                final double delta = objective.delta(all, 0, n, h, w0, reg.bias());
                 objective.shift(all, 0, n, h, delta);
                 w0 += delta;
             }
@@ -803,7 +795,7 @@ public final class Factorization {
                             if (a >= 0 && b >= 0) for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
                             h[i] = a >= 0 && b >= 0 ? dot * multiplier(u, i * F + f) * multiplier(u, i * F + g) : 0;
                         }
-                        final double delta = objective.delta(all, 0, n, h, r[f][g], reg.of(reg.pairWeights(), pairRows[f][g]));
+                        final double delta = objective.delta(all, 0, n, h, r[f][g], reg.pairWeights());
                         objective.shift(all, 0, n, h, delta);
                         r[f][g] += delta;
                         r[g][f] = r[f][g];

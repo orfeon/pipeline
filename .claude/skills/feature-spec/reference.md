@@ -270,7 +270,8 @@ unseen; null only when no cross-side pair is known.
 `als.reg` (a number, or `{bias, linear, factors, pairWeights}`; default 0.01 each) is an **absolute** ridge added to a
 parameter's curvature summed over its training rows — compare it with a value's training rows (squared) or its
 `Σ p (1 − p)` (logistic / contest), not with a per-row rate: 0.01 on a value with thousands of rows is no
-regularization. `regScale: perRow` multiplies it by the parameter's rows (equal proportional shrinkage). Give the
+regularization. `regScale: perRow` multiplies a value's linear / factor ridge by the value's rows (equal proportional shrinkage; the
+bias and fwfm's pair weights keep theirs). Give the
 factors a stronger ridge than the linear weights, and id-like fields (few rows per value) the strongest: a weakly
 penalized pair of ids memorizes the training targets, while one large λ for everything collapses every factor to 0.
 Choose λ on the walk-forward loss; the plan reports it (info `factorization.als.reg`).

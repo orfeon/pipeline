@@ -4356,8 +4356,10 @@ public final class FeaturePlanCompiler {
         if (!"fwfm".equals(variant) && parts.containsKey("pairWeights")) {
             diagnostics.warning("factorization.als", loc, "als.reg.pairWeights applies to variant fwfm (the field-pair weights r_fg) and is ignored");
         }
-        if (!linear && parts.containsKey("linear")) {
-            diagnostics.warning("factorization.als", loc, "a linear ridge is ignored under linear: false (no per-value weight is fitted)");
+        if (!linear && (parts.containsKey("linear") || !def.fmFieldRegLinear.isEmpty())) {
+            diagnostics.warning("factorization.als", loc, "a linear ridge is ignored under linear: false (no per-value weight is fitted): "
+                    + (parts.containsKey("linear") ? "als.reg.linear" : "") + (parts.containsKey("linear") && !def.fmFieldRegLinear.isEmpty() ? ", " : "")
+                    + (def.fmFieldRegLinear.isEmpty() ? "" : "the reg.linear of " + def.fmFieldRegLinear));
         }
         final boolean uniform = parts.isEmpty() && def.fmFieldReg.isEmpty() && !perRow;
         final String curvature = switch (lossText) {
@@ -4367,7 +4369,8 @@ public final class FeaturePlanCompiler {
         };
         diagnostics.info("factorization.als.reg", loc, (uniform ? "ridge " + base + " on every parameter" : "ridge bias " + bias + ", linear " + linearPer
                 + ", factors " + factorsPer + ("fwfm".equals(variant) ? ", pairWeights " + pairWeights : "") + " (fields " + def.fields + ")")
-                + (perRow ? ", multiplied by the training rows that carry each parameter (regScale perRow): every value is shrunk by about the same proportion"
+                + (perRow ? ", the linear and factor ridge multiplied by each value's training rows (regScale perRow; the bias and pairWeights as they are):"
+                + " every value is shrunk by about the same proportion"
                 : ", added as it is to a parameter's curvature summed over its training rows (regScale absolute) - compare it with " + curvature
                 + ": a value with far more than that is barely shrunk"));
         final Map<String, String> coordinates = new LinkedHashMap<>();

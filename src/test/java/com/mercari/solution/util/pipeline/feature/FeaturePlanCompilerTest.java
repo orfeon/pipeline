@@ -2216,6 +2216,12 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan interactionsOnly = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: {linear: 0}},")
                 .replace("latentDim: 4", "latentDim: 4\n        linear: false")));
         Assertions.assertFalse(interactionsOnly.getDiagnostics().hasErrors(), interactionsOnly::describe);
+        // a field's explicit linear ridge is ignored under linear: false (warned); a number setting both is not
+        Assertions.assertTrue(interactionsOnly.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.als".equals(m.code()) && m.message().contains("the reg.linear of [seller_id]")), interactionsOnly::describe);
+        final FeaturePlan numberOnly = compile(SOURCES, withEncoding(ranked.replace("fields: [seller_id,", "fields: [{field: seller_id, reg: 3},")
+                .replace("latentDim: 4", "latentDim: 4\n        linear: false")));
+        Assertions.assertFalse(numberOnly.getDiagnostics().getMessages().stream().anyMatch(m -> m.message().contains("linear ridge is ignored")), numberOnly::describe);
         final FeaturePlan bias = compile(SOURCES, withEncoding(ranked.replace("latentDim: 4", "latentDim: 4\n        als: {reg: {bias: 1}}")));
         Assertions.assertFalse(bias.getDiagnostics().hasErrors(), bias::describe);
         Assertions.assertTrue(bias.getDiagnostics().getMessages().stream()

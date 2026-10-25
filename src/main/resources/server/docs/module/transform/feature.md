@@ -1015,12 +1015,13 @@ ridge in effect (info `factorization.als.reg`).
 - `fields: [{field: seller_id, reg: {linear: 10, factors: 100}}, ...]` — a field's own linear / factor ridge (a number
   sets both; an omitted part takes the block's). A field with few rows per value (an id) usually needs a stronger
   ridge than one with many (a category).
-- `regScale: perRow` multiplies λ by the training rows that carry the parameter (a value's rows; the rows with both
-  fields for `r_fg`; every row for `w0`): every value is then shrunk by about the same proportion whatever its count —
-  the per-row reading. Under `squared` that proportion is `1 / (1 + λ)` for a categorical value's weight `w` (its slope
-  is 1 on every row); a factor's slope is the other fields' factors and `r_fg`'s the factor products, mostly well below
-  1, so the same λ shrinks them far more (`H / rows / (H / rows + λ)`). `absolute` (the default) shrinks a rare value more than a
-  frequent one: a fixed prior per value, the Bayesian ridge.
+- `regScale: perRow` multiplies the λ of a value's weight and factors by the value's training rows: every value is then
+  shrunk by about the same proportion whatever its count — the per-row reading. Under `squared` that proportion is
+  `1 / (1 + λ)` for a categorical value's weight `w` (its slope is 1 on every row); a factor's slope is the other
+  fields' factors, mostly well below 1, so the same λ shrinks it far more (`H / rows / (H / rows + λ)`). The bias `w0`
+  and fwfm's `r_fg` are not per value — one parameter shared by (nearly) every row — and keep their λ as it is: scaled by
+  every row it would pull the whole prediction towards 0 (a constant target of 100 read as 75 at λ = 1). `absolute`
+  (the default) shrinks a rare value more than a frequent one: a fixed prior per value, the Bayesian ridge.
 
 Why the factors want a ridge of their own: a pair of two fields whose combination nearly identifies a training row
 (an entity × entity pair seen once or twice) can memorize the training targets when its factors are weakly penalized
