@@ -258,8 +258,8 @@ level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and n
 ### `type: factorization` (always static)
 
 `variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}; either may add
-`reg: <n> | {linear, factors}`]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, reg, regScale,
-seed}`, `outputs: [{pair: [a, b], as,
+`reg: <n> | {linear, factors}`]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, warmEpochs, reg,
+regScale, tol, seed}`, `outputs: [{pair: [a, b], as,
 perUnit}, {between: {left: [...], right: [...]}, as}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as}]`, `fit: {artifact}`.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
 rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
@@ -273,7 +273,12 @@ parameter's curvature summed over its training rows — compare it with a value'
 regularization. `regScale: perRow` multiplies it by the parameter's rows (equal proportional shrinkage). Give the
 factors a stronger ridge than the linear weights, and id-like fields (few rows per value) the strongest: a weakly
 penalized pair of ids memorizes the training targets, while one large λ for everything collapses every factor to 0.
-Choose λ on the walk-forward loss; the plan reports it (info `factorization.als.reg`).
+Choose λ on the walk-forward loss; the plan reports it (info `factorization.als.reg`). `als.tol: t` stops a fit once
+an epoch moves the penalised objective by less than `t` (epochs become a cap; a forward warm start then only shortens a
+fit instead of changing it — without it a non-converged fit depends on how many fits came before). Every fit logs its
+rows, epochs, objective, loss against the offset alone, parameter sizes and score spread; the warnings `spread`
+(within-contest sd > 5), `memorizing` (training loss < 1/10 of the offset's) and `unconverged` are counted as
+`feature/fm_<block>_<flag>` — read them after a run before trusting the columns.
 
 ### `type: discretize` (always static)
 

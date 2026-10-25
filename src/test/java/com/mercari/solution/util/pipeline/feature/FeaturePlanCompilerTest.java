@@ -2208,6 +2208,31 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * factorization als.tol: a coordinate when declared, a range check, and under forward the warm start's epoch cap
+     * defaults to the whole epochs (a warm start only shortens a fit that stops at convergence).
+     */
+    @Test
+    public void testFactorizationTolerance() {
+        final String forward = FM_BLOCK.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}", "fit: {mode: forward, blocks: {size: P30D}}");
+        final FeaturePlan plain = compile(SOURCES, withEncoding(forward.replace("latentDim: 4", "latentDim: 4\n        als: {epochs: 20}")));
+        Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
+        Assertions.assertNull(column(plain, "fm_linear").getCoordinates().get("tol"));
+        Assertions.assertEquals("10", column(plain, "fm_linear").getCoordinates().get("warmEpochs"));
+        Assertions.assertTrue(plain.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "fit.mode.forward".equals(m.code()) && m.message().contains("als.tol makes the warm start a shortcut")), plain::describe);
+
+        final FeaturePlan tol = compile(SOURCES, withEncoding(forward.replace("latentDim: 4", "latentDim: 4\n        als: {epochs: 20, tol: 0.0001}")));
+        Assertions.assertFalse(tol.getDiagnostics().hasErrors(), tol::describe);
+        Assertions.assertEquals("1.0E-4", column(tol, "fm_linear").getCoordinates().get("tol"));
+        Assertions.assertEquals("20", column(tol, "fm_linear").getCoordinates().get("warmEpochs"));
+        Assertions.assertEquals(1e-4, FeatureStages.fmSpecs(tol.getColumns()).get(0).options().tol());
+        Assertions.assertEquals("fm", FeatureStages.fmSpecs(tol.getColumns()).get(0).options().label(), "the fit log names the block");
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forward.replace("latentDim: 4", "latentDim: 4\n        als: {tol: -1}"))), "factorization.als"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(forward.replace("latentDim: 4", "latentDim: 4\n        als: {tol: 1}"))), "factorization.als"));
+    }
+
+    /**
      * The Low-Rank + Sparse recipes compile into a valid schedule. (1) batch: a forward factorization's sum is a
      * baseline, and a shrunk encoding of the cross offset by it keeps only what the factorization does not explain —
      * the encoding's keyed stage runs after the fit stage that fills the sum. (2) contest: a team rating with a pairing

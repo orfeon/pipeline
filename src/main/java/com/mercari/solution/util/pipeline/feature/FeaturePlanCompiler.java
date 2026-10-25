@@ -4420,7 +4420,10 @@ public final class FeaturePlanCompiler {
         if (latentDim < 1) diagnostics.error("factorization.latentDim", loc, "latentDim must be >= 1");
         final int epochs = def.epochs == null ? 10 : def.epochs;
         if (epochs < 1) diagnostics.error("factorization.als", loc, "als.epochs must be >= 1: " + epochs);
-        final int warmEpochs = def.warmEpochs == null ? Math.max(1, (epochs + 1) / 2) : def.warmEpochs;
+        if (def.tol != null && !(def.tol >= 0 && def.tol < 1)) diagnostics.error("factorization.als", loc, "als.tol must be in [0, 1): " + def.tol);
+        final double tol = def.tol == null || !(def.tol > 0 && def.tol < 1) ? 0 : def.tol;
+        // under tol a warm start only shortens a fit (it stops at convergence): it gets the whole epoch cap by default
+        final int warmEpochs = def.warmEpochs != null ? def.warmEpochs : tol > 0 ? epochs : Math.max(1, (epochs + 1) / 2);
         if (warmEpochs < 1) diagnostics.error("factorization.als", loc, "als.warmEpochs must be >= 1: " + warmEpochs);
 
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "factorization", "the model is fitted", "iterative ALS fit", true, true);
@@ -4458,8 +4461,12 @@ public final class FeaturePlanCompiler {
                 final ForwardBlocks blocks = fitSpec.forwardBlocks();
                 diagnostics.info("fit.mode.forward", loc, what + " at every time block (" + blocks.describe() + ") over the complete blocks"
                         + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
-                        + (warmStart ? ", each started from the fit before it for " + warmEpochs + " epoch(s) (fit.warmStart previous; the first takes " + epochs + ")"
-                        : ", each from scratch for " + epochs + " epoch(s) (fit.warmStart none)")
+                        + (warmStart ? ", each started from the fit before it for " + (tol > 0 ? "at most " : "") + warmEpochs
+                        + " epoch(s) (fit.warmStart previous; the first takes " + (tol > 0 ? "at most " : "") + epochs + ")"
+                        : ", each from scratch for " + (tol > 0 ? "at most " : "") + epochs + " epoch(s) (fit.warmStart none)")
+                        + (tol > 0 ? ", stopping once an epoch moves the objective by less than " + tol + " (als.tol)"
+                        : warmStart ? "; without als.tol every fit runs its epochs, so a fit that has not converged depends on how many fits came"
+                        + " before it - als.tol makes the warm start a shortcut only" : "")
                         + (warmStart && fitSpec.window != null ? "; a value with no row in the window leaves the fit, but the values in it"
                         + " start from the fit before, which read older blocks (fit.warmStart none for fits that read the window alone)" : "")
                         + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
@@ -4696,6 +4703,7 @@ public final class FeaturePlanCompiler {
                 c.coordinates.put("latentDim", Integer.toString(latentDim));
                 c.coordinates.put("target", target);
                 c.coordinates.put("epochs", Integer.toString(epochs));
+                if (tol > 0) c.coordinates.put("tol", Double.toString(tol));
                 c.coordinates.putAll(regCoordinates);
                 c.coordinates.put("seed", Long.toString(def.seed == null ? 0L : def.seed));
                 c.coordinates.put("loss", loss.name());

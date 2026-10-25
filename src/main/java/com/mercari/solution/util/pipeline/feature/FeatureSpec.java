@@ -423,6 +423,8 @@ public class FeatureSpec implements Serializable {
         public Double reg;
         /** factorization {@code als.reg} as an object: the ridge per kind of parameter (bias / linear / factors / pairWeights). */
         public Map<String, Double> regParts = new LinkedHashMap<>();
+        /** factorization {@code als.tol}: stop a fit once an epoch moves its objective by less than this fraction (null = every epoch runs). */
+        public Double tol;
         /** factorization {@code als.regScale}: absolute (default) | perRow. */
         public String regScale;
         /** factorization {@code fields[].reg}: per field, its linear / factors ridge (a number sets both). */
@@ -1363,9 +1365,10 @@ public class FeatureSpec implements Serializable {
                     def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
                 }
                 def.regScale = Json.string(als, "regScale");
+                def.tol = Json.string(als, "tol") == null ? null : Double.parseDouble(Json.string(als, "tol"));
                 def.seed = Json.string(als, "seed") == null ? null : Long.parseLong(Json.string(als, "seed"));
             } catch (final RuntimeException e) {
-                diagnostics.error("factorization.als", loc, "als.epochs / warmEpochs / reg / seed must be numeric: " + als);
+                diagnostics.error("factorization.als", loc, "als.epochs / warmEpochs / reg / tol / seed must be numeric: " + als);
             }
         }
         def.fitJson = o.has("fit") && o.get("fit").isJsonObject() ? o.get("fit").toString() : null;

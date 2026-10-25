@@ -973,7 +973,7 @@ is a fold:
     task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset; loss (below)
     # linear: false                               # fit no per-value weight w (interactions only, over an offset that carries the main effects)
     fit: {mode: forward, blocks: {size: P30D}, artifact: {uri: "gs://bucket/features"}}   # static (default) | forward | fold
-    als: {epochs: 10, warmEpochs: 5, reg: {linear: 1, factors: 10}, seed: 0}   # reg: one number, or per part (below)
+    als: {epochs: 10, warmEpochs: 5, reg: {linear: 1, factors: 10}, tol: 0.0001, seed: 0}   # reg: one number, or per part (below)
     outputs:
       - {pair: [seller_id, category], as: fm_seller_category}   # r_fg · ⟨v_f[x_f], v_g[x_g]⟩
       - {embedding: category, as: cat_emb, dims: 4}            # cat_emb_0 .. cat_emb_3
@@ -1037,7 +1037,13 @@ refitting modes give training rows values fitted without their own target:
 - **`forward`** fits one model per time block (`fit.blocks`, `minBlocks`, `window` / `minHistory` as in *Forward block
   fits*) over the complete blocks whose targets are known at `predictAt`; a row reads the model of the last such block
   (null before `minBlocks`). Each fit starts from the one before it and runs `als.warmEpochs` epochs (default half of
-  `epochs`, rounded up; `fit.warmStart: none` fits each from scratch with `epochs`), so a run costs roughly
+  `epochs`, rounded up — all of `epochs` under `als.tol`; `fit.warmStart: none` fits each from scratch with `epochs`).
+  **Without `als.tol` a warm start changes the result, not only the cost**: a fit that has not converged after its
+  epochs stops wherever the previous fits left it, so the same block reads different values with finer blocks (more
+  fits before it) or without the warm start. Under `als.tol` every fit runs until it converges (the epochs are a cap),
+  and the warm start only shortens it — up to `tol` for a convex fit (squared loss, factors held at 0 by their ridge);
+  a factorization is not convex, so two starts can still settle in different optima, and the scores of a
+  well-regularized fit move least. A run costs roughly
   `epochs · N₁ + warmEpochs · (N₂ + N₃ + …)` row passes, `Nᵢ` the rows of the i-th fit's window — measure it on a
   subset before a long history. The fits run one after another on one worker. `fit.minRows: n` leaves a fit over
   fewer than `n` rows unsolved (its rows read null). Under `window`, a value with no row in the window leaves the fit,
@@ -1132,6 +1138,20 @@ fields are all numeric is a quadratic form of the values (warning `factorization
   (`offsetScale: probability`, default — `ln b` for a contest, `logit b` for logistic; a row whose offset gives no finite
   score, `b ≤ 0` in a contest or `b ∉ (0, 1)` under logistic, is not a training row) or as a score already
   (`offsetScale: score`). The outputs never include it.
+- **Convergence (`als.tol`)**: with `tol: t` (in [0, 1), default 0 = off) a fit stops once an epoch moves the penalised
+  objective (negative log-likelihood + ½ Σ λ θ²) by less than `t` of its value, and `epochs` / `warmEpochs` become caps.
+  The coordinate steps converge linearly, so a tight `tol` can need many epochs: give `epochs` room (100s), and read
+  the fit log for how many each fit took.
+- **Fit diagnostics**: every fit logs one line — the block, the fit (`whole input`, `fold 3`, `forward change point
+  <block> (warm start)`), training rows, epochs, wall time, the objective before / after and its last-epoch move, the
+  per-unit loss (`rmse`, `logloss`, `nll/choice`) against the offset alone (ŷ = 0), the largest `|w|`, the per-value
+  factor norms `‖v‖` (p50 / p99 / max) and the spread of the scores ŷ (the mean within-contest standard deviation under a
+  contest loss). Three warnings, each logged per fit and counted as `feature/fm_<block>_<flag>` next to
+  `feature/fm_<block>_fits`: `spread` (a contest's scores spread by sd > 5: the probabilities pile onto one entry),
+  `memorizing` (`logistic` / contest: the training loss below a tenth of the offset's — the model learns the training
+  rows by heart, typically a pair close to unique per row under a weak factor ridge), `unconverged` (the objective
+  still moved more than 0.1% in the last epoch, or did not reach `als.tol`). The artifact manifest carries the
+  whole-input fit's report as `fit` (without the wall time).
 - **Fitting**: every parameter takes one Newton step per epoch on the loss restricted to it (the model is linear in each
   parameter; under squared loss the step is the exact ridge solution, i.e. the alternating least squares above). Under
   `plackettLuce` / `softmax` the ridge (see *Regularization* above) must be > 0: it is what fixes what a contest cannot

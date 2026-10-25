@@ -51,6 +51,8 @@ public class FactorizationServeTest {
         Assertions.assertArrayEquals(expected.numeric, actual.numeric);
         Assertions.assertArrayEquals(expected.mean, actual.mean, 0d);
         Assertions.assertArrayEquals(expected.scale, actual.scale, 0d);
+        // the report as the manifest has it: everything but the wall time of the fit
+        Assertions.assertEquals(expected.report == null ? null : expected.report.toJson(), actual.report == null ? null : actual.report.toJson());
         for (int f = 0; f < expected.fields.size(); f++) {
             Assertions.assertArrayEquals(expected.r[f], actual.r[f], 0d);
             final Map<String, double[]> params = expected.params.get(f);
