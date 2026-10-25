@@ -993,7 +993,7 @@ for a pair that never occurred together: that is what the low-rank model adds ov
 falls back to its parent for an unseen pair. A value the fit never saw yields null `pair` / `embedding` outputs and a
 `count` of 0 (the `sum` still adds what the known fields contribute); a null value yields a null `count`. `count` is the
 number of training rows that carried the row's value in the model the row reads — the support behind its factors.
-`fitBlock` and `trainRows` describe the fit itself, so the split between fitting and applying can be checked from the
+`fitBlock` and `trainRows` (default names `<name>_fit_block` / `<name>_train_rows`) describe the fit itself, so the split between fitting and applying can be checked from the
 output alone: `trainRows` is the model's training rows (the rows a contest loss learns from; null where the row reads
 no model, or the model comes from an artifact written before the count was stored), and `fitBlock`, under `fit.mode:
 forward`, the time block the model was fitted at — it read the blocks up to and including it, never a later one (with

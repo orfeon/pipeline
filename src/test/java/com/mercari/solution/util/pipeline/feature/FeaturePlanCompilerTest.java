@@ -2235,8 +2235,8 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(readouts.contains("fitBlock"), readouts);
         final FeaturePlan forward = compile(SOURCES, withEncoding(readouts.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}", "fit: {mode: forward, blocks: {size: P30D}}")));
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
-        Assertions.assertEquals("fitBlock", column(forward, "fm_fitBlock").getCoordinates().get("kind"));
-        Assertions.assertEquals(Schema.Type.int64, column(forward, "fm_fitBlock").getFieldType().getType());
+        Assertions.assertEquals("fitBlock", column(forward, "fm_fit_block").getCoordinates().get("kind"));
+        Assertions.assertEquals(Schema.Type.int64, column(forward, "fm_fit_block").getFieldType().getType());
         Assertions.assertEquals("trainRows", column(forward, "fm_rows").getCoordinates().get("kind"));
         Assertions.assertFalse(forward.getDiagnostics().getMessages().stream().anyMatch(m -> m.message().contains("fitBlock is the forward change point")), forward::describe);
         final FeaturePlan statik = compile(SOURCES, withEncoding(readouts));

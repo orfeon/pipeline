@@ -4696,7 +4696,7 @@ public final class FeaturePlanCompiler {
                         diagnostics.warning("factorization.outputs", loc, "fitBlock is the forward change point of the model a row reads:"
                                 + " it is null under fit.mode " + mode.token());
                     }
-                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_" + out.kind,
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + ("fitBlock".equals(out.kind) ? "_fit_block" : "_train_rows"),
                             Schema.FieldType.INT64, computeAt);
                     c.coordinates.put("kind", out.kind);
                     cols.add(c);

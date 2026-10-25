@@ -126,7 +126,12 @@ public final class Factorization {
         public FitReport report;
         /** The training rows of the fit (the rows a contest loss learns from; 0 = unknown, for an artifact written without them). */
         public long rows;
-        /** fit.mode forward: the change point (time block) the model was fitted at — it read blocks up to this one; null otherwise. */
+        /**
+         * fit.mode forward: the change point (time block) the model was fitted at — it read blocks up to this one; null
+         * otherwise. It repeats the key the model is kept under because the side-input lookup ({@link Fits#modelFor})
+         * hands out the model alone. Without a window the whole-input model is the last change point's (one object), so
+         * it carries that change point too; nothing reads it there, and an artifact does not keep it.
+         */
         public Long changePoint;
 
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
