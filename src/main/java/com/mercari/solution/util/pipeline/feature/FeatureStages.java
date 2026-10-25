@@ -1499,7 +1499,7 @@ public final class FeatureStages {
      * whole-input model; fold / forward models are always re-fitted.
      */
     record FmSpec(String block, List<String> fields, boolean fieldWeighted, int k, String target, String offsetColumn,
-                  int epochs, double reg, long seed, String artifactUri, boolean refit,
+                  int epochs, Factorization.Regularization reg, long seed, String artifactUri, boolean refit,
                   List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis, Factorization.Plan plan,
                   Factorization.Loss loss, String offsetScale, List<String> contestKeys, String contestTime, String contestTimeType,
                   boolean descending, int top, boolean linear, List<String> scales,
@@ -1742,6 +1742,15 @@ public final class FeatureStages {
         }
     }
 
+    /** The ridge of a factorization block from its coordinates ({@code reg}, or the per-part ones the compiler writes). */
+    static Factorization.Regularization regularization(final Map<String, String> k, final int fields) {
+        if (k.get("reg") != null) return Factorization.Regularization.uniform(Double.parseDouble(k.get("reg")), fields);
+        return new Factorization.Regularization(Double.parseDouble(k.get("regBias")),
+                Arrays.stream(k.get("regLinear").split(",")).mapToDouble(Double::parseDouble).toArray(),
+                Arrays.stream(k.get("regFactors").split(",")).mapToDouble(Double::parseDouble).toArray(),
+                Double.parseDouble(k.get("regPairWeights")), "perRow".equals(k.get("regScale")));
+    }
+
     static List<FmSpec> fmSpecs(final List<OutputColumn> stageColumns) {
         final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
         for (final OutputColumn c : stageColumns) {
@@ -1769,7 +1778,7 @@ public final class FeatureStages {
             }
             specs.add(new FmSpec(e.getKey(), fields, "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
-                    epochs, Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
+                    epochs, regularization(k, fields.size()), Long.parseLong(k.get("seed")),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null, folds,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), plan,

@@ -559,7 +559,12 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   of the example set, never of the runner's delivery order. `task.loss` (squared / logistic / plackettLuce) is a
   `Factorization.Objective`: `derivatives` = {g, H} along one parameter, `shift` keeps the cached scores (and the
   Plackett–Luce pool sums `Z` per contest stage) current, `refresh` recomputes them once per epoch — a new loss is one
-  `Objective` checked by `FactorizationTest.assertDerivatives` (finite differences + shift-vs-refresh). Contest keys are
+  `Objective` checked by `FactorizationTest.assertDerivatives` (finite differences + shift-vs-refresh). The ridge is a
+  `Factorization.Regularization` (bias / per-field linear / per-field factors / pairWeights, `perRow` = the λ of a value's
+  w and v times its rows — never the bias or r_fg, which are shared by every row and would pull the prediction to 0), written by `FeaturePlanCompiler.fmRegularization` as the one `reg` coordinate when uniform,
+  else `regBias` / `regLinear` / `regFactors` / `regPairWeights` / `regScale` (`FeatureStages.regularization` reads both);
+  a uniform one must stay bit-identical to the scalar (`testUniformRegularizationIsTheScalar`), and the linear part is
+  pinned to an exact normal-equation solve (`testLinearRidgeIsTheExactRidgeSolution`). Contest keys are
   `FmSpec.contestOf` = (event millis, context keys); `ORDER` sorts by contest, so the key text decides the fit order —
   a test that rebuilds the examples must build the same key. Numeric fields: `Example.x` holds the raw values by field
   index and `values[f]` is `Factorization.NUMERIC` ("") when present; `train` turns them into the per-example units `u`

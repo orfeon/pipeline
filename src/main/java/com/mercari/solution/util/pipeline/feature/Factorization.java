@@ -297,9 +297,14 @@ public final class Factorization {
      *                   that already carries the main effects)
      * @param scales     per field: null for a categorical field, {@code zscore} / {@code none} for a numeric one (how its
      *                   value is standardised; the mean and standard deviation are the fit's own); null = all categorical
+     * @param reg        the ridge per kind of parameter and field (a number: {@link Regularization#uniform})
      */
-    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, double reg, long seed,
+    public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, Regularization reg, long seed,
                           Loss loss, int top, boolean descending, boolean linear, List<String> scales) implements Serializable {
+        public Options {
+            Objects.requireNonNull(reg, "reg");
+        }
+
         public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed) {
             this(fields, fieldWeighted, latentDim, epochs, reg, seed, Loss.squared, 0, false, true, null);
         }
@@ -309,11 +314,61 @@ public final class Factorization {
             this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, null);
         }
 
+        /** {@code reg} on every parameter. */
+        public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed,
+                       final Loss loss, final int top, final boolean descending, final boolean linear, final List<String> scales) {
+            this(fields, fieldWeighted, latentDim, epochs, Regularization.uniform(reg, fields.size()), seed, loss, top, descending, linear, scales);
+        }
+
         /** Per field: numeric or categorical. */
         public boolean[] numeric() {
             final boolean[] numeric = new boolean[fields.size()];
             for (int f = 0; f < numeric.length; f++) numeric[f] = scales != null && scales.get(f) != null;
             return numeric;
+        }
+    }
+
+    /**
+     * The ridge {@code (g − λ θ) / (H + λ)} of every parameter ({@code als.reg}): an absolute amount added to the
+     * parameter's curvature H, which is summed over the training rows that carry it — not a per-row penalty. Under
+     * {@code perRow} ({@code als.regScale: perRow}) the λ of a value's weight and factors is multiplied by the value's
+     * training rows. The bias and the field-pair weights are not per value: one parameter shared by (nearly) every row,
+     * so a per-row λ would shrink it towards 0 by λ / (1 + λ) of its size (a constant target of 100 read as 75 at λ = 1)
+     * — they keep their λ as it is.
+     *
+     * @param bias        the global bias w0 (a contest loss has none)
+     * @param linear      per field: its per-value weights w
+     * @param factors     per field: its latent factors v
+     * @param pairWeights fwfm: the field-pair weights r_fg
+     */
+    public record Regularization(double bias, double[] linear, double[] factors, double pairWeights, boolean perRow) implements Serializable {
+        public static Regularization uniform(final double reg, final int fields) {
+            final double[] all = new double[fields];
+            Arrays.fill(all, reg);
+            return new Regularization(reg, all, all.clone(), reg, false);
+        }
+
+        /** The ridge of a parameter carried by {@code rows} training rows. */
+        double of(final double reg, final int rows) {
+            return perRow ? reg * rows : reg;
+        }
+
+        // by value: a record compares and prints its array components by identity
+        @Override
+        public boolean equals(final Object o) {
+            return o instanceof Regularization other && Double.compare(bias, other.bias) == 0 && Arrays.equals(linear, other.linear)
+                    && Arrays.equals(factors, other.factors) && Double.compare(pairWeights, other.pairWeights) == 0 && perRow == other.perRow;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(bias, Arrays.hashCode(linear), Arrays.hashCode(factors), pairWeights, perRow);
+        }
+
+        @Override
+        public String toString() {
+            return "Regularization[bias=" + bias + ", linear=" + Arrays.toString(linear) + ", factors=" + Arrays.toString(factors)
+                    + ", pairWeights=" + pairWeights + ", perRow=" + perRow + "]";
         }
     }
 
@@ -684,7 +739,7 @@ public final class Factorization {
             }
         }
         final Objective objective = Objective.of(options, examples, s);
-        final double reg = options.reg();
+        final Regularization reg = options.reg();
         int longest = 0;
         for (int f = 0; f < F; f++) for (int id = 0; id + 1 < start[f].length; id++) longest = Math.max(longest, start[f][id + 1] - start[f][id]);
         final double[] h = new double[Math.max(longest, n)];
@@ -696,7 +751,7 @@ public final class Factorization {
             // global bias
             if (!contest) {
                 Arrays.fill(h, 0, n, 1d);
-                final double delta = objective.delta(all, 0, n, h, w0, reg);
+                final double delta = objective.delta(all, 0, n, h, w0, reg.bias());
                 objective.shift(all, 0, n, h, delta);
                 w0 += delta;
             }
@@ -706,7 +761,7 @@ public final class Factorization {
                     for (int id = 0; id + 1 < start[f].length; id++) {
                         final int from = start[f][id], to = start[f][id + 1];
                         for (int j = from; j < to; j++) h[j - from] = multiplier(u, members[f][j] * F + f);
-                        final double delta = objective.delta(members[f], from, to, h, w[f][id], reg);
+                        final double delta = objective.delta(members[f], from, to, h, w[f][id], reg.of(reg.linear()[f], to - from));
                         objective.shift(members[f], from, to, h, delta);
                         w[f][id] += delta;
                     }
@@ -723,7 +778,7 @@ public final class Factorization {
                             final double own = multiplier(u, i * F + f);
                             h[j - from] = own * (fm ? q[i * k + d] - p * own : slope(r, v, u, idx, i, F, f, d, k));
                         }
-                        final double delta = objective.delta(members[f], from, to, h, p, reg);
+                        final double delta = objective.delta(members[f], from, to, h, p, reg.of(reg.factors()[f], to - from));
                         objective.shift(members[f], from, to, h, delta);
                         if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta * multiplier(u, members[f][j] * F + f);
                         v[f][id * k + d] = p + delta;
@@ -740,7 +795,7 @@ public final class Factorization {
                             if (a >= 0 && b >= 0) for (int d = 0; d < k; d++) dot += v[f][a * k + d] * v[g][b * k + d];
                             h[i] = a >= 0 && b >= 0 ? dot * multiplier(u, i * F + f) * multiplier(u, i * F + g) : 0;
                         }
-                        final double delta = objective.delta(all, 0, n, h, r[f][g], reg);
+                        final double delta = objective.delta(all, 0, n, h, r[f][g], reg.pairWeights());
                         objective.shift(all, 0, n, h, delta);
                         r[f][g] += delta;
                         r[g][f] = r[f][g];
