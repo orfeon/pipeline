@@ -2228,6 +2228,28 @@ public class FeaturePlanCompilerTest {
                 .anyMatch(m -> "factorization.als".equals(m.code()) && m.message().contains("bias")), bias::describe);
     }
 
+    /** factorization fitBlock / trainRows: int64 readouts of the fit a row reads; fitBlock outside forward is warned (null). */
+    @Test
+    public void testFactorizationFitReadouts() {
+        final String readouts = FM_BLOCK.replace("      - {sum: true, as: fm_linear}", "      - {sum: true, as: fm_linear}\n          - {fitBlock: true}\n          - {trainRows: true, as: fm_rows}");
+        Assertions.assertTrue(readouts.contains("fitBlock"), readouts);
+        final FeaturePlan forward = compile(SOURCES, withEncoding(readouts.replace("fit: {artifact: \"gs://bucket/features\", window: P1000D}", "fit: {mode: forward, blocks: {size: P30D}}")));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertEquals("fitBlock", column(forward, "fm_fit_block").getCoordinates().get("kind"));
+        Assertions.assertEquals(Schema.Type.int64, column(forward, "fm_fit_block").getFieldType().getType());
+        Assertions.assertEquals("trainRows", column(forward, "fm_rows").getCoordinates().get("kind"));
+        Assertions.assertFalse(forward.getDiagnostics().getMessages().stream().anyMatch(m -> m.message().contains("fitBlock is the forward change point")), forward::describe);
+        final FeaturePlan statik = compile(SOURCES, withEncoding(readouts));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertTrue(statik.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("fitBlock is the forward change point")), statik::describe);
+        // several kinds in one output: only the first is output, warned
+        final FeaturePlan both = compile(SOURCES, withEncoding(readouts.replace("{fitBlock: true}", "{fitBlock: true, trainRows: true}")));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertTrue(both.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("only fitBlock is output")), both::describe);
+    }
+
     /**
      * factorization als.tol: a coordinate when declared, a range check, and under forward the warm start's epoch cap
      * defaults to the whole epochs (a warm start only shortens a fit that stops at convergence).

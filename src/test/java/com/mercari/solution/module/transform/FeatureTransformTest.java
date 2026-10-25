@@ -725,6 +725,8 @@ public class FeatureTransformTest {
                         - {count: seller_id, as: fm_seller_rows}
                         - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side}
                         - {sum: true, as: fm_linear}
+                        - {fitBlock: true, as: fm_fit_block}
+                        - {trainRows: true, as: fm_train_rows}
                 """.formatted(fit);
         return FEATURE_CONFIG.replace("      output:\n", fm.replaceAll("(?m)^", "    ") + "      output:\n");
     }
@@ -752,8 +754,13 @@ public class FeatureTransformTest {
             Assertions.assertNull(row.getPrimitiveValue("f_fm_pair"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_seller_rows"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_side"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_fit_block"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_train_rows"), row::toString);
             return;
         }
+        // the geometry of the fit the row reads: its forward change point (null otherwise) and its training rows
+        Assertions.assertEquals(model.changePoint, (Long) row.getPrimitiveValue("f_fm_fit_block"), row::toString);
+        Assertions.assertEquals(model.rows, ((Number) row.getPrimitiveValue("f_fm_train_rows")).longValue(), row::toString);
         final Double side = model.between(values, null, new int[]{0, 1}, new int[]{2});
         if (side == null) Assertions.assertNull(row.getPrimitiveValue("f_fm_side"), row::toString);
         else Assertions.assertEquals(side, row.getAsDouble("f_fm_side"), 1e-9, row::toString);
@@ -831,7 +838,11 @@ public class FeatureTransformTest {
                         fits.modelFor(null, blocks.usableBlock(millis.get(key), predictOffset, lag), 1);
                 Assertions.assertEquals(key.startsWith("A/") || key.startsWith("B/"), model == null, key);
                 assertFm(row, model, examples.get(key).values());
-                if (model != null) read++;
+                if (model != null) {
+                    read++;
+                    // fitted on blocks up to and including the row's usable one only: the audit the readout is for
+                    Assertions.assertTrue((Long) row.getPrimitiveValue("f_fm_fit_block") <= blocks.usableBlock(millis.get(key), predictOffset, lag), key);
+                }
             }
             Assertions.assertEquals(3, read);
             return null;
@@ -844,6 +855,9 @@ public class FeatureTransformTest {
                 dir, dirs[0].getName(), "fm", FM_FIELDS, false, 2);
         Assertions.assertEquals(fits.total.predict(examples.get("D/s1").values()), whole.predict(examples.get("D/s1").values()), 1e-9);
         Assertions.assertEquals(4L, whole.count(examples.get("D/s1").values(), 0));
+        // the training rows come through the artifact's __global record
+        Assertions.assertTrue(whole.rows > 0);
+        Assertions.assertEquals(fits.total.rows, whole.rows);
     }
 
     /**

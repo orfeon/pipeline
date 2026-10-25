@@ -136,7 +136,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   any code that enumerates quantileTransform columns as blocks), `Spectral` (`type: spectralEmbedding`: unordered pair counts of a value with its lag
   values — the `PairCounts` summary, sorted maps so nothing depends on arrival order — → PPMI → `Svd.jacobi` →
   coordinates `sqrt(|λ|) · v` by decreasing |λ|, vocabulary capped by co-occurrence mass; `<block>.spectral.json`), `Factorization`
-  (fm / fwfm ALS + `<block>.fm.avro`; `Fits` = whole-input + fold / forward models, `Model.count` the per-value training rows;
+  (fm / fwfm ALS + `<block>.fm.avro`; `Fits` = whole-input + fold / forward models, `Model.count` the per-value training rows, `Model.rows` the fit's training rows — stored as the `__global`
+  record's `n`, 0 = unknown for an older artifact, read out as `trainRows` (null when 0) — and `Model.changePoint` the forward change
+  point, set in `forward()` after `alignTo` and read out as `fitBlock`;
   forward models are NOT a side input: `FmSpec.serve` joins each change point's model with the rows keyed by the change point
   they read, `FitApplyDoFn` skips the block (`blockServed`); a windowed input or a non-default trigger falls back to the
   side input; the whole-input model is fitted only when the artifact is written (`writesTotal`); coders in

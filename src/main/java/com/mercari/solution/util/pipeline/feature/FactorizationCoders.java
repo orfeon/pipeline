@@ -92,6 +92,9 @@ final class FactorizationCoders {
                     writeDoubles(e.getValue(), out);
                 }
             }
+            VarInt.encode(m.rows, out);
+            data.writeBoolean(m.changePoint != null);
+            if (m.changePoint != null) data.writeLong(m.changePoint);
             // the fit's report (the artifact manifest of a fold run's whole-input model is written after this coder)
             final Factorization.FitReport r = m.report;
             data.writeBoolean(r != null);
@@ -135,6 +138,8 @@ final class FactorizationCoders {
                 final Map<String, double[]> params = m.params.get(f);
                 for (int i = 0; i < size; i++) params.put(readString(in), readDoubles(in));
             }
+            m.rows = VarInt.decodeLong(in);
+            if (data.readBoolean()) m.changePoint = data.readLong();
             if (data.readBoolean()) {
                 final int rows = VarInt.decodeInt(in);
                 final int epochs = VarInt.decodeInt(in);

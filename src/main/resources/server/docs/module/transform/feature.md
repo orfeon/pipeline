@@ -981,6 +981,8 @@ is a fold:
       - {between: {left: [seller_id, category], right: [condition_grade]}, as: seller_side_grade}   # Σ of the cross-side pairs
       - {count: seller_id, as: seller_rows}                    # training rows with the row's seller (int64)
       - {sum: true, as: fm_linear}                             # w0 + Σ w + Σ pairs (without the offset)
+      - {fitBlock: true, as: fm_fit_block}                     # forward: the change point of the model the row reads (int64)
+      - {trainRows: true, as: fm_train_rows}                   # the training rows of that model (int64)
 ```
 
 `ŷ = w0 + Σ_f w_f[x_f] + Σ_{f<g} r_fg ⟨v_f[x_f], v_g[x_g]⟩`, fitted by alternating least squares (closed-form
@@ -990,7 +992,19 @@ on one worker, so it must fit in memory. A pair score is non-null whenever both 
 for a pair that never occurred together: that is what the low-rank model adds over an encoding of the cross, which
 falls back to its parent for an unseen pair. A value the fit never saw yields null `pair` / `embedding` outputs and a
 `count` of 0 (the `sum` still adds what the known fields contribute); a null value yields a null `count`. `count` is the
-number of training rows that carried the row's value in the model the row reads — the support behind its factors. The
+number of training rows that carried the row's value in the model the row reads — the support behind its factors.
+`fitBlock` and `trainRows` (default names `<name>_fit_block` / `<name>_train_rows`) describe the fit itself, so the split between fitting and applying can be checked from the
+output alone: `trainRows` is the model's training rows (the rows a contest loss learns from; null where the row reads
+no model, or the model comes from an artifact written before the count was stored), and `fitBlock`, under `fit.mode:
+forward`, the time block the model was fitted at — it read the blocks up to and including it, never a later one (with
+`window`, the fit reads the last `window` of them, but a warm start carries values from the fits before, which read
+older blocks). Block indices count as the engine does: `size: P30D` →
+`floor(epochMillis / size)`, `bucket: month` → `year · 12 + month − 1` (`quarter` → `year · 4 + (month − 1) / 3`, `year`
+→ the year, `week` / `day` → whole weeks / days since the epoch, UTC — so weeks start on Thursday, as 1970-01-01 did,
+not on a `DATE_TRUNC(WEEK)` Sunday or an ISO Monday), a calendar clock → the tick ordinal divided by
+`ticks`. A row may read a model fitted at block `b` only when `b` ends by its `predictAt` minus the target's
+availability lag, i.e. `fitBlock < block(eventTime + predictAt − lag)`. `fitBlock` is null outside `forward` (warning
+`factorization.outputs`). The
 artifact (`<planHash>/<block>.fm.avro` with the per-value counts + manifest with the fwfm `pairWeights` ranking) holds
 the whole-input model and is written and reused like the static encoding artifacts.
 

@@ -281,7 +281,7 @@ not expand because another block failed).
 | `factorization.als.reg` | info | the ridge in effect per part and field, and what to compare it with (a value's training rows under squared, its Σ p (1 − p) otherwise; `regScale: perRow` = proportional shrinkage) — an absolute ridge, not a per-row rate |
 | `factorization.fields.numeric` | warning | every field is numeric: the model is a quadratic form of the values, with no per-value parameter |
 | `factorization.fields.scale` | warning | a numeric field with `scale: none` under `loss: logistic` / `plackettLuce` / `softmax`: the capped steps overshoot or crawl on a raw value far from ±1 — use `scale: zscore` |
-| `factorization.outputs` | warning | `perUnit: true` on a pair without a numeric field, or on a `between`, is ignored |
+| `factorization.outputs` | warning | `perUnit: true` on a pair without a numeric field, or on a `between`, is ignored; `fitBlock` outside `fit.mode: forward` reads null; an output object setting several kinds (e.g. `{fitBlock: true, trainRows: true}`) outputs only the first — one output per kind |
 | `factorization.fit.mode` / `discretize.fit.mode` | error | these types are always `static` |
 | `quantileTransform.fit.mode` / `quantileTransform.fit.mode.static` | error / info | quantileTransform is `static` or `forward` (expanding / fold are rejected); the info says a block declared `static` under a top-level forward fit and therefore sees the whole input |
 | `svd.fit.mode` | error | `static` \| `forward` only (`expanding` / `fold` are rejected) |

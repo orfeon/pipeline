@@ -324,6 +324,32 @@ public class FactorizationTest {
             Assertions.assertEquals(model.pair(e.values(), 0, 1), loaded.pair(e.values(), 0, 1), 1e-12);
             for (int f = 0; f < 3; f++) Assertions.assertEquals(model.count(e.values(), f), loaded.count(e.values(), f));
         }
+        Assertions.assertEquals(16, model.rows);
+        Assertions.assertEquals(model.rows, loaded.rows, "the training rows ride in the global record");
+    }
+
+    /** Every forward model knows its change point (it read the blocks up to it) and its training rows; the others have none. */
+    @Test
+    public void testFitGeometry() {
+        final List<Factorization.Example> examples = additive();
+        final Factorization.Fits forward = Factorization.fitAll(convex(20, 0), examples, new Factorization.Plan(0, true, 2, 0, Alignment.PROCRUSTES, true, 10));
+        for (final java.util.Map.Entry<Long, Factorization.Model> e : forward.blocks.entrySet()) {
+            // a window of 2 blocks: the rows of blocks (at - 2, at]; a change point past the data has none
+            final long at = e.getKey();
+            final long rows = examples.stream().filter(x -> x.tag() > at - 2 && x.tag() <= at).count();
+            if (rows == 0) {
+                Assertions.assertNull(e.getValue(), "change point " + at);
+                continue;
+            }
+            Assertions.assertEquals(e.getKey(), e.getValue().changePoint);
+            Assertions.assertEquals(rows, e.getValue().rows, "change point " + at);
+            Assertions.assertEquals(e.getValue().rows, e.getValue().report.rows());
+        }
+        Assertions.assertNull(forward.total.changePoint, "the whole-input model under a window is a fit of its own");
+        Assertions.assertEquals(examples.size(), forward.total.rows);
+        final Factorization.Model whole = Factorization.fit(convex(20, 0), examples);
+        Assertions.assertNull(whole.changePoint);
+        Assertions.assertEquals(examples.size(), whole.rows);
     }
 
     /** between: the sum of the known cross-side pairs; an unknown member drops out, nothing known reads null. */
