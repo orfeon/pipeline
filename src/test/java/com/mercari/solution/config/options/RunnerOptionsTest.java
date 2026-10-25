@@ -1,6 +1,5 @@
 package com.mercari.solution.config.options;
 
-import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Options;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -69,7 +68,7 @@ public class RunnerOptionsTest {
                 }
                 """);
         final PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
-        SdkHarnessOptions.setOptions(pipelineOptions, options.getSdkHarness(), MPipeline.Runner.direct);
+        SdkHarnessOptions.setOptions(pipelineOptions, options.getSdkHarness());
         final org.apache.beam.sdk.options.SdkHarnessOptions harness = pipelineOptions.as(org.apache.beam.sdk.options.SdkHarnessOptions.class);
         Assertions.assertEquals(org.apache.beam.sdk.options.SdkHarnessOptions.LogLevel.DEBUG, harness.getDefaultSdkHarnessLogLevel());
         Assertions.assertEquals(org.apache.beam.sdk.options.SdkHarnessOptions.LogLevel.WARN, harness.getSdkHarnessLogLevelOverrides().get("org.apache.kafka"));

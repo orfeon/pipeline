@@ -174,7 +174,7 @@ public class Options implements Serializable {
             case spark -> SparkOptions.setOptions(pipelineOptions, options.spark);
         }
 
-        SdkHarnessOptions.setOptions(pipelineOptions, options.sdkHarness, runner);
+        SdkHarnessOptions.setOptions(pipelineOptions, options.sdkHarness);
 
         // after the runner options: options.dataflow.project also sets GcpOptions.project
         GCPOptions.applyDefaultProject(pipelineOptions);

@@ -1,6 +1,5 @@
 package com.mercari.solution.config.options;
 
-import com.mercari.solution.MPipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
 
 import java.io.Serializable;
@@ -12,9 +11,9 @@ import java.util.Map;
  * the pipeline's user code (worker log levels, state cache, stuck-bundle timeout). Honoured by Dataflow and the
  * portable runners (prism / portable / flink / spark job services).
  *
- * <p>On Dataflow the log levels are mirrored to {@code DataflowWorkerLoggingOptions}
- * ({@code defaultWorkerLogLevel} / {@code workerLogLevelOverrides}), which the legacy (non runner v2) worker
- * reads instead, so the setting takes effect whichever worker runs the job.
+ * <p>The log levels are not copied to the deprecated {@code DataflowWorkerLoggingOptions}: the legacy (non runner
+ * v2) Dataflow worker falls back to these options when the deprecated ones are unset, and setting the deprecated
+ * ones would log a deprecation warning on every worker and override a command-line {@code --defaultWorkerLogLevel}.
  */
 public class SdkHarnessOptions implements Serializable {
 
@@ -28,8 +27,7 @@ public class SdkHarnessOptions implements Serializable {
 
     public static void setOptions(
             final PipelineOptions pipelineOptions,
-            final SdkHarnessOptions sdkHarness,
-            final MPipeline.Runner runner) {
+            final SdkHarnessOptions sdkHarness) {
 
         if(sdkHarness == null) {
             return;
@@ -43,17 +41,6 @@ public class SdkHarnessOptions implements Serializable {
                 .set("maxCacheMemoryUsagePercent", sdkHarness.maxCacheMemoryUsagePercent)
                 .set("elementProcessingTimeoutMinutes", sdkHarness.elementProcessingTimeoutMinutes)
                 .set("jdkAddOpenModules", sdkHarness.jdkAddOpenModules);
-
-        if(runner == MPipeline.Runner.dataflow
-                && (sdkHarness.defaultSdkHarnessLogLevel != null || sdkHarness.sdkHarnessLogLevelOverrides != null)) {
-            try {
-                RunnerOptionSetter.of(pipelineOptions, "org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions")
-                        .set("defaultWorkerLogLevel", sdkHarness.defaultSdkHarnessLogLevel)
-                        .set("workerLogLevelOverrides", sdkHarness.sdkHarnessLogLevelOverrides);
-            } catch (final ClassNotFoundException e) {
-                throw new RuntimeException("Failed to set dataflow worker logging options", e);
-            }
-        }
     }
 
 }

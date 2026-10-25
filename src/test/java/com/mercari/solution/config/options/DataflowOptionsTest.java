@@ -89,9 +89,12 @@ public class DataflowOptionsTest {
         Assertions.assertTrue(((java.util.List<?>) clazz.getMethod("getExperiments").invoke(dataflowOptions)).contains("use_runner_v2"));
     }
 
-    /** On Dataflow the SDK harness log levels are mirrored to the legacy worker's logging options. */
+    /**
+     * The SDK harness log levels are not copied to the deprecated DataflowWorkerLoggingOptions: the legacy worker
+     * falls back to SdkHarnessOptions while the deprecated ones keep their defaults (INFO / unset).
+     */
     @Test
-    public void testSdkHarnessLogLevelsAreMirroredToWorkerLogging() throws Exception {
+    public void testSdkHarnessLogLevelsLeaveDeprecatedWorkerLoggingAlone() throws Exception {
         final Class<?> clazz;
         try {
             clazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowWorkerLoggingOptions");
@@ -108,11 +111,12 @@ public class DataflowOptionsTest {
                 }
                 """, Options.class);
         final PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
-        SdkHarnessOptions.setOptions(pipelineOptions, options.getSdkHarness(), com.mercari.solution.MPipeline.Runner.dataflow);
+        SdkHarnessOptions.setOptions(pipelineOptions, options.getSdkHarness());
         final Object logging = as(pipelineOptions, clazz);
-        Assertions.assertEquals("WARN", clazz.getMethod("getDefaultWorkerLogLevel").invoke(logging).toString());
-        Assertions.assertEquals("DEBUG", ((java.util.Map<?, ?>) clazz.getMethod("getWorkerLogLevelOverrides").invoke(logging))
-                .get("com.mercari.solution").toString());
+        Assertions.assertEquals("INFO", clazz.getMethod("getDefaultWorkerLogLevel").invoke(logging).toString());
+        Assertions.assertNull(clazz.getMethod("getWorkerLogLevelOverrides").invoke(logging));
+        Assertions.assertEquals(org.apache.beam.sdk.options.SdkHarnessOptions.LogLevel.WARN,
+                pipelineOptions.as(org.apache.beam.sdk.options.SdkHarnessOptions.class).getDefaultSdkHarnessLogLevel());
     }
 
     @Test

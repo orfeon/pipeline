@@ -14,8 +14,9 @@ honoured by Dataflow and the portable runners (prism, portable, Flink / Spark jo
 | elementProcessingTimeoutMinutes | Integer             | Terminate the SDK harness (the runner then retries the work) when a single element has been processing longer than this (minutes; default 0 = no limit). A safety net against stuck calls to external services. Applies to SDK-harness workers (Dataflow Runner v2, portable runners). |
 | jdkAddOpenModules               | Array<String\>      | `--add-opens` flags for the worker JVM (`module/package=target-module`, e.g. `java.base/java.nio=ALL-UNNAMED`), for libraries that need reflective access on Java 17+. |
 
-On **Dataflow** `defaultSdkHarnessLogLevel` / `sdkHarnessLogLevelOverrides` are also applied to the legacy worker's
-`defaultWorkerLogLevel` / `workerLogLevelOverrides`, so the levels take effect with and without Runner v2.
+On **Dataflow** the log levels take effect with and without Runner v2: the legacy worker reads
+`defaultSdkHarnessLogLevel` / `sdkHarnessLogLevelOverrides` too. Its deprecated `--defaultWorkerLogLevel` /
+`--workerLogLevelOverrides`, when given on the command line, take precedence over them.
 
 The log levels only change what the *worker* emits; the launcher / driver process (where the pipeline is
 assembled) keeps its own logging configuration.
