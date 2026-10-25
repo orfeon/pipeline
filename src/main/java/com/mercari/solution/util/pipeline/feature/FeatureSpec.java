@@ -273,7 +273,7 @@ public class FeatureSpec implements Serializable {
         public String as;
     }
 
-    /** One factorization output: {@code pair: [a, b]}, {@code between: {left, right}}, {@code embedding: field (dims)}, {@code count: field} or {@code sum: true}. */
+    /** One factorization output: {@code pair: [a, b]}, {@code between: {left, right}}, {@code embedding: field (dims)}, {@code count: field}, {@code fitBlock: true}, {@code trainRows: true} or {@code sum: true}. */
     public static class FmOutput implements Serializable {
         public String kind;
         public List<String> pair = new ArrayList<>();
@@ -1330,6 +1330,14 @@ public class FeatureSpec implements Serializable {
         for (final JsonObject out : "copula".equals(def.type) ? List.<JsonObject>of() : objects(o, "outputs")) {
             final FmOutput fm = new FmOutput();
             fm.as = Json.string(out, "as");
+            final List<String> kinds = new ArrayList<>();
+            // in the order the kind is chosen below; the flags count when true
+            for (final String key : List.of("pair", "embedding", "between", "count")) if (out.has(key)) kinds.add(key);
+            for (final String key : List.of("fitBlock", "trainRows", "sum")) if (Json.bool(out, key, false)) kinds.add(key);
+            if (kinds.size() > 1) {
+                diagnostics.warning("factorization.outputs", loc, "an output reads one kind: " + String.join(", ", kinds)
+                        + " are set, only " + kinds.get(0) + " is output — write one output per kind");
+            }
             if (out.has("pair")) {
                 fm.kind = "pair";
                 fm.pair = Json.strings(out, "pair");

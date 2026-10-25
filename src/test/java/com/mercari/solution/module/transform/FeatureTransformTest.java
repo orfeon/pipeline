@@ -840,7 +840,7 @@ public class FeatureTransformTest {
                 assertFm(row, model, examples.get(key).values());
                 if (model != null) {
                     read++;
-                    // fitted on blocks before the row's usable one only: the audit the readout is for
+                    // fitted on blocks up to and including the row's usable one only: the audit the readout is for
                     Assertions.assertTrue((Long) row.getPrimitiveValue("f_fm_fit_block") <= blocks.usableBlock(millis.get(key), predictOffset, lag), key);
                 }
             }
@@ -855,6 +855,9 @@ public class FeatureTransformTest {
                 dir, dirs[0].getName(), "fm", FM_FIELDS, false, 2);
         Assertions.assertEquals(fits.total.predict(examples.get("D/s1").values()), whole.predict(examples.get("D/s1").values()), 1e-9);
         Assertions.assertEquals(4L, whole.count(examples.get("D/s1").values(), 0));
+        // the training rows come through the artifact's __global record
+        Assertions.assertTrue(whole.rows > 0);
+        Assertions.assertEquals(fits.total.rows, whole.rows);
     }
 
     /**

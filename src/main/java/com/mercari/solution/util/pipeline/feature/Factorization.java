@@ -124,7 +124,7 @@ public final class Factorization {
         public final double[] mean, scale;
         /** What the fit that produced the model did (null for a model read from an artifact). */
         public FitReport report;
-        /** The training rows of the fit (the rows a contest loss learns from; 0 for an artifact written without them). */
+        /** The training rows of the fit (the rows a contest loss learns from; 0 = unknown, for an artifact written without them). */
         public long rows;
         /** fit.mode forward: the change point (time block) the model was fitted at — it read blocks up to this one; null otherwise. */
         public Long changePoint;

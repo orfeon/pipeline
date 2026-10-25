@@ -2243,6 +2243,11 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
         Assertions.assertTrue(statik.getDiagnostics().getMessages().stream()
                 .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("fitBlock is the forward change point")), statik::describe);
+        // several kinds in one output: only the first is output, warned
+        final FeaturePlan both = compile(SOURCES, withEncoding(readouts.replace("{fitBlock: true}", "{fitBlock: true, trainRows: true}")));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertTrue(both.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("only fitBlock is output")), both::describe);
     }
 
     /**
