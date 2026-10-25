@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 
 public class PrismOptionsTest {
 
-    private static final String BUNDLED = "/opt/prism/apache_beam-v2.76.0-prism-linux-amd64";
+    private static final String BUNDLED = "/opt/prism/apache_beam-v2.77.0-prism-linux-amd64";
 
     /** The bundled binary is a default: a config value (even an empty one) or a command-line value wins. */
     @Test

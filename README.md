@@ -96,7 +96,7 @@ See [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) for
 | `spark`              | SparkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `server`             | —              | Pipeline API server container image (WAR on Jetty)             |
 
-(Other profiles: `portable`, `dataflow-gpu`.)
+(Other profile: `portable`.)
 
 ## Pipeline API Server
 

@@ -31,7 +31,7 @@ mvn test -Dtest=ConfigTest#testMethodName  # single method
 
 ### Maven Profiles (runners)
 
-`dataflow` (default) · `direct` · `prism` · `portable` · `flink` · `spark` · `server` (WAR) · `dataflow-gpu`.
+`dataflow` (default) · `direct` · `prism` · `portable` · `flink` · `spark` · `server` (WAR).
 The active runner is also resolved at runtime from pipeline options (see `MPipeline.Runner`).
 
 ## Architecture
@@ -281,6 +281,6 @@ self-contained (parameters, examples) — the agent reads one file per module.
 ## Key Dependencies
 
 - Java 21
-- Apache Beam 2.76.0
+- Apache Beam 2.77.0
 - Google Cloud Platform SDKs (BigQuery, Spanner, Datastore, Firestore, Bigtable, Pub/Sub, …)
 - Jetty EE11 12 (Server)

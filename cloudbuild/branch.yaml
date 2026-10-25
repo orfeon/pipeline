@@ -45,41 +45,6 @@ steps:
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-server'
     waitFor: ['build-direct']
-  # Dataflow GPU: launcher image (Jib)
-  - name: maven:3.9-eclipse-temurin-21
-    entrypoint: mvn
-    args:
-      - "clean"
-      - "package"
-      - "-DskipTests"
-      - "-Pdataflow-gpu"
-      - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
-      - "-Dmaven.repo.local=/workspace/.m2"
-    id: 'build-dataflow-gpu'
-    waitFor: ['build-server']
-  # Dataflow GPU: flex template build
-  - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli:slim'
-    args:
-      - "gcloud"
-      - "dataflow"
-      - "flex-template"
-      - "build"
-      - "gs://${_BUCKET}/${_VERSION}-gpu"
-      - "--image"
-      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
-      - "--sdk-language"
-      - "JAVA"
-    waitFor: ['build-dataflow-gpu']
-  # Dataflow GPU: worker SDK container image with CUDA/cuDNN
-  - name: 'gcr.io/kaniko-project/executor:latest'
-    args:
-      - "--destination=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu-worker:${_VERSION}"
-      - "--context=dir:///workspace/containers/dataflow-gpu"
-      - "--dockerfile=Dockerfile"
-      - "--build-arg=BEAM_VERSION=${_BEAM_VERSION}"
-      - "--cache=true"
-      - "--cache-ttl=168h"
-    waitFor: ['-']
   # Flink: fat JAR build (Jib skipped)
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -90,7 +55,7 @@ steps:
       - "-Pflink"
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-flink'
-    waitFor: ['build-dataflow-gpu']
+    waitFor: ['build-server']
   # Flink: worker SDK container image
   - name: 'gcr.io/kaniko-project/executor:latest'
     args:
@@ -126,7 +91,6 @@ substitutions:
   _REGION: "{SET YOUR GAR REPOSITORY REGION}"
   _REPOSITORY: "{SET YOUR GAR REPOSITORY NAME}"
   _VERSION: ${BRANCH_NAME}
-  _BEAM_VERSION: "2.76.0"
 options:
   dynamic_substitutions: true
   logging: CLOUD_LOGGING_ONLY

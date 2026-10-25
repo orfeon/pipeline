@@ -30,7 +30,7 @@ config nor the command line set one, so:
   own download.
 * A container starts with **no outbound network access** and **no writable `$HOME`** — a plain local
   binary is used in place. A URL given as `prismLocation` is fetched into `~/.apache_beam/cache/prism/bin`
-  at startup and needs a writable, exec-capable `$HOME`. A **local zip is not unpacked** by Beam 2.76
+  at startup and needs a writable, exec-capable `$HOME`. A **local zip is not unpacked** by Beam (2.76 / 2.77)
   (it is copied as is and fails to execute): unzip it yourself and point at the binary.
 * The runner still needs a **writable `java.io.tmpdir`**: the portable runner zips the classpath into a
   temp file at every submission (a hardened pod with `readOnlyRootFilesystem` needs an `emptyDir` on
