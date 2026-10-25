@@ -68,6 +68,15 @@ public class PrismOptionsTest {
         options = JsonUtil.fromJson("{\"prism\":{\"prismLocation\":\"\",\"prismVersionOverride\":\"2.76.0\"}}", Options.class);
         PrismOptions.setOptions(pipelineOptions, options.getPrism(), BUNDLED);
         Assertions.assertEquals("", prismLocation(pipelineOptions, clazz));
+
+        // setEnableWebUI takes a Boolean (a boolean.class lookup used to fail)
+        pipelineOptions = PipelineOptionsFactory.create();
+        options = JsonUtil.fromJson("{\"prism\":{\"enableWebUI\":false,\"prismLogLevel\":\"warn\"}}", Options.class);
+        PrismOptions.setOptions(pipelineOptions, options.getPrism(), BUNDLED);
+        final Object prismOptions = pipelineOptions.as((Class<? extends PipelineOptions>) clazz);
+        Assertions.assertEquals(false, clazz.getMethod("getEnableWebUI").invoke(prismOptions));
+        Assertions.assertEquals("warn", clazz.getMethod("getPrismLogLevel").invoke(prismOptions));
+        Assertions.assertEquals(BUNDLED, prismLocation(pipelineOptions, clazz));
     }
 
     @SuppressWarnings("unchecked")

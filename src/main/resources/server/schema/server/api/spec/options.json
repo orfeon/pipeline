@@ -35,7 +35,7 @@
     "sdkHarness": {
       "type": "object",
       "title": "SDK Harness",
-      "description": "Java SDK harness (worker) settings for every runner (see docs/options/sdkharness.md)",
+      "description": "Java SDK harness (worker) settings; take effect on SDK-harness runners (Dataflow, prism, portable) (see docs/options/sdkharness.md)",
       "properties": {
         "defaultSdkHarnessLogLevel": {
           "type": "string",

@@ -3,7 +3,6 @@ package com.mercari.solution.config.options;
 import org.apache.beam.sdk.options.PipelineOptions;
 
 import java.io.Serializable;
-import java.lang.reflect.InvocationTargetException;
 
 public class PrismOptions implements Serializable {
 
@@ -37,37 +36,25 @@ public class PrismOptions implements Serializable {
             return;
         }
 
+        final RunnerOptionSetter setter;
         try {
-            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>)Class.forName("org.apache.beam.runners.prism.PrismPipelineOptions");
-            final PipelineOptions prismOptions = pipelineOptions.as(clazz);
-
-            if(prism != null) {
-                if(prism.enableWebUI != null) {
-                    clazz.getMethod("setEnableWebUI", boolean.class).invoke(prismOptions, prism.enableWebUI);
-                }
-                if(prism.idleShutdownTimeout != null) {
-                    clazz.getMethod("setIdleShutdownTimeout", String.class).invoke(prismOptions, prism.idleShutdownTimeout);
-                }
-                if(prism.prismLocation != null) {
-                    clazz.getMethod("setPrismLocation", String.class).invoke(prismOptions, prism.prismLocation);
-                }
-                if(prism.prismVersionOverride != null) {
-                    clazz.getMethod("setPrismVersionOverride", String.class).invoke(prismOptions, prism.prismVersionOverride);
-                }
-                if(prism.prismLogLevel != null) {
-                    clazz.getMethod("setPrismLogLevel", String.class).invoke(prismOptions, prism.prismLogLevel);
-                }
-            }
-
-            final String current = (String) clazz.getMethod("getPrismLocation").invoke(prismOptions);
-            final String location = defaultPrismLocation(prism == null ? null : prism.prismLocation, current, bundledLocation);
-            if(location != null) {
-                clazz.getMethod("setPrismLocation", String.class).invoke(prismOptions, location);
-            }
-
-        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+            setter = RunnerOptionSetter.of(pipelineOptions, "org.apache.beam.runners.prism.PrismPipelineOptions");
+        } catch (final ClassNotFoundException e) {
             throw new RuntimeException("Failed to set prism runner pipeline options", e);
         }
+
+        if(prism != null) {
+            // setEnableWebUI takes a Boolean: a getMethod(name, boolean.class) lookup failed at run time
+            setter.set("enableWebUI", prism.enableWebUI)
+                    .set("idleShutdownTimeout", prism.idleShutdownTimeout)
+                    .set("prismLocation", prism.prismLocation)
+                    .set("prismVersionOverride", prism.prismVersionOverride)
+                    .set("prismLogLevel", prism.prismLogLevel);
+        }
+
+        final String current = (String) setter.get("prismLocation");
+        // a null location leaves the option alone
+        setter.set("prismLocation", defaultPrismLocation(prism == null ? null : prism.prismLocation, current, bundledLocation));
     }
 
     /**

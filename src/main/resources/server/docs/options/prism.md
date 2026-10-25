@@ -16,8 +16,10 @@ its entrypoint runs pipelines with `--runner=PrismRunner`.
 | prismLogLevel        | String  | Log level of the prism process: `debug`, `info`, `warn`, `error`. |
 
 The [portable](portable.md) block is applied with the prism runner too (prism's options extend the portable
-ones), e.g. `sdkWorkerParallelism` or `environmentCacheMillis`. The worker log levels of the Java SDK harness are set
-with [`sdkHarness`](sdkharness.md).
+ones), e.g. `sdkWorkerParallelism` or `environmentCacheMillis`. Do not set `portable.jobEndpoint` with prism — the
+runner rejects it at startup (`use --runner=PortableRunner instead`) — and leave `portable.defaultEnvironmentType`
+unset unless you mean it: prism defaults to `LOOPBACK`, while `DOCKER` needs a Docker daemon next to the prism
+process. The worker log levels of the Java SDK harness are set with [`sdkHarness`](sdkharness.md).
 
 The pipeline process stays alive for the whole run: the runner submits the job to the prism process it
 starts, and `MPipeline` waits for the result (a FAILED / CANCELLED pipeline exits non-zero, which a

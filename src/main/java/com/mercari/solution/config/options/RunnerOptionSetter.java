@@ -36,10 +36,6 @@ final class RunnerOptionSetter {
         return new RunnerOptionSetter(clazz, pipelineOptions.as(clazz));
     }
 
-    PipelineOptions options() {
-        return options;
-    }
-
     /** Sets {@code property} to {@code value}; a {@code null} value leaves the option alone. */
     RunnerOptionSetter set(final String property, final Object value) {
         if(value == null) {

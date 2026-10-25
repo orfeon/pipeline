@@ -4,7 +4,8 @@ Portable runner options.
 
 These are Beam's [PortablePipelineOptions](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/options/PortablePipelineOptions.html),
 used when the pipeline is submitted to a Beam job service (`--runner=PortableRunner`, e.g. a Flink / Spark job
-server). The block is also applied for the [prism](prism.md) runner, whose options extend them.
+server). The block is also applied for the [prism](prism.md) runner, whose options extend them — except that
+prism rejects `jobEndpoint` and defaults `defaultEnvironmentType` to `LOOPBACK` instead of `DOCKER`.
 
 | parameter                   | type           | description |
 |-----------------------------|----------------|-------------|
