@@ -2166,7 +2166,9 @@ Two context ops fit a small model over the rows of the group and hand each row i
   exponential race — Plackett–Luce, exactly Harville (served by the closed form). A larger shape narrows the
   running times around their means, so a favourite that does not win is less sure of the next places than Harville
   says — the bias the `discount` exponents approximate — and a shape below 1 is the opposite. Zero, missing and
-  negative rows follow the conventions above. `shape` and `discount` are not combined (`context.harville.shape`).
+  negative rows follow the conventions above, and rows of equal value read the same. `shape` is a number in
+  [0.05, 1000] (outside it the race cannot be solved; at 1000 a running time spreads by 3% of its mean, the
+  normal model in all but name). `shape` and `discount` are not combined (`context.harville.shape`).
 - **A residual does not remove its regressors from the model.** The residual is `field − a − b · against`
   within the group, so a model that is given the residual **and** `field` (or anything monotone in it within the
   group, such as its `zscore`) can rebuild `against`'s position in the group from the two. That is harmless when
@@ -2187,15 +2189,15 @@ Two context ops fit a small model over the rows of the group and hand each row i
 - **`shape` or `discount`.** Both correct the same bias; `discount` is the power approximation of a race model
   (Lo and Bacon-Shone's λ, τ), `shape` the model itself. One `shape` holds across field sizes — the exponents
   that approximate it do not (they were fitted for fields of eight to eighteen) — and it is interpretable: the
-  relative spread of a running time is `1 / sqrt(shape)`. Published racing studies put the gamma shape between
+  relative spread of a running time is `1 / sqrt(shape)`. Published fits of the gamma model put the shape between
   about 2 and 4 (Henery's normal model is the large-shape limit); start at `2`, and fit it against realised
   placings as you would the exponents. The price is compute: see *Cost*.
 - **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
   without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
   in one `top` are one pass, not one per place. With `shape` the group is calibrated numerically (Newton on the
-  rates, each step a quadrature pass of a few hundred nodes, quadratic in the group size): 10–50 ms per group of
-  eight to eighteen rows, so a million groups is hours of worker CPU, spread over the workers the context stage
-  runs on. `maxGroupSize` (default 64) is read by `harville` only: a group
+  rates, each step a quadrature pass of a few hundred nodes, quadratic in the group size): about 1–10 ms per group
+  of eight to eighteen rows, so a million groups is an hour or more of worker CPU, spread over the workers the
+  context stage runs on. `maxGroupSize` (default 64) is read by `harville` only: a group
   with more valid rows reads null (info `context.op.groupSolver`; on `residualize` the key is ignored with a
   warning, since it reads every row of the group whatever its size). The result does not depend on the order
   the rows of a group arrive in.
@@ -2203,7 +2205,7 @@ Two context ops fit a small model over the rows of the group and hand each row i
   Under `nullPolicy: indicator` both get an `_isnull` companion column (a group can read null as a whole).
 - Diagnostics: `context.residualize.against` (missing, non-numeric, repeated, or the field itself),
   `context.harville.top` (distinct integers in 1..3), `context.harville.discount` (at most two positive
-  exponents), `context.harville.shape` (a positive number; not beside `discount`), `context.op.maxGroupSize`
+  exponents), `context.harville.shape` (a number in [0.05, 1000]; not beside `discount`), `context.op.maxGroupSize`
   (≥ 2; a warning on `residualize`).
 
 ### Array readouts (row, `type: vector`)

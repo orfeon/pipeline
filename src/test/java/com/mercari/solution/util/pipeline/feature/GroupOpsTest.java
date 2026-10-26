@@ -309,6 +309,44 @@ public class GroupOpsTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 4, 2d, 64));
         Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, 0d, 64));
         Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, Double.POSITIVE_INFINITY, 64));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, GroupOps.RACE_MAX_SHAPE * 2, 64));
+    }
+
+    /**
+     * Rows of equal value read the same bit for bit (a tie with the gauge row included), so the result does not depend
+     * on which of them arrives first; and the calibration converges across the shape range, large shapes and long
+     * shots included (a start from the win probabilities themselves underflowed every other row at a large shape).
+     */
+    @Test
+    public void testRaceTiesAndRange() {
+        final double[][] tied = {{0.3, 0.2, 0.2, 0.2, 0.1}, {0.25, 0.25, 0.15, 0.15, 0.1, 0.1}, {0.4, 0.2, 0.2, 0.1, 0.1}};
+        for (final double shape : new double[]{0.5, 2, 4}) {
+            for (final double[] p : tied) {
+                final double[][] within = GroupOps.racePlaces(p, 3, shape, 64);
+                for (int k = 0; k < 3; k++) {
+                    double sum = 0;
+                    for (int i = 0; i < p.length; i++) {
+                        sum += within[k][i];
+                        for (int j = 0; j < p.length; j++) if (p[i] == p[j]) Assertions.assertEquals(within[k][i], within[k][j], 0d, "shape " + shape + " top " + (k + 1));
+                    }
+                    Assertions.assertEquals(Math.min(k + 1, p.length), sum, 1e-6);
+                }
+            }
+        }
+        final double[][] fields = {{1e-6, 0.05, 0.1, 0.2, 0.3, 0.35}, {0.001, 0.001, 0.002, 0.996}, {0.4, 0.25, 0.15, 0.12, 0.08}};
+        for (final double shape : new double[]{GroupOps.RACE_MIN_SHAPE, 20, 200, GroupOps.RACE_MAX_SHAPE}) {
+            for (final double[] p : fields) {
+                final double[][] within = GroupOps.racePlaces(p, 3, shape, 64);
+                for (int k = 0; k < 3; k++) {
+                    double sum = 0;
+                    for (final double v : within[k]) {
+                        Assertions.assertFalse(Double.isNaN(v), "shape " + shape + " converged");
+                        sum += v;
+                    }
+                    Assertions.assertEquals(Math.min(k + 1, p.length), sum, 1e-6, "shape " + shape + " top " + (k + 1));
+                }
+            }
+        }
     }
 
     /** The evaluator with a shape reads the race model's pass; the compiler carries the shape and rejects it next to a discount. */
@@ -342,6 +380,13 @@ public class GroupOpsTest {
         Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "discount: [0.81, 0.65], shape: 2")), "context.harville.shape"));
         Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 0")), "context.harville.shape"));
         Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: two")), "shape.invalid"));
+        // outside the range the race can be solved in, the shape is rejected rather than every group reading null
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 0.01")), "context.harville.shape"));
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 5000")), "context.harville.shape"));
+        // a race after a plain harville in the same block still reports its own cost
+        final FeaturePlan both = compile(SPEC.replace("discount: [0.81, 0.65]}", "discount: [0.81, 0.65]}\n      - {type: harville, field: prob_pWin_softmax, as: race, top: [2, 3], shape: 2}"));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertTrue(both.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("context.op.groupSolver") && m.message().contains("gamma race model")), both::describe);
     }
 
     /** The evaluator hands every place of a group the same pass: the columns read what the solver returns. */

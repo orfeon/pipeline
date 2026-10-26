@@ -253,7 +253,17 @@ public final class GroupOps {
         return out;
     }
 
-    /** The Newton calibration of the race model stops when every log win probability is within this of its target. */
+    /**
+     * The shapes the race is solved for. Below the lower bound the running time's 1e-10 quantile underflows, and the
+     * quadrature with it (every group would read null); above the upper one the incomplete gamma's series runs out of
+     * terms — and at 1000 the running times already spread by 3% of their mean, the normal model in all but name.
+     */
+    public static final double RACE_MIN_SHAPE = 0.05, RACE_MAX_SHAPE = 1000;
+    /**
+     * The Newton calibration of the race model stops when the log win probability of every free rate is within this of
+     * its target. The gauge row's own equation is implied by the others (the win probabilities sum to 1) up to the
+     * quadrature's truncation, about 1e-9: a tolerance this tight could never be met on it.
+     */
     private static final double RACE_TOLERANCE = 1e-10;
     /** Newton steps (each one quadrature pass with the Jacobian) before the calibration is given up. */
     private static final int RACE_MAX_STEPS = 60;
@@ -277,10 +287,13 @@ public final class GroupOps {
      * are normalised over those rows, a row at 0 can only finish behind every positive row and the zero rows share the
      * places left in equal parts, every row reads NaN when no value is positive, more than {@code maxGroupSize} rows
      * take part, or — a numerical failure the closed form cannot have — the calibration does not converge. The sums
-     * run in the order of the values, so the result does not depend on the order the group arrives in.
+     * run in the order of the values and rows of equal value read the same, so the result does not depend on the
+     * order the group arrives in. {@code shape} must lie in [{@link #RACE_MIN_SHAPE}, {@link #RACE_MAX_SHAPE}].
      */
     public static double[][] racePlaces(final double[] p, final int maxTop, final double shape, final int maxGroupSize) {
-        if (!(shape > 0) || Double.isInfinite(shape)) throw new IllegalArgumentException("race shape must be a positive number: " + shape);
+        if (!(shape >= RACE_MIN_SHAPE && shape <= RACE_MAX_SHAPE)) {
+            throw new IllegalArgumentException("race shape must be in [" + RACE_MIN_SHAPE + ", " + RACE_MAX_SHAPE + "]: " + shape);
+        }
         if (shape == 1d) return harvillePlaces(p, maxTop, null, maxGroupSize);
         if (maxTop < 1 || maxTop > MAX_TOP) throw new IllegalArgumentException("harville top must be in [1, " + MAX_TOP + "]: " + maxTop);
         final int n = p.length;
@@ -307,6 +320,19 @@ public final class GroupOps {
         for (int r = 0; r < live; r++) q[r] = p[rows[zeros + r]] / total;
         final double[][] within = raceWithin(q, maxTop, shape);
         if (within == null) return out;
+        // rows of equal value are the same runner, but the solver's rounding (the gauge rate is fixed, the others solved
+        // for) tells them apart in the last digits: which row got which would follow the arrival order. A run of equal
+        // values reads its mean, summed in position order
+        for (int r = 0, end; r < live; r = end) {
+            end = r + 1;
+            while (end < live && q[end] == q[r]) end++;
+            if (end - r < 2) continue;
+            for (int k = 1; k < maxTop; k++) {
+                double sum = 0;
+                for (int t = r; t < end; t++) sum += within[k][t];
+                Arrays.fill(within[k], r, end, sum / (end - r));
+            }
+        }
         for (int k = 1; k <= maxTop; k++) {
             for (int r = 0; r < live; r++) out[k - 1][rows[zeros + r]] = Math.min(1d, within[k - 1][r]);
             // the places the positive rows cannot fill fall to the zero rows in equal shares
@@ -323,14 +349,15 @@ public final class GroupOps {
     static double[][] raceWithin(final double[] q, final int maxTop, final double shape) {
         final int m = q.length;
         final double[][] within = new double[maxTop][m];
-        if (m <= 1) {
-            for (final double[] place : within) Arrays.fill(place, 1d);
-            return within;
+        // only a place between the first and the size of the field needs the race: with top 1 alone, or a field of two,
+        // the input and the ones below are the whole answer
+        if (maxTop > 1 && m > 2) {
+            final Race race = new Race(shape, m);
+            final double[] theta = raceRates(race, q);
+            if (theta == null) return null;
+            race.integrate(theta, new double[m], null, within);
         }
-        final double[] theta = raceRates(q, shape);
-        if (theta == null) return null;
-        // the places from the calibrated rates; place 1 is the input itself, and once k reaches the field everyone is within it
-        new Race(shape, m).integrate(theta, new double[m], null, within);
+        // place 1 is the input itself, and once k reaches the field everyone is within it
         System.arraycopy(q, 0, within[0], 0, m);
         for (int k = 1; k < maxTop; k++) if (k + 1 >= m) Arrays.fill(within[k], 1d);
         return within;
@@ -342,28 +369,37 @@ public final class GroupOps {
      * converge. Package-private for the tests (a simulation from these rates is the reference for {@link #raceWithin}).
      */
     static double[] raceRates(final double[] q, final double shape) {
+        return raceRates(new Race(shape, q.length), q);
+    }
+
+    private static double[] raceRates(final Race race, final double[] q) {
         final int m = q.length;
-        final Race race = new Race(shape, m);
-        // the exponential race's rates are the win probabilities themselves: the starting point
-        double[] theta = q.clone();
+        // the starting point: the exponential race's rates are the win probabilities themselves, and a log running time
+        // spreads about 1 / sqrt(shape) as wide as the exponential's, so q^(1 / sqrt(shape)) keeps the field's gaps in
+        // units of that spread. Starting from q itself at a large shape, the favourite finishes before the others have
+        // started and their win probabilities underflow to 0: no Newton step could be taken from there
+        final double power = 1 / Math.sqrt(race.shape);
+        double[] theta = new double[m];
+        for (int i = 0; i < m; i++) theta[i] = Math.pow(q[i], power);
         final double[] logQ = new double[m];
         for (int i = 0; i < m; i++) logQ[i] = Math.log(q[i]);
         final double[] win = new double[m];
         final double[][] jacobian = new double[m][m];
         race.integrate(theta, win, jacobian, null);
-        double norm = residualNorm(win, logQ);
+        final int d = m - 1;
+        double norm = residualNorm(win, logQ, d);
+        if (!Double.isFinite(norm)) return null;
         for (int step = 0; step < RACE_MAX_STEPS && norm > RACE_TOLERANCE; step++) {
-            // Newton on log θ with the last rate fixed (the model is invariant to a common scale of the rates):
-            // (J_ij / P_i) Δ_j = −(log P_i − log q_i) over i, j < m − 1
-            final int d = m - 1;
+            // Newton on log θ with the last rate fixed (the model is invariant to a common scale of the rates): the
+            // Jacobian is symmetric, so the step solves J Δ = P ∘ (log q − log P) over i, j < m − 1 — the system
+            // (J_ij / P_i) Δ_j = −(log P_i − log q_i) with every row multiplied by its P_i
             final double[][] a = new double[d][d];
             final double[] g = new double[d];
             for (int i = 0; i < d; i++) {
-                for (int j = 0; j < d; j++) a[i][j] = jacobian[i][j] / win[i];
-                g[i] = -(Math.log(win[i]) - logQ[i]);
+                System.arraycopy(jacobian[i], 0, a[i], 0, d);
+                g[i] = -(Math.log(win[i]) - logQ[i]) * win[i];
             }
-            final double[] delta = eliminate(a, g);
-            if (delta == null) return null;
+            final double[] delta = solve(a, g);
             // a step that does not reduce the residual is halved, up to a point
             boolean accepted = false;
             final double[] winNext = new double[m];
@@ -377,7 +413,7 @@ public final class GroupOps {
                 }
                 if (!finite) continue;
                 race.integrate(next, winNext, jacobianNext, null);
-                final double normNext = residualNorm(winNext, logQ);
+                final double normNext = residualNorm(winNext, logQ, d);
                 if (normNext < norm) {
                     theta = next;
                     System.arraycopy(winNext, 0, win, 0, m);
@@ -389,47 +425,18 @@ public final class GroupOps {
             }
             if (!accepted) break;
         }
-        return norm <= 1e-7 ? theta : null;
+        // accepted on every row, the gauge's included
+        return residualNorm(win, logQ, m) <= 1e-7 ? theta : null;
     }
 
-    private static double residualNorm(final double[] win, final double[] logQ) {
+    /** The largest |log P_i − log q_i| over the first {@code count} rows; infinite when one of them has no win probability. */
+    private static double residualNorm(final double[] win, final double[] logQ, final int count) {
         double norm = 0;
-        for (int i = 0; i < win.length; i++) {
+        for (int i = 0; i < count; i++) {
             if (!(win[i] > 0)) return Double.POSITIVE_INFINITY;
             norm = Math.max(norm, Math.abs(Math.log(win[i]) - logQ[i]));
         }
         return norm;
-    }
-
-    /** Gaussian elimination with partial pivoting; null when the system is singular. */
-    private static double[] eliminate(final double[][] a, final double[] b) {
-        final int d = b.length;
-        for (int c = 0; c < d; c++) {
-            int pivot = c;
-            for (int r = c + 1; r < d; r++) if (Math.abs(a[r][c]) > Math.abs(a[pivot][c])) pivot = r;
-            if (!(Math.abs(a[pivot][c]) > 1e-300)) return null;
-            if (pivot != c) {
-                final double[] row = a[c];
-                a[c] = a[pivot];
-                a[pivot] = row;
-                final double v = b[c];
-                b[c] = b[pivot];
-                b[pivot] = v;
-            }
-            for (int r = c + 1; r < d; r++) {
-                final double f = a[r][c] / a[c][c];
-                if (f == 0) continue;
-                for (int k = c; k < d; k++) a[r][k] -= f * a[c][k];
-                b[r] -= f * b[c];
-            }
-        }
-        final double[] x = new double[d];
-        for (int r = d - 1; r >= 0; r--) {
-            double s = b[r];
-            for (int k = r + 1; k < d; k++) s -= a[r][k] * x[k];
-            x[r] = s / a[r][r];
-        }
-        return x;
     }
 
     /**
@@ -442,7 +449,7 @@ public final class GroupOps {
      */
     private static final class Race {
         private final double shape, logGamma, quantileLow, quantileHigh;
-        private final double[] f, s, cdf, prefix, suffix, dp;
+        private final double[] f, s, cdf, prefix, suffix, dp, shapeLogTheta;
 
         Race(final double shape, final int m) {
             this.shape = shape;
@@ -455,14 +462,17 @@ public final class GroupOps {
             this.prefix = new double[m + 1];
             this.suffix = new double[m + 1];
             this.dp = new double[MAX_TOP];
+            this.shapeLogTheta = new double[m];
         }
 
         void integrate(final double[] theta, final double[] win, final double[][] jacobian, final double[][] within) {
             final int m = theta.length;
             double min = Double.POSITIVE_INFINITY, max = 0;
-            for (final double t : theta) {
-                min = Math.min(min, t);
-                max = Math.max(max, t);
+            for (int i = 0; i < m; i++) {
+                min = Math.min(min, theta[i]);
+                max = Math.max(max, theta[i]);
+                // per row, not per node
+                shapeLogTheta[i] = shape * Math.log(theta[i]);
             }
             final double lo = Math.log(quantileLow / max), hi = Math.log(quantileHigh / min);
             int intervals = (int) Math.ceil(RACE_NODES_PER_WIDTH * (hi - lo) * Math.max(1d, Math.sqrt(shape)));
@@ -480,9 +490,10 @@ public final class GroupOps {
                 final double w = (node == 0 || node == intervals ? 1 : node % 2 == 1 ? 4 : 2) * h / 3 * t;
                 for (int i = 0; i < m; i++) {
                     final double x = theta[i] * t;
-                    s[i] = com.mercari.solution.util.pipeline.glm.StatMath.regularizedGammaQ(shape, x);
+                    // ln Γ(shape) is the same at every node: computed once, not once per call
+                    s[i] = com.mercari.solution.util.pipeline.glm.StatMath.regularizedGammaQ(shape, x, logGamma);
                     cdf[i] = 1 - s[i];
-                    f[i] = Math.exp(shape * Math.log(theta[i]) + (shape - 1) * logT - x - logGamma);
+                    f[i] = Math.exp(shapeLogTheta[i] + (shape - 1) * logT - x - logGamma);
                 }
                 prefix[0] = 1;
                 for (int i = 0; i < m; i++) prefix[i + 1] = prefix[i] * s[i];

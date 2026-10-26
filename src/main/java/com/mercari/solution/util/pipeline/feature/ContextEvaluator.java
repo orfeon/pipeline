@@ -350,7 +350,7 @@ public class ContextEvaluator implements Serializable {
     /**
      * The group solvers ({@link GroupOps}): the op's fields become one vector per channel over the rows of the group
      * (a missing or non-finite value is NaN), the solver returns every row's value (NaN = null). The places of a
-     * harville are one pass per (field, discount, bound) — the {@code top} columns of a group read the same one.
+     * harville are one pass per (field, discount, shape, bound) — the {@code top} columns of a group read the same one.
      */
     private void solve(final String name, final Plan plan, final List<Map<String, Object>> rows) {
         final double[] result;
