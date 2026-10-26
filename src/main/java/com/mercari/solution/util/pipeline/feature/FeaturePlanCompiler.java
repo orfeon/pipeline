@@ -1233,12 +1233,31 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.op.maxGroupSize", loc, "maxGroupSize must be >= 2: " + maxGroupSize);
                     return null;
                 }
+                // shape: the gamma race model (Stern) solved numerically per group; 1 is the Harville closed form, and the
+                // discount exponents approximate what the shape models, so the two are not combined
+                final double shape = op.shape == null ? 1d : op.shape;
+                if (!(shape >= GroupOps.RACE_MIN_SHAPE && shape <= GroupOps.RACE_MAX_SHAPE)) {
+                    diagnostics.error("context.harville.shape", loc, "harville shape must be a number in [" + GroupOps.RACE_MIN_SHAPE + ", " + GroupOps.RACE_MAX_SHAPE
+                            + "] (the gamma shape of the running times; 1 = Harville; outside the range the race cannot be solved and every group would read null): " + op.shape);
+                    return null;
+                }
+                if (shape != 1d && !op.discount.isEmpty()) {
+                    diagnostics.error("context.harville.shape", loc, "discount and shape correct the same bias (the later places plain Harville gives the favourites): declare one of them"
+                            + " - shape is the exact gamma race model, discount its power approximation");
+                    return null;
+                }
                 if (def.excludeSelf) diagnostics.warning("context.harville.excludeSelf", loc, "excludeSelf has no effect on harville (the row is part of its own field)");
-                if (hintedBlocks.add("context.op.groupSolver:" + def.name)) {
-                    diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker - quadratic in the group size for the 2nd place, cubic for the 3rd:"
-                            + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)");
+                // the race's cost is its own: a plain harville earlier in the block must not silence it
+                if (hintedBlocks.add("context.op.groupSolver:" + def.name + (shape == 1d ? "" : ":race"))) {
+                    diagnostics.info("context.op.groupSolver", loc, shape == 1d
+                            ? "harville solves every group on one worker - quadratic in the group size for the 2nd place, cubic for the 3rd:"
+                            + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)"
+                            : "harville with shape " + shape + " calibrates the gamma race model of every group on one worker (Newton on the rates, a few hundred"
+                            + " quadrature nodes per step: quadratic in the group size, milliseconds per group): a group with more than " + maxGroupSize
+                            + " valid rows reads null (maxGroupSize)");
                 }
                 if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
+                if (shape != 1d) coordinates.put("shape", Double.toString(shape));
                 coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
             }
             case "ratingProb" -> {

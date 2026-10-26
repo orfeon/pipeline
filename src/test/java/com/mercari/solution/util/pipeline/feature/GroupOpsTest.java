@@ -202,6 +202,193 @@ public class GroupOpsTest {
         Assertions.assertTrue(discounted[0] < plain[0] && discounted[3] > plain[3]);
     }
 
+    /**
+     * The numerical race at shape 1 is the exponential race, i.e. the Harville closed form (to the quadrature's accuracy);
+     * shape 1 declared takes the closed form itself, bit for bit.
+     */
+    @Test
+    public void testRaceShapeOneIsHarville() {
+        final Random random = new Random(11);
+        for (int trial = 0; trial < 12; trial++) {
+            final int n = 2 + random.nextInt(14);
+            final double[] p = new double[n];
+            double sum = 0;
+            for (int i = 0; i < n; i++) sum += p[i] = random.nextDouble() + 0.02;
+            for (int i = 0; i < n; i++) p[i] /= sum;
+            final double[][] closed = GroupOps.harvillePlaces(p, 3, null, 64), numerical = GroupOps.raceWithin(p, 3, 1d);
+            Assertions.assertNotNull(numerical, "converged, n = " + n);
+            for (int k = 0; k < 3; k++) Assertions.assertArrayEquals(closed[k], numerical[k], 1e-6, "top " + (k + 1) + " n = " + n);
+        }
+        final double[] p = {0.5, 0.3, 0.2, 0};
+        for (int k = 0; k < 3; k++) Assertions.assertArrayEquals(GroupOps.harvillePlaces(p, 3, null, 64)[k], GroupOps.racePlaces(p, 3, 1d, 64)[k], 0d);
+    }
+
+    /**
+     * Monte Carlo reference for the model: races simulated from the calibrated rates (gamma running times as sums of
+     * exponentials) reproduce the input win probabilities and the within-k probabilities the quadrature returns.
+     */
+    @Test
+    public void testRaceAgainstSimulation() {
+        final double[] q = {0.40, 0.25, 0.15, 0.12, 0.08};
+        for (final int shape : new int[]{2, 4}) {
+            final double[] theta = GroupOps.raceRates(q, shape);
+            Assertions.assertNotNull(theta);
+            final double[][] within = GroupOps.raceWithin(q, 3, shape);
+            final Random random = new Random(100 + shape);
+            final int races = 400_000;
+            final int[][] placed = new int[3][q.length];
+            final double[] time = new double[q.length];
+            for (int r = 0; r < races; r++) {
+                for (int i = 0; i < q.length; i++) {
+                    double t = 0;
+                    for (int e = 0; e < shape; e++) t -= Math.log(1 - random.nextDouble());
+                    time[i] = t / theta[i];
+                }
+                for (int i = 0; i < q.length; i++) {
+                    int ahead = 0;
+                    for (int j = 0; j < q.length; j++) if (time[j] < time[i]) ahead++;
+                    for (int k = ahead; k < 3; k++) placed[k][i]++;
+                }
+            }
+            for (int i = 0; i < q.length; i++) {
+                Assertions.assertEquals(q[i], placed[0][i] / (double) races, 0.003, "shape " + shape + " win " + i);
+                Assertions.assertEquals(within[1][i], placed[1][i] / (double) races, 0.004, "shape " + shape + " top 2 " + i);
+                Assertions.assertEquals(within[2][i], placed[2][i] / (double) races, 0.004, "shape " + shape + " top 3 " + i);
+            }
+        }
+    }
+
+    /**
+     * Every place sums to k, contains the one before it, orders with strength and does not depend on the arrival order;
+     * a larger shape takes later places from the favourite (what the discount approximates), a smaller one gives them;
+     * zero, missing and negative rows and the bounds follow the Harville conventions.
+     */
+    @Test
+    public void testRaceProperties() {
+        final Random random = new Random(13);
+        for (final double shape : new double[]{0.5, 1.7, 3, 8, 40}) {
+            for (int trial = 0; trial < 6; trial++) {
+                final int n = 2 + random.nextInt(16);
+                final double[] p = new double[n];
+                for (int i = 0; i < n; i++) p[i] = random.nextDouble() + 0.01;
+                final double[][] within = GroupOps.racePlaces(p, 3, shape, 64);
+                for (int k = 0; k < 3; k++) {
+                    double sum = 0;
+                    for (final double v : within[k]) {
+                        Assertions.assertTrue(v >= 0 && v <= 1, "shape " + shape + " n " + n + ": " + v);
+                        sum += v;
+                    }
+                    Assertions.assertEquals(Math.min(k + 1, n), sum, 1e-6, "shape " + shape + " n " + n + " top " + (k + 1));
+                    for (int i = 0; i < n; i++) {
+                        if (k > 0) Assertions.assertTrue(within[k][i] >= within[k - 1][i] - 1e-12, "a place contains the one before it");
+                        for (int j = 0; j < n; j++) if (p[i] > p[j]) Assertions.assertTrue(within[k][i] >= within[k][j] - 1e-9, "shape " + shape + " top " + (k + 1));
+                    }
+                }
+                final double[] reversed = new double[n];
+                for (int i = 0; i < n; i++) reversed[i] = p[n - 1 - i];
+                final double[][] back = GroupOps.racePlaces(reversed, 3, shape, 64);
+                for (int k = 0; k < 3; k++) for (int i = 0; i < n; i++) Assertions.assertEquals(within[k][i], back[k][n - 1 - i], "bit for bit");
+            }
+        }
+        final double[] p = {0.6, 0.2, 0.1, 0.1};
+        final double[] plain = GroupOps.harville(p, 3, new double[0], 64), narrow = GroupOps.racePlaces(p, 3, 2d, 64)[2], wide = GroupOps.racePlaces(p, 3, 0.5, 64)[2];
+        Assertions.assertTrue(narrow[0] < plain[0] && narrow[3] > plain[3], "shape 2 flattens the favourite's later places: " + narrow[0] + " < " + plain[0]);
+        Assertions.assertTrue(wide[0] > plain[0] && wide[3] < plain[3], "shape 0.5 sharpens them: " + wide[0] + " > " + plain[0]);
+        // the Harville conventions for the rows outside the race
+        Assertions.assertArrayEquals(new double[]{1, 0.5, 0.5}, GroupOps.racePlaces(new double[]{1, 0, 0}, 2, 2d, 64)[1], 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 1}, GroupOps.racePlaces(new double[]{1, 0, 0}, 3, 2d, 64)[2], 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 0}, GroupOps.racePlaces(new double[]{0.5, 0.5, 0}, 2, 2d, 64)[1], 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1}, GroupOps.racePlaces(new double[]{0.9, 0.1}, 3, 2d, 64)[1], 1e-12);
+        final double[][] mixed = GroupOps.racePlaces(new double[]{0.6, NaN, 0.36, 0.24, -1, 0}, 2, 2d, 64);
+        Assertions.assertEquals(0.5, mixed[0][0], 1e-12);
+        Assertions.assertTrue(Double.isNaN(mixed[1][1]) && Double.isNaN(mixed[1][4]));
+        Assertions.assertEquals(0d, mixed[1][5]);
+        Assertions.assertEquals(2d, mixed[1][0] + mixed[1][2] + mixed[1][3], 1e-6);
+        for (final double v : GroupOps.racePlaces(new double[]{0, 0}, 2, 2d, 64)[1]) Assertions.assertTrue(Double.isNaN(v));
+        for (final double v : GroupOps.racePlaces(new double[]{0.5, 0.3, 0.2}, 2, 2d, 2)[1]) Assertions.assertTrue(Double.isNaN(v));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 4, 2d, 64));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, 0d, 64));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, Double.POSITIVE_INFINITY, 64));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.racePlaces(p, 2, GroupOps.RACE_MAX_SHAPE * 2, 64));
+    }
+
+    /**
+     * Rows of equal value read the same bit for bit (a tie with the gauge row included), so the result does not depend
+     * on which of them arrives first; and the calibration converges across the shape range, large shapes and long
+     * shots included (a start from the win probabilities themselves underflowed every other row at a large shape).
+     */
+    @Test
+    public void testRaceTiesAndRange() {
+        final double[][] tied = {{0.3, 0.2, 0.2, 0.2, 0.1}, {0.25, 0.25, 0.15, 0.15, 0.1, 0.1}, {0.4, 0.2, 0.2, 0.1, 0.1}};
+        for (final double shape : new double[]{0.5, 2, 4}) {
+            for (final double[] p : tied) {
+                final double[][] within = GroupOps.racePlaces(p, 3, shape, 64);
+                for (int k = 0; k < 3; k++) {
+                    double sum = 0;
+                    for (int i = 0; i < p.length; i++) {
+                        sum += within[k][i];
+                        for (int j = 0; j < p.length; j++) if (p[i] == p[j]) Assertions.assertEquals(within[k][i], within[k][j], 0d, "shape " + shape + " top " + (k + 1));
+                    }
+                    Assertions.assertEquals(Math.min(k + 1, p.length), sum, 1e-6);
+                }
+            }
+        }
+        final double[][] fields = {{1e-6, 0.05, 0.1, 0.2, 0.3, 0.35}, {0.001, 0.001, 0.002, 0.996}, {0.4, 0.25, 0.15, 0.12, 0.08}};
+        for (final double shape : new double[]{GroupOps.RACE_MIN_SHAPE, 20, 200, GroupOps.RACE_MAX_SHAPE}) {
+            for (final double[] p : fields) {
+                final double[][] within = GroupOps.racePlaces(p, 3, shape, 64);
+                for (int k = 0; k < 3; k++) {
+                    double sum = 0;
+                    for (final double v : within[k]) {
+                        Assertions.assertFalse(Double.isNaN(v), "shape " + shape + " converged");
+                        sum += v;
+                    }
+                    Assertions.assertEquals(Math.min(k + 1, p.length), sum, 1e-6, "shape " + shape + " top " + (k + 1));
+                }
+            }
+        }
+    }
+
+    /** The evaluator with a shape reads the race model's pass; the compiler carries the shape and rejects it next to a discount. */
+    @Test
+    public void testEvaluateGroupShape() {
+        final String spec = SPEC.replace("discount: [0.81, 0.65]", "shape: 2");
+        Assertions.assertNotEquals(SPEC, spec);
+        final FeaturePlan plan = compile(spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn top3 = plan.getColumn("placed_p_harville_top3");
+        Assertions.assertEquals("2.0", top3.getCoordinates().get("shape"));
+        Assertions.assertNull(top3.getCoordinates().get("discount"));
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("context.op.groupSolver") && m.message().contains("gamma race model")), plan::describe);
+        final ContextEvaluator evaluator = new ContextEvaluator(List.of(plan.getColumn("placed_p_harville_top2"), top3));
+        evaluator.setup();
+        final double[] p = {0.5, 0.3, 0.15, 0.05};
+        final List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (final double v : p) {
+            final Map<String, Object> row = new java.util.HashMap<>();
+            row.put("prob_pWin_softmax", v);
+            rows.add(row);
+        }
+        evaluator.evaluate(rows);
+        final double[][] expected = GroupOps.racePlaces(p, 3, 2d, 64);
+        for (int i = 0; i < p.length; i++) {
+            Assertions.assertEquals(expected[1][i], (Double) rows.get(i).get("placed_p_harville_top2"), 0d);
+            Assertions.assertEquals(expected[2][i], (Double) rows.get(i).get("placed_p_harville_top3"), 0d);
+        }
+        // shape 1 is the plain op (no coordinate), a discount beside a shape is rejected, so is a shape that is not positive
+        Assertions.assertNull(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 1")).getColumn("placed_p_harville_top3").getCoordinates().get("shape"));
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "discount: [0.81, 0.65], shape: 2")), "context.harville.shape"));
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 0")), "context.harville.shape"));
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: two")), "shape.invalid"));
+        // outside the range the race can be solved in, the shape is rejected rather than every group reading null
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 0.01")), "context.harville.shape"));
+        Assertions.assertTrue(hasCode(compile(SPEC.replace("discount: [0.81, 0.65]", "shape: 5000")), "context.harville.shape"));
+        // a race after a plain harville in the same block still reports its own cost
+        final FeaturePlan both = compile(SPEC.replace("discount: [0.81, 0.65]}", "discount: [0.81, 0.65]}\n      - {type: harville, field: prob_pWin_softmax, as: race, top: [2, 3], shape: 2}"));
+        Assertions.assertFalse(both.getDiagnostics().hasErrors(), both::describe);
+        Assertions.assertTrue(both.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("context.op.groupSolver") && m.message().contains("gamma race model")), both::describe);
+    }
+
     /** The evaluator hands every place of a group the same pass: the columns read what the solver returns. */
     @Test
     public void testEvaluateGroup() {

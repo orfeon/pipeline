@@ -97,12 +97,12 @@ public final class StatMath {
     /** Regularized lower incomplete gamma P(a, x) = γ(a, x) / Γ(a) (Numerical Recipes gammp). */
     public static double regularizedGammaP(final double a, final double x) {
         if (x <= 0) return 0d;
-        if (x < a + 1) return gammaPSeries(a, x);
+        if (x < a + 1) return gammaPSeries(a, x, logGamma(a));
         return 1d - Math.exp(-x + a * Math.log(x) - logGamma(a)) * gammaQContinuedFraction(a, x);
     }
 
     /** The series of P(a, x) for x < a + 1. */
-    private static double gammaPSeries(final double a, final double x) {
+    private static double gammaPSeries(final double a, final double x, final double logGammaA) {
         double ap = a, sum = 1d / a, del = sum;
         for (int n = 1; n < 1000; n++) {
             ap += 1;
@@ -110,14 +110,22 @@ public final class StatMath {
             sum += del;
             if (Math.abs(del) < Math.abs(sum) * 1e-15) break;
         }
-        return sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
+        return sum * Math.exp(-x + a * Math.log(x) - logGammaA);
     }
 
     /** Regularized upper incomplete gamma Q(a, x) = Γ(a, x) / Γ(a) (Numerical Recipes gammq). */
     public static double regularizedGammaQ(final double a, final double x) {
+        return regularizedGammaQ(a, x, logGamma(a));
+    }
+
+    /**
+     * {@link #regularizedGammaQ(double, double)} with {@code logGammaA} = {@link #logGamma}(a) given: a caller that
+     * evaluates many x at one shape (a quadrature) computes it once instead of once per call.
+     */
+    public static double regularizedGammaQ(final double a, final double x, final double logGammaA) {
         if (x <= 0) return 1d;
-        if (x < a + 1) return 1d - gammaPSeries(a, x);
-        return Math.exp(-x + a * Math.log(x) - logGamma(a)) * gammaQContinuedFraction(a, x);
+        if (x < a + 1) return 1d - gammaPSeries(a, x, logGammaA);
+        return Math.exp(-x + a * Math.log(x) - logGammaA) * gammaQContinuedFraction(a, x);
     }
 
     /** The continued fraction of Q(a, x) for x ≥ a + 1 (modified Lentz): Q = e^{−x} x^a / Γ(a) times it. */
