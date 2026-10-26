@@ -105,6 +105,10 @@ public interface Summary<S extends Serializable> extends Serializable {
         public static final Summary<Order.State> ORDER = new Order();
         /** Cross moments of a pair (x, y): cov / corr / beta / intercept / r2 of y on x. Invertible. */
         public static final Summary<Regression.State> REGRESSION = new Regression();
+        /** The second moments of k series ({@link Covariance}); the eigenvalue readouts of the covariance matrix. */
+        public static final Summary<Covariance.State> COVARIANCE = new Covariance(false);
+        /** {@link #COVARIANCE} with the eigenvalue readouts of the correlation matrix ({@code standardize}). */
+        public static final Summary<Covariance.State> COVARIANCE_STANDARDIZED = new Covariance(true);
         // the linear summaries of a path (lti: exponential / fourier / legendre) are parameterised per column: Dynamics.spec
     }
 
@@ -489,13 +493,212 @@ public interface Summary<S extends Serializable> extends Serializable {
          * otherwise turn a constant x into a spurious beta / corr instead of null (the scan path anchors inside the
          * window and gets an exact 0).
          */
-        private static double variance(final double secondMoment, final double mean) {
+        static double variance(final double secondMoment, final double mean) {
             final double v = secondMoment - mean * mean;
             return v <= 1e-12 * secondMoment ? 0d : v;
         }
 
-        private static double clamp(final double r) {
+        static double clamp(final double r) {
             return Math.max(-1d, Math.min(1d, r));
+        }
+    }
+
+    /**
+     * The second moments of a k-vector — n, Σ(x − a), Σ(x − a)(x − a)ᵀ about an anchor a (the first vector folded in,
+     * re-anchored on merge, reset exactly when n returns to 0) — read as the window's covariance / correlation matrix:
+     * the sequence {@code covariance} op over k series of the entity's past events. A contribution is a
+     * {@code double[]} with every component present (the evaluator skips a row with a missing one), so every readout is
+     * over the same rows. Readouts (null below two contributions): {@code absorption} — the share of the total variance
+     * the leading {@code components} eigenvalues carry (one, by default; Kritzman et al.'s absorption ratio), {@code
+     * effectiveRank} — the participation ratio {@code (Σλ)² / Σλ²} of the eigenvalues, the number of equal sources that
+     * would spread the variance as the series do (k when they are uncorrelated and alike, 1 when one source drives
+     * them all), {@code meanCorrelation} — the mean pairwise correlation, {@code logDet} — the log determinant of the
+     * correlation matrix (0 when uncorrelated, towards −∞ as the series become collinear; null while the window holds
+     * fewer vectors than series, the matrix being singular then), {@code count}. The eigenvalue readouts are of the
+     * covariance matrix, or of the correlation matrix under {@code standardize} ({@link Summaries#COVARIANCE_STANDARDIZED});
+     * the correlation readouts are null when a series is constant over the window.
+     */
+    final class Covariance implements Summary<Covariance.State> {
+        public static final class State implements Serializable {
+            public int dimension;
+            public double n;
+            /** The anchor subtracted from every vector (unset while the state is empty). */
+            public double[] anchor = new double[0];
+            /** Σ (x − anchor). */
+            public double[] sum = new double[0];
+            /** Σ (x − anchor)(x − anchor)ᵀ, row-major. */
+            public double[] products = new double[0];
+            public boolean anchored;
+        }
+
+        /** The default of the {@code components} parameter of {@code absorption}. */
+        public static final int DEFAULT_COMPONENTS = 1;
+        /** The most series the op accepts (a k × k eigendecomposition per read). */
+        public static final int MAX_DIMENSION = 64;
+        /** An eigenvalue of the correlation matrix below this share of its trace counts as 0 (the matrix is singular). */
+        private static final double SINGULAR = 1e-12;
+
+        private final boolean standardize;
+
+        Covariance(final boolean standardize) {
+            this.standardize = standardize;
+        }
+
+        /**
+         * The spec of a {@code covariance} column from its coordinates: {@code func} the readout, {@code components} its
+         * parameter ({@code absorption}), {@code standardize} the matrix the eigenvalue readouts are of.
+         */
+        static Spec spec(final Map<String, String> coordinates) {
+            final String func = coordinates.get("func");
+            final String components = coordinates.get("components");
+            final Readout readout = components == null ? Readout.of(func) : Readout.of(func, Double.parseDouble(components));
+            return new Spec("true".equals(coordinates.get("standardize")) ? Summaries.COVARIANCE_STANDARDIZED : Summaries.COVARIANCE, readout);
+        }
+
+        @Override
+        public State create() {
+            return new State();
+        }
+
+        @Override
+        public void update(final State s, final Object contribution, final int sign) {
+            final double[] x = (double[]) contribution;
+            if (!s.anchored) {
+                s.dimension = x.length;
+                s.anchor = x.clone();
+                s.sum = new double[x.length];
+                s.products = new double[x.length * x.length];
+                s.anchored = true;
+            } else if (x.length != s.dimension) {
+                throw new IllegalArgumentException("covariance contribution of " + x.length + " series into a state of " + s.dimension);
+            }
+            final int k = s.dimension;
+            final double[] d = new double[k];
+            for (int i = 0; i < k; i++) d[i] = x[i] - s.anchor[i];
+            s.n += sign;
+            for (int i = 0; i < k; i++) {
+                s.sum[i] += sign * d[i];
+                for (int j = 0; j < k; j++) s.products[i * k + j] += sign * d[i] * d[j];
+            }
+            // an emptied window starts over: no rounding residue, and the next vector re-anchors
+            if (s.n == 0) reset(s);
+        }
+
+        private static void reset(final State s) {
+            s.sum = new double[0];
+            s.products = new double[0];
+            s.anchor = new double[0];
+            s.anchored = false;
+        }
+
+        @Override
+        public boolean invertible() {
+            return true;
+        }
+
+        @Override
+        public void merge(final State into, final State other) {
+            if (other.n == 0) return;
+            if (!into.anchored) {
+                into.dimension = other.dimension;
+                into.anchor = other.anchor.clone();
+                into.sum = other.sum.clone();
+                into.products = other.products.clone();
+                into.n = other.n;
+                into.anchored = true;
+                return;
+            }
+            if (into.dimension != other.dimension) {
+                throw new IllegalArgumentException("covariance states of " + into.dimension + " and " + other.dimension + " series");
+            }
+            // other's sums are about other.anchor; with δ = other.anchor − into.anchor and z = y + δ:
+            // Σz = Σy + n δ, Σzzᵀ = Σyyᵀ + (Σy)δᵀ + δ(Σy)ᵀ + n δδᵀ
+            final int k = into.dimension;
+            final double[] delta = new double[k];
+            for (int i = 0; i < k; i++) delta[i] = other.anchor[i] - into.anchor[i];
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    into.products[i * k + j] += other.products[i * k + j] + other.sum[i] * delta[j] + delta[i] * other.sum[j] + other.n * delta[i] * delta[j];
+                }
+            }
+            for (int i = 0; i < k; i++) into.sum[i] += other.sum[i] + other.n * delta[i];
+            into.n += other.n;
+        }
+
+        @Override
+        public double count(final State s) {
+            return s.n;
+        }
+
+        @Override
+        public Object read(final State s, final Readout readout) {
+            if ("count".equals(readout.name())) return (long) s.n;
+            if (s.n < 2) return null;
+            final int k = s.dimension;
+            final double[] mean = new double[k], variance = new double[k];
+            for (int i = 0; i < k; i++) {
+                mean[i] = s.sum[i] / s.n;
+                variance[i] = Regression.variance(s.products[i * k + i] / s.n, mean[i]);
+            }
+            boolean constant = false;
+            for (final double v : variance) constant |= v == 0;
+            // the population covariance; a constant series has no covariance with anything (its products are residue)
+            final double[][] cov = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                cov[i][i] = variance[i];
+                for (int j = i + 1; j < k; j++) {
+                    final double c = variance[i] == 0 || variance[j] == 0 ? 0d : s.products[i * k + j] / s.n - mean[i] * mean[j];
+                    cov[i][j] = cov[j][i] = c;
+                }
+            }
+            return switch (readout.name()) {
+                case "meanCorrelation" -> {
+                    if (constant) yield null;
+                    double sum = 0;
+                    for (int i = 0; i < k; i++) for (int j = i + 1; j < k; j++) sum += Regression.clamp(cov[i][j] / Math.sqrt(variance[i] * variance[j]));
+                    yield sum / (k * (k - 1) / 2);
+                }
+                case "logDet" -> {
+                    if (constant) yield null;
+                    final double[] lambda = Svd.jacobi(correlation(cov, variance))[0];
+                    double logDet = 0;
+                    for (final double l : lambda) {
+                        // the trace of a correlation matrix is k: an eigenvalue below SINGULAR · k is 0 (n ≤ k, or collinear series)
+                        if (!(l > SINGULAR * k)) yield null;
+                        logDet += Math.log(l);
+                    }
+                    yield logDet;
+                }
+                case "absorption", "effectiveRank" -> {
+                    if (standardize && constant) yield null;
+                    final double[] lambda = Svd.jacobi(standardize ? correlation(cov, variance) : cov)[0];
+                    double trace = 0, squares = 0;
+                    for (int i = 0; i < k; i++) {
+                        // a PSD matrix: a negative eigenvalue is the sweep's rounding
+                        lambda[i] = Math.max(0d, lambda[i]);
+                        trace += lambda[i];
+                        squares += lambda[i] * lambda[i];
+                    }
+                    if (!(trace > 0)) yield null;
+                    if ("effectiveRank".equals(readout.name())) yield trace * trace / squares;
+                    final int components = Math.min(k, readout.parameter() == null ? DEFAULT_COMPONENTS : readout.parameter().intValue());
+                    double leading = 0;
+                    for (int i = 0; i < components; i++) leading += lambda[i];
+                    yield Math.min(1d, leading / trace);
+                }
+                default -> throw new IllegalArgumentException("covariance cannot read " + readout.name());
+            };
+        }
+
+        /** The correlation matrix of a covariance matrix with the given (non-zero) variances, clamped to [−1, 1]. */
+        private static double[][] correlation(final double[][] cov, final double[] variance) {
+            final int k = variance.length;
+            final double[][] r = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                r[i][i] = 1d;
+                for (int j = i + 1; j < k; j++) r[i][j] = r[j][i] = Regression.clamp(cov[i][j] / Math.sqrt(variance[i] * variance[j]));
+            }
+            return r;
         }
     }
 

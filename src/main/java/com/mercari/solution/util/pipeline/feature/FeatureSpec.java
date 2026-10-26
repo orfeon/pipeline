@@ -137,6 +137,10 @@ public class FeatureSpec implements Serializable {
         public Integer maxGroupSize;
         /** harville: the gamma shape of the race model (Stern); null / 1 = the Harville closed form. */
         public Double shape;
+        /** covariance: the leading eigenvalues {@code absorption} sums (default 1). */
+        public Integer components;
+        /** covariance: read the eigenvalues of the correlation matrix rather than the covariance matrix. */
+        public boolean standardize;
         /**
          * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by
          * name and the current row's through {@code $self.<field>} (a similarity kernel). Null / NaN / non-positive
@@ -1563,6 +1567,8 @@ public class FeatureSpec implements Serializable {
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
         op.weightBy = Json.string(o, "weightBy");
+        op.components = Json.integer(o, "components");
+        op.standardize = Json.bool(o, "standardize", false);
         op.method = Json.string(o, "method");
         op.context = Json.string(o, "context");
         op.order = Json.string(o, "order");

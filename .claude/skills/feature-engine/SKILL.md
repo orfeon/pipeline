@@ -260,7 +260,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
   events and is therefore scan-only, and its rank funcs spearman / kendall / quadrantAsymmetry (`RankDependence`,
   `q` coordinate on the last) have no family at all: `OperatorCatalog.summary` returns null for them, so they take
-  the scan path and re-rank the window per row — keep any new rank statistic there, not in `REGRESSION`). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
+  the scan path and re-rank the window per row — keep any new rank statistic there, not in `REGRESSION`), `COVARIANCE` / `COVARIANCE_STANDARDIZED` (`Summary.Covariance`: anchored k × k cross
+  moments of a `double[]` vector — the sequence `covariance` op: absorption / effectiveRank / meanCorrelation / logDet / count; the two
+  instances read the eigenvalues of the covariance or of the correlation matrix, so the spec is built per column by
+  `Summary.Covariance.spec(coordinates)` — `standardize` picks the instance, `components` the readout parameter — not through
+  `OperatorCatalog.summary`; a past row contributes only with every series present, `SequenceEvaluator.vector`; the compiler expands
+  the op once per block in `expandCovariance`, before the per-field loop, since its columns are per func). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
   (`lift` + `summarize.dynamics`, `lti`: exponential = Laguerre, fourier, legendre) and of `ewma` (order-0
   exponential sugar): parameterised per column from the coordinates (`Dynamics.spec`), a vector state shared by a
   channel's component columns through the `stateKey` coordinate (= `ColumnPlan.stateKey`, the `KeyState` key), a

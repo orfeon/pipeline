@@ -50,6 +50,8 @@ public class SequenceIncrementalTest {
                   - {maxEvents: 25}
                 ops:
                   - {type: aggregate, field: start_price, funcs: [skew, kurt, zeroCross, peaks, acf1, pacf2, ar2_1]}
+                  - {type: covariance, fields: [start_price, sold], funcs: [absorption, effectiveRank, meanCorrelation, logDet, count], as: joint}
+                  - {type: covariance, fields: [start_price, sold], funcs: [absorption, effectiveRank], standardize: true, as: joint_std}
               - name: seq
                 scope: sequence
                 entity: seller

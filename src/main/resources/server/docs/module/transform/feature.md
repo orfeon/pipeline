@@ -27,7 +27,9 @@ Supports:
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
   time), run length, events/days since a predicate last held, count of matching rows, windowed aggregates
   (count / mean / min / max / sum / std / first / last, the shape and series summaries skew / kurt / zeroCross /
-  peaks / acf / pacf / ar), and path summaries (the general form `lift` + `summarize`: exponential / Laguerre,
+  peaks / acf / pacf / ar), two-series regression (cov / corr / beta, rank dependence), the joint variation of
+  k series (`covariance`: absorption ratio, effective rank, mean correlation, log determinant) and path summaries
+  (the general form `lift` + `summarize`: exponential / Laguerre,
   Fourier and Legendre projections of the window). Windows combine `maxEvents`, `maxAge` and a
   `filter` that can reference the current row through `$self.<field>`.
 - **population** scope — expanding-fit encoding: conditional statistics of a target per key set
@@ -191,6 +193,7 @@ features:
       - {type: delta, field: start_price, k: 1}
       - {type: trend, field: start_price, k: 5}
       - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # two series (see Two-series and fractional-difference ops)
+      - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption, meanCorrelation]}   # k series together (see Joint variation of several series)
       - {type: fracdiff, field: start_price, d: 0.4, k: 20}
       - {type: ewma, expr: "sold >= 1", halflife: [3, 10], decayBy: events}
       - {type: runLength, field: condition_grade, value: good}   # a declared value matches a numeric field as a number (value: 1 = 1.0)
@@ -343,6 +346,48 @@ shrinkage scale:
   `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
   `quadrantAsymmetry` among the funcs: warning; a `maxEvents` window whose `maxEvents − lag` pairs can never fill a
   corner: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
+
+### Joint variation of several series (sequence `covariance`)
+
+```yaml
+- name: joint
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P90D}]
+  ops:
+    - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption, effectiveRank, meanCorrelation, logDet, count], as: j}   # joint_90d_j_absorption / _effectiveRank / _meanCorrelation / _logDet / _count
+    - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption], components: 2, standardize: true}   # joint_90d_start_price_final_price_quantity_absorption2
+```
+
+- **`covariance`** reads k numeric fields (2 to 64) of the entity's past events *together* and emits readouts of
+  their covariance / correlation matrix over the window — one column per func, not one per field. A past event
+  contributes when every field is present (not null / NaN / ±Infinity), so every readout is over the same events.
+  The columns are named by `as`, else by the fields joined: `<name>_<window>_<as | f1_f2_…>_<func>`.
+- **Funcs** (default `[absorption, meanCorrelation]`; every one but `count` is null with fewer than two contributing events):
+  - `absorption` — the share of the total variance carried by the leading `components` eigenvalues of the covariance
+    matrix (default 1): near 1 when one source moves every series, near 1 / k when they move independently with
+    equal variance. `components` must be below k (all k would read 1); a value other than 1 is in the column name
+    (`_absorption2`).
+  - `effectiveRank` — the participation ratio `(Σλ)² / Σλ²` of the eigenvalues: the number of equal, independent
+    sources that would spread the variance as the series do (k for uncorrelated series of equal variance, 1 when
+    one source drives them all).
+  - `meanCorrelation` — the mean of the pairwise correlations.
+  - `logDet` — the log determinant of the correlation matrix: 0 when the series are uncorrelated, towards −∞ as
+    they become collinear. Null while the window holds no more events than series (n ≤ k: the matrix is singular)
+    or a series is collinear with the others.
+  - `count` — the contributing events (int64; 0, never null).
+- **`standardize: true`** makes `absorption` / `effectiveRank` read the eigenvalues of the correlation matrix instead
+  of the covariance matrix: series of unlike scale (a price and a count) would otherwise let the largest variance
+  decide the ratio. `meanCorrelation` and `logDet` are of the correlation matrix either way, and every correlation
+  readout is null when a series is constant over the window.
+- **Cost / retention.** The op runs incrementally: a running k × k cross-moment state per column (anchored at the
+  first vector so a common level stays out of the products, evicted under `maxAge`), O(k²) per event and one k × k
+  eigendecomposition per row read — the window's length does not enter. Under `maxEvents` or a general `filter` it
+  re-reads the window per row (bounded by the window). Not defined over a `direction: future` window.
+- Diagnostics: `sequence.covariance.fields` (fewer than 2 or more than 64 fields, a field listed twice),
+  `sequence.op.type` (a non-numeric field), `sequence.covariance.func`, `sequence.covariance.components` (error
+  outside [1, k − 1]; warning when declared without `absorption` among the funcs), `sequence.weightBy.op`
+  (`weightBy` is an `aggregate` parameter).
 
 ### Ratings from contests (sequence `rating`)
 

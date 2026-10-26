@@ -285,6 +285,51 @@ public class FeaturePlanCompilerTest {
      * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
      */
     @Test
+    public void testCovarianceExpansion() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        final String cov = "- {type: covariance, fields: [start_price, quantity, current_bid_t10], funcs: [absorption, effectiveRank, meanCorrelation, logDet, count], components: 2, as: joint}";
+        final String spec = SPEC.replace(plain, plain + "\n      " + cov + "\n      - {type: covariance, fields: [start_price, quantity], standardize: true}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        // one column per func (the series are read together), named by `as`; a declared components is in the name
+        final OutputColumn absorption = column(plan, "recent_365d_joint_absorption2");
+        Assertions.assertEquals("covariance", absorption.getOperator());
+        Assertions.assertEquals(Schema.Type.float64, absorption.getFieldType().getType());
+        Assertions.assertEquals("absorption", absorption.getCoordinates().get("func"));
+        Assertions.assertEquals("start_price,quantity,current_bid_t10", absorption.getCoordinates().get("fields"));
+        Assertions.assertEquals("2", absorption.getCoordinates().get("components"));
+        Assertions.assertNull(absorption.getCoordinates().get("standardize"));
+        Assertions.assertEquals(Set.of("start_price", "quantity", "current_bid_t10"), absorption.getPastInputs());
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "recent_n5_joint_count").getFieldType().getType());
+        Assertions.assertNull(column(plan, "recent_n5_joint_effectiveRank").getCoordinates().get("components"));
+        Assertions.assertEquals(absorption.getStatus(), column(plan, "recent_365d_joint_logDet").getStatus(), "the same inputs, the same availability");
+        // default funcs, the fields joined as the name segment, standardize on the eigenvalue readouts only
+        final OutputColumn std = column(plan, "recent_365d_start_price_quantity_absorption");
+        Assertions.assertEquals("true", std.getCoordinates().get("standardize"));
+        Assertions.assertEquals("1", std.getCoordinates().get("components"));
+        Assertions.assertNull(column(plan, "recent_365d_start_price_quantity_meanCorrelation").getCoordinates().get("standardize"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, std.getStatus());
+        // a family-backed op: incremental without a window; under maxEvents it re-reads a bounded tail
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(std));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(column(plan, "recent_n5_joint_absorption2")));
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(cov, "- {type: covariance, field: start_price}")), "sequence.covariance.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(cov, "- {type: covariance, fields: [start_price, start_price]}")), "sequence.covariance.fields"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(cov, "- {type: covariance, fields: [start_price, condition_grade]}")), "sequence.op.type"));
+        final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [absorption, effectiveRank, meanCorrelation, logDet, count]", "funcs: [absorption, corr]"));
+        Assertions.assertTrue(hasCode(func, "sequence.covariance.func"));
+        Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("absorption | effectiveRank")));
+        Assertions.assertTrue(hasError(compile(SOURCES, spec.replace("components: 2", "components: 3")), "sequence.covariance.components"));
+        Assertions.assertTrue(hasError(compile(SOURCES, spec.replace("components: 2", "components: 0")), "sequence.covariance.components"));
+        final FeaturePlan unread = compile(SOURCES, spec.replace("funcs: [absorption, effectiveRank, meanCorrelation, logDet, count], components: 2", "funcs: [logDet], components: 2"));
+        Assertions.assertFalse(unread.getDiagnostics().hasErrors(), unread::describe);
+        Assertions.assertTrue(hasCode(unread, "sequence.covariance.components"), "components without absorption: a warning");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("components: 2, as: joint", "components: 2, as: joint, weightBy: \"1\"")), "sequence.weightBy.op"), "weightBy is an aggregate parameter");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("fields: [start_price, quantity], standardize", "fields: [start_price, nosuchfield], standardize")), "reference.unresolved"));
+        Assertions.assertNotNull(column(compile(SOURCES, spec.replace("components: 2, as: joint", "as: joint")), "recent_365d_joint_absorption"), "the default components is not in the name");
+    }
+
+    @Test
     public void testRegressionAndFracdiffExpansion() {
         final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
         Assertions.assertTrue(SPEC.contains(plain));

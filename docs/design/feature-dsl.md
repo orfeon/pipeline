@@ -89,7 +89,7 @@ what that state can do classifies every sequence statistic — the sugar ops of 
 
 | kind of statistic | state | consequence | examples |
 |---|---|---|---|
-| sum of per-event contributions that can also be *removed* (a group) | power sums, counts, cross moments, an order-statistics multiset | incremental over any window: O(1) per row, evicting under `maxAge` | count / sum / mean / std, skew / kurt, cov / corr / beta, distribution, quantiles |
+| sum of per-event contributions that can also be *removed* (a group) | power sums, counts, cross moments (of a pair, or the k × k matrix of `covariance`), an order-statistics multiset | incremental over any window: O(1) per row, evicting under `maxAge` | count / sum / mean / std, skew / kurt, cov / corr / beta, distribution, quantiles |
 | sum of per-event contributions that can only *grow* (a monoid) | running extremes, the gathered values | incremental over an unbounded past; re-read under a rolling window | min / max |
 | reads *neighbouring* events (an ordered monoid with boundary values) | — | re-read over the window per row; the window must be bounded | acf / pacf / AR coefficients, zero crossings, peaks, lagged cross-correlation, `trend`, `fracdiff` |
 | depends on the *current row* (a self-join) | none possible | re-read over the window per row; the window must be bounded | `weightBy` kernels |
@@ -670,6 +670,8 @@ premise of the availability propagation rule (§6.1).
     - {type: regression, field: final_price, against: start_price,
        funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2 | spearman | kendall | quadrantAsymmetry (q: 0.75); lag: k pairs field with `against` k events earlier
     - {type: fracdiff, field: start_price, d: 0.4, k: 20} # (1 − B)^d truncated to k terms (stationary, memory kept)
+    - {type: covariance, fields: [start_price, final_price, quantity],
+       funcs: [absorption, meanCorrelation]}                # k series read together: absorption (components) | effectiveRank | meanCorrelation | logDet | count; standardize = eigenvalues of the correlation matrix
     - {type: ewma, field: start_price, halflife: [2, 5, 10],
        decayBy: events}                                   # events | time
     - {type: ewma, expr: "sold >= 1", halflife: [5]}      # an expression (desugared to an anonymous row feature, below)
@@ -749,7 +751,7 @@ may be left unbounded:
 
 | op | evaluated | retention without `maxAge` |
 |---|---|---|
-| `aggregate` moments / shape, same-event `regression`, `ewma` and the `exponential` / `fourier` dynamics | incrementally (evicting under `maxAge`) | none beyond the state |
+| `aggregate` moments / shape, same-event `regression`, `covariance`, `ewma` and the `exponential` / `fourier` dynamics | incrementally (evicting under `maxAge`) | none beyond the state |
 | `legendre` dynamics | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `rating` (the entity rated from its contests: `context` = the contest, `field` = the outcome) | incrementally, one contest — the rows of a context group at one event time — at a time, over a **pool** of entities: the stage key is the global key, or the field of a reduced `$self` equality filter; no other window exists | one rating per player of the pool — per **member** when the op rates teams (`with: [<entity>, ...]`: the row is the block's entity plus other entities of the same row, its strength their sum, a contest's change shared among them by their part of the team's variance; readouts per member — `mu` / `sigma` / `count` / `delta` / `deviation` (net of the prior) / `z` (standardised within the member's pool of rated players, whose moments the state keeps) — and for the team: `mu` / `sigma` / `count` (the contests this very team ran) / `deviation`) —; the rows the window shift still holds back |
