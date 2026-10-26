@@ -298,6 +298,22 @@ public class SummaryTest {
         Assertions.assertEquals(1.2437813708243606, (Double) g.read(s, Summary.Readout.of("effectiveRank")), 1e-12);
         Assertions.assertEquals(0.82473401051973383, (Double) g.read(s, Summary.Readout.of("meanCorrelation")), 1e-12);
         Assertions.assertEquals(-7.0512475069271643, (Double) g.read(s, Summary.Readout.of("logDet")), 1e-9);
+        // the eigenvalues are swept once per state version: the funcs sharing the state reuse them, an update is seen,
+        // and a state that travelled (its caches transient) reads the same
+        final Summary.Covariance.State grown = fold(g, rows.subList(0, 5));
+        g.read(grown, Summary.Readout.of("absorption"));
+        g.read(grown, Summary.Readout.of("logDet"));
+        g.update(grown, rows.get(5), 1);
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(grown, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(-7.0512475069271643, (Double) g.read(grown, Summary.Readout.of("logDet")), 1e-9);
+        final double[] swept = grown.covarianceEigen;
+        Assertions.assertEquals(1.2437813708243606, (Double) g.read(grown, Summary.Readout.of("effectiveRank")), 1e-12);
+        Assertions.assertSame(swept, grown.covarianceEigen, "effectiveRank reads the sweep absorption made");
+        Assertions.assertEquals(0.88497407769492831, (Double) std.read(grown, Summary.Readout.of("absorption")), 1e-12, "the standardised read is of the correlation matrix's sweep");
+        final Summary.Covariance.State travelled = org.apache.beam.sdk.util.SerializableUtils.clone(grown);
+        Assertions.assertNull(travelled.covarianceEigen);
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(travelled, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(-7.0512475069271643, (Double) g.read(travelled, Summary.Readout.of("logDet")), 1e-9);
         Assertions.assertEquals(0.88497407769492831, (Double) std.read(s, Summary.Readout.of("absorption")), 1e-12);
         Assertions.assertEquals(1.2557488690665288, (Double) std.read(s, Summary.Readout.of("effectiveRank")), 1e-12);
         // the correlation readouts are the same under either instance; every component carries all the variance

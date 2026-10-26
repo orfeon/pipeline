@@ -530,6 +530,11 @@ public interface Summary<S extends Serializable> extends Serializable {
             /** Σ (x − anchor)(x − anchor)ᵀ, row-major. */
             public double[] products = new double[0];
             public boolean anchored;
+            /** Bumped by every update / merge: what the eigenvalue caches below are valid at (a read cache, not state: transient). */
+            transient long version;
+            /** The eigenvalues last swept of the covariance and of the correlation matrix, valid at the version beside them. */
+            transient double[] covarianceEigen, correlationEigen;
+            transient long covarianceEigenAt, correlationEigenAt;
         }
 
         /** The default of the {@code components} parameter of {@code absorption}. */
@@ -564,6 +569,7 @@ public interface Summary<S extends Serializable> extends Serializable {
         @Override
         public void update(final State s, final Object contribution, final int sign) {
             final double[] x = (double[]) contribution;
+            s.version++;
             if (!s.anchored) {
                 s.dimension = x.length;
                 s.anchor = x.clone();
@@ -599,6 +605,7 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         @Override
         public void merge(final State into, final State other) {
+            into.version++;
             if (other.n == 0) return;
             if (!into.anchored) {
                 into.dimension = other.dimension;
@@ -662,7 +669,7 @@ public interface Summary<S extends Serializable> extends Serializable {
                 }
                 case "logDet" -> {
                     if (constant) yield null;
-                    final double[] lambda = Svd.jacobi(correlation(cov, variance))[0];
+                    final double[] lambda = eigenvalues(s, true, () -> correlation(cov, variance));
                     double logDet = 0;
                     for (final double l : lambda) {
                         // the trace of a correlation matrix is k: an eigenvalue below SINGULAR · k is 0 (n ≤ k, or collinear series)
@@ -673,13 +680,11 @@ public interface Summary<S extends Serializable> extends Serializable {
                 }
                 case "absorption", "effectiveRank" -> {
                     if (standardize && constant) yield null;
-                    final double[] lambda = Svd.jacobi(standardize ? correlation(cov, variance) : cov)[0];
+                    final double[] lambda = eigenvalues(s, standardize, () -> standardize ? correlation(cov, variance) : cov);
                     double trace = 0, squares = 0;
-                    for (int i = 0; i < k; i++) {
-                        // a PSD matrix: a negative eigenvalue is the sweep's rounding
-                        lambda[i] = Math.max(0d, lambda[i]);
-                        trace += lambda[i];
-                        squares += lambda[i] * lambda[i];
+                    for (final double l : lambda) {
+                        trace += l;
+                        squares += l * l;
                     }
                     if (!(trace > 0)) yield null;
                     if ("effectiveRank".equals(readout.name())) yield trace * trace / squares;
@@ -690,6 +695,27 @@ public interface Summary<S extends Serializable> extends Serializable {
                 }
                 default -> throw new IllegalArgumentException("covariance cannot read " + readout.name());
             };
+        }
+
+        /**
+         * The eigenvalues of the covariance or of the correlation matrix (decreasing; a negative one — the sweep's rounding
+         * on a PSD matrix — snapped to 0), swept once per state version: the funcs of an op read one state, and absorption,
+         * effectiveRank and logDet would otherwise each sweep the same matrix on every row. The cache is transient — a
+         * state that travels is read afresh — and the array is shared, so a reader must not write into it.
+         */
+        private static double[] eigenvalues(final State s, final boolean ofCorrelation, final java.util.function.Supplier<double[][]> matrix) {
+            final double[] cached = ofCorrelation ? s.correlationEigen : s.covarianceEigen;
+            if (cached != null && (ofCorrelation ? s.correlationEigenAt : s.covarianceEigenAt) == s.version) return cached;
+            final double[] lambda = Svd.jacobi(matrix.get())[0];
+            for (int i = 0; i < lambda.length; i++) lambda[i] = Math.max(0d, lambda[i]);
+            if (ofCorrelation) {
+                s.correlationEigen = lambda;
+                s.correlationEigenAt = s.version;
+            } else {
+                s.covarianceEigen = lambda;
+                s.covarianceEigenAt = s.version;
+            }
+            return lambda;
         }
 
         /**

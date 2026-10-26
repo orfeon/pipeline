@@ -2859,6 +2859,10 @@ public final class FeaturePlanCompiler {
                     + " (meanCorrelation and logDet are of the correlation matrix either way), which funcs does not list: ignored");
         }
         final String base = def.name + "_" + window.token() + "_" + (op.as != null ? op.as : String.join("_", names)) + "_";
+        if (op.as == null && fields.size() > 4 && hintedBlocks.add("sequence.covariance.as:" + def.name + ":" + window.token() + ":" + String.join(",", canonical))) {
+            diagnostics.hint("sequence.covariance.as", loc, "the default name segment joins the " + fields.size() + " field names (" + String.join("_", names)
+                    + "): declare as: to keep the column names within a sink's limit");
+        }
         // the funcs read one running state (the same vectors fold in either way, standardize only changes the read): the
         // O(k²) update and the k × k sums are paid once per op, not once per func. Keyed by the ordered series, so
         // two ops over the same series and window share it too, and no other vector ever lands in it
@@ -2869,13 +2873,16 @@ public final class FeaturePlanCompiler {
                 continue;
             }
             final boolean absorption = "absorption".equals(func);
-            // a declared components other than the default is in the name: two of them in one block do not collide
-            final String suffix = absorption && components != Summary.Covariance.DEFAULT_COMPONENTS ? func + components : func;
+            final boolean eigen = absorption || "effectiveRank".equals(func);
+            // the parameters that change the value are in the name, so two ops over the same series in one block do not
+            // collide: a declared components other than the default, and standardize on the eigenvalue readouts (`_z`:
+            // of the standardised series)
+            final String suffix = (absorption && components != Summary.Covariance.DEFAULT_COMPONENTS ? func + components : func) + (op.standardize && eigen ? "_z" : "");
             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + suffix, "count".equals(func) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
             c.coordinates.put("func", func);
             c.coordinates.put("fields", String.join(",", canonical));
             if (absorption) c.coordinates.put("components", Integer.toString(components));
-            if (op.standardize && (absorption || "effectiveRank".equals(func))) c.coordinates.put("standardize", "true");
+            if (op.standardize && eigen) c.coordinates.put("standardize", "true");
             c.coordinates.put("stateKey", stateKey);
             for (final String field : fields) addPastInput(c, field);
             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);

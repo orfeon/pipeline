@@ -356,13 +356,16 @@ shrinkage scale:
   windows: [{maxAge: P90D}]
   ops:
     - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption, effectiveRank, meanCorrelation, logDet, count], as: j}   # joint_90d_j_absorption / _effectiveRank / _meanCorrelation / _logDet / _count
-    - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption], components: 2, standardize: true}   # joint_90d_start_price_final_price_quantity_absorption2
+    - {type: covariance, fields: [start_price, final_price, quantity], funcs: [absorption], components: 2, standardize: true}   # joint_90d_start_price_final_price_quantity_absorption2_z
 ```
 
 - **`covariance`** reads k numeric fields (2 to 64) of the entity's past events *together* and emits readouts of
   their covariance / correlation matrix over the window — one column per func, not one per field. A past event
   contributes when every field is present (not null / NaN / ±Infinity), so every readout is over the same events.
-  The columns are named by `as`, else by the fields joined: `<name>_<window>_<as | f1_f2_…>_<func>`.
+  The columns are named by `as`, else by the fields joined: `<name>_<window>_<as | f1_f2_…>_<func>`; the parameters
+  that change a value are in its name (`absorption<c>` for a declared `components`, `_z` after `absorption` /
+  `effectiveRank` under `standardize`), so two ops over the same series can sit in one block. With more than four
+  fields declare `as` (hint `sequence.covariance.as`): the joined names can exceed a sink's column-name limit.
 - **Funcs** (default `[absorption, meanCorrelation]`; every one but `count` is null with fewer than two contributing events):
   - `absorption` — the share of the total variance carried by the leading `components` eigenvalues of the covariance
     matrix (default 1): near 1 when one source moves every series, near 1 / k when they move independently with
@@ -377,20 +380,21 @@ shrinkage scale:
     or a series is collinear with the others.
   - `count` — the contributing events (int64; 0, never null).
 - **`standardize: true`** makes `absorption` / `effectiveRank` read the eigenvalues of the correlation matrix instead
-  of the covariance matrix: series of unlike scale (a price and a count) would otherwise let the largest variance
+  of the covariance matrix (`_absorption_z` / `_effectiveRank_z`): series of unlike scale (a price and a count) would otherwise let the largest variance
   decide the ratio. `meanCorrelation` and `logDet` are of the correlation matrix either way, and every correlation
   readout is null when a series is constant over the window.
 - **Cost / retention.** The op runs incrementally: one running k × k cross-moment state per op and window, shared
   by its funcs (anchored at the first vector so a common level stays out of the products, evicted under `maxAge`),
-  O(k²) per event and one k × k eigendecomposition per row read — the window's length does not enter. Under
+  O(k²) per event and one k × k eigendecomposition per row read, shared by the funcs that read it — the window's
+  length does not enter. Under
   `maxEvents` or a general `filter` it re-reads the window per row: bound it with `maxAge` / `maxEvents` (a filter
   alone keeps the whole filtered history, `sequence.window.unbounded`). Not defined over a `direction: future` window.
 - Diagnostics: `sequence.covariance.fields` (fewer than 2 or more than 64 fields, a field listed twice),
   `sequence.op.type` (a non-numeric field), `sequence.covariance.func`, `sequence.covariance.components` (error
   outside [1, k − 1]; warning when declared without `absorption` among the funcs), `sequence.covariance.standardize`
   (warning: declared without `absorption` / `effectiveRank` among the funcs), `components.invalid` /
-  `standardize.invalid` (not an integer / not `true` or `false`), `sequence.weightBy.op` (`weightBy` is an
-  `aggregate` parameter).
+  `standardize.invalid` (not an integer / not `true` or `false`), `sequence.covariance.as` (hint: more than four
+  fields without `as`), `sequence.weightBy.op` (`weightBy` is an `aggregate` parameter).
 
 ### Ratings from contests (sequence `rating`)
 

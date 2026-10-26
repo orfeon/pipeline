@@ -1432,8 +1432,8 @@ public class FeatureTransformTest {
                         Assertions.assertEquals(1.0038734328024981, row.getAsDouble("f_joint_all_j_effectiveRank"), 1e-9);
                         Assertions.assertEquals(-0.2477754800226194, row.getAsDouble("f_joint_all_j_meanCorrelation"), 1e-9);
                         Assertions.assertNull(row.getPrimitiveValue("f_joint_all_j_logDet"), "three vectors of three series: singular");
-                        Assertions.assertEquals(0.94178400430915243, row.getAsDouble("f_joint_all_s_absorption"), 1e-9);
-                        Assertions.assertEquals(1.1231585932315855, row.getAsDouble("f_joint_all_s_effectiveRank"), 1e-9);
+                        Assertions.assertEquals(0.94178400430915243, row.getAsDouble("f_joint_all_s_absorption_z"), 1e-9);
+                        Assertions.assertEquals(1.1231585932315855, row.getAsDouble("f_joint_all_s_effectiveRank_z"), 1e-9);
                     }
                     case "C/s1" -> {
                         Assertions.assertEquals(2L, ((Number) row.getPrimitiveValue("f_joint_all_j_count")).longValue());
@@ -1442,12 +1442,12 @@ public class FeatureTransformTest {
                         // price and bid rose together, the quantity fell: (−1 + 1 − 1) / 3
                         Assertions.assertEquals(-1.0 / 3, row.getAsDouble("f_joint_all_j_meanCorrelation"), 1e-9);
                         Assertions.assertNull(row.getPrimitiveValue("f_joint_all_j_logDet"));
-                        Assertions.assertEquals(1.0, row.getAsDouble("f_joint_all_s_absorption"), 1e-9);
-                        Assertions.assertEquals(1.0, row.getAsDouble("f_joint_all_s_effectiveRank"), 1e-9);
+                        Assertions.assertEquals(1.0, row.getAsDouble("f_joint_all_s_absorption_z"), 1e-9);
+                        Assertions.assertEquals(1.0, row.getAsDouble("f_joint_all_s_effectiveRank_z"), 1e-9);
                     }
                     case "A/s1", "A/s2", "B/s1", "C/s2" -> {
                         Assertions.assertNull(row.getPrimitiveValue("f_joint_all_j_absorption"), id + ": fewer than two vectors");
-                        Assertions.assertNull(row.getPrimitiveValue("f_joint_all_s_effectiveRank"), id + ": fewer than two vectors");
+                        Assertions.assertNull(row.getPrimitiveValue("f_joint_all_s_effectiveRank_z"), id + ": fewer than two vectors");
                         Assertions.assertEquals("B/s1".equals(id) || "C/s2".equals(id) ? 1L : 0L, ((Number) row.getPrimitiveValue("f_joint_all_j_count")).longValue(), id);
                     }
                     default -> Assertions.fail("unexpected row " + id);

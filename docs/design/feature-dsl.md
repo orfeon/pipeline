@@ -671,7 +671,7 @@ premise of the availability propagation rule (§6.1).
        funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2 | spearman | kendall | quadrantAsymmetry (q: 0.75); lag: k pairs field with `against` k events earlier
     - {type: fracdiff, field: start_price, d: 0.4, k: 20} # (1 − B)^d truncated to k terms (stationary, memory kept)
     - {type: covariance, fields: [start_price, final_price, quantity],
-       funcs: [absorption, meanCorrelation]}                # k series read together: absorption (components) | effectiveRank | meanCorrelation | logDet | count; standardize = eigenvalues of the correlation matrix
+       funcs: [absorption, meanCorrelation]}                # k series read together: absorption (components) | effectiveRank | meanCorrelation | logDet | count; standardize = eigenvalues of the correlation matrix (`_z` in the name)
     - {type: ewma, field: start_price, halflife: [2, 5, 10],
        decayBy: events}                                   # events | time
     - {type: ewma, expr: "sold >= 1", halflife: [5]}      # an expression (desugared to an anonymous row feature, below)
