@@ -147,6 +147,36 @@ public class StatMathTest {
         }
         Assertions.assertEquals(0d, StatMath.inverseRegularizedBeta(2, 3, 0));
         Assertions.assertEquals(1d, StatMath.inverseRegularizedBeta(2, 3, 1));
+        // a far lower tail is solved to its own digits, not to an absolute 1e-15 (which any guess below it would meet)
+        for (final double[] ab : new double[][]{{0.5, 0.5}, {2, 0.5}, {15, 0.5}, {0.5, 2}}) {
+            for (final double p : new double[]{1e-13, 1e-16, 1e-20, 1e-30, 1e-50}) {
+                final double x = StatMath.inverseRegularizedBeta(ab[0], ab[1], p);
+                Assertions.assertEquals(1, StatMath.regularizedBeta(ab[0], ab[1], x) / p, 1e-12, ab[0] + "," + ab[1] + " p=" + p);
+            }
+        }
+    }
+
+    /** The t quantile / tail keep their relative digits in a far tail and next to the centre (where df / (df + t²) is 1 to an ulp). */
+    @Test
+    public void testStudentTTailsAndCentre() {
+        for (final double df : new double[]{1, 2.5, 4, 30, 1000}) {
+            for (final double tail : new double[]{1e-16, 1e-25, 1e-40}) {
+                final double t = StatMath.studentTQuantileOfLowerTail(tail, df);
+                Assertions.assertEquals(1, StatMath.studentTLowerTail(t, df) / tail, 1e-12, "df " + df + " tail " + tail);
+            }
+            // next to the centre the quantile is linear in the offset from 1/2, with slope 1 / f(0)
+            final double density0 = Math.exp(StatMath.logGamma((df + 1) / 2) - StatMath.logGamma(df / 2)) / Math.sqrt(df * Math.PI);
+            for (final double requested : new double[]{1e-12, 1e-9, 1e-7}) {
+                final double p = 0.5 + requested;
+                // the offset p really holds (exact: p and 0.5 are within a factor of 2), not the one asked for
+                final double offset = p - 0.5;
+                Assertions.assertEquals(offset / density0, StatMath.studentTQuantile(p, df), 1e-6 * offset / density0, "df " + df + " offset " + offset);
+                final double t = offset / density0;
+                Assertions.assertEquals(0.5 - offset, StatMath.studentTLowerTail(t, df), 1e-6 * offset + Math.ulp(0.5), "df " + df + " t " + t);
+            }
+        }
+        // a small shape reaches its lower quantile (a = 0.05: about 1e-140 at 1e-7)
+        Assertions.assertEquals(1e-7, StatMath.regularizedGammaP(0.05, StatMath.gammaQuantile(0.05, 1e-7)), 1e-19);
     }
 
     /** Reference values from scipy.stats.t / f / gamma. */

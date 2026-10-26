@@ -3533,12 +3533,12 @@ public final class FeaturePlanCompiler {
     }
 
     /**
-     * §4.4 copula: the Gaussian copula of a few numeric inputs. The marginals are quantile transforms expanded as
+     * §4.4 copula: the Gaussian or t copula ({@code family: t} with a declared {@code df}) of a few numeric inputs. The marginals are quantile transforms expanded as
      * synthetic {@code quantileTransform} blocks ({@code <name>_z_<input>}, intermediate, normal scores) under the block's
      * own fit geometry — or, with {@code marginals: scores}, the inputs are taken as normal scores already — and the
      * block fits the correlation of the score vectors from their moments (the svd family). One FLOAT64 column per
      * readout ({@link Copula}): {@code conditional} / {@code conditionalProb} of an input given others, {@code expected}
-     * (its conditional mean score), {@code jointRank}, {@code logDensity}. A readout reads on the row only the scores it is
+     * (its conditional median score), {@code jointRank}, {@code logDensity}. A readout reads on the row only the scores it is
      * computed from — {@code expected} not even its own input's, so an outcome's expected score given pre-event inputs is
      * a feature — and its availability is theirs; the fit reads every score from the past rows (an outcome input delays a
      * forward fit like a target).

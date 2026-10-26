@@ -134,6 +134,17 @@ public final class Copula implements Serializable, FitArtifact.Model {
         return new Copula(dimension, n, mean, sd, correlation, shrinkage, shrinkMethod, floored, family, df, report);
     }
 
+    /**
+     * The same correlation read as another family: the family and df are readout parameters (the fit is the same moment
+     * solve), so a loaded artifact takes the config's — as a quantile transform takes its {@code clip}.
+     */
+    public Copula withFamily(final String family, final double df) {
+        final boolean t = T.equals(family);
+        if (!t && !GAUSSIAN.equals(family)) throw new IllegalArgumentException("copula family must be " + GAUSSIAN + " or " + T + ": " + family);
+        if (t && (!(df > 0) || Double.isInfinite(df))) throw new IllegalArgumentException("a t copula needs positive degrees of freedom: " + df);
+        return new Copula(dimension, n, mean, sd, correlation, shrinkage, shrinkMethod, floored, family, t ? df : Double.NaN, diagnostics);
+    }
+
     static Copula empty(final int dimension, final long n) {
         return empty(dimension, n, GAUSSIAN, Double.NaN);
     }
@@ -261,10 +272,20 @@ public final class Copula implements Serializable, FitArtifact.Model {
         return z == null || z.isNaN() || z.isInfinite() ? Double.NaN : (z - mean[i]) / sd[i];
     }
 
-    /** The row's coordinate in the copula's latent space: the standardised score, or under t its t quantile ({@link #toT}). */
-    private double latent(final Double[] scores, final int i) {
-        final double z = standardised(scores, i);
-        return isT() && !Double.isNaN(z) ? toT(z, df) : z;
+    /**
+     * The row's coordinates in the copula's latent space, one per input (NaN = missing): the standardised scores, under t
+     * their t quantiles ({@link #toT}). Every readout of a row reads them, so the stage computes them once per row (one t
+     * quantile per input, not one per input and readout); null when nothing was fitted.
+     */
+    double[] latents(final Double[] scores) {
+        if (isEmpty()) return null;
+        final boolean t = isT();
+        final double[] y = new double[dimension];
+        for (int i = 0; i < dimension; i++) {
+            final double z = i < scores.length ? standardised(scores, i) : Double.NaN;
+            y[i] = t && !Double.isNaN(z) ? toT(z, df) : z;
+        }
+        return y;
     }
 
     /** The t quantile at the probability of a standard normal score: {@code T_ν⁻¹(Φ(z))}, through the tail so a far score keeps its digits. */
@@ -289,14 +310,24 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * With none of {@code given} observed it is j's own standardised score.
      */
     public Double conditional(final Double[] scores, final int j, final int[] given) {
-        final double[] c = conditionalPosition(scores, j, given);
+        return conditionalOf(latents(scores), j, given);
+    }
+
+    /** {@link #conditional} from the row's {@link #latents}. */
+    Double conditionalOf(final double[] y, final int j, final int[] given) {
+        final double[] c = conditionalPosition(y, j, given);
         if (c == null) return null;
         return isT() ? toNormal(c[0], c[1]) : c[0];
     }
 
     /** {@code Φ(conditional)}: the conditional copula {@code C_{j|S}(u_j | u_S)} at the row (under t, the t CDF of the t position). */
     public Double conditionalProb(final Double[] scores, final int j, final int[] given) {
-        final double[] c = conditionalPosition(scores, j, given);
+        return conditionalProbOf(latents(scores), j, given);
+    }
+
+    /** {@link #conditionalProb} from the row's {@link #latents}. */
+    Double conditionalProbOf(final double[] y, final int j, final int[] given) {
+        final double[] c = conditionalPosition(y, j, given);
         if (c == null) return null;
         return isT() ? StatMath.studentTCdf(c[0], c[1]) : NormalDistribution.cdf(c[0]);
     }
@@ -305,18 +336,17 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * {position, degrees of freedom} of j given the observed inputs of {@code given}: the regression residual over its
      * conditional standard deviation — under t divided by the scale {@code sqrt((ν + y_Sᵀ R_SS⁻¹ y_S) / (ν + k))}, so it
      * is t with {@code ν + k} degrees of freedom; under the Gaussian the position is N(0, 1) (df = ∞). Null when j is
-     * missing or nothing was fitted.
+     * missing or nothing was fitted ({@code y} null).
      */
-    private double[] conditionalPosition(final Double[] scores, final int j, final int[] given) {
-        if (isEmpty()) return null;
-        final double yj = latent(scores, j);
+    private double[] conditionalPosition(final double[] y, final int j, final int[] given) {
+        if (y == null) return null;
+        final double yj = y[j];
         if (Double.isNaN(yj)) return null;
-        final double[] ys = new double[given.length];
-        final Conditional c = system(scores, j, given, ys);
-        final double position = (yj - predicted(c, given, ys)) / c.sd;
+        final Conditional c = system(y, j, given);
+        final double position = (yj - predicted(c, given, y)) / c.sd;
         if (!isT()) return new double[]{position, Double.POSITIVE_INFINITY};
         final int k = c.observed.length;
-        final double scale = Math.sqrt((df + quadraticGiven(c, given, ys)) / (df + k));
+        final double scale = Math.sqrt((df + quadraticGiven(c, y)) / (df + k));
         return new double[]{position / scale, df + k};
     }
 
@@ -329,26 +359,22 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * j exactly at the average (as {@link #jointRank} is null with nothing observed).
      */
     public Double expected(final Double[] scores, final int j, final int[] given) {
-        if (isEmpty()) return null;
-        final double[] ys = new double[given.length];
-        final Conditional c = system(scores, j, given, ys);
-        boolean observed = false;
-        for (final double y : ys) observed |= !Double.isNaN(y);
-        if (!observed) return null;
-        final double mu = predicted(c, given, ys);
+        return expectedOf(latents(scores), j, given);
+    }
+
+    /** {@link #expected} from the row's {@link #latents} ({@code y[j]} is not read). */
+    Double expectedOf(final double[] y, final int j, final int[] given) {
+        if (y == null) return null;
+        final Conditional c = system(y, j, given);
+        if (c.observed.length == 0) return null;
+        final double mu = predicted(c, given, y);
         return mean[j] + sd[j] * (isT() ? toNormal(mu, df) : mu);
     }
 
-    /**
-     * The regression of j on the observed inputs among {@code given} (their latent coordinates written to {@code ys},
-     * NaN = missing), solved once per observed set.
-     */
-    private Conditional system(final Double[] scores, final int j, final int[] given, final double[] ys) {
+    /** The regression of j on the observed inputs among {@code given} (latent coordinates {@code y}, NaN = missing), solved once per observed set. */
+    private Conditional system(final double[] y, final int j, final int[] given) {
         int mask = 0;
-        for (int k = 0; k < given.length; k++) {
-            ys[k] = latent(scores, given[k]);
-            if (!Double.isNaN(ys[k])) mask |= 1 << given[k];
-        }
+        for (final int g : given) if (!Double.isNaN(y[g])) mask |= 1 << g;
         // the observed conditioning set alone decides the system — whichever readout lists it — so β is kept per input
         final Map<Long, Conditional> cache = conditionals();
         final long key = ((long) j << 32) | (mask & 0xffffffffL);
@@ -362,25 +388,20 @@ public final class Copula implements Serializable, FitArtifact.Model {
     }
 
     /** {@code r_jS R_SS⁻¹ y_S} over the observed coordinates (latent units). */
-    private static double predicted(final Conditional c, final int[] given, final double[] ys) {
+    private static double predicted(final Conditional c, final int[] given, final double[] y) {
         double predicted = 0;
-        for (int k = 0; k < given.length; k++) if (!Double.isNaN(ys[k])) predicted += c.beta[given[k]] * ys[k];
+        for (final int g : given) if (!Double.isNaN(y[g])) predicted += c.beta[g] * y[g];
         return predicted;
     }
 
     /** {@code y_Sᵀ R_SS⁻¹ y_S} over the observed conditioning coordinates, through the system's Cholesky factor (0 with none observed). */
-    private static double quadraticGiven(final Conditional c, final int[] given, final double[] ys) {
+    private static double quadraticGiven(final Conditional c, final double[] y) {
         final int k = c.observed.length;
-        if (k == 0) return 0d;
-        final double[] y = new double[k];
-        for (int a = 0; a < k; a++) {
-            for (int p = 0; p < given.length; p++) if (given[p] == c.observed[a]) y[a] = ys[p];
-        }
-        // forward substitution L w = y: the form is w'w
+        // forward substitution L w = y_S: the form is w'w
         double q = 0;
         final double[] w = new double[k];
         for (int a = 0; a < k; a++) {
-            double s = y[a];
+            double s = y[c.observed[a]];
             for (int t = 0; t < a; t++) s -= c.chol[a][t] * w[t];
             w[a] = s / c.chol[a][a];
             q += w[a] * w[a];
@@ -426,13 +447,14 @@ public final class Copula implements Serializable, FitArtifact.Model {
      * it once for both.
      */
     double[] quadratic(final Double[] scores) {
-        if (isEmpty()) return null;
-        final double[] y = new double[dimension];
+        return quadraticOf(latents(scores));
+    }
+
+    /** {@link #quadratic} from the row's {@link #latents} (null = nothing fitted). */
+    double[] quadraticOf(final double[] y) {
+        if (y == null) return null;
         int mask = 0;
-        for (int i = 0; i < dimension; i++) {
-            y[i] = latent(scores, i);
-            if (!Double.isNaN(y[i])) mask |= 1 << i;
-        }
+        for (int i = 0; i < dimension; i++) if (!Double.isNaN(y[i])) mask |= 1 << i;
         if (mask == 0) return null;
         final Map<Integer, Joint> cache = joints();
         Joint joint = cache.get(mask);
@@ -906,7 +928,10 @@ public final class Copula implements Serializable, FitArtifact.Model {
         for (int i = 0; i < correlation.length; i++) correlation[i] = doubles(rows.get(i));
         // an artifact written before the t family names no family: Gaussian
         final String family = json.has("family") && json.get("family").isJsonPrimitive() ? json.get("family").getAsString() : GAUSSIAN;
-        final double df = T.equals(family) ? json.get("df").getAsDouble() : Double.NaN;
+        if (!GAUSSIAN.equals(family) && !T.equals(family)) throw new IllegalStateException("copula artifact names an unknown family '" + family + "' (gaussian | t)");
+        final JsonElement declaredDf = json.get("df");
+        if (T.equals(family) && (declaredDf == null || !declaredDf.isJsonPrimitive())) throw new IllegalStateException("copula artifact of family t lacks 'df'");
+        final double df = T.equals(family) ? declaredDf.getAsDouble() : Double.NaN;
         return new Copula(json.get("dimension").getAsInt(), n.getAsLong(), doubles(json.get("mean")), doubles(json.get("sd")), correlation,
                 json.get("shrinkage").getAsDouble(), json.get("shrinkMethod").getAsString(), json.get("floored").getAsInt(), family, df,
                 json.has("diagnostics") && json.get("diagnostics").isJsonObject() ? json.get("diagnostics").toString() : null);

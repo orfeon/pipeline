@@ -204,6 +204,8 @@ public class CopulaTest {
 
     /** {@code n} draws of a multivariate t with correlation {@code r} and {@code df} degrees of freedom (a Gaussian vector over a chi-square scale). */
     private static double[][] tDraws(final double[][] r, final double df, final int n, final long seed) {
+        // the loop below draws ceil(df / 2) exponentials: an odd df would silently be a chi-square(df + 1)
+        if (df <= 0 || df % 2 != 0) throw new IllegalArgumentException("tDraws needs an even df: " + df);
         final double[][] x = draws(r, n, seed);
         final Random random = new Random(seed + 1);
         for (final double[] row : x) {
@@ -342,6 +344,23 @@ public class CopulaTest {
         Assertions.assertFalse(json.has("diagnostics"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 0, false));
         Assertions.assertThrows(IllegalArgumentException.class, () -> Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, "clayton", 2, false));
+        // the family is a readout parameter: the Gaussian artifact read as t is the t fit of the same moments, and back
+        final Copula asT = gaussian.withFamily(Copula.T, 2.5);
+        Assertions.assertTrue(asT.isT());
+        Assertions.assertEquals(c.conditional(row, 2, new int[]{0, 1}), asT.conditional(row, 2, new int[]{0, 1}));
+        Assertions.assertEquals(c.logDensity(row), asT.logDensity(row));
+        Assertions.assertTrue(Double.isNaN(asT.withFamily(Copula.GAUSSIAN, 7).df));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> gaussian.withFamily(Copula.T, Double.NaN));
+    }
+
+    /** {@code T⁻¹(Φ(z))} and back keep their digits into the far tails (scores well past what a clipped marginal emits). */
+    @Test
+    public void testTCoordinatesRoundTrip() {
+        for (final double df : new double[]{1, 2.5, 4, 30}) {
+            for (final double z : new double[]{-20, -9, -8, -7.5, -3, -0.3, 1e-9, 1e-6, 0.3, 3, 7.5, 8, 9, 20}) {
+                Assertions.assertEquals(z, Copula.toNormal(Copula.toT(z, df), df), 1e-12 * Math.max(1, Math.abs(z)), "df " + df + " z " + z);
+            }
+        }
     }
 
     /**

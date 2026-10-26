@@ -5120,6 +5120,11 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNotEquals(plan.getHash(), studentT.getHash(), "the family and df are in the plan hash");
         Assertions.assertEquals("t", FeatureStages.copulaSpecs(studentT.getColumns()).get(0).copulaFamily());
         Assertions.assertEquals(4d, FeatureStages.copulaSpecs(studentT.getColumns()).get(0).df());
+        // a loaded artifact takes the config's family / df (readout parameters): one written as Gaussian is served as t(4)
+        final Copula adopted = FeatureStages.copulaSpecs(studentT.getColumns()).get(0)
+                .adopt(new Copula(2, 10, new double[]{0, 0}, new double[]{1, 1}, new double[][]{{1, 0.3}, {0.3, 1}}, 0, Copula.NONE, 0));
+        Assertions.assertTrue(adopted.isT());
+        Assertions.assertEquals(4d, adopted.df);
         Assertions.assertNull(column(plan, "cop_cond_start_price").getCoordinates().get("family"), "the Gaussian writes no family coordinate");
         Assertions.assertTrue(studentT.getDiagnostics().getMessages().stream().anyMatch(d -> d.code().equals("fit.mode.static") && d.message().contains("t copula with 4.0 degrees of freedom")), studentT::describe);
         final FeaturePlan ignoredDf = compile(SOURCES, withEncoding(block.replace("type: copula", "type: copula\n        df: 4")));

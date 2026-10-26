@@ -162,7 +162,9 @@ public final class StatMath {
         final double q = 1 - p;
         double lo = 0, hi = Math.max(1d, a + 10 * Math.sqrt(a) + 10);
         while (upper ? regularizedGammaQ(a, hi) > q : regularizedGammaP(a, hi) < p) hi *= 2;
-        for (int i = 0; i < 300 && hi - lo > 1e-14 * hi; i++) {
+        // a small shape puts a lower quantile hundreds of orders of magnitude below 1 (a = 0.05: 1e-140 at 1e-7), which
+        // the halving from lo = 0 must reach before the relative tolerance can bite
+        for (int i = 0; i < 1200 && hi - lo > 1e-14 * hi; i++) {
             final double mid = 0.5 * (lo + hi);
             if (upper ? regularizedGammaQ(a, mid) > q : regularizedGammaP(a, mid) < p) lo = mid; else hi = mid;
         }
@@ -243,7 +245,8 @@ public final class StatMath {
             if (x <= 0 || x >= 1) break;
             final double err = regularizedBeta(a, b, x) - p;
             if (err < 0) lo = Math.max(lo, x); else hi = Math.min(hi, x);
-            if (Math.abs(err) <= 1e-15 * Math.max(p, 1 - p)) return x;
+            // relative to p: an absolute 1e-15 would accept the initial guess of any p below it (a far lower tail)
+            if (Math.abs(err) <= 1e-15 * p) return x;
             final double density = Math.exp(a1 * Math.log(x) + b1 * Math.log(1 - x) + afac);
             if (!(density > 0) || Double.isInfinite(density)) break;
             final double u = err / density;
@@ -270,12 +273,23 @@ public final class StatMath {
         return t < 0 ? tail : 1 - tail;
     }
 
-    /** P(T ≤ −|t|): the lower tail of a Student t at {@code −absT}, computed directly so a far tail keeps its digits. */
+    /**
+     * P(T ≤ −|t|): the lower tail of a Student t at {@code −absT}, computed directly so a far tail keeps its digits. Near
+     * the centre ({@code |t| < 0.5}, a tail above 0.3 for every df) it is {@code ½ − ½ I_{t²/(df+t²)}(1/2, df/2)}: there
+     * {@code df / (df + t²)} is within an ulp of 1 and would read every small |t| as the centre.
+     */
     public static double studentTLowerTail(final double absT, final double df) {
         if (Double.isInfinite(df)) return NormalDistribution.cdf(-absT);
         if (Double.isInfinite(absT)) return 0d;
-        return 0.5 * regularizedBeta(df / 2, 0.5, df / (df + absT * absT));
+        final double t2 = absT * absT;
+        if (absT < CENTRAL_T) return 0.5 - 0.5 * regularizedBeta(0.5, df / 2, t2 / (df + t2));
+        return 0.5 * regularizedBeta(df / 2, 0.5, df / (df + t2));
     }
+
+    /** Below this |t| the Student t functions work on {@code t² / (df + t²)} rather than {@code df / (df + t²)}. */
+    private static final double CENTRAL_T = 0.5;
+    /** Above this lower tail (every df: |t| below about 0.5) the t quantile is solved on {@code t² / (df + t²)}. */
+    private static final double CENTRAL_TAIL = 0.3;
 
     /** The quantile of a Student t with {@code df} degrees of freedom; ±∞ at 0 / 1, NaN outside [0, 1]. */
     public static double studentTQuantile(final double p, final double df) {
@@ -288,11 +302,20 @@ public final class StatMath {
         return p < 0.5 ? -t : t;
     }
 
-    /** The |t| whose lower tail P(T ≤ −|t|) is {@code tail} (in (0, 0.5]): I_x(df / 2, 1 / 2) = 2 tail, x = df / (df + t²). */
+    /**
+     * The |t| whose lower tail P(T ≤ −|t|) is {@code tail} (in (0, 0.5]): I_x(df / 2, 1 / 2) = 2 tail, x = df / (df + t²).
+     * Near the centre (a tail above 0.3) the mirror I_y(1 / 2, df / 2) = 1 − 2 tail on y = t² / (df + t²) instead: x would
+     * be within an ulp of 1, and a small |t| would come back as noise.
+     */
     public static double studentTQuantileOfLowerTail(final double tail, final double df) {
         if (!(tail > 0)) return Double.POSITIVE_INFINITY;
         if (tail >= 0.5) return 0d;
         if (Double.isInfinite(df)) return -NormalDistribution.inverseNormal(tail);
+        if (tail > CENTRAL_TAIL) {
+            // 2 tail is in (0.6, 1), so 1 − 2 tail is exact
+            final double y = inverseRegularizedBeta(0.5, df / 2, 1 - 2 * tail);
+            return y <= 0 ? 0d : Math.sqrt(df * y / (1 - y));
+        }
         final double x = inverseRegularizedBeta(df / 2, 0.5, 2 * tail);
         return x >= 1 ? 0d : Math.sqrt(df * (1 - x) / x);
     }

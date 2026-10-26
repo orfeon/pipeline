@@ -40,7 +40,7 @@ Supports:
   **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
   normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
   **smooth**: the curve of a target over a numeric key (penalised B-splines, strength by REML) and the
-  target's residual from it. **copula**: the Gaussian copula of a few numeric inputs — an input's position
+  target's residual from it. **copula**: the Gaussian or t copula of a few numeric inputs — an input's position
   given the others, how atypical the combination is, the dependence's log density. **transitionStats** / **spectralEmbedding**: over the values an entity takes one
   after another — the shrunk distribution of the next value given the previous one(s), and coordinates of a
   categorical state from its co-occurrences (PPMI + spectral factorisation).
@@ -1614,13 +1614,14 @@ input.
   other, more often than a Gaussian with the same `R`) — and the smaller `df`, the heavier the joint tails; above a
   few hundred it is the Gaussian. `df` is **declared, not fitted**: the fit solves moments, and a likelihood over the
   rows would need a pass of its own. Take it from a Gaussian block's `diagnose` report (`dfSuggested`, below) or choose
-  it by validation; `df: 4` is a common starting point for daily financial returns. `R` stays the normal scores'
+  it by validation; `df: 4` is a common starting point. `R` stays the normal scores'
   correlation (under a true t copula a close estimate, slightly below the t copula's own at small `df`). What changes
   per readout is in the table: `conditional` and `expected` remain normal-score columns (comparable across families,
   feedable to the same model), `conditionalProb` / `jointRank` / `logDensity` are the t copula's probabilities and
   density. Cost: one t quantile per input and row (the inverse incomplete beta), a few microseconds; the fit is the
   same Combine. `shrink` / `eigenFloor` / `marginals` / `fit` apply unchanged (`fit.align` is ignored as for the
-  Gaussian); `df` is in the plan hash, so a serving config must declare the same one. `df` on a Gaussian block is a
+  Gaussian); `df` is in the plan hash, so a serving config must declare the same one (an artifact loaded under a pinned
+  `fit.artifact.id` is read with the config's `family` / `df`: they change the readouts, not the fit). `df` on a Gaussian block is a
   warning (`copula.df`), a missing or non-positive `df` with `family: t` an error, any other family `copula.family`.
 - **Rows that enter the fit.** Only complete score vectors: a row with a missing input (null / NaN) takes no part
   (as in svd). `fit.minRows` defaults to the number of inputs + 1; an input without spread (a single value, one mass
