@@ -113,7 +113,7 @@ public final class OperatorCatalog {
         register(Scope.population, "quantileTransform", InputKind.numeric, F64, true, "empirical CDF position (or normal score) of a value, quantile knots fitted on the whole input");
         register(Scope.population, "discretize", InputKind.numeric, I64, true, "fitted discretization (v1)");
         register(Scope.population, "smooth", InputKind.numeric, F64, true, "smooth curve of a target over a numeric key (penalised B-splines, strength by REML), solved from the input's moments");
-        register(Scope.population, "copula", InputKind.numeric, F64, true, "Gaussian copula of a few numeric inputs (quantile-transformed marginals, the correlation of their normal scores): conditional positions and means, joint atypicality, the dependence's log density");
+        register(Scope.population, "copula", InputKind.numeric, F64, true, "Gaussian or t copula of a few numeric inputs (quantile-transformed marginals, the correlation of their normal scores): conditional positions and medians, joint atypicality, the dependence's log density");
         register(Scope.population, "factorization", InputKind.categorical, F64, true, "factorization machine (v1)");
     }
 

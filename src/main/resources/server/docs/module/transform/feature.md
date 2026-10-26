@@ -40,7 +40,7 @@ Supports:
   **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
   normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
   **smooth**: the curve of a target over a numeric key (penalised B-splines, strength by REML) and the
-  target's residual from it. **copula**: the Gaussian copula of a few numeric inputs — an input's position
+  target's residual from it. **copula**: the Gaussian or t copula of a few numeric inputs — an input's position
   given the others, how atypical the combination is, the dependence's log density. **transitionStats** / **spectralEmbedding**: over the values an entity takes one
   after another — the shrunk distribution of the next value given the previous one(s), and coordinates of a
   categorical state from its co-occurrences (PPMI + spectral factorisation).
@@ -1552,7 +1552,7 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
     scope: population
     type: copula
     inputs: [start_price, quantity, current_bid_t10]   # 2 to 31 numeric fields / columns
-    # family: gaussian                 # the only family implemented (t is rejected: copula.family)
+    family: gaussian                   # gaussian (default) | t — with df: <degrees of freedom>, see "Family t" below
     marginals: {bins: 100, clip: 0.001} # quantile transforms expanded per input (the defaults); or: marginals: scores
     shrink: oas                        # oas (default) | none | a number in [0, 1): R <- (1 - λ) R + λ I
     eigenFloor: 1.0e-6                 # the smallest eigenvalue R keeps (default 1e-6)
@@ -1570,8 +1570,9 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
 
 A copula separates a multivariate distribution into its **marginals** (each input on its own) and its **dependence**
 (how the inputs move together). The block takes the marginals as quantile transforms — every input becomes its normal
-score `z = Φ⁻¹(F(x))` — and fits the dependence of those scores as one correlation matrix `R` (the Gaussian copula).
-What a row reads is then a property of the *relation* between its inputs, not of their scales: any monotone
+score `z = Φ⁻¹(F(x))` — and fits the dependence of those scores as one correlation matrix `R`, read as the Gaussian
+copula (default) or, with `family: t` and a declared `df`, as the t copula (the same `R`, heavier joint tails — see
+*Family t*). What a row reads is then a property of the *relation* between its inputs, not of their scales: any monotone
 transform of an input (a log, a price in another currency, a rank) leaves every output the same (exactly when the
 marginal has a knot per distinct value, up to the interpolation between knots otherwise), heavy tails and outliers
 are ranks, and under `forward` every output stays calibrated as the inputs drift.
@@ -1579,11 +1580,11 @@ are ranks, and under `forward` every output stays calibrated as the inputs drift
 | output | column | value |
 |---|---|---|
 | `conditional` (bare) | `<name>_cond_<input>` per input | the input's position given **all** the other inputs |
-| `{conditional: x, given: [a, b]}` | `<name>_cond_x_given_a_b` | `(z_x − r_xS R_SS⁻¹ z_S) / sqrt(1 − r_xS R_SS⁻¹ r_Sx)` over S = the `given` inputs — standard normal under the model: 0 = where the others put it, +2 = two standard deviations higher than they imply |
-| `conditionalProb` (bare or `{conditionalProb: x, given}`) | `<name>_condprob_…` | `Φ` of the conditional position: the conditional copula `C(u_x \| u_S)` in (0, 1). For a tree model prefer `conditional` — a probability squeezes the tails near 0 and 1 |
-| `expected` (bare or `{expected: x, given}`) | `<name>_expected_…` | the conditional mean of x's normal score given S, in the score's units: `m_x + s_x r_xS R_SS⁻¹ z_S` (`m_x`, `s_x` = the score's fitted mean and standard deviation, ≈ 0 and 1) — the Gaussian copula regression of x on S, "where the others put it". It does not read x, so it is defined when x is missing (null when none of `given` is observed) — and an outcome's expected score given pre-event inputs is a feature (below). In score units, not x's own: for a tree model the conditional median of x in its own units is a monotone function of it (and so is any other conditional quantile among rows that observe the same `given` inputs), so it carries the same information |
-| `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects). The lower tail is computed directly, so a row near the centre reads a small probability with its digits, not 0 |
-| `logDensity` | `<name>_logdensity` | `log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z`: what the dependence alone makes of the combination — positive when it is more common than independent inputs would make it, negative when the inputs disagree with how they usually move together. Unlike `jointRank` it ignores how extreme each input is on its own |
+| `{conditional: x, given: [a, b]}` | `<name>_cond_x_given_a_b` | `(z_x − r_xS R_SS⁻¹ z_S) / sqrt(1 − r_xS R_SS⁻¹ r_Sx)` over S = the `given` inputs — standard normal under the model: 0 = where the others put it, +2 = two standard deviations higher than they imply. Under `family: t` the conditional of the t coordinates is a t with `df + |S|` degrees of freedom around the same regression, scaled by `sqrt((df + y_Sᵀ R_SS⁻¹ y_S) / (df + |S|))` (far-out conditioning inputs widen it); the column is the normal score of that t position, so it is standard normal under either family and reads the same way |
+| `conditionalProb` (bare or `{conditionalProb: x, given}`) | `<name>_condprob_…` | `Φ` of the conditional position (under t its t CDF): the conditional copula `C(u_x \| u_S)` in (0, 1). For a tree model prefer `conditional` — a probability squeezes the tails near 0 and 1 |
+| `expected` (bare or `{expected: x, given}`) | `<name>_expected_…` | the conditional median of x's normal score given S, in the score's units — under the Gaussian the conditional mean too: `m_x + s_x r_xS R_SS⁻¹ z_S` (`m_x`, `s_x` = the score's fitted mean and standard deviation, ≈ 0 and 1), the Gaussian copula regression of x on S, "where the others put it"; under t the regression's position in t coordinates mapped back to a normal score. It does not read x, so it is defined when x is missing (null when none of `given` is observed) — and an outcome's expected score given pre-event inputs is a feature (below). In score units, not x's own: for a tree model the conditional median of x in its own units is a monotone function of it (and so is any other conditional quantile among rows that observe the same `given` inputs), so it carries the same information |
+| `jointRank` | `<name>_jointrank` | the χ²(k) CDF of `zᵀ R⁻¹ z` over the k inputs — under t the F(k, df) CDF of `yᵀ R⁻¹ y / k`: how atypical the combination is as a whole, on a probability scale (0.99 = more unusual than 99% of the vectors the model expects). The lower tail is computed directly, so a row near the centre reads a small probability with its digits, not 0 |
+| `logDensity` | `<name>_logdensity` | `log c(u) = −½ log det R − ½ zᵀ (R⁻¹ − I) z` (under t the multivariate t density of `y` over the product of its t marginals): what the dependence alone makes of the combination — positive when it is more common than independent inputs would make it, negative when the inputs disagree with how they usually move together. Unlike `jointRank` it ignores how extreme each input is on its own |
 
 `as:` names a readout's column (its full name, without the prefix) — on a conditional entry, or on a joint readout
 written `{jointRank: true, as: <name>}` / `{logDensity: true, as: <name>}`; two readouts with one name are an error
@@ -1604,8 +1605,24 @@ input.
   rows alone (Chen, Wiesel, Eldar and Hero 2010; derived for Gaussian data, which normal scores are) — strong with
   few rows or unrelated inputs, negligible with many rows and real dependence; a number fixes λ, `none` switches it
   off. Eigenvalues below `eigenFloor` are then raised to it, so `R⁻¹` exists and every readout stays finite even with
-  two near-identical inputs. The artifact `<planHash>/<block>.copula.json` holds the dimension, n, the means and
-  standard deviations, the shrinkage method and value, the number of floored eigenvalues and `R`.
+  two near-identical inputs. The artifact `<planHash>/<block>.copula.json` holds the family (and `df`), the dimension, n,
+  the means and standard deviations, the shrinkage method and value, the number of floored eigenvalues and `R`.
+- **Family t** (`family: t`, `df: <number>` required, > 0). The same `R`, read as a t copula: every standardised score
+  becomes the t quantile at its probability, `y = T_df⁻¹(Φ(z))`, and the vector `y` is multivariate t with correlation
+  `R` and `df` degrees of freedom. A t copula has **tail dependence** — joint extremes are more frequent than the
+  correlation alone would make them, in every corner (two inputs crash together, and a crash in one with a spike in the
+  other, more often than a Gaussian with the same `R`) — and the smaller `df`, the heavier the joint tails; above a
+  few hundred it is the Gaussian. `df` is **declared, not fitted**: the fit solves moments, and a likelihood over the
+  rows would need a pass of its own. Take it from a Gaussian block's `diagnose` report (`dfSuggested`, below) or choose
+  it by validation; `df: 4` is a common starting point. `R` stays the normal scores'
+  correlation (under a true t copula a close estimate, slightly below the t copula's own at small `df`). What changes
+  per readout is in the table: `conditional` and `expected` remain normal-score columns (comparable across families,
+  feedable to the same model), `conditionalProb` / `jointRank` / `logDensity` are the t copula's probabilities and
+  density. Cost: one t quantile per input and row (the inverse incomplete beta), a few microseconds; the fit is the
+  same Combine. `shrink` / `eigenFloor` / `marginals` / `fit` apply unchanged (`fit.align` is ignored as for the
+  Gaussian); `df` is in the plan hash, so a serving config must declare the same one (an artifact loaded under a pinned
+  `fit.artifact.id` is read with the config's `family` / `df`: they change the readouts, not the fit). `df` on a Gaussian block is a
+  warning (`copula.df`), a missing or non-positive `df` with `family: t` an error, any other family `copula.family`.
 - **Rows that enter the fit.** Only complete score vectors: a row with a missing input (null / NaN) takes no part
   (as in svd). `fit.minRows` defaults to the number of inputs + 1; an input without spread (a single value, one mass
   point) leaves nothing fitted and every readout null (the run log says which input).
@@ -1638,8 +1655,9 @@ input.
   holds the whole-input correlation for a static serving run; it is solved from the forward scores, which match the
   whole-input marginals' scores when the inputs do not drift.
 - **What a Gaussian copula cannot see.** It has no tail dependence: two inputs that crash together more often than
-  their overall correlation implies look like any other pair with that correlation. `conditional` is linear in the
-  scores (a rank-space regression), so a relation that is not monotone is invisible to it.
+  their overall correlation implies look like any other pair with that correlation (`family: t` sees that, with one
+  `df` for every pair; a dependence that is asymmetric between the upper and the lower tail is beyond both families).
+  `conditional` is linear in the scores (a rank-space regression), so a relation that is not monotone is invisible to it.
 - **`diagnose`** (`true`, or `{tail, pairs}`; off by default) reports, from the whole-input fit, whether that matters for
   your inputs. For every pair (or the `pairs: [[a, b], ...]` listed), it counts the rows beyond the `tail` quantile
   (default `0.95`) of one input that are beyond it in the other too — and the mirror below `1 − tail` — and holds the
@@ -1649,7 +1667,14 @@ input.
   taken at the exceedance rates actually observed (an input whose top 8% is one tied value is held against a
   copula with 8% beyond, not 5%). A share more than two standard errors above it (and at least five
   joint rows) is logged as a warning: joint extremes are more frequent than the model's dependence allows — a tail
-  feature, or a t copula, would see them. For the inputs whose marginals the block expands it also counts **point
+  feature, or a t copula, would see them. For every pair tail whose share exceeds the Gaussian's, `dfMatch` is the
+  degrees of freedom of the t copula that would imply exactly that share (at the same exceedance rates and
+  correlation; a bivariate t orthant integrated numerically), and once some tail is flagged the report ends with
+  `dfSuggested`, their median over the pair tails — the `df` to declare with `family: t` (one `df` serves every pair,
+  so a spread of `dfMatch` values is itself a finding: the pairs differ in tail behaviour). A block that is already
+  `family: t` is held against the t copula's implied share at its declared `df`, reports each pair's tail-dependence
+  coefficient `tailDependence` = `2 T_{df+1}(−sqrt((df+1)(1−ρ)/(1+ρ)))`, flags the tails the declared `df` still
+  under-states (a smaller `df`) and notes those it over-states (a larger one). For the inputs whose marginals the block expands it also counts **point
   masses** — values sitting on a run of tied knots, a mass of at least `1 / bins` of the rows (a zero-inflated count's
   zeros) — and, per pair, how often both inputs are on one, against the product of their shares: masses that occur
   together put a spike into the scores the correlation is fitted on and narrow the conditional spread around it

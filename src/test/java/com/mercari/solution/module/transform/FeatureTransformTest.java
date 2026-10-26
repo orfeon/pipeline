@@ -6,6 +6,7 @@ import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.feature.Copula;
 import com.mercari.solution.util.pipeline.feature.Rating;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -4936,6 +4937,55 @@ public class FeatureTransformTest {
                       fit: {%1$sartifact: {uri: "%2$s"}}
                 """.formatted(fit, dir);
         return FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    /**
+     * family t: the same block as a t copula with df 4 — the readouts are the model's over the same correlation (checked
+     * against a {@link Copula} fitted on the emitted scores), the artifact names the family and df, and a Gaussian block
+     * on the same rows differs in every readout but the correlation.
+     */
+    @Test
+    public void testCopulaT() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        // the cop block alone declares shrink right after these inputs (cop_oas has no shrink, cop_s other inputs); runtime indentation = 10
+        final String config = copulaConfig("", dir).replace("inputs: [start_price, quantity]\n          shrink: none",
+                "inputs: [start_price, quantity]\n          family: t\n          df: 4\n          shrink: none");
+        Assertions.assertNotEquals(copulaConfig("", dir), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final List<MElement> list = new ArrayList<>();
+            for (final MElement row : rows) list.add(row);
+            Assertions.assertEquals(6, list.size());
+            // the fitted model over the emitted scores (zp / zq are the same marginals, fitted on the same six rows)
+            final com.mercari.solution.util.pipeline.feature.Svd.Moments m = new com.mercari.solution.util.pipeline.feature.Svd.Moments();
+            for (final MElement row : list) m.add(new double[]{row.getAsDouble("f_zp"), row.getAsDouble("f_zq")});
+            final Copula t = Copula.fit(m, Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 4, false);
+            final Copula gaussian = Copula.fit(m, Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+            for (final MElement row : list) {
+                final Double[] scores = {row.getAsDouble("f_zp"), row.getAsDouble("f_zq")};
+                Assertions.assertEquals(t.conditional(scores, 0, new int[]{1}), row.getAsDouble("f_cop_cond_start_price"), 1e-9, row::toString);
+                Assertions.assertEquals(t.conditional(scores, 1, new int[]{0}), row.getAsDouble("f_cop_cond_quantity"), 1e-9, row::toString);
+                Assertions.assertEquals(t.conditionalProb(scores, 0, new int[]{1}), row.getAsDouble("f_cop_condprob_start_price"), 1e-9, row::toString);
+                Assertions.assertEquals(t.jointRank(scores), row.getAsDouble("f_cop_jointrank"), 1e-9, row::toString);
+                Assertions.assertEquals(t.logDensity(scores), row.getAsDouble("f_cop_logdensity"), 1e-9, row::toString);
+                // the Gaussian block (cop_s, over the same scores) reads the same correlation differently
+                Assertions.assertEquals(gaussian.jointRank(scores), row.getAsDouble("f_cop_s_jointrank"), 1e-9, row::toString);
+                Assertions.assertNotEquals(row.getAsDouble("f_cop_s_jointrank"), row.getAsDouble("f_cop_jointrank"), row::toString);
+                Assertions.assertNotEquals(row.getAsDouble("f_cop_s_logdensity"), row.getAsDouble("f_cop_logdensity"), row::toString);
+            }
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject cop = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop.copula.json").toPath())).getAsJsonObject();
+        Assertions.assertEquals("t", cop.get("family").getAsString());
+        Assertions.assertEquals(4d, cop.get("df").getAsDouble());
+        final com.google.gson.JsonObject oas = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(new java.io.File(dirs[0], "cop_oas.copula.json").toPath())).getAsJsonObject();
+        Assertions.assertEquals("gaussian", oas.get("family").getAsString());
+        Assertions.assertFalse(oas.has("df"));
+        Assertions.assertEquals(cop.getAsJsonArray("correlation").get(0).getAsJsonArray().get(1).getAsDouble(),
+                Copula.fromJson(cop).correlation[0][1], 0d);
     }
 
     /**

@@ -121,4 +121,94 @@ public class StatMathTest {
         Assertions.assertTrue(StatMath.glob("a?c").matcher("abc").matches());
         Assertions.assertFalse(StatMath.glob("a.c").matcher("abc").matches());
     }
+
+    /** Reference values from scipy.special.betainc; the closed forms I_x(1, b) = 1 − (1 − x)^b and I_x(a, 1) = x^a. */
+    @Test
+    public void testRegularizedBeta() {
+        Assertions.assertEquals(0.0189271240719457, StatMath.regularizedBeta(2.5, 0.5, 0.3), 1e-14);
+        Assertions.assertEquals(0.795167235300867, StatMath.regularizedBeta(0.5, 0.5, 0.9), 1e-13);
+        Assertions.assertEquals(0.231787008, StatMath.regularizedBeta(7, 3, 0.6), 1e-12);
+        Assertions.assertEquals(4.2441330890241e-10, StatMath.regularizedBeta(1.5, 0.5, 1e-6), 1e-22, "a small lower tail keeps its digits");
+        for (final double x : new double[]{0.01, 0.3, 0.77}) {
+            Assertions.assertEquals(1 - Math.pow(1 - x, 3.5), StatMath.regularizedBeta(1, 3.5, x), 1e-14);
+            Assertions.assertEquals(Math.pow(x, 2.25), StatMath.regularizedBeta(2.25, 1, x), 1e-14);
+        }
+        Assertions.assertEquals(0d, StatMath.regularizedBeta(2, 3, 0));
+        Assertions.assertEquals(1d, StatMath.regularizedBeta(2, 3, 1));
+        // the inverse round-trips, including far into the tails and with b < 1 (the t quantile's shape)
+        for (final double[] ab : new double[][]{{2.5, 0.5}, {0.5, 0.5}, {7, 3}, {1.25, 0.5}, {40, 0.5}, {0.3, 2}}) {
+            for (final double p : new double[]{1e-15, 1e-9, 1e-4, 0.01, 0.2, 0.5, 0.8, 0.99, 1 - 1e-6}) {
+                final double x = StatMath.inverseRegularizedBeta(ab[0], ab[1], p);
+                Assertions.assertTrue(x > 0 && x < 1, ab[0] + "," + ab[1] + " p=" + p + " x=" + x);
+                // to the digits x itself has: near 1 with b < 1 the density is steep, so one ulp of x moves p by more than 1e-12
+                final double density = Math.exp((ab[0] - 1) * Math.log(x) + (ab[1] - 1) * Math.log(1 - x) + StatMath.logGamma(ab[0] + ab[1]) - StatMath.logGamma(ab[0]) - StatMath.logGamma(ab[1]));
+                Assertions.assertEquals(p, StatMath.regularizedBeta(ab[0], ab[1], x), 1e-11 * Math.max(p, 1e-3) + 2 * Math.ulp(x) * density, ab[0] + "," + ab[1] + " p=" + p);
+            }
+        }
+        Assertions.assertEquals(0d, StatMath.inverseRegularizedBeta(2, 3, 0));
+        Assertions.assertEquals(1d, StatMath.inverseRegularizedBeta(2, 3, 1));
+        // a far lower tail is solved to its own digits, not to an absolute 1e-15 (which any guess below it would meet)
+        for (final double[] ab : new double[][]{{0.5, 0.5}, {2, 0.5}, {15, 0.5}, {0.5, 2}}) {
+            for (final double p : new double[]{1e-13, 1e-16, 1e-20, 1e-30, 1e-50}) {
+                final double x = StatMath.inverseRegularizedBeta(ab[0], ab[1], p);
+                Assertions.assertEquals(1, StatMath.regularizedBeta(ab[0], ab[1], x) / p, 1e-12, ab[0] + "," + ab[1] + " p=" + p);
+            }
+        }
+    }
+
+    /** The t quantile / tail keep their relative digits in a far tail and next to the centre (where df / (df + t²) is 1 to an ulp). */
+    @Test
+    public void testStudentTTailsAndCentre() {
+        for (final double df : new double[]{1, 2.5, 4, 30, 1000}) {
+            for (final double tail : new double[]{1e-16, 1e-25, 1e-40}) {
+                final double t = StatMath.studentTQuantileOfLowerTail(tail, df);
+                Assertions.assertEquals(1, StatMath.studentTLowerTail(t, df) / tail, 1e-12, "df " + df + " tail " + tail);
+            }
+            // next to the centre the quantile is linear in the offset from 1/2, with slope 1 / f(0)
+            final double density0 = Math.exp(StatMath.logGamma((df + 1) / 2) - StatMath.logGamma(df / 2)) / Math.sqrt(df * Math.PI);
+            for (final double requested : new double[]{1e-12, 1e-9, 1e-7}) {
+                final double p = 0.5 + requested;
+                // the offset p really holds (exact: p and 0.5 are within a factor of 2), not the one asked for
+                final double offset = p - 0.5;
+                Assertions.assertEquals(offset / density0, StatMath.studentTQuantile(p, df), 1e-6 * offset / density0, "df " + df + " offset " + offset);
+                final double t = offset / density0;
+                Assertions.assertEquals(0.5 - offset, StatMath.studentTLowerTail(t, df), 1e-6 * offset + Math.ulp(0.5), "df " + df + " t " + t);
+            }
+        }
+        // a small shape reaches its lower quantile (a = 0.05: about 1e-140 at 1e-7)
+        Assertions.assertEquals(1e-7, StatMath.regularizedGammaP(0.05, StatMath.gammaQuantile(0.05, 1e-7)), 1e-19);
+    }
+
+    /** Reference values from scipy.stats.t / f / gamma. */
+    @Test
+    public void testStudentTAndF() {
+        Assertions.assertEquals(0.0333832724059941, StatMath.studentTCdf(-2.5, 4), 1e-14);
+        Assertions.assertEquals(0.849756605364646, StatMath.studentTCdf(1.3, 2.5), 1e-14);
+        Assertions.assertEquals(4.06764021358198e-05, StatMath.studentTCdf(-30, 3), 1e-18);
+        Assertions.assertEquals(0.5, StatMath.studentTCdf(0, 7));
+        // df = 1 is the Cauchy, an infinite df the normal
+        Assertions.assertEquals(0.5 + Math.atan(1.7) / Math.PI, StatMath.studentTCdf(1.7, 1), 1e-13);
+        Assertions.assertEquals(StatMath.studentTCdf(1.7, Double.POSITIVE_INFINITY), 0.5 * StatMath.erfc(-1.7 / Math.sqrt(2)), 1e-15);
+        Assertions.assertEquals(2.77644510519779, StatMath.studentTQuantile(0.975, 4), 1e-11);
+        Assertions.assertEquals(-10.2145318524074, StatMath.studentTQuantile(0.001, 3), 1e-10);
+        Assertions.assertEquals(-3489.58339536998, StatMath.studentTQuantile(1e-9, 2.5), 1e-7);
+        Assertions.assertEquals(0.527760452706597, StatMath.studentTQuantile(0.7, 50), 1e-12);
+        Assertions.assertEquals(0d, StatMath.studentTQuantile(0.5, 3));
+        Assertions.assertEquals(Double.NEGATIVE_INFINITY, StatMath.studentTQuantile(0, 3));
+        for (final double df : new double[]{1, 2.5, 4, 30}) {
+            for (final double p : new double[]{1e-12, 1e-6, 0.03, 0.4, 0.5, 0.6, 0.97, 1 - 1e-6}) {
+                Assertions.assertEquals(p, StatMath.studentTCdf(StatMath.studentTQuantile(p, df), df), 1e-12 * Math.max(p, 1e-3), "df " + df + " p " + p);
+            }
+        }
+        Assertions.assertEquals(0.743612802471824, StatMath.fCdf(2.0, 3, 4), 1e-13);
+        Assertions.assertEquals(0.21495909499123, StatMath.fCdf(0.25, 2, 7.5), 1e-13);
+        Assertions.assertEquals(0d, StatMath.fCdf(0, 2, 3));
+        // F(1, df) is the square of a t(df); F(k, inf) is chi2(k) / k
+        Assertions.assertEquals(2 * StatMath.studentTCdf(2.5, 4) - 1, StatMath.fCdf(6.25, 1, 4), 1e-13);
+        Assertions.assertEquals(StatMath.chiSquareCdf(7.5, 3), StatMath.fCdf(2.5, 3, Double.POSITIVE_INFINITY), 1e-15);
+        Assertions.assertEquals(StatMath.chiSquareCdf(7.5, 3), StatMath.chiSquareCdfReal(7.5, 3), 0d);
+        Assertions.assertEquals(1.41422022908297e-05, StatMath.gammaQuantile(2, 1e-10), 1e-18);
+        Assertions.assertEquals(0.172519800333608, StatMath.gammaQuantile(0.7, 0.3), 1e-13);
+        Assertions.assertEquals(35.2286297490232, StatMath.gammaQuantile(5.5, 1 - 1e-10), 1e-9);
+    }
 }

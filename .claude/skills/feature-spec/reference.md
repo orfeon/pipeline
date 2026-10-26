@@ -328,7 +328,10 @@ needs named `inputs`, not an array — `svd.outputs`); `residualNorm` = `<name>_
 
 ### `type: copula` (static, or forward per time block)
 
-`inputs` (2 to 31 distinct numeric fields / columns), `family: gaussian` (the only one; `t` is rejected),
+`inputs` (2 to 31 distinct numeric fields / columns), `family: gaussian` (default) or `family: t` with a declared
+`df: <number > 0>` (the same correlation read as a t copula — heavier joint tails; `conditional` / `expected` stay
+normal-score columns, `conditionalProb` / `jointRank` (F(k, df)) / `logDensity` are the t copula's; `df` is not fitted:
+take it from a Gaussian block's `diagnose` report, `dfSuggested`, or choose it by validation),
 `marginals: {bins, clip}` (default `{bins: 100, clip: 0.001}`: one `quantileTransform` with `distribution: normal` is
 expanded per input as the intermediate column `<name>_z_<input>`, under the block's `fit`) or `marginals: scores` (the
 inputs are your own normal-score columns; a warning names one that is not a normal quantileTransform), `shrink: oas |

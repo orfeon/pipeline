@@ -202,6 +202,193 @@ public class CopulaTest {
         Assertions.assertTrue(Copula.fromJson(Copula.empty(3, 1).toJson()).isEmpty());
     }
 
+    /** {@code n} draws of a multivariate t with correlation {@code r} and {@code df} degrees of freedom (a Gaussian vector over a chi-square scale). */
+    private static double[][] tDraws(final double[][] r, final double df, final int n, final long seed) {
+        // the loop below draws ceil(df / 2) exponentials: an odd df would silently be a chi-square(df + 1)
+        if (df <= 0 || df % 2 != 0) throw new IllegalArgumentException("tDraws needs an even df: " + df);
+        final double[][] x = draws(r, n, seed);
+        final Random random = new Random(seed + 1);
+        for (final double[] row : x) {
+            // chi-square(df) as a gamma(df / 2) draw: the sum of exponentials for an integer df / 2
+            double chi2 = 0;
+            for (int k = 0; k < df / 2; k++) chi2 += -2 * Math.log(1 - random.nextDouble());
+            final double scale = Math.sqrt(df / chi2);
+            for (int i = 0; i < row.length; i++) row[i] *= scale;
+        }
+        return x;
+    }
+
+    /** Sample mean, variance and kurtosis (E[(x − m)⁴] / var²) of the non-null values. */
+    private static double[] momentsOf(final java.util.List<Double> values) {
+        double n = 0, s = 0;
+        for (final Double v : values) if (v != null) { n++; s += v; }
+        final double mean = s / n;
+        double v2 = 0, v4 = 0;
+        for (final Double v : values) if (v != null) { final double d = v - mean; v2 += d * d; v4 += d * d * d * d; }
+        v2 /= n;
+        v4 /= n;
+        return new double[]{mean, v2, v4 / (v2 * v2), n};
+    }
+
+    /**
+     * Rows of a t(4) copula with correlation R, scored by rank: under {@code family: t, df: 4} the conditional readouts are
+     * N(0, 1) (kurtosis 3) and jointRank is uniform — under the Gaussian family on the same rows the conditionals are
+     * heavy-tailed and jointRank piles up near 1. conditionalProb is the probability of the conditional position under
+     * either family, expected is the position a conditional of 0 sits at, and a huge df is the Gaussian.
+     */
+    @Test
+    public void testTFamilyReadouts() {
+        final int n = 20_000;
+        final double[][] z = normalScores(tDraws(R, 4, n, 31));
+        final Svd.Moments m = moments(z);
+        final Copula t = Copula.fit(m, Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 4, false);
+        final Copula gaussian = Copula.fit(m, Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, false);
+        Assertions.assertTrue(t.isT());
+        Assertions.assertEquals(4d, t.df);
+        Assertions.assertArrayEquals(gaussian.correlation[0], t.correlation[0], 0d, "the same R: the normal scores' correlation");
+        Assertions.assertTrue(t.describe().startsWith("family t (df 4.0)"), t.describe());
+        final java.util.List<Double> condT = new java.util.ArrayList<>(), condG = new java.util.ArrayList<>(), rankT = new java.util.ArrayList<>(), rankG = new java.util.ArrayList<>();
+        final int[] given = {0, 1};
+        for (final double[] row : z) {
+            final Double[] scores = boxed(row);
+            condT.add(t.conditional(scores, 2, given));
+            condG.add(gaussian.conditional(scores, 2, given));
+            rankT.add(t.jointRank(scores));
+            rankG.add(gaussian.jointRank(scores));
+            // the probability readout is the position's under its own family
+            Assertions.assertEquals(com.mercari.solution.util.domain.math.NormalDistribution.cdf(t.conditional(scores, 2, given)), t.conditionalProb(scores, 2, given), 1e-12);
+        }
+        final double[] mt = momentsOf(condT), mg = momentsOf(condG);
+        Assertions.assertEquals(0, mt[0], 0.03, "t conditional mean");
+        Assertions.assertEquals(1, mt[1], 0.04, "t conditional variance");
+        Assertions.assertEquals(3, mt[2], 0.15, "t conditional kurtosis (normal)");
+        Assertions.assertTrue(mg[2] > 3.4, "the Gaussian family reads heavy-tailed conditionals on t rows: kurtosis " + mg[2]);
+        final double[] rt = momentsOf(rankT);
+        Assertions.assertEquals(0.5, rt[0], 0.01, "t jointRank is uniform: mean");
+        Assertions.assertEquals(1 / 12d, rt[1], 0.004, "t jointRank is uniform: variance");
+        final double tailT = rankT.stream().filter(v -> v > 0.99).count() / (double) n, tailG = rankG.stream().filter(v -> v > 0.99).count() / (double) n;
+        Assertions.assertEquals(0.01, tailT, 0.004, "t jointRank beyond 0.99");
+        Assertions.assertTrue(tailG > 0.02, "the Gaussian family over-reads joint extremes on t rows: " + tailG);
+        // expected: the score at which the conditional reads 0 (it does not read input 2 itself)
+        final Double[] row = boxed(1.1, -0.4, Double.NaN);
+        final Double expected = t.expected(row, 2, given);
+        Assertions.assertNotNull(expected);
+        Assertions.assertEquals(0, t.conditional(boxed(1.1, -0.4, expected), 2, given), 1e-9);
+        Assertions.assertNotEquals(gaussian.expected(row, 2, given), expected, "the t regression's position is mapped through the t, not the normal");
+        // with none of given observed: the input's own standardised score, as under the Gaussian
+        Assertions.assertEquals(gaussian.conditional(boxed(Double.NaN, Double.NaN, 0.7), 2, given), t.conditional(boxed(Double.NaN, Double.NaN, 0.7), 2, given), 1e-9);
+        Assertions.assertNull(t.expected(boxed(Double.NaN, Double.NaN, 0.7), 2, given));
+        // one observed input: the copula density is 1 under either family
+        Assertions.assertEquals(0, t.logDensity(boxed(Double.NaN, 1.3, Double.NaN)), 1e-12);
+        // a huge df is the Gaussian copula
+        final Copula wide = Copula.fit(m, Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 1e7, false);
+        for (final double[] r : java.util.Arrays.copyOf(z, 200)) {
+            final Double[] scores = boxed(r);
+            Assertions.assertEquals(gaussian.conditional(scores, 2, given), wide.conditional(scores, 2, given), 1e-4);
+            Assertions.assertEquals(gaussian.jointRank(scores), wide.jointRank(scores), 1e-4);
+            Assertions.assertEquals(gaussian.logDensity(scores), wide.logDensity(scores), 1e-4);
+            Assertions.assertEquals(gaussian.expected(scores, 2, given), wide.expected(scores, 2, given), 1e-4);
+        }
+    }
+
+    /** The t copula density integrates to 1 over the unit square (so does the Gaussian's), and reads above 1 in the joint tails where the Gaussian's does not. */
+    @Test
+    public void testTDensityIntegratesToOne() {
+        final double[][] r = {{1, 0.6}, {0.6, 1}};
+        final Copula t = new Copula(2, 100, new double[]{0, 0}, new double[]{1, 1}, r, 0, Copula.NONE, 0, Copula.T, 3, null);
+        final Copula g = new Copula(2, 100, new double[]{0, 0}, new double[]{1, 1}, r, 0, Copula.NONE, 0);
+        final int grid = 400;
+        double massT = 0, massG = 0;
+        for (int i = 0; i < grid; i++) {
+            for (int j = 0; j < grid; j++) {
+                final Double[] scores = boxed(com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal((i + 0.5) / grid),
+                        com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal((j + 0.5) / grid));
+                massT += Math.exp(t.logDensity(scores));
+                massG += Math.exp(g.logDensity(scores));
+            }
+        }
+        Assertions.assertEquals(1, massT / (grid * grid), 3e-3);
+        Assertions.assertEquals(1, massG / (grid * grid), 3e-3);
+        // both inputs in the upper 0.5% together: more common under t than under the Gaussian; opposite corners: rarer than
+        // independence under the Gaussian, while the t's common scale inflates every corner (its opposite-corner tail dependence
+        // is 2 T_{ν+1}(−sqrt((ν+1)(1+ρ)/(1−ρ))) > 0), so there too it reads above the Gaussian
+        final double far = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.995);
+        Assertions.assertTrue(t.logDensity(boxed(far, far)) > g.logDensity(boxed(far, far)), "joint tail");
+        Assertions.assertTrue(g.logDensity(boxed(far, -far)) < 0, "opposite tails under the Gaussian");
+        Assertions.assertTrue(t.logDensity(boxed(far, -far)) > g.logDensity(boxed(far, -far)), "opposite tails under t");
+        // jointRank at the centre keeps its digits under t as well
+        final Double near = t.jointRank(boxed(1e-6, 1e-6));
+        Assertions.assertTrue(near > 0 && near < 1e-10, "jointRank near the centre: " + near);
+    }
+
+    /** The artifact keeps family and df; one written before the t family (no family key) is Gaussian. */
+    @Test
+    public void testTArtifactRoundTrip() {
+        final Copula c = Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 2.5, false);
+        final com.google.gson.JsonObject json = c.toJson();
+        Assertions.assertEquals("t", json.get("family").getAsString());
+        Assertions.assertEquals(2.5, json.get("df").getAsDouble());
+        final Copula back = Copula.fromJson(json);
+        Assertions.assertTrue(back.isT());
+        Assertions.assertEquals(2.5, back.df);
+        final Double[] row = boxed(0.9, -1.1, 0.2);
+        Assertions.assertEquals(c.conditional(row, 2, new int[]{0, 1}), back.conditional(row, 2, new int[]{0, 1}));
+        Assertions.assertEquals(c.jointRank(row), back.jointRank(row));
+        Assertions.assertEquals(c.logDensity(row), back.logDensity(row));
+        final com.google.gson.JsonObject old = Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, false).toJson();
+        old.remove("family");
+        final Copula gaussian = Copula.fromJson(old);
+        Assertions.assertFalse(gaussian.isT());
+        Assertions.assertEquals(Copula.GAUSSIAN, gaussian.family);
+        Assertions.assertTrue(Double.isNaN(gaussian.df));
+        Assertions.assertFalse(json.has("diagnostics"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 0, false));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Copula.fit(moments(draws(R, 300, 10)), Copula.OAS, Copula.DEFAULT_EIGEN_FLOOR, "clayton", 2, false));
+        // the family is a readout parameter: the Gaussian artifact read as t is the t fit of the same moments, and back
+        final Copula asT = gaussian.withFamily(Copula.T, 2.5);
+        Assertions.assertTrue(asT.isT());
+        Assertions.assertEquals(c.conditional(row, 2, new int[]{0, 1}), asT.conditional(row, 2, new int[]{0, 1}));
+        Assertions.assertEquals(c.logDensity(row), asT.logDensity(row));
+        Assertions.assertTrue(Double.isNaN(asT.withFamily(Copula.GAUSSIAN, 7).df));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> gaussian.withFamily(Copula.T, Double.NaN));
+    }
+
+    /** {@code T⁻¹(Φ(z))} and back keep their digits into the far tails (scores well past what a clipped marginal emits). */
+    @Test
+    public void testTCoordinatesRoundTrip() {
+        for (final double df : new double[]{1, 2.5, 4, 30}) {
+            for (final double z : new double[]{-20, -9, -8, -7.5, -3, -0.3, 1e-9, 1e-6, 0.3, 3, 7.5, 8, 9, 20}) {
+                Assertions.assertEquals(z, Copula.toNormal(Copula.toT(z, df), df), 1e-12 * Math.max(1, Math.abs(z)), "df " + df + " z " + z);
+            }
+        }
+    }
+
+    /**
+     * The bivariate t orthant: at thresholds 0 it is the normal's (1/4 + asin ρ / 2π, every elliptical copula), a huge df is
+     * the Gaussian orthant, a reference value from a numerical integration (scipy), the tail-dependence coefficient, and the
+     * df that matches a share.
+     */
+    @Test
+    public void testUpperOrthantT() {
+        Assertions.assertEquals(0.25 + Math.asin(0.5) / (2 * Math.PI), Copula.upperOrthantT(0, 0, 0.5, 3), 2e-5);
+        Assertions.assertEquals(0.05588805946, Copula.upperOrthantT(1.0, 1.5, 0.5, 4), 5e-6);
+        Assertions.assertEquals(Copula.upperOrthant(1.0, 1.5, 0.5), Copula.upperOrthantT(1.0, 1.5, 0.5, 1e6), 2e-5);
+        Assertions.assertEquals(Copula.upperOrthant(1.0, 1.5, 0.5), Copula.upperOrthantT(1.0, 1.5, 0.5, Double.POSITIVE_INFINITY), 1e-6);
+        // the t orthant beyond a far threshold exceeds the normal's (tail dependence), and grows as df falls
+        final double q = com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(0.95);
+        final double t3 = Copula.upperOrthantT(StatMath.studentTQuantile(0.95, 3), StatMath.studentTQuantile(0.95, 3), 0.5, 3);
+        final double t10 = Copula.upperOrthantT(StatMath.studentTQuantile(0.95, 10), StatMath.studentTQuantile(0.95, 10), 0.5, 10);
+        Assertions.assertTrue(t3 > t10 && t10 > Copula.upperOrthant(q, q, 0.5), t3 + " > " + t10 + " > " + Copula.upperOrthant(q, q, 0.5));
+        Assertions.assertEquals(0.2531699951, Copula.tailDependence(0.5, 4), 1e-9);
+        Assertions.assertEquals(0d, Copula.tailDependence(-1, 4));
+        Assertions.assertEquals(1d, Copula.tailDependence(1, 4));
+        // the share a t(5) copula implies is matched by df 5; the Gaussian's share by no finite df; a share beyond df 1's by the floor
+        final double share5 = Copula.impliedShare(0.05, 0.06, 0.4, Copula.T, 5);
+        Assertions.assertEquals(5, Copula.matchingDf(share5, 0.05, 0.06, 0.4), 0.15);
+        Assertions.assertTrue(Double.isNaN(Copula.matchingDf(Copula.impliedShare(0.05, 0.06, 0.4, Copula.GAUSSIAN, Double.NaN), 0.05, 0.06, 0.4)));
+        Assertions.assertEquals(Copula.DF_MATCH_MIN, Copula.matchingDf(0.99, 0.05, 0.06, 0.4));
+    }
+
     /** P(X > a, Y > b): independence is the product, ρ → 1 the larger threshold, and ρ = 0.5 at the 0.95 quantile ≈ 0.244 × 0.05. */
     @Test
     public void testUpperOrthant() {
@@ -275,6 +462,26 @@ public class CopulaTest {
                 Assertions.assertTrue(observed - implied > 2 * se, report::toString);
                 Assertions.assertEquals(2, report.json().get("flagged").getAsInt(), report::toString);
                 Assertions.assertEquals(2, report.warnings().size(), report::toString);
+                // the data are a t(3) scale mixture: the matching t copula has about 3 degrees of freedom
+                final double suggested = report.json().get("dfSuggested").getAsDouble();
+                Assertions.assertTrue(suggested > 1.5 && suggested < 6, report::toString);
+                Assertions.assertEquals(2, report.json().get("dfMatched").getAsInt(), report::toString);
+                Assertions.assertTrue(upper.has("dfMatch"), report::toString);
+                Assertions.assertTrue(report.lines().get(report.lines().size() - 1).contains("matches the observed joint-tail shares"), report::toString);
+                // the same rows under a t copula with the true df: the implied share is within noise, nothing is flagged
+                final Copula t3 = Copula.fit(Copula.head(m, 2), Copula.NONE, Copula.DEFAULT_EIGEN_FLOOR, Copula.T, 3, false);
+                final Copula.Report ofT = Copula.diagnose(m, 2, t3, 0.95, pairs, noMass, names);
+                final com.google.gson.JsonObject pair = ofT.json().getAsJsonArray("pairs").get(0).getAsJsonObject();
+                Assertions.assertEquals("t", ofT.json().get("family").getAsString());
+                Assertions.assertEquals(3d, ofT.json().get("df").getAsDouble());
+                Assertions.assertEquals(Copula.tailDependence(t3.correlation[0][1], 3), pair.get("tailDependence").getAsDouble());
+                for (final String side : new String[]{"upper", "lower"}) {
+                    final com.google.gson.JsonObject s = pair.getAsJsonObject(side);
+                    Assertions.assertTrue(Math.abs(s.get("observed").getAsDouble() - s.get("implied").getAsDouble()) < 3 * s.get("se").getAsDouble(), ofT::toString);
+                    Assertions.assertTrue(s.get("implied").getAsDouble() > implied + 0.05, "the t copula implies a larger joint-tail share than the Gaussian: " + ofT);
+                }
+                Assertions.assertEquals(0, ofT.json().get("flagged").getAsInt(), ofT::toString);
+                Assertions.assertFalse(ofT.json().has("dfSuggested"), ofT::toString);
             } else {
                 Assertions.assertTrue(Math.abs(observed - implied) < 3 * se, report::toString);
                 Assertions.assertEquals(0, report.json().get("flagged").getAsInt(), report::toString);

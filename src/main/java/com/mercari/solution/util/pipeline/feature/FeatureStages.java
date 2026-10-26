@@ -2715,7 +2715,7 @@ public final class FeatureStages {
      * {@code diagnose} the vector carries tail and point-mass indicators behind the scores ({@link Copula#diagnoseVector}):
      * the correlation is read from the scores' block of the moments, the report from the rest.
      */
-    record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String artifactUri, boolean refit,
+    record CopulaSpec(String block, List<String> fields, String shrink, double eigenFloor, String copulaFamily, double df, String artifactUri, boolean refit,
                       List<OutputColumn> columns, String[] kinds, int[] of, int[][] given,
                       Forward forward, long predictOffsetMillis, long minRows, Diagnose diagnose) implements ForwardFitBlock<double[], Svd.Moments, Copula> {
 
@@ -2734,6 +2734,18 @@ public final class FeatureStages {
         @Override
         public FitArtifact.Json<Copula> artifact() {
             return Copula.ARTIFACT;
+        }
+
+        /**
+         * The family and df are readout parameters (the fit is the same moment solve): a loaded artifact takes the
+         * config's, so an artifact under a pinned {@code fit.artifact.id} written with another family is not served as it.
+         */
+        @Override
+        public Copula adopt(final Copula c) {
+            if (copulaFamily.equals(c.family) && Double.compare(df, c.df) == 0) return c;
+            LOG.info("copula {}: the artifact was written as family {}{}; applying the config's family {}{}", block, c.family,
+                    c.isT() ? " (df " + c.df + ")" : "", copulaFamily, Copula.T.equals(copulaFamily) ? " (df " + df + ")" : "");
+            return c.withFamily(copulaFamily, df);
         }
 
         @Override
@@ -2800,7 +2812,7 @@ public final class FeatureStages {
 
         @Override
         public Copula fit(final Svd.Moments m, final boolean loud) {
-            final Copula plain = Copula.fit(diagnose == null ? m : Copula.head(m, fields.size()), shrink, eigenFloor, loud);
+            final Copula plain = Copula.fit(diagnose == null ? m : Copula.head(m, fields.size()), shrink, eigenFloor, copulaFamily, df, loud);
             final Copula fitted = loud && diagnose != null ? withReport(this, m, plain) : plain;
             if (loud) LOG.info("copula {}: {}", block, fitted.describe());
             return fitted;
@@ -2809,23 +2821,28 @@ public final class FeatureStages {
         @Override
         public void apply(final ForwardModel<Copula> model, final Map<String, Object> values) {
             final Copula copula = modelFor(model, values);
-            final Double[] scores = new Double[fields.size()];
-            if (copula != null) for (int i = 0; i < scores.length; i++) scores[i] = FeatureValues.toDouble(values.get(fields.get(i)));
+            // the latent coordinates (under t one t quantile per input) are what every readout reads: computed once per row
+            double[] latent = null;
+            if (copula != null) {
+                final Double[] scores = new Double[fields.size()];
+                for (int i = 0; i < scores.length; i++) scores[i] = FeatureValues.toDouble(values.get(fields.get(i)));
+                latent = copula.latents(scores);
+            }
             // jointRank and logDensity read the same quadratic form: solved once per row
             double[] quadratic = null;
             boolean solved = false;
             for (int i = 0; i < kinds.length; i++) {
                 final boolean joint = "jointRank".equals(kinds[i]) || "logDensity".equals(kinds[i]);
                 if (copula != null && joint && !solved) {
-                    quadratic = copula.quadratic(scores);
+                    quadratic = copula.quadraticOf(latent);
                     solved = true;
                 }
                 final Double value = copula == null ? null : switch (kinds[i]) {
-                    case "conditional" -> copula.conditional(scores, of[i], given[i]);
-                    case "conditionalProb" -> copula.conditionalProb(scores, of[i], given[i]);
-                    case "expected" -> copula.expected(scores, of[i], given[i]);
-                    case "jointRank" -> Copula.jointRankOf(quadratic);
-                    case "logDensity" -> Copula.logDensityOf(quadratic);
+                    case "conditional" -> copula.conditionalOf(latent, of[i], given[i]);
+                    case "conditionalProb" -> copula.conditionalProbOf(latent, of[i], given[i]);
+                    case "expected" -> copula.expectedOf(latent, of[i], given[i]);
+                    case "jointRank" -> copula.jointRankOf(quadratic);
+                    case "logDensity" -> copula.logDensityOf(quadratic);
                     default -> throw new IllegalStateException("unknown copula output " + kinds[i]);
                 };
                 values.put(columns.get(i).getCanonicalName(), value);
@@ -2843,8 +2860,9 @@ public final class FeatureStages {
             for (final String line : report.lines()) LOG.info("copula {} diagnose: {}", spec.block(), line);
         }
         // "flagged" counts tails (a pair has an upper and a lower one), so it is not reported as a number of pairs
-        LOG.info("copula {} diagnose: {} joint tail(s) of {} pair(s) beyond the Gaussian copula's at {} ({} finding(s) in all, {} unremarkable line(s){})",
-                spec.block(), report.json().get("flagged") == null ? 0 : report.json().get("flagged").getAsInt(), diagnose.pairs().length, diagnose.tail(),
+        LOG.info("copula {} diagnose: {} joint tail(s) of {} pair(s) beyond the {} copula's at {} ({} finding(s) in all, {} unremarkable line(s){})",
+                spec.block(), report.json().get("flagged") == null ? 0 : report.json().get("flagged").getAsInt(), diagnose.pairs().length,
+                fitted.isT() ? "t (df " + fitted.df + ")" : "Gaussian", diagnose.tail(),
                 report.warnings().size(), report.lines().size(), report.lines().size() <= 50 ? "" : ", not logged");
         return fitted.withDiagnostics(report.json().toString());
     }
@@ -2879,8 +2897,10 @@ public final class FeatureStages {
                 diagnose = new CopulaSpec.Diagnose(tail, com.mercari.solution.util.domain.math.NormalDistribution.inverseNormal(tail), pairs,
                         massFields, List.of(k.get("inputNames").split(",")));
             }
+            final String family = k.getOrDefault("family", Copula.GAUSSIAN);
             specs.add(new CopulaSpec(e.getKey(), List.of(k.get("fields").split(",")), k.getOrDefault("shrink", Copula.OAS),
                     Double.parseDouble(k.getOrDefault("eigenFloor", Double.toString(Copula.DEFAULT_EIGEN_FLOOR))),
+                    family, Copula.T.equals(family) ? Double.parseDouble(k.get("df")) : Double.NaN,
                     k.get("artifactUri"), "true".equals(k.get("refit")), cs, kinds, of, given,
                     Forward.of(cs.get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")),
                     diagnose));

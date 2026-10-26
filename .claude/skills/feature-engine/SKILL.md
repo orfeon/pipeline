@@ -120,10 +120,17 @@ reads what the compile layer wrote into each column's `coordinates`.
   + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → the leading eigenpairs, `<block>.svd.json`), `SymmetricEigen` (the leading `k` eigenpairs of a dense symmetric matrix, by magnitude or — PSD — by value: `Svd.jacobi` up to 128 rows, so every earlier artifact is reproduced bit for bit, and ojalgo's symmetric decomposition beyond — 0.15 s at 700 rows against the sweep's 7–15 s. A hand-rolled restarted block Krylov iteration with a warm start from the previous change point was built, measured against it on 300–1024-row matrices, and removed: it won only on fast-decaying spectra (0.16 s vs 0.18 s) and lost 2–8x on the slowly decaying ones co-occurrence data has. Do not reintroduce an iterative path without that measurement), `Smooth` (`type: smooth`: a P-spline of a
   target over a numeric key — uniform B-splines on a declared range, difference penalty, λ by REML — solved from the
   `Svd.Moments` of `[B(x), y]`, read through their centred form with the target centred; `<block>.smooth.json`; a
-  *reused* family, engine doc §9.6.3), `Copula` (`type: copula`: the Gaussian copula of 2–31 numeric inputs — the
+  *reused* family, engine doc §9.6.3), `Copula` (`type: copula`: the Gaussian or t copula of 2–31 numeric inputs — the
   correlation of their normal scores from the same `Svd.Moments`, standardised, OAS-shrunk towards I and eigenvalue-floored;
   readouts `conditional` / `conditionalProb` / `expected` (no self input: the row side reads `given` alone) / `jointRank` /
-  `logDensity`, a missing score marginalised out; the conditional
+  `logDensity`, a missing score marginalised out; `family: t` (coordinates `family` / `df`, `df` DECLARED — the fit is a
+  moment solve, there is no pass for a likelihood over `df`) changes the readouts only: scores → t quantiles (`toT`), the
+  conditional is a t with `df + |S|` degrees of freedom scaled by the conditioning quadratic form (the `Conditional` record
+  keeps the Cholesky factor of `R_SS` for it), `conditional` / `expected` mapped back to normal scores (`toNormal`) so the
+  columns read the same under both families, `jointRank` = F(k, df), `logDensity` = the multivariate t density over its t
+  marginals (`quadratic` carries `Σ log(1 + y²/df)` as a fifth entry; `jointRankOf` / `logDensityOf` are instance methods);
+  the t / F / incomplete-beta functions are in `StatMath`; `diagnose` inverts the bivariate t orthant (`upperOrthantT`,
+  `matchingDf`) to report `dfMatch` per pair tail and `dfSuggested`, and a t model reports `tailDependence`; the conditional
   system is cached per (input, observed mask) with β kept PER INPUT INDEX — keyed by the observed set alone, two readouts
   with different `given` lists share an entry, so β must not be indexed by position in `given` (the first version was, and
   collided); `<block>.copula.json`; the marginals are synthetic `quantileTransform` blocks `<name>_z_<input>` built by
