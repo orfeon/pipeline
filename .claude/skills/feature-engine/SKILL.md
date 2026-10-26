@@ -265,7 +265,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   instances read the eigenvalues of the covariance or of the correlation matrix, so the spec is built per column by
   `Summary.Covariance.spec(coordinates)` — `standardize` picks the instance, `components` the readout parameter — not through
   `OperatorCatalog.summary`; a past row contributes only with every series present, `SequenceEvaluator.vector`; the compiler expands
-  the op once per block in `expandCovariance`, before the per-field loop, since its columns are per func). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
+  the op once per block in `expandCovariance`, before the per-field loop, since its columns are per func — and gives
+  them one `stateKey`, keyed by the window and the ordered series, so the k × k state is folded once per op, not per func). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
   (`lift` + `summarize.dynamics`, `lti`: exponential = Laguerre, fourier, legendre) and of `ewma` (order-0
   exponential sugar): parameterised per column from the coordinates (`Dynamics.spec`), a vector state shared by a
   channel's component columns through the `stateKey` coordinate (= `ColumnPlan.stateKey`, the `KeyState` key), a

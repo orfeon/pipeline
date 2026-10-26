@@ -2854,7 +2854,15 @@ public final class FeaturePlanCompiler {
         if (op.components != null && !funcs.contains("absorption")) {
             diagnostics.warning("sequence.covariance.components", loc, "components is read by absorption only, which funcs does not list: ignored");
         }
+        if (op.standardize && !funcs.contains("absorption") && !funcs.contains("effectiveRank")) {
+            diagnostics.warning("sequence.covariance.standardize", loc, "standardize changes the eigenvalue readouts absorption / effectiveRank only"
+                    + " (meanCorrelation and logDet are of the correlation matrix either way), which funcs does not list: ignored");
+        }
         final String base = def.name + "_" + window.token() + "_" + (op.as != null ? op.as : String.join("_", names)) + "_";
+        // the funcs read one running state (the same vectors fold in either way, standardize only changes the read): the
+        // O(k²) update and the k × k sums are paid once per op, not once per func. Keyed by the ordered series, so
+        // two ops over the same series and window share it too, and no other vector ever lands in it
+        final String stateKey = def.name + "_" + window.token() + "_covariance(" + String.join(",", canonical) + ")";
         for (final String func : funcs) {
             if (!OperatorCatalog.COVARIANCE_FUNCS.contains(func)) {
                 diagnostics.error("sequence.covariance.func", loc, "unknown covariance func: " + func + " (available: " + String.join(" | ", OperatorCatalog.COVARIANCE_FUNCS) + ")");
@@ -2868,6 +2876,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("fields", String.join(",", canonical));
             if (absorption) c.coordinates.put("components", Integer.toString(components));
             if (op.standardize && (absorption || "effectiveRank".equals(func))) c.coordinates.put("standardize", "true");
+            c.coordinates.put("stateKey", stateKey);
             for (final String field : fields) addPastInput(c, field);
             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
         }

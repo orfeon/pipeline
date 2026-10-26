@@ -514,7 +514,8 @@ public interface Summary<S extends Serializable> extends Serializable {
      * would spread the variance as the series do (k when they are uncorrelated and alike, 1 when one source drives
      * them all), {@code meanCorrelation} — the mean pairwise correlation, {@code logDet} — the log determinant of the
      * correlation matrix (0 when uncorrelated, towards −∞ as the series become collinear; null while the window holds
-     * fewer vectors than series, the matrix being singular then), {@code count}. The eigenvalue readouts are of the
+     * no more vectors than series — n centred vectors span at most n − 1 dimensions, so the matrix is singular for
+     * n ≤ k), {@code count}. The eigenvalue readouts are of the
      * covariance matrix, or of the correlation matrix under {@code standardize} ({@link Summaries#COVARIANCE_STANDARDIZED});
      * the correlation readouts are null when a series is constant over the window.
      */
@@ -654,8 +655,9 @@ public interface Summary<S extends Serializable> extends Serializable {
             return switch (readout.name()) {
                 case "meanCorrelation" -> {
                     if (constant) yield null;
+                    final double[][] r = correlation(cov, variance);
                     double sum = 0;
-                    for (int i = 0; i < k; i++) for (int j = i + 1; j < k; j++) sum += Regression.clamp(cov[i][j] / Math.sqrt(variance[i] * variance[j]));
+                    for (int i = 0; i < k; i++) for (int j = i + 1; j < k; j++) sum += r[i][j];
                     yield sum / (k * (k - 1) / 2);
                 }
                 case "logDet" -> {
@@ -690,13 +692,19 @@ public interface Summary<S extends Serializable> extends Serializable {
             };
         }
 
-        /** The correlation matrix of a covariance matrix with the given (non-zero) variances, clamped to [−1, 1]. */
+        /**
+         * The correlation matrix of a covariance matrix with the given (non-zero) variances, clamped to [−1, 1]. The
+         * scale is the product of the two deviations, not the root of the product of the variances: that product
+         * under- or overflows for series of extreme scale (0 / 0 = NaN, or a spurious 0) where the deviations do not.
+         */
         private static double[][] correlation(final double[][] cov, final double[] variance) {
             final int k = variance.length;
+            final double[] sd = new double[k];
+            for (int i = 0; i < k; i++) sd[i] = Math.sqrt(variance[i]);
             final double[][] r = new double[k][k];
             for (int i = 0; i < k; i++) {
                 r[i][i] = 1d;
-                for (int j = i + 1; j < k; j++) r[i][j] = r[j][i] = Regression.clamp(cov[i][j] / Math.sqrt(variance[i] * variance[j]));
+                for (int j = i + 1; j < k; j++) r[i][j] = r[j][i] = Regression.clamp(cov[i][j] / (sd[i] * sd[j]));
             }
             return r;
         }

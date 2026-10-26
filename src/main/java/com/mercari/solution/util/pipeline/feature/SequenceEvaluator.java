@@ -84,7 +84,8 @@ public class SequenceEvaluator implements Serializable {
         boolean ratingTeam;
         /**
          * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
-         * components of a dynamics channel (one state, read out once per component column).
+         * components of a dynamics channel (one state, read out once per component column) or by the funcs of a
+         * {@code covariance} over the same series.
          */
         String stateKey;
     }

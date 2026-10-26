@@ -1567,8 +1567,13 @@ public class FeatureSpec implements Serializable {
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
         op.weightBy = Json.string(o, "weightBy");
-        op.components = Json.integer(o, "components");
-        op.standardize = Json.bool(o, "standardize", false);
+        op.components = integerOf(o, "components", diagnostics, loc);
+        if (o.has("standardize") && !o.get("standardize").isJsonNull()) {
+            // a boolean only: `standardize: yes` is a string under YAML 1.2, which parseBoolean would read as false
+            final JsonElement flag = o.get("standardize");
+            if (flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean()) op.standardize = flag.getAsBoolean();
+            else diagnostics.error("standardize.invalid", loc, "standardize must be true or false: " + flag);
+        }
         op.method = Json.string(o, "method");
         op.context = Json.string(o, "context");
         op.order = Json.string(o, "order");
@@ -1711,6 +1716,20 @@ public class FeatureSpec implements Serializable {
         }
         diagnostics.error(key + ".invalid", loc, key + " must be an integer: " + e);
         return null;
+    }
+
+    /**
+     * An integer parameter in int range: null when absent, or when it is not an integral number (reported as
+     * {@code <key>.invalid}, like {@link #longOf}) — not {@code Json.integer}, which throws on text and truncates 2.5 to 2.
+     */
+    private static Integer integerOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
+        final Double d = doubleOf(o, key, diagnostics, loc);
+        if (d == null) return null;
+        if (d != Math.rint(d) || Math.abs(d) > Integer.MAX_VALUE) {
+            diagnostics.error(key + ".invalid", loc, key + " must be an integer: " + o.get(key));
+            return null;
+        }
+        return d.intValue();
     }
 
     /** A list of numeric parameters; a value that is not a number is reported as {@code <key>.invalid}, like {@link #doubleOf}. */

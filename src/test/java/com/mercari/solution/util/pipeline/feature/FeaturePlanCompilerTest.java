@@ -281,8 +281,8 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
-     * The two-series {@code regression} op (one column per func, both series projected into the history, the lagged
-     * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
+     * The k-series {@code covariance} op: one column per func (every series projected into the history, one running
+     * state per op), its parameters in the coordinates, and every diagnostic.
      */
     @Test
     public void testCovarianceExpansion() {
@@ -327,8 +327,24 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("components: 2, as: joint", "components: 2, as: joint, weightBy: \"1\"")), "sequence.weightBy.op"), "weightBy is an aggregate parameter");
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("fields: [start_price, quantity], standardize", "fields: [start_price, nosuchfield], standardize")), "reference.unresolved"));
         Assertions.assertNotNull(column(compile(SOURCES, spec.replace("components: 2, as: joint", "as: joint")), "recent_365d_joint_absorption"), "the default components is not in the name");
+        // the funcs of an op share one running state (per window); another series list has its own
+        Assertions.assertEquals(absorption.getCoordinates().get("stateKey"), column(plan, "recent_365d_joint_count").getCoordinates().get("stateKey"));
+        Assertions.assertNotEquals(absorption.getCoordinates().get("stateKey"), column(plan, "recent_n5_joint_absorption2").getCoordinates().get("stateKey"));
+        Assertions.assertNotEquals(absorption.getCoordinates().get("stateKey"), std.getCoordinates().get("stateKey"));
+        // standardize without an eigenvalue readout: ignored, a warning; a non-boolean / non-integer parameter: an error
+        final FeaturePlan unstandardized = compile(SOURCES, spec.replace("fields: [start_price, quantity], standardize: true", "fields: [start_price, quantity], funcs: [logDet], standardize: true"));
+        Assertions.assertFalse(unstandardized.getDiagnostics().hasErrors(), unstandardized::describe);
+        Assertions.assertTrue(hasCode(unstandardized, "sequence.covariance.standardize"));
+        Assertions.assertFalse(hasCode(plan, "sequence.covariance.standardize"));
+        Assertions.assertTrue(hasError(compile(SOURCES, spec.replace("standardize: true", "standardize: \"yes\"")), "standardize.invalid"));
+        Assertions.assertTrue(hasError(compile(SOURCES, spec.replace("components: 2", "components: 1.5")), "components.invalid"));
+        Assertions.assertTrue(hasError(compile(SOURCES, spec.replace("components: 2", "components: two")), "components.invalid"));
     }
 
+    /**
+     * The two-series {@code regression} op (one column per func, both series projected into the history, the lagged
+     * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
+     */
     @Test
     public void testRegressionAndFracdiffExpansion() {
         final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";

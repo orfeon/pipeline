@@ -380,14 +380,17 @@ shrinkage scale:
   of the covariance matrix: series of unlike scale (a price and a count) would otherwise let the largest variance
   decide the ratio. `meanCorrelation` and `logDet` are of the correlation matrix either way, and every correlation
   readout is null when a series is constant over the window.
-- **Cost / retention.** The op runs incrementally: a running k × k cross-moment state per column (anchored at the
-  first vector so a common level stays out of the products, evicted under `maxAge`), O(k²) per event and one k × k
-  eigendecomposition per row read — the window's length does not enter. Under `maxEvents` or a general `filter` it
-  re-reads the window per row (bounded by the window). Not defined over a `direction: future` window.
+- **Cost / retention.** The op runs incrementally: one running k × k cross-moment state per op and window, shared
+  by its funcs (anchored at the first vector so a common level stays out of the products, evicted under `maxAge`),
+  O(k²) per event and one k × k eigendecomposition per row read — the window's length does not enter. Under
+  `maxEvents` or a general `filter` it re-reads the window per row: bound it with `maxAge` / `maxEvents` (a filter
+  alone keeps the whole filtered history, `sequence.window.unbounded`). Not defined over a `direction: future` window.
 - Diagnostics: `sequence.covariance.fields` (fewer than 2 or more than 64 fields, a field listed twice),
   `sequence.op.type` (a non-numeric field), `sequence.covariance.func`, `sequence.covariance.components` (error
-  outside [1, k − 1]; warning when declared without `absorption` among the funcs), `sequence.weightBy.op`
-  (`weightBy` is an `aggregate` parameter).
+  outside [1, k − 1]; warning when declared without `absorption` among the funcs), `sequence.covariance.standardize`
+  (warning: declared without `absorption` / `effectiveRank` among the funcs), `components.invalid` /
+  `standardize.invalid` (not an integer / not `true` or `false`), `sequence.weightBy.op` (`weightBy` is an
+  `aggregate` parameter).
 
 ### Ratings from contests (sequence `rating`)
 
