@@ -232,7 +232,7 @@ not expand because another block failed).
 | `sequence.rating.globalKey` | hint | the rating stage replays every row under one key (one worker thread) — expected; split independent pools with a pre-event `$self` equality filter when the data has them |
 | `sequence.direction` / `features.direction` | error | `direction` is `past` (default) or `future`, on sequence blocks only |
 | `sequence.direction.maxAge` | error | a `direction: future` window needs `maxAge` (the label horizon) |
-| `sequence.direction.op` | error | the op reads the window in one direction (`delta`, `trend`, `fracdiff`, a lagged `regression`), or the general form `lift` + `summarize` (past only) — not defined over the future; the message lists what is |
+| `sequence.direction.op` | error | the op reads the window in one direction (`delta`, `trend`, `fracdiff`, a lagged `regression`, a `regression` with a spread func residual / residualZ / ar1 / halfLife / adf), or the general form `lift` + `summarize` (past only) — not defined over the future; the message lists what is |
 | `sequence.direction.future` | info | the block's columns are labels (status `label`): referencing one from a feature is a violation |
 | `sequence.barrier.levels` / `sequence.barrier.direction` | error | `barrier` needs `up` > 0 and / or `down` < 0, and exists only under `direction: future` |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |

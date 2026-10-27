@@ -4814,6 +4814,9 @@ public class FeaturePlanCompilerTest {
             Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e + "\n" + bad.describe());
         }
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lag, "- {type: regression, field: final_price, against: start_price, lag: 1}")), "sequence.direction.op"));
+        // the spread funcs read the residuals in time order: the mirrored replay would reverse them
+        final FeaturePlan spread = compile(SOURCES, spec.replace(lag, "- {type: regression, field: final_price, against: start_price, funcs: [beta, ar1]}"));
+        Assertions.assertTrue(hasCode(spread, "sequence.direction.op"), spread::describe);
         final FeaturePlan sameEvent = compile(SOURCES, spec.replace(lag, lag + "\n      - {type: regression, field: final_price, against: start_price}"));
         Assertions.assertFalse(sameEvent.getDiagnostics().hasErrors(), sameEvent::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("up: 0.05, down: -0.05", "up: -0.05")), "sequence.barrier.levels"));

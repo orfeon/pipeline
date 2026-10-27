@@ -3,6 +3,9 @@ package com.mercari.solution.util.pipeline.feature;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.List;
+
 /** {@link Cointegration}: the spread's readouts against numpy (least squares, the lag-1 regression of the residuals, the Dickey–Fuller statistic). */
 public class CointegrationTest {
 
@@ -52,34 +55,22 @@ public class CointegrationTest {
         Assertions.assertEquals(Cointegration.residualZ(X, Y, n), Cointegration.residualZ(X, scaled, n), 1e-9, "z is scale-free");
         Assertions.assertEquals(Cointegration.ar1(X, Y, n), Cointegration.ar1(X, scaled, n), 1e-9);
         Assertions.assertEquals(Cointegration.adf(X, Y, n), Cointegration.adf(xShifted, Y, n), 1e-6);
-        // a random walk spread: phi near 1, no half-life when at or above 1, adf near 0; a spread that alternates: phi near -1
-        final double[] walk = new double[n];
-        double level = 0;
-        for (int i = 0; i < n; i++) walk[i] = 2 + 0.5 * X[i] + (level += (i % 3 == 0 ? 0.4 : 0.3));
-        final Double phiWalk = Cointegration.ar1(X, walk, n);
-        Assertions.assertNotNull(phiWalk);
-        final double[] alternating = new double[n];
-        for (int i = 0; i < n; i++) alternating[i] = 2 + 0.5 * X[i] + (i % 2 == 0 ? 1 : -1);
+        // a slowly reverting spread (one sine period over the window: phi in (0, 1)) and an alternating one (phi below 0)
+        final double[] slow = new double[n], alternating = new double[n];
+        for (int i = 0; i < n; i++) {
+            slow[i] = 2 + 0.5 * X[i] + Math.sin(2 * Math.PI * i / n);
+            alternating[i] = 2 + 0.5 * X[i] + (i % 2 == 0 ? 1 : -1);
+        }
+        final Double phiSlow = Cointegration.ar1(X, slow, n);
+        Assertions.assertTrue(phiSlow > 0 && phiSlow < 1, "slow spread: " + phiSlow);
+        // the half-life is in events, of the same phi: -ln 2 / ln phi (numpy: phi 0.5034, about one event)
+        Assertions.assertEquals(-Math.log(2) / Math.log(phiSlow), Cointegration.halfLife(X, slow, n), 1e-12);
+        Assertions.assertTrue(Cointegration.halfLife(X, slow, n) > Cointegration.halfLife(X, Y, n), "slower reversion, longer half-life");
+        Assertions.assertTrue(Cointegration.adf(X, slow, n) > Cointegration.adf(X, Y, n), "weaker reversion reads less negative");
         final Double phiAlt = Cointegration.ar1(X, alternating, n);
         Assertions.assertTrue(phiAlt < 0, "alternating spread: " + phiAlt);
         Assertions.assertNull(Cointegration.halfLife(X, alternating, n), "no half-life for an overshooting spread");
         Assertions.assertTrue(Cointegration.adf(X, alternating, n) < Cointegration.adf(X, Y, n), "stronger reversion reads more negative");
-        // the half-life is in events: phi 0.5 halves in one event, phi 0.5^(1/3) in three
-        final double[] half = new double[n], third = new double[n];
-        double e = 1;
-        for (int i = 0; i < n; i++) {
-            half[i] = e;
-            e *= 0.5;
-        }
-        // an exact geometric spread has phi exactly 0.5 whatever the line (the line is fitted on x alone here: y = e)
-        Assertions.assertEquals(0.5, phi(half, n), 1e-12);
-        Assertions.assertEquals(1d, -Math.log(2) / Math.log(phi(half, n)), 1e-12);
-        e = 1;
-        for (int i = 0; i < n; i++) {
-            third[i] = e;
-            e *= Math.pow(0.5, 1d / 3);
-        }
-        Assertions.assertEquals(3d, -Math.log(2) / Math.log(phi(third, n)), 1e-9);
         // nothing to read: fewer than three pairs, a constant x (no line), a spread of nothing (y on the line)
         Assertions.assertNull(Cointegration.ar1(X, Y, 2));
         Assertions.assertNull(Cointegration.residual(X, Y, 2));
@@ -92,13 +83,20 @@ public class CointegrationTest {
         Assertions.assertEquals(0d, Cointegration.residual(grid, exact, 6), 0d);
     }
 
-    /** The lag-1 regression of a series on itself (no intercept), as the readouts take it over the residuals. */
-    private static double phi(final double[] e, final int n) {
-        double cross = 0, lagged = 0;
-        for (int i = 1; i < n; i++) {
-            cross += e[i] * e[i - 1];
-            lagged += e[i - 1] * e[i - 1];
+    @Test
+    public void testRounding() {
+        // a constant x whose mean is off by an ulp (19.99 ten times: sxx ~1e-28, not 0) is still no line, as beta is null
+        final double[] flat = new double[10];
+        Arrays.fill(flat, 19.99);
+        for (final String func : Cointegration.FUNCS) Assertions.assertNull(Cointegration.of(func, flat, Y, 10), func + ": constant x");
+        // y on a line with fractional coefficients: residuals of the size of rounding, a spread of nothing all the same
+        final double[] x = {0.1, 0.7, 0.3, 1.9, 2.2, 0.5}, y = new double[x.length];
+        for (int i = 0; i < x.length; i++) y[i] = 0.3 * x[i] + 0.7;
+        Assertions.assertEquals(0d, Cointegration.of(Cointegration.RESIDUAL, x, y, x.length), 0d);
+        for (final String func : List.of(Cointegration.RESIDUAL_Z, Cointegration.AR1, Cointegration.HALF_LIFE, Cointegration.ADF)) {
+            Assertions.assertNull(Cointegration.of(func, x, y, x.length), func + ": y on the line");
         }
-        return cross / lagged;
+        // an overflow is null, not NaN
+        Assertions.assertNull(Cointegration.of(Cointegration.RESIDUAL, new double[]{1, 2, 3}, new double[]{1e308, 1e308, 1e308}, 3));
     }
 }

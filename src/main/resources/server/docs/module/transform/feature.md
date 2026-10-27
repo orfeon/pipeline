@@ -343,9 +343,11 @@ shrinkage scale:
     it ranks pairs by the strength of their reversion rather than tests them.
 
   The residuals are consecutive among the window's complete pairs (a pair with a missing value is left out). All
-  five are null below three pairs (`adf` four), for a constant `x` (no line) or a spread of nothing; `residual` /
-  `residualZ` read the latest **past** event (strictly past, like every sequence op). They combine with `lag`. A
-  half-life in events is in time only where the entity's events are evenly spaced.
+  five are null below three pairs (`adf` four) and for a constant `x` (no line — where `beta` is null too); for a
+  spread of nothing (`y` on the line, up to rounding) `residual` reads 0 and the other four are null. `residual` /
+  `residualZ` read the latest **past** event (strictly past, like every sequence op). They combine with `lag`, but
+  not with a `direction: future` window (they read the spread in time order). A half-life in events is in time only
+  where the entity's events are evenly spaced.
 - **`lag: k`** (lead-lag) pairs `field` of each event with `against` **k events earlier** inside the window —
   "does x lead y by k events" (swap the two fields for the other direction; `lag` ≥ 0). Columns are named
   `..._lag<k>_<func>`.
@@ -2824,11 +2826,12 @@ output:
 - **Ops read from the row outwards** (`sequence.direction.op` lists them): `aggregate` (every func; `first` is the
   nearest event, `last` the furthest), `lag` — named `lead<k>`, the k-th next event —, `ewma` (weighted by the
   distance ahead), `sinceEvent` — named `until_<unit>`: events / days until the predicate first holds —,
-  `countMatch`, `runLength` (the run starting with the next event), `regression` without `lag`, and **`barrier`**:
+  `countMatch`, `runLength` (the run starting with the next event), `regression` without `lag` or a spread func, and **`barrier`**:
   `1` when the path first moves up by `up` (relative to the current row's own value of the field), `-1` when it first
   moves down by `down`, `0` when it touches neither within the window, null without a future value or a current
   value (`up` > 0 and / or `down` < 0, `sequence.barrier.levels`; future windows only, `sequence.barrier.direction`).
-  `delta`, `trend`, `fracdiff` and a lagged `regression` read the window in one direction and are rejected, as is the
+  `delta`, `trend`, `fracdiff`, a lagged `regression` and the `regression` spread funcs (`residual` / `residualZ` /
+  `ar1` / `halfLife` / `adf`) read the window in one direction and are rejected, as is the
   general form (`lift` + `summarize`), which reads the past window only.
 - **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
   latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
@@ -3006,7 +3009,7 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail (`ewma` and the path
   summaries are running states and keep none). Only the operators that re-read their window — `runLength` /
-  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression` or one of its rank funcs,
+  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression` or one of its rank / spread funcs,
   `weightBy` — without `maxAge` or `maxEvents`, and any window with a `filter` but no `maxAge`, read the key's
   full history, and they keep only the fields they read for it (the history is trimmed per field, so the
   other columns' fields still leave with their own windows, though each retained row keeps a ~40-byte entry

@@ -1284,7 +1284,7 @@ scan        ⇔ otherwise — bounded by maxAge, or, without a filter, by maxEve
               key's whole history and is reported (sequence.window.unbounded)
 ```
 
-Four kinds of statistic have **no family by construction**, and the reason is part of the design:
+Five kinds of statistic have **no family by construction**, and the reason is part of the design:
 
 - **self-dependent** (`weightBy`): the weight reads the current row, a different number for every (row, event)
   pair — nothing folded once per event can serve it. Declared as `OperatorCatalog.summary(stat, weighted)`.
@@ -1292,14 +1292,15 @@ Four kinds of statistic have **no family by construction**, and the reason is pa
   edge would need the rows before it.
 - **rank statistics** (the `regression` funcs `spearman` / `kendall` / `quadrantAsymmetry`, `RankDependence`): an
   event entering the window moves every other event's rank, so no contribution of one event survives the next one.
+  Updating them incrementally would take a two-dimensional order structure (Spearman's Σ R_x R_y needs a dominance
+  count as well), polylog per update at best; the windows these are meant for are tens to hundreds of events, so
+  the window is ranked again per row (`kendall` in O(w log w), Knight's merge-sort count).
 - **residual statistics** (the `regression` funcs `residual` / `residualZ` / `ar1` / `halfLife` / `adf`,
   `Cointegration`): the spread is the residual of the window's least-squares line, which every entering event moves,
   and its lag-1 regression pairs consecutive residuals — the same two reasons; a lifted vector
   `(x_t, y_t, x_(t−1), y_(t−1))` would make the lag-1 moments a `Covariance` family, but eviction would still need the
-  evicted event's neighbour, so the scan stays.
-  Updating them incrementally would take a two-dimensional order structure (Spearman's Σ R_x R_y needs a dominance
-  count as well), polylog per update at best; the windows these are meant for are tens to hundreds of events, so
-  the window is ranked again per row (`kendall` in O(w log w), Knight's merge-sort count).
+  evicted event's neighbour, so the scan stays. The residuals are read in time order, so like the lagged pairing
+  they are rejected over a `direction: future` window (replayed on the mirrored clock, it would reverse them).
 - **order-dependent readouts** (`SeriesStats`: zeroCross / peaks / acf / pacf / ar): as summaries they are *ordered*
   monoids — `merge` is a concatenation that carries boundary values, contributions must arrive in order (so they
   cannot be a Beam `CombineFn`), and removing the oldest element needs its *successors*, which
