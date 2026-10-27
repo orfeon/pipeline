@@ -534,6 +534,101 @@ public final class GroupOps {
         }
     }
 
+    /**
+     * The result of {@link #svd}: per row its scores on the leading components and its residual per channel (null for a
+     * row that took no part), the residual's norm (NaN), the share of the group's variance the components carry (NaN
+     * when nothing was fitted) and the rows that entered the fit.
+     */
+    public record GroupSvd(double[][] scores, double[][] residual, double[] residualNorm, double absorption, int count) {}
+
+    /**
+     * The principal components of the group: its rows as vectors over the channels (a row with a missing or
+     * non-finite channel takes no part and reads null), centred — and standardised by the channels' sample standard
+     * deviations under {@code standardize}: the correlation matrix's components, for channels of unlike scale — and
+     * projected on the leading {@code rank} eigenvectors of their covariance matrix, each oriented so its largest
+     * loading is positive, the first of the loadings tied with it on a tie ({@link #orientation}: the same field
+     * dominating two groups gives their scores one sign). The scores say where a row sits on the group's main axes of
+     * variation (ordered by variance, {@code 0} the most), the residual what the axes do not explain of it (per
+     * channel, in the channel's units), {@code absorption} the share of the variance the axes carry (1 with every
+     * component kept, NaN for a group without variance). A group needs {@code rank + 1} complete rows, else nothing is
+     * read: with fewer, the last components carry no variance and point anywhere. At exactly {@code rank + 1} rows the
+     * components pass through the points — the scores are their coordinates on them, the residual is 0 and
+     * {@code absorption} 1. The vectors enter the moments in an order the values decide (lexicographic over the
+     * channels), so the result does not depend on the order the rows of a group arrive in.
+     */
+    public static GroupSvd svd(final double[][] channels, final int rank, final boolean standardize) {
+        final int k = channels.length, n = k == 0 ? 0 : channels[0].length;
+        final int[] rows = new int[n];
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            boolean complete = true;
+            // an infinite value would turn every moment into NaN: like residualize, only finite rows take part
+            for (int c = 0; c < k && complete; c++) complete = Double.isFinite(channels[c][i]);
+            if (complete) rows[m++] = i;
+        }
+        final double[][] scores = new double[n][], residual = new double[n][];
+        final double[] residualNorm = new double[n];
+        Arrays.fill(residualNorm, Double.NaN);
+        if (rank < 1 || m < rank + 1) return new GroupSvd(scores, residual, residualNorm, Double.NaN, m);
+        sort(rows, m, (a, b) -> {
+            for (int c = 0; c < k; c++) {
+                final int cmp = Double.compare(channels[c][a], channels[c][b]);
+                if (cmp != 0) return cmp;
+            }
+            return 0;
+        });
+        final Svd.Moments moments = new Svd.Moments();
+        final double[][] vectors = new double[m][];
+        for (int r = 0; r < m; r++) moments.add(vectors[r] = vector(channels, rows[r]));
+        final Svd fit = Svd.fit(moments, rank, true, standardize, false);
+        final double[] orientation = orientation(fit);
+        for (int r = 0; r < m; r++) {
+            final int i = rows[r];
+            final double[] x = vectors[r];
+            final double[] s = fit.transform(x);
+            // the residual is read off the fit's own orientation (score × loading), before the scores are re-oriented
+            residual[i] = fit.residual(x, s);
+            for (int j = 0; j < s.length; j++) s[j] *= orientation[j];
+            scores[i] = s;
+            double sum = 0;
+            for (final double v : residual[i]) sum += v * v;
+            residualNorm[i] = Math.sqrt(sum);
+        }
+        double carried = 0;
+        for (final double v : fit.variances) carried += v;
+        return new GroupSvd(scores, residual, residualNorm, fit.totalVariance > 0 ? Math.min(1d, carried / fit.totalVariance) : Double.NaN, m);
+    }
+
+    /** Loadings within this share of a component's largest one are tied with it ({@link #orientation}). */
+    private static final double ORIENTATION_TIE = 1e-9;
+
+    /**
+     * The sign each component's scores are read with. {@link Svd#fit} makes the largest-magnitude loading positive,
+     * the first one on an exact tie; but a group's loadings often tie in magnitude only up to rounding — two rows
+     * under {@code standardize} give every loading ±1/√k — and the last bits would then pick which field orients the
+     * scores, flipping their sign from one group to the next. The first loading within {@link #ORIENTATION_TIE} of the
+     * largest decides instead: {@code -1} when it is negative (the fit oriented the component by a later one).
+     */
+    private static double[] orientation(final Svd fit) {
+        final double[] signs = new double[fit.components.length];
+        for (int r = 0; r < signs.length; r++) {
+            final double[] loadings = fit.components[r];
+            double largest = 0;
+            for (final double v : loadings) largest = Math.max(largest, Math.abs(v));
+            int first = 0;
+            while (first < loadings.length - 1 && Math.abs(loadings[first]) < largest * (1 - ORIENTATION_TIE)) first++;
+            signs[r] = loadings[first] < 0 ? -1 : 1;
+        }
+        return signs;
+    }
+
+    /** Row {@code row} of the group as a vector over the channels. */
+    private static double[] vector(final double[][] channels, final int row) {
+        final double[] x = new double[channels.length];
+        for (int c = 0; c < channels.length; c++) x[c] = channels[c][row];
+        return x;
+    }
+
     /** Orders {@code rows[0..m)} by the given comparison, without an index boxed per row. */
     private static void sort(final int[] rows, final int m, final Order order) {
         if (m > 1) mergeSort(rows, new int[m], 0, m, order);

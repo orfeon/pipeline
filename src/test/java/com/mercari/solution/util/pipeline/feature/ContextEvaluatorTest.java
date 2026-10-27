@@ -13,6 +13,46 @@ public class ContextEvaluatorTest {
         return row;
     }
 
+    /** The context svd: the columns of one op read one fit of the group (the first score, the residual norm, the share), a row with a hole reads null. */
+    @Test
+    public void testGroupSvdColumns() {
+        final java.util.List<OutputColumn> columns = new java.util.ArrayList<>();
+        for (final String[] readout : new String[][]{{"pc_0", "scores", "0"}, {"pc_1", "scores", "1"}, {"pc_residnorm", "residualNorm", null}, {"pc_absorption", "absorption", null}, {"pc_resid_b", "residual", "1"}}) {
+            final OutputColumn c = new OutputColumn();
+            c.canonicalName = readout[0];
+            c.scope = FeatureSpec.Scope.context;
+            c.operator = "svd";
+            c.coordinates.put("fields", "a,b,c");
+            c.coordinates.put("rank", "2");
+            c.coordinates.put("func", readout[1]);
+            if (readout[2] != null) c.coordinates.put("index", readout[2]);
+            columns.add(c);
+        }
+        final ContextEvaluator evaluator = new ContextEvaluator(columns);
+        evaluator.setup();
+        final double[][] channels = {{1, 2, 3, 4, 5}, {2, 2.5, 5, 4.5, 7}, {0.5, 1.5, 1.0, 3.5, 2.5}};
+        final java.util.List<java.util.Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            final java.util.Map<String, Object> row = new java.util.HashMap<>();
+            row.put("a", channels[0][i]);
+            row.put("b", channels[1][i]);
+            row.put("c", channels[2][i]);
+            rows.add(row);
+        }
+        final java.util.Map<String, Object> holed = new java.util.HashMap<>(java.util.Map.of("a", 9d, "c", 0d));
+        rows.add(holed);
+        evaluator.evaluate(rows);
+        final GroupOps.GroupSvd reference = GroupOps.svd(channels, 2, false);
+        for (int i = 0; i < 5; i++) {
+            Assertions.assertEquals(reference.scores()[i][0], (Double) rows.get(i).get("pc_0"), 0d);
+            Assertions.assertEquals(reference.scores()[i][1], (Double) rows.get(i).get("pc_1"), 0d);
+            Assertions.assertEquals(reference.residualNorm()[i], (Double) rows.get(i).get("pc_residnorm"), 0d);
+            Assertions.assertEquals(reference.residual()[i][1], (Double) rows.get(i).get("pc_resid_b"), 0d);
+            Assertions.assertEquals(reference.absorption(), (Double) rows.get(i).get("pc_absorption"), 0d);
+        }
+        for (final String name : java.util.List.of("pc_0", "pc_1", "pc_residnorm", "pc_absorption", "pc_resid_b")) Assertions.assertNull(holed.get(name), name);
+    }
+
     /** ratingProb: the Plackett-Luce contest over the group's (mu, sigma), rows without a value out of it, one row = 1. */
     @Test
     public void testRatingProbIsThePlackettLuceContest() {

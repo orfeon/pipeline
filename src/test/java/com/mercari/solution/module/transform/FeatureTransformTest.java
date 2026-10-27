@@ -2232,6 +2232,11 @@ public class FeatureTransformTest {
                   context: byCategory
                   ops:
                     - {type: harville, field: start_price, top: [1, 2]}
+                - name: shape
+                  scope: context
+                  context: session
+                  ops:
+                    - {type: svd, fields: [start_price, quantity, current_bid_t10], funcs: [scores, residualNorm, absorption], as: pc}
             """.replaceAll("(?m)^", "    ");
 
     /**
@@ -2282,6 +2287,25 @@ public class FeatureTransformTest {
                 Assertions.assertEquals(e[0], ((Number) row.getPrimitiveValue("f_neutral_current_bid_t10_residualize")).doubleValue(), 1e-9, id);
                 Assertions.assertEquals(e[1], ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top1")).doubleValue(), 1e-12, id);
                 Assertions.assertEquals(e[2], ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top2")).doubleValue(), 1e-12, id);
+            }
+            // svd over the session: two rows (A, C) sit half their distance apart on the one axis, oriented by the bid (the
+            // largest loading), nothing left over, the whole variance carried; a session of one row (B, D) reads null
+            for (final MElement row : rows) {
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final Double score = switch (id) {
+                    case "A/s1" -> 41.006097107625344;
+                    case "A/s2" -> -41.006097107625344;
+                    case "C/s1" -> 14.177446878757824;
+                    case "C/s2" -> -14.177446878757824;
+                    default -> null;
+                };
+                if (score == null) {
+                    for (final String c : List.of("f_shape_pc_0", "f_shape_pc_residnorm", "f_shape_pc_absorption")) Assertions.assertNull(row.getPrimitiveValue(c), id + " " + c);
+                    continue;
+                }
+                Assertions.assertEquals(score, row.getAsDouble("f_shape_pc_0"), 1e-9, id);
+                Assertions.assertEquals(0d, row.getAsDouble("f_shape_pc_residnorm"), 1e-9, id);
+                Assertions.assertEquals(1d, row.getAsDouble("f_shape_pc_absorption"), 1e-12, id);
             }
             Assertions.assertEquals(6, count);
             return null;

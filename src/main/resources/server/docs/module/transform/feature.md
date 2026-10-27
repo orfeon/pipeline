@@ -75,7 +75,7 @@ time; warnings and hints from the compiler are part of that report.
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. `minInterval` is a declaration the plan relies on and the run audits (see [minInterval audit](#mininterval-audit-declaration-vs-data)). |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
-| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `ratingProb`, `residualize`, `harville`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
+| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `ratingProb`, `residualize`, `harville`, `svd`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) `minBlocks` (default 1), `minHistory` (the same as a duration, rounded up to whole blocks; `minBlocks` wins) and `window` (the range of blocks a row reads) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
@@ -2202,9 +2202,9 @@ level: a row expression, or the input of a model whose initial score is the mark
   expr: "ln(contest_pNet_ratingProb / market_share)"
 ```
 
-### Group solvers (context ops `residualize`, `harville`)
+### Group solvers (context ops `residualize`, `harville`, `svd`)
 
-Two context ops fit a small model over the rows of the group and hand each row its part of the solution:
+Three context ops fit a small model over the rows of the group and hand each row its part of the solution:
 
 ```yaml
 - name: neutral                     # what is left of the score once the group's dependence on the market is taken out
@@ -2218,6 +2218,11 @@ Two context ops fit a small model over the rows of the group and hand each row i
   ops:
     - {type: harville, field: prob_pWin_softmax, as: p, top: [2, 3], discount: [0.81, 0.65]}   # placed_p_harville_top2 / _top3
     - {type: harville, field: prob_pWin_softmax, as: race, top: [2, 3], shape: 2}            # the gamma race model (Stern) instead of the discount
+- name: shape                       # where each row sits on the group's main axes of variation
+  scope: context
+  context: session
+  ops:
+    - {type: svd, fields: [log_market, quantity, model_score], rank: 2, standardize: true, funcs: [scores, residualNorm], as: pc}   # shape_pc_z_0 / shape_pc_z_1 / shape_pc_z_residnorm
 ```
 
 - **`residualize`** regresses `field` on the `against` fields (one name or a list; input fields or columns),
@@ -2253,6 +2258,29 @@ Two context ops fit a small model over the rows of the group and hand each row i
   negative rows follow the conventions above, and rows of equal value read the same. `shape` is a number in
   [0.05, 1000] (outside it the race cannot be solved; at 1000 a running time spreads by 3% of its mean, the
   normal model in all but name). `shape` and `discount` are not combined (`context.harville.shape`).
+- **`svd`** reads two or more numeric `fields` **together** — the rows of the group as vectors over them — centres
+  them with the group's means (and divides by the group's standard deviations under `standardize: true`: the
+  correlation matrix's components, for fields of unlike scale) and projects every row on the leading `rank`
+  principal components of the group (default 1, at most the number of fields): a PCA **per group**, fitted on the
+  rows of that group alone, where the population `svd` fits one on the whole input. Funcs (default `[scores]`):
+  `scores` — one column per component, `<name>_<as | fields joined>_0` carrying the most variance (`_z` after the
+  segment under `standardize`, as the sequence `covariance` names its standardized readouts: an op with it and one
+  without over the same fields are two sets of columns), each component
+  oriented so its largest loading is positive — the first field's on a tie, as in a group of two standardized
+  rows where every loading has the same size (the same field dominating two groups gives their scores one sign);
+  `residual` — what the components do not explain of the row, one column per field (`_resid_<field>`) in the
+  field's units; `residualNorm` (`_residnorm`) — the Euclidean length of that residual, how atypical the row is for
+  the group's structure; `absorption` (`_absorption`) — the share of the group's variance the `rank` components
+  carry (1 with every field's worth kept), one value for the group. A row takes part when every field is present
+  (null otherwise, in every column: the readouts are over the same rows); a group needs `rank + 1` such rows or
+  every row reads null (with fewer, the last components carry no variance and point anywhere). At exactly
+  `rank + 1` rows the components pass through the points: the scores are still their coordinates, but the
+  residual is 0 and `absorption` 1 — read those two from groups of `rank + 2` rows or more, and keep `rank` below
+  the number of fields for them (with every component kept they are constants on every row:
+  warning `context.svd.rank`). A group without variance reads scores 0 and no `absorption`. The result does not depend on the order the rows arrive in. `excludeSelf` has no
+  effect (`context.svd.excludeSelf`). The parameter is `rank`, as for the population svd (`components` is the
+  sequence `covariance`'s). Scores are in the fields' units (or standard deviations): read them relative to the
+  group's scale when groups differ in spread, or standardize.
 - **A residual does not remove its regressors from the model.** The residual is `field − a − b · against`
   within the group, so a model that is given the residual **and** `field` (or anything monotone in it within the
   group, such as its `zscore`) can rebuild `against`'s position in the group from the two. That is harmless when
@@ -2277,20 +2305,25 @@ Two context ops fit a small model over the rows of the group and hand each row i
   about 2 and 4 (Henery's normal model is the large-shape limit); start at `2`, and fit it against realised
   placings as you would the exponents. The price is compute: see *Cost*.
 - **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
-  without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
+  without `excludeSelf`), `svd` linear too (one k × k eigendecomposition per group and op, shared by its
+  columns), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
   in one `top` are one pass, not one per place. With `shape` the group is calibrated numerically (Newton on the
   rates, each step a quadrature pass of a few hundred nodes, quadratic in the group size): about 1–10 ms per group
   of eight to eighteen rows, so a million groups is an hour or more of worker CPU, spread over the workers the
   context stage runs on. `maxGroupSize` (default 64) is read by `harville` only: a group
-  with more valid rows reads null (info `context.op.groupSolver`; on `residualize` the key is ignored with a
-  warning, since it reads every row of the group whatever its size). The result does not depend on the order
+  with more valid rows reads null (info `context.op.groupSolver`; on `residualize` / `svd` the key is ignored with
+  a warning, since they read every row of the group whatever its size). The result does not depend on the order
   the rows of a group arrive in.
-- Both are row / context only (streaming-capable) and inherit the availability of every field they read.
-  Under `nullPolicy: indicator` both get an `_isnull` companion column (a group can read null as a whole).
+- All three are row / context only (streaming-capable) and inherit the availability of every field they read.
+  Under `nullPolicy: indicator` each of their columns gets an `_isnull` companion column (a group can read null
+  as a whole).
 - Diagnostics: `context.residualize.against` (missing, non-numeric, repeated, or the field itself),
   `context.harville.top` (distinct integers in 1..3), `context.harville.discount` (at most two positive
   exponents), `context.harville.shape` (a number in [0.05, 1000]; not beside `discount`), `context.op.maxGroupSize`
-  (≥ 2; a warning on `residualize`).
+  (≥ 2; a warning on `residualize` / `svd`), `context.svd.fields` (two or more distinct numeric fields),
+  `context.svd.rank` (in [1, the number of fields]; `components` is not its name; a warning when `rank` keeps
+  every component and the funcs read more than the scores), `context.svd.func`,
+  `context.svd.excludeSelf` (warning).
 
 ### Array readouts (row, `type: vector`)
 

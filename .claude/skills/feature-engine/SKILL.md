@@ -225,10 +225,19 @@ reads what the compile layer wrote into each column's `coordinates`.
   probability space with a max-shift; `ratingProb` = the Plackett-Luce contest read forward, `exp(mu / c)` normalised with
   `c² = Σ (sigma² + beta²)` over the group's active rows — coordinates `sigma` (column, optional) and `beta`; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
   `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
-  group solvers `residualize` / `harville` go through `solve(name, plan, rows)` → `GroupOps` (pure
+  group solvers `residualize` / `harville` / `svd` go through `solve(name, plan, rows)` → `GroupOps` (pure
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.
-  Work shared by several columns of one group is cached on the group's list identity (`harvillePlaces`: every
-  place of a `top` is one pass — a new group is a new list, so the cache cannot outlive it).
+  Work shared by several columns of one group is cached on the group's list identity (`caches(rows)`: `harvillePlaces` — every
+  place of a `top` is one pass — and `groupSvd` — the columns of one svd op read one fit; a new group is a new list, so
+  the caches cannot outlive it). The context `svd` (`GroupOps.svd`: the complete rows sorted by their values, folded into
+  `Svd.Moments`, `Svd.fit(rank, center, standardize)` per group — the population svd's orientation, re-read by
+  `GroupOps.orientation` so that loadings tied up to rounding (two standardized rows: every loading ±1/√k) let the FIRST
+  field decide the sign, not the last bits —,
+  readouts scores / residual / residualNorm / absorption, null below `rank + 1` rows) is expanded by
+  `expandContextSvd` BEFORE the per-field loop of `expandContext`, since its fields are one vector (one set of columns
+  per op, named `_0` / `_resid_<field>` / `_residnorm` / `_absorption` like the population svd's outputs, the segment
+  ending in `_z` under `standardize`); its
+  coordinates are `fields` / `rank` / `standardize` / `func` / `index`.
   `harville` with `shape` ≠ 1 is `GroupOps.racePlaces` (the gamma race model: rates calibrated per group by Newton on
   log θ against the input win probabilities, one Simpson pass in log time per step for the win probabilities, their
   Jacobian and the Poisson-binomial within-k; `raceRates` / `raceWithin` are package-private for the Monte Carlo
