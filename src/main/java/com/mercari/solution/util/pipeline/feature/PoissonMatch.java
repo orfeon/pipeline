@@ -19,15 +19,15 @@ import java.util.List;
  * non-positive at these rates is left out, as the rating leaves it out of its update.
  *
  * <p>The difference law is summed over the Poisson masses up to the point their tail is below the double's precision;
- * the sums run in a fixed order, so the result is a pure function of the two rates. A rate above {@link #MAX_RATE} (or
- * not positive) has no model: {@link #of} returns null.
+ * the sums run in a fixed order, so the result is a pure function of the two rates. A rate (or common part) above
+ * {@link #MAX_RATE}, or a rate that is not positive, has no model: {@link #of} returns null.
  */
 public final class PoissonMatch {
 
     /** The readouts of the op: {@code over} takes the thresholds of the {@code over} list, the others are one column each. */
     public static final List<String> FUNCS = List.of("expected", "win", "draw", "lose", "over", "bothScore");
 
-    /** The total an {@code over} is read against without an {@code over} list (the common football line). */
+    /** The total an {@code over} is read against without an {@code over} list (a common totals line). */
     public static final double DEFAULT_OVER = 2.5;
 
     /** Rates past this read null: the difference law is summed over the masses, about {@code λ + 12 √λ} terms. */
@@ -51,16 +51,20 @@ public final class PoissonMatch {
 
     /**
      * The match of two sides at these rates, or null when a rate is not a positive number up to {@link #MAX_RATE},
-     * {@code rho} is outside (−1, 1) or {@code covariance} is not a finite rate ≥ 0 (both 0 = independent scores).
+     * {@code rho} is outside (−1, 1), {@code covariance} is not a rate in [0, {@link #MAX_RATE}], or both are non-zero
+     * (two models of the dependence: {@link #over} reads the common part and not the tilt; both 0 = independent scores).
      */
     public static PoissonMatch of(final double lambda0, final double lambda1, final double rho, final double covariance) {
         if (!(lambda0 > 0) || !(lambda1 > 0) || lambda0 > MAX_RATE || lambda1 > MAX_RATE) return null;
-        if (!(Math.abs(rho) < 1) || !(covariance >= 0) || Double.isInfinite(covariance)) return null;
+        if (!(Math.abs(rho) < 1) || !(covariance >= 0) || covariance > MAX_RATE) return null;
+        if (rho != 0d && covariance != 0d) return null;
         // the difference of the own parts: P(x > y) = Σ_y p_1(y) P(x > y), P(x = y) = Σ_y p_1(y) p_0(y), P(x < y) = Σ_y p_1(y) P(x < y),
         // the tails of p_0 accumulated from both ends so that every term keeps its digits
         final double largest = Math.max(lambda0, lambda1);
         final int n = (int) Math.ceil(largest + 12 * Math.sqrt(largest) + 40);
-        final double[] p0 = pmf(lambda0, n), p1 = pmf(lambda1, n), above = new double[n];
+        final double[] logFactorial = new double[n];
+        for (int k = 0; k < n; k++) logFactorial[k] = StatMath.logGamma(k + 1d);
+        final double[] p0 = pmf(lambda0, logFactorial), p1 = pmf(lambda1, logFactorial), above = new double[n];
         double tail = 0;
         for (int y = n - 1; y >= 0; y--) {
             above[y] = tail;
@@ -85,11 +89,14 @@ public final class PoissonMatch {
         return new PoissonMatch(lambda0, lambda1, covariance, tilt, win, draw, lose);
     }
 
-    /** The Poisson masses {@code P(k)}, {@code k < n}, in logs (no underflow of {@code e^(−λ)} at a large rate). */
-    private static double[] pmf(final double lambda, final int n) {
-        final double[] p = new double[n];
+    /**
+     * The Poisson masses {@code P(k)}, {@code k <} the length of {@code logFactorial} ({@code ln k!}, shared by the two
+     * sides), in logs (no underflow of {@code e^(−λ)} at a large rate).
+     */
+    private static double[] pmf(final double lambda, final double[] logFactorial) {
+        final double[] p = new double[logFactorial.length];
         final double log = Math.log(lambda);
-        for (int k = 0; k < n; k++) p[k] = Math.exp(k * log - lambda - StatMath.logGamma(k + 1d));
+        for (int k = 0; k < p.length; k++) p[k] = Math.exp(k * log - lambda - logFactorial[k]);
         return p;
     }
 
@@ -120,8 +127,8 @@ public final class PoissonMatch {
     }
 
     /**
-     * The probability the total of the two scores exceeds {@code threshold} (a line: 2.5 reads 3 goals or more; 1 for
-     * a negative threshold). Under {@code covariance} the common part counts twice in the total.
+     * The probability the total of the two scores exceeds {@code threshold} (a line: 2.5 reads a total of 3 or more; 1
+     * for a negative threshold). Under {@code covariance} the common part counts twice in the total.
      */
     public double over(final double threshold) {
         if (threshold < 0) return 1d;
@@ -131,11 +138,13 @@ public final class PoissonMatch {
             // the four low-score cells hold totals 0, 1, 1, 2: below the line they move −tilt (0–0 alone) or +tilt (0–0, 0–1, 1–0); from 2 on all four, which cancel
             return tailAbove(rate, m) + (m == 0 ? tilt : m == 1 ? -tilt : 0d);
         }
-        // total = 2K + S, S ~ Poisson(λ_0 + λ_1): P(total > m) = Σ_k P(K = k) P(S > m − 2k), 1 once 2k > m
+        // total = 2K + S, S ~ Poisson(λ_0 + λ_1): P(total > m) = Σ_k P(K = k) P(S > m − 2k), 1 once 2k > m. The sum stops
+        // where K's own tail is below the double's precision (as the difference law does): a far line costs no more than a near one
         double sum = 0;
         final long half = m / 2;
+        final long last = Math.min(half, (long) Math.ceil(covariance + 12 * Math.sqrt(covariance) + 40));
         final double logCovariance = Math.log(covariance);
-        for (long k = 0; k <= half; k++) {
+        for (long k = 0; k <= last; k++) {
             sum += Math.exp(k * logCovariance - covariance - StatMath.logGamma(k + 1d)) * tailAbove(rate, m - 2 * k);
         }
         return sum + tailAbove(covariance, half);

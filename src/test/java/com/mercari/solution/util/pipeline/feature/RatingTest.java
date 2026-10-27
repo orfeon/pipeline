@@ -1285,9 +1285,24 @@ public class RatingTest {
         Assertions.assertFalse(warned.getDiagnostics().hasErrors(), warned::describe);
         Assertions.assertTrue(hasCode(warned, "context.poissonProb.excludeSelf"), warned::describe);
         Assertions.assertFalse(hasCode(plan, "context.poissonProb.excludeSelf"));
-        // the errors
+        // the model of the rating: a dependence, an offset or a defence other than the rating's own is a warning (the second op
+        // leaves out the rating's rho), the readouts of one rating read as declared are not
         final String one = "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, rho: -0.1, funcs: [expected, win, draw, lose, over, bothScore], over: [2.5, 3.5], as: p}";
         Assertions.assertTrue(block.contains(one));
+        Assertions.assertTrue(hasCode(plan, "context.poissonProb.rating"), plan::describe);
+        final String single = block.replace("      - {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence}\n", "");
+        Assertions.assertNotEquals(block, single);
+        final FeaturePlan declared = compile(rated + single);
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertFalse(hasCode(declared, "context.poissonProb.rating"), declared::describe);
+        for (final String other : List.of("- {type: poissonProb, field: skill_all_ps_defence, defence: skill_all_ps_attack, rho: -0.1, as: p}",
+                "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_mu, rho: -0.1, as: p}",
+                "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, rho: -0.1, offset: start_price, as: p}")) {
+            final FeaturePlan p = compile(rated + single.replace(one, other));
+            Assertions.assertFalse(p.getDiagnostics().hasErrors(), p::describe);
+            Assertions.assertTrue(hasCode(p, "context.poissonProb.rating"), () -> other + "\n" + p.describe());
+        }
+        // the errors
         final String prefix = "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, ";
         final Map<String, String> cases = new java.util.LinkedHashMap<>();
         cases.put("- {type: poissonProb, field: skill_all_ps_attack, as: p}", "context.poissonProb.defence");
@@ -1296,9 +1311,13 @@ public class RatingTest {
         cases.put(prefix + "rho: -0.1, covariance: 0.2, as: p}", "context.poissonProb.dependence");
         cases.put(prefix + "rho: 1.5, as: p}", "context.poissonProb.dependence");
         cases.put(prefix + "covariance: -1, as: p}", "context.poissonProb.dependence");
+        cases.put(prefix + "covariance: 1e5, as: p}", "context.poissonProb.dependence");
         cases.put(prefix + "funcs: [exact], as: p}", "context.poissonProb.func");
+        cases.put(prefix + "funcs: [win, win], as: p}", "context.poissonProb.func");
         cases.put(prefix + "over: [-1], as: p}", "context.poissonProb.over");
+        cases.put(prefix + "over: [2.5, 2.5], as: p}", "context.poissonProb.over");
         cases.put(prefix + "offset: start_price, offsetScale: log, as: p}", "context.poissonProb.offsetScale");
+        cases.put(prefix + "offset: start_price, offsetUnits: logit, as: p}", "context.poissonProb.offsetScale");
         cases.put(prefix + "offset: category, as: p}", "context.poissonProb.offset");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan p = compile(rated + block.replace(one, e.getKey()));

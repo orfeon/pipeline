@@ -2214,14 +2214,14 @@ sides scoring.
 ```yaml
 - name: skill
   scope: sequence
-  entity: team
+  entity: side
   ops:
-    - {type: rating, field: goals, context: match, method: poisson, rho: -0.1, offset: home_edge, as: dc}   # skill_all_dc_attack / _defence
+    - {type: rating, field: score, context: match, method: poisson, rho: -0.1, offset: side_shift, as: dc}   # skill_all_dc_attack / _defence
 - name: result
   scope: context
   context: match
   ops:
-    - {type: poissonProb, field: skill_all_dc_attack, defence: skill_all_dc_defence, rho: -0.1, offset: home_edge,
+    - {type: poissonProb, field: skill_all_dc_attack, defence: skill_all_dc_defence, rho: -0.1, offset: side_shift,
        funcs: [expected, win, draw, lose, over], over: [2.5, 3.5], as: p}
     # result_p_expected / result_p_win / result_p_draw / result_p_lose / result_p_over2p5 / result_p_over3p5
 ```
@@ -2230,11 +2230,11 @@ sides scoring.
 |---|---|
 | `field` | the row's **attack** rating (a `poisson` rating's `attack` readout — any numeric column read as a log rate). One field per op: the `defence` belongs to it |
 | `defence` | required: the column of the row's **defence** rating (the matching `defence` readout). A side's rate is `exp(attack_i − defence_j + offset_i)`, its attack less the *opponent's* defence |
-| `offset` | optional: the column of the row's shift of the log rate — the same column the rating read as its `offset` (a home advantage: `ln` of the rate ratio; `ln` of the typical score when the rating has one, see *no intercept* above). A `baselines[].name` or a numeric column; no `offsetScale` (the scale is the rating's, an error) |
-| `rho` / `covariance` | the dependence of the two scores, **as the rating declared it** (the probabilities are of the model the ratings were fitted with): `rho` in (−1, 1) reweights the four low-score results, `covariance` ≥ 0 adds a common Poisson component of that mean to both scores. One of them; both 0 (default) = independent scores |
+| `offset` | optional: the column of the row's shift of the log rate — the same column the rating read as its `offset` (a home advantage: `ln` of the rate ratio; `ln` of the typical score when the rating has one, see *no intercept* above). A `baselines[].name` or a numeric column; no `offsetScale` / `offsetUnits` (the scale is the rating's, an error) |
+| `rho` / `covariance` | the dependence of the two scores, **as the rating declared it** (the probabilities are of the model the ratings were fitted with; a value other than the rating's is a warning): `rho` in (−1, 1) reweights the four low-score results, `covariance` in [0, 10⁴] adds a common Poisson component of that mean to both scores. One of them; both 0 (default) = independent scores |
 | `funcs` | default `[expected, win, draw, lose]`: `expected` — the side's expected score (`λ_i`, plus `covariance`); `win` / `draw` / `lose` — the probability the side scores more / the same / less than the other; `over` — the probability the **total** exceeds each line of `over` (one column per line, `_over2p5`); `bothScore` — both sides score at least once |
-| `over` | the lines of `over` (finite, ≥ 0; default `[2.5]`: three goals or more). Declaring it implies the `over` func |
-| `as` | the name segment: `<name>_<as | field>_<func>` (`_over<line>` with `.` as `p`) |
+| `over` | the lines of `over` (distinct, finite, ≥ 0; default `[2.5]`: a total of three or more). Declaring it implies the `over` func |
+| `as` | the name segment: `<name>_<as \| field>_<func>` (`_over<line>` with `.` as `p`) |
 
 A group is a match when **exactly two** of its rows carry a finite attack, defence (and offset, where one is
 named); every other group — one row, three, a side without a rating — reads null in every column (a third row
@@ -2250,17 +2250,19 @@ and the three results sum to 1. `excludeSelf` has no effect (warning). The colum
 attack / defence columns and of the offset, so the probabilities are as available as the ratings: a context block
 over the match reading sequence columns, like `ratingProb`.
 
-**Reading it against a market.** `expected` is the model's expected goals; `ln(p_win / p_market)` of the `win`
-column is the model's disagreement with a 1X2 price, `over` against a totals line. The probabilities are of the
-rating's state **before** the match (the sequence columns are strictly past), at the prior for two unrated sides
-(rates `exp(offset)`, 1 without one — the no-intercept rule above: a `poisson` rating of points rather than goals
+**Reading it against a market.** `expected` is the model's expected score; `ln(p_win / p_market)` of the `win`
+column is the model's disagreement with a three-way result price, `over` against a totals line. The probabilities
+are of the rating's state **before** the match (the sequence columns are strictly past), at the prior for two
+unrated sides (rates `exp(offset)`, 1 without one — the no-intercept rule above: a `poisson` rating of large scores
 needs the `ln` of the typical score in its `offset`, and this op the same column).
 
 Diagnostics: `context.poissonProb.field` (one field per op), `context.poissonProb.defence` (required, numeric),
-`context.poissonProb.offset` (a baseline name or a numeric column), `context.poissonProb.offsetScale` (does not
-apply), `context.poissonProb.dependence` (`rho` in (−1, 1), `covariance` a finite rate ≥ 0, not both non-zero),
-`context.poissonProb.func`, `context.poissonProb.over` (finite lines ≥ 0), `context.poissonProb.excludeSelf`
-(warning).
+`context.poissonProb.offset` (a baseline name or a numeric column), `context.poissonProb.offsetScale` (`offsetScale`
+/ `offsetUnits` do not apply), `context.poissonProb.dependence` (`rho` in (−1, 1), `covariance` in [0, 10⁴], not
+both non-zero), `context.poissonProb.func` (known, distinct), `context.poissonProb.over` (distinct finite lines ≥ 0),
+`context.poissonProb.excludeSelf` (warning), `context.poissonProb.rating` (warning: the field is a rating readout but
+not a `poisson` rating's `attack`, `defence` is not that rating's `defence` readout, or `rho` / `covariance` /
+`offset` differ from what the rating declared).
 
 ### Group solvers (context ops `residualize`, `harville`, `svd`)
 

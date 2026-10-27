@@ -161,7 +161,7 @@ public class ContextEvaluator implements Serializable {
      */
     private record PoissonProb(String defence, String offset, double rho, double covariance, String func, double threshold, String key) {}
 
-    /** The match of a group: the two rows that are its sides, in the order {@link PoissonMatch} reads them (null model = no match). */
+    /** The match of a group: the two rows that are its sides, in the order {@link PoissonMatch} reads them (a group with no match caches null). */
     private record Match(int[] rows, PoissonMatch model) {}
 
     /**
@@ -377,31 +377,31 @@ public class ContextEvaluator implements Serializable {
      */
     private void poissonProb(final String name, final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
         final Match match = poissonMatch(field, plan, rows);
-        for (int i = 0; i < rows.size(); i++) {
-            Double value = null;
-            if (match != null) {
-                final int side = i == match.rows()[0] ? 0 : i == match.rows()[1] ? 1 : -1;
-                if (side >= 0) {
-                    final PoissonMatch model = match.model();
-                    value = switch (plan.func()) {
-                        case "expected" -> model.expected(side);
-                        case "win" -> model.win(side);
-                        case "draw" -> model.draw();
-                        case "lose" -> model.lose(side);
-                        case "over" -> model.over(plan.threshold());
-                        case "bothScore" -> model.bothScore();
-                        default -> throw new IllegalStateException("unknown poissonProb readout: " + plan.func());
-                    };
-                }
-            }
-            rows.get(i).put(name, value);
+        for (final Map<String, Object> row : rows) row.put(name, null);
+        if (match == null) return;
+        final PoissonMatch model = match.model();
+        // the match's own readouts are one value for both sides: computed once
+        final Double shared = switch (plan.func()) {
+            case "draw" -> model.draw();
+            case "over" -> model.over(plan.threshold());
+            case "bothScore" -> model.bothScore();
+            default -> null;
+        };
+        for (int side = 0; side < 2; side++) {
+            final Double value = shared != null ? shared : switch (plan.func()) {
+                case "expected" -> model.expected(side);
+                case "win" -> model.win(side);
+                case "lose" -> model.lose(side);
+                default -> throw new IllegalStateException("unknown poissonProb readout: " + plan.func());
+            };
+            rows.get(match.rows()[side]).put(name, value);
         }
     }
 
     /**
      * The match this column reads, built once per group and (attack, defence, offset, dependence). The sides are
-     * ordered by their rate, then attack, defence and offset — the sums of {@link PoissonMatch} run from side 0, so two
-     * rows that arrive the other way round read the same bits (two sides equal in all four are interchangeable).
+     * ordered by their rate — the sums of {@link PoissonMatch} run from side 0, so two rows that arrive the other way
+     * round read the same bits; two sides at one rate are one law and read the same bits whichever is side 0.
      */
     private Match poissonMatch(final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
         caches(rows);
@@ -430,10 +430,7 @@ public class ContextEvaluator implements Serializable {
         Match match = null;
         if (m == 2) {
             final double[] lambda = {Math.exp(attack[0] - defence[1] + offset[0]), Math.exp(attack[1] - defence[0] + offset[1])};
-            int first = 0;
-            if (lambda[1] < lambda[0] || lambda[1] == lambda[0] && (attack[1] < attack[0] || attack[1] == attack[0]
-                    && (defence[1] < defence[0] || defence[1] == defence[0] && offset[1] < offset[0]))) first = 1;
-            final int second = 1 - first;
+            final int first = lambda[1] < lambda[0] ? 1 : 0, second = 1 - first;
             final PoissonMatch model = PoissonMatch.of(lambda[first], lambda[second], plan.rho(), plan.covariance());
             if (model != null) match = new Match(new int[]{sides[first], sides[second]}, model);
         }

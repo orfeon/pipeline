@@ -1146,7 +1146,7 @@ public final class FeaturePlanCompiler {
                 continue;
             }
             // the op's own parameters are validated once here — an op over three fields reports a bad one once
-            final ContextOpParams params = validateContextOp(op, def, context, loc);
+            final ContextOpParams params = validateContextOp(op, def, context, fields, loc);
             if (params == null) continue;
             for (final String field : fields) {
                 final Ref ref = resolve(field);
@@ -1261,21 +1261,23 @@ public final class FeaturePlanCompiler {
      * What every column of a context op needs, validated once per op rather than once per field: the coordinates the
      * op contributes to each column, the extra inputs those columns read (the regressors of a residualize, a softmax
      * offset, the row identity of a shuffle), the validFor an offset passes on, the resolved regressors and the
-     * places of a harville (one column each).
+     * columns an op fans out into per field (the places of a harville, the readouts of a poissonProb; empty = one).
      */
     private record ContextOpParams(Map<String, String> coordinates, List<String> inputs, Duration validFor,
-                                   List<String> against, List<Integer> top, List<Variant> variants) {}
+                                   List<String> against, List<Variant> variants) {}
 
     /**
      * Validates the parameters of one context op and resolves what its columns are built from: {@code softmax}
      * (offset / temperature / scales), {@code residualize} (the explanatory fields), {@code harville} (places /
-     * discount / maxGroupSize) and {@code shuffle} (seed / ordering). Returns null when no column must be created.
+     * discount / maxGroupSize), {@code ratingProb} / {@code poissonProb} (the rating's other columns) and
+     * {@code shuffle} (seed / ordering). {@code fields} are the op's fields after the block's inputs are desugared.
+     * Returns null when no column must be created.
      */
-    private ContextOpParams validateContextOp(final Op op, final FeatureDef def, final ContextDef context, final String loc) {
+    private ContextOpParams validateContextOp(final Op op, final FeatureDef def, final ContextDef context, final List<String> fields,
+                                              final String loc) {
         final Map<String, String> coordinates = new LinkedHashMap<>();
         final List<String> inputs = new ArrayList<>();
         final List<String> against = new ArrayList<>();
-        List<Integer> top = List.of();
         final List<Variant> variants = new ArrayList<>();
         Duration validFor = null;
         switch (op.type) {
@@ -1305,7 +1307,7 @@ public final class FeaturePlanCompiler {
                 }
             }
             case "harville" -> {
-                top = op.top.isEmpty() ? List.of(2, 3) : op.top;
+                final List<Integer> top = op.top.isEmpty() ? List.of(2, 3) : op.top;
                 if (top.stream().anyMatch(k -> k < 1 || k > GroupOps.MAX_TOP) || new HashSet<>(top).size() != top.size()) {
                     diagnostics.error("context.harville.top", loc, "harville top must list distinct places in [1, " + GroupOps.MAX_TOP + "]: " + top);
                     return null;
@@ -1346,6 +1348,7 @@ public final class FeaturePlanCompiler {
                 if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
                 if (shape != 1d) coordinates.put("shape", Double.toString(shape));
                 coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
+                for (final int k : top) variants.add(new Variant("_harville_top" + k, Schema.FieldType.FLOAT64, Map.of("top", Integer.toString(k))));
             }
             case "ratingProb" -> {
                 // the field is the strength (a rating's mu, a team's), sigma the column of its uncertainty (optional: 0
@@ -1353,10 +1356,9 @@ public final class FeaturePlanCompiler {
                 if (op.sigmaField != null) {
                     // an op fans out over its fields with ONE set of coordinates: a sigma belongs to one strength, so an
                     // op over several fields would read every field's contest with the same uncertainty
-                    final int fieldCount = !op.fields.isEmpty() ? op.fields.size() : def.inputs.size();
-                    if (fieldCount > 1) {
+                    if (fields.size() > 1) {
                         diagnostics.error("context.ratingProb.sigma", loc, "ratingProb sigma '" + op.sigmaField + "' is the uncertainty of one strength: an op that names it takes one field"
-                                + " (this op covers " + fieldCount + ") - declare one ratingProb op per field, each with its own sigma");
+                                + " (this op covers " + fields.size() + ") - declare one ratingProb op per field, each with its own sigma");
                         return null;
                     }
                     final Ref ref = resolve(op.sigmaField);
@@ -1396,10 +1398,9 @@ public final class FeaturePlanCompiler {
             case "poissonProb" -> {
                 // the field is a poisson rating's attack, defence the column of its defence: the two rows of the group are a
                 // match, each side's rate exp(attack_i - defence_j + offset_i) as the rating's update read it
-                final int fieldCount = !op.fields.isEmpty() ? op.fields.size() : def.inputs.size();
-                if (fieldCount > 1) {
+                if (fields.size() > 1) {
                     diagnostics.error("context.poissonProb.field", loc, "poissonProb reads one field (the row's attack rating) beside its defence column"
-                            + " (this op covers " + fieldCount + ") - declare one poissonProb op per rating");
+                            + " (this op covers " + fields.size() + ") - declare one poissonProb op per rating");
                     return null;
                 }
                 if (op.defence == null) {
@@ -1415,8 +1416,10 @@ public final class FeaturePlanCompiler {
                 coordinates.put("defence", defence.canonical());
                 inputs.add(defence.canonical());
                 // the offset is the shift of the log rate the rating read (ln of a rate ratio): one scale, no offsetScale
-                if (op.offsetScale != null) {
-                    diagnostics.error("context.poissonProb.offsetScale", loc, "poissonProb reads offset as the rating did - a shift of the row's log rate (a home advantage: ln of the rate ratio): offsetScale does not apply");
+                // (nor the rating's own offsetUnits, which a copied rating op would bring along)
+                if (op.offsetScale != null || op.offsetUnits != null) {
+                    diagnostics.error("context.poissonProb.offsetScale", loc, "poissonProb reads offset as the rating did - a shift of the row's log rate (a home advantage: ln of the rate ratio): "
+                            + (op.offsetScale != null ? "offsetScale" : "offsetUnits") + " does not apply");
                     return null;
                 }
                 if (op.offset != null) {
@@ -1436,8 +1439,8 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.poissonProb.dependence", loc, "rho must lie in (-1, 1): " + op.rho);
                     return null;
                 }
-                if (!(covariance >= 0) || Double.isInfinite(covariance)) {
-                    diagnostics.error("context.poissonProb.dependence", loc, "covariance must be a finite rate >= 0 (the mean of the scores' common part): " + op.covariance);
+                if (!(covariance >= 0) || covariance > PoissonMatch.MAX_RATE) {
+                    diagnostics.error("context.poissonProb.dependence", loc, "covariance must be a rate in [0, " + PoissonMatch.MAX_RATE + "] (the mean of the scores' common part): " + op.covariance);
                     return null;
                 }
                 if (rho != 0d) coordinates.put("rho", Double.toString(rho));
@@ -1450,6 +1453,10 @@ public final class FeaturePlanCompiler {
                         return null;
                     }
                 }
+                if (new HashSet<>(funcs).size() != funcs.size()) {
+                    diagnostics.error("context.poissonProb.func", loc, "poissonProb funcs must be distinct: " + op.funcs);
+                    return null;
+                }
                 final List<Double> over = op.over.isEmpty() ? List.of(PoissonMatch.DEFAULT_OVER) : op.over;
                 for (final Double line : over) {
                     if (line == null || !(line >= 0) || line.isInfinite()) {
@@ -1457,9 +1464,14 @@ public final class FeaturePlanCompiler {
                         return null;
                     }
                 }
+                if (new HashSet<>(over).size() != over.size()) {
+                    diagnostics.error("context.poissonProb.over", loc, "over must list distinct lines (one column each): " + op.over);
+                    return null;
+                }
                 if (def.excludeSelf) {
                     diagnostics.warning("context.poissonProb.excludeSelf", loc, "excludeSelf has no effect on poissonProb (the row is one side of its own match)");
                 }
+                if (!fields.isEmpty()) warnPoissonRating(fields.get(0), defence, rho, covariance, coordinates.get("offset"), loc);
                 for (final String func : funcs) {
                     if ("over".equals(func)) {
                         for (final Double line : over) variants.add(new Variant("_over" + number(line), Schema.FieldType.FLOAT64, Map.of("func", func, "threshold", Double.toString(line))));
@@ -1517,7 +1529,7 @@ public final class FeaturePlanCompiler {
             }
             default -> { }
         }
-        return new ContextOpParams(coordinates, inputs, validFor, against, top, variants);
+        return new ContextOpParams(coordinates, inputs, validFor, against, variants);
     }
 
     /**
@@ -1556,6 +1568,42 @@ public final class FeaturePlanCompiler {
         }
     }
 
+    /**
+     * Warns (code {@code context.poissonProb.rating}) when the {@code poissonProb} field is a rating readout but not the
+     * {@code attack} of a {@code poisson} rating, when {@code defence} is not that rating's {@code defence} readout, or
+     * when its {@code rho} / {@code covariance} / {@code offset} differ from what the rating declared: the probabilities
+     * would be of another model than the one the ratings were fitted with. A field that is no rating readout (any
+     * column read as a log rate) is not checked.
+     */
+    private void warnPoissonRating(final String field, final Ref defence, final double rho, final double covariance,
+                                   final String offset, final String loc) {
+        final Ref attack = resolve(field);
+        if (attack == null || attack.column() == null || !"rating".equals(attack.column().operator)) return;
+        final Map<String, String> rating = attack.column().coordinates;
+        final List<String> issues = new ArrayList<>();
+        if (!"poisson".equals(rating.get("method")) || !"attack".equals(rating.get("func"))) {
+            issues.add("'" + field + "' is not the attack readout of a poisson rating");
+        } else {
+            final OutputColumn other = defence.column();
+            if (other == null || !"rating".equals(other.operator) || !"defence".equals(other.coordinates.get("func"))
+                    || !Objects.equals(rating.get("stateKey"), other.coordinates.get("stateKey"))) {
+                issues.add("defence '" + defence.canonical() + "' is not the defence readout of the rating of '" + field + "' (" + rating.get("stateKey") + "_defence)");
+            }
+            final double declaredRho = Double.parseDouble(rating.getOrDefault("rho", "0"));
+            final double declaredCovariance = Double.parseDouble(rating.getOrDefault("covariance", "0"));
+            if (declaredRho != rho) issues.add("rho " + rho + " where the rating declares " + declaredRho);
+            if (declaredCovariance != covariance) issues.add("covariance " + covariance + " where the rating declares " + declaredCovariance);
+            if (!Objects.equals(rating.get("offsetField"), offset)) {
+                issues.add("offset " + (offset == null ? "none" : "'" + offset + "'") + " where the rating reads "
+                        + (rating.get("offsetField") == null ? "none" : "'" + rating.get("offsetField") + "'"));
+            }
+        }
+        if (!issues.isEmpty()) {
+            diagnostics.warning("context.poissonProb.rating", loc, "poissonProb reads the match the ratings were fitted with: " + String.join("; ", issues)
+                    + " - the probabilities would be of another model");
+        }
+    }
+
     /** The scale a {@code softmax} / {@code ratingProb} offset is read in ({@code probability} by default, or {@code log}), or null after reporting it. */
     private String contextOffsetScale(final Op op, final String loc) {
         if (op.offsetUnits != null) {
@@ -1581,21 +1629,18 @@ public final class FeaturePlanCompiler {
         return offsetScale;
     }
 
-    /** One column of a context op: the ops that fan out produce several per field (a listed value, a place). */
+    /** One column of a context op: the ops that fan out produce several per field (a listed value, a place, a readout). */
     private record Variant(String suffix, Schema.FieldType type, Map<String, String> coordinates) {}
 
     /**
      * The columns one field of a context op produces: one per listed value for {@code countByValue} /
-     * {@code ratioByValue} (like {@code indicator}, instead of a map column), one per place for {@code harville},
-     * one otherwise.
+     * {@code ratioByValue} (like {@code indicator}, instead of a map column), the variants the op's validation resolved
+     * (a {@code harville}'s places, a {@code poissonProb}'s readouts), one otherwise.
      */
     private List<Variant> contextVariants(final Op op, final ContextOpParams params, final Operator operator, final Ref ref) {
         if (!op.values.isEmpty() && List.of("countByValue", "ratioByValue").contains(op.type)) {
             final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
             return op.values.stream().map(value -> new Variant("_" + op.type + "_" + value, type, Map.of("value", value))).toList();
-        }
-        if (!params.top().isEmpty()) {
-            return params.top().stream().map(k -> new Variant("_harville_top" + k, Schema.FieldType.FLOAT64, Map.of("top", Integer.toString(k)))).toList();
         }
         if (!params.variants().isEmpty()) return params.variants();
         return List.of(new Variant("_" + op.type, operator.outputFor(ref.type()), Map.of()));

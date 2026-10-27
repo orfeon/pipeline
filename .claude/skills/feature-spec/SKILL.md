@@ -166,7 +166,7 @@ parameters:
 | difference to a named baseline (market) | `row`, `type: residual`, `baseline: market`, `on: identity \| logit \| log` | the baseline is declared once in `baselines` |
 | rank / z-score / share / composition inside the event | `context` | `excludeSelf: true` for "vs. the others"; `values: [...]` for per-value columns |
 | a value **neutralised** against other fields inside the event (what the score says beyond the market), or "within the first k" probabilities from win probabilities | `context` ops `residualize` (`against: [...]`) / `harville` (`top`, `discount`) | `residualize` needs `p + 2` complete rows per group (null otherwise); `harville` is cubic for `top: 3` (`maxGroupSize`, default 64) |
-| the **result probabilities of a match** from a `poisson` rating (expected goals, win / draw / lose, the total over a line) | `context` op `poissonProb` (`field: <rating>_attack`, `defence: <rating>_defence`, `rho` / `covariance` as the rating declared, `funcs`, `over: [2.5]`) | the group must be the match (exactly two rated rows, else null); the same `offset` column as the rating |
+| the **result probabilities of a match** from a `poisson` rating (expected scores, win / draw / lose, the total over a line) | `context` op `poissonProb` (`field: <rating>_attack`, `defence: <rating>_defence`, `rho` / `covariance` as the rating declared, `funcs`, `over: [2.5]`) | the group must be the match (exactly two rated rows, else null); the same `offset` column as the rating |
 | where a row sits on its event's main axes of variation over several fields, and how atypical it is for them (a PCA per group) | `context` op `svd` (`fields: [a, b, ...]`, `rank`, `standardize`, `funcs: [scores, residual, residualNorm, absorption]`) | needs `rank + 1` complete rows per group (null otherwise); the residual and `absorption` say something from `rank + 2` rows and with `rank` below the number of fields |
 | the entity's past: lag, delta, trend, EWMA, run length, time since, counts, deterministic aggregates | `sequence` | strictly past rows; windows `maxEvents` / `maxAge` / `filter` with `$self` |
 | the *shape* of the entity's recent path as a few numbers: decay-weighted trend (Laguerre), periodicity (Fourier), level / slope / curvature over the window (Legendre) | `sequence` general form: `lift` + `summarize.dynamics` (`family: lti`) | one float64 column per component; running state (no history kept); at most 64 columns per block |
@@ -453,7 +453,7 @@ not alter values).
   the natural feature for a model whose initial score is the market's log share.
 - **A `poisson` rating as match probabilities**: a context `{type: poissonProb, field: <rating>_attack, defence:
   <rating>_defence, rho: <as the rating>, funcs: [expected, win, draw, lose, over], over: [2.5]}` over the match
-  context reads the scores' model forward — expected goals, 1X2 and totals probabilities on the market's scale
+  context reads the scores' model forward — expected scores, three-way result and totals probabilities on the market's scale
   (`ln(p_win / p_market)`); the group must be the match (two rated rows), and the `offset` column is the rating's.
 - **Serving a `rating`**: put `fit: {artifact: {uri: ..., require: true}}` on the block (the top-level artifact
   is not inherited). The backfill writes every pool's state after its replay; a run whose input starts after the

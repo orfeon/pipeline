@@ -98,10 +98,14 @@ public class PoissonMatchTest {
         Assertions.assertEquals(1.6, bp.expected(0), 1e-15);
         Assertions.assertEquals(1 - Math.exp(-2.5), bp.over(0.5), 1e-12);
         Assertions.assertEquals(1 - Math.exp(-1.6) - Math.exp(-1.3) + Math.exp(-2.5), bp.bothScore(), 1e-12);
-        // a common part of 0 is the independent model bit for bit
-        final PoissonMatch zero = PoissonMatch.of(1.2, 0.9, 0d, 0d);
-        Assertions.assertEquals(zero.over(2.5), PoissonMatch.of(1.2, 0.9, 0d, 0d).over(2.5), 0d);
+        // the bivariate total tends to the independent one as the common part vanishes (the two branches of over agree)
+        final PoissonMatch zero = PoissonMatch.of(1.2, 0.9, 0d, 0d), vanishing = PoissonMatch.of(1.2, 0.9, 0d, 1e-12);
+        for (final double line : new double[]{0.5, 1.5, 2.5, 3.5, 6.5}) Assertions.assertEquals(zero.over(line), vanishing.over(line), 1e-10, "line " + line);
+        Assertions.assertEquals(zero.win(0), vanishing.win(0), 0d);
         Assertions.assertEquals(1 - Math.exp(-2.1), zero.over(0.5), 1e-12);
+        // a far line costs no more than a near one: the common part's sum stops where its tail is below the precision
+        Assertions.assertEquals(0d, bp.over(1e15), 1e-300);
+        Assertions.assertEquals(0d, PoissonMatch.of(1.2, 0.9, 0d, 0d).over(1e15), 1e-300);
         // no model: a rate that is not positive, infinite, past the bound; a rho outside (-1, 1); a negative covariance
         Assertions.assertNull(PoissonMatch.of(0d, 1d, 0d, 0d));
         Assertions.assertNull(PoissonMatch.of(1d, Double.NaN, 0d, 0d));
@@ -110,6 +114,9 @@ public class PoissonMatchTest {
         Assertions.assertNotNull(PoissonMatch.of(PoissonMatch.MAX_RATE, 1d, 0d, 0d));
         Assertions.assertNull(PoissonMatch.of(1d, 1d, 1d, 0d));
         Assertions.assertNull(PoissonMatch.of(1d, 1d, 0d, -0.1));
+        Assertions.assertNull(PoissonMatch.of(1d, 1d, 0d, PoissonMatch.MAX_RATE * 1.01));
+        // rho and covariance are two models of the dependence: both non-zero is no model (over would read one, win the other)
+        Assertions.assertNull(PoissonMatch.of(1d, 1d, -0.1, 0.2));
         // at the bound the three results still sum to one
         final PoissonMatch bound = PoissonMatch.of(PoissonMatch.MAX_RATE, PoissonMatch.MAX_RATE * 0.98, 0d, 0d);
         Assertions.assertEquals(1d, bound.win(0) + bound.draw() + bound.win(1), 1e-9);
