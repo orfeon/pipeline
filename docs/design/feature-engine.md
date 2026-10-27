@@ -1255,6 +1255,7 @@ Families (`Summary.Summaries`, plus the two that live with their model class):
 | `COUNTS` | value → count | yes | distribution | encoding `distribution` |
 | `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
 | `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
+| `COVARIANCE` / `COVARIANCE_STANDARDIZED` | n, Σx, Σxxᵀ of a k-vector about an anchor | yes | absorption (components) / effectiveRank / meanCorrelation / logDet / count — the two instances read the eigenvalues of the covariance or of the correlation matrix (`standardize`) | sequence `covariance` |
 | `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3); `type: copula` fits (the vector of normal scores, §9.6.3) |
 | `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
 

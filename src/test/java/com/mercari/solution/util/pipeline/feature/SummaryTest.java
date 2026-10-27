@@ -281,6 +281,106 @@ public class SummaryTest {
         }
     }
 
+    /**
+     * The covariance family against numpy (the population covariance of six 3-vectors, its eigenvalues and those of the
+     * correlation matrix): every readout, the degenerate inputs, the anchor, the monoid / group laws and the exact reset.
+     */
+    @Test
+    public void testCovariance() {
+        final Summary<Summary.Covariance.State> g = Summary.Summaries.COVARIANCE;
+        final Summary<Summary.Covariance.State> std = Summary.Summaries.COVARIANCE_STANDARDIZED;
+        final List<double[]> rows = List.of(new double[]{1, 2, 0.5}, new double[]{2, 2.5, 1.5}, new double[]{3, 5, 1.0},
+                new double[]{4, 4.5, 3.5}, new double[]{5, 7, 2.5}, new double[]{6, 6.5, 5.0});
+        final Summary.Covariance.State s = fold(g, rows);
+        Assertions.assertEquals(6L, g.read(s, COUNT));
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(s, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(0.99968239756525212, (Double) g.read(s, Summary.Readout.of("absorption", 2)), 1e-12);
+        Assertions.assertEquals(1.2437813708243606, (Double) g.read(s, Summary.Readout.of("effectiveRank")), 1e-12);
+        Assertions.assertEquals(0.82473401051973383, (Double) g.read(s, Summary.Readout.of("meanCorrelation")), 1e-12);
+        Assertions.assertEquals(-7.0512475069271643, (Double) g.read(s, Summary.Readout.of("logDet")), 1e-9);
+        // the eigenvalues are swept once per state version: the funcs sharing the state reuse them, an update is seen,
+        // and a state that travelled (its caches transient) reads the same
+        final Summary.Covariance.State grown = fold(g, rows.subList(0, 5));
+        g.read(grown, Summary.Readout.of("absorption"));
+        g.read(grown, Summary.Readout.of("logDet"));
+        g.update(grown, rows.get(5), 1);
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(grown, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(-7.0512475069271643, (Double) g.read(grown, Summary.Readout.of("logDet")), 1e-9);
+        final double[] swept = grown.covarianceEigen;
+        Assertions.assertEquals(1.2437813708243606, (Double) g.read(grown, Summary.Readout.of("effectiveRank")), 1e-12);
+        Assertions.assertSame(swept, grown.covarianceEigen, "effectiveRank reads the sweep absorption made");
+        Assertions.assertEquals(0.88497407769492831, (Double) std.read(grown, Summary.Readout.of("absorption")), 1e-12, "the standardised read is of the correlation matrix's sweep");
+        final Summary.Covariance.State travelled = org.apache.beam.sdk.util.SerializableUtils.clone(grown);
+        Assertions.assertNull(travelled.covarianceEigen);
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(travelled, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(-7.0512475069271643, (Double) g.read(travelled, Summary.Readout.of("logDet")), 1e-9);
+        Assertions.assertEquals(0.88497407769492831, (Double) std.read(s, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(1.2557488690665288, (Double) std.read(s, Summary.Readout.of("effectiveRank")), 1e-12);
+        // the correlation readouts are the same under either instance; every component carries all the variance
+        Assertions.assertEquals(g.read(s, Summary.Readout.of("meanCorrelation")), std.read(s, Summary.Readout.of("meanCorrelation")));
+        Assertions.assertEquals(g.read(s, Summary.Readout.of("logDet")), std.read(s, Summary.Readout.of("logDet")));
+        Assertions.assertEquals(1.0, (Double) g.read(s, Summary.Readout.of("absorption", 3)), 1e-12);
+        // fewer than two vectors: the count alone
+        Assertions.assertNull(g.read(fold(g, rows.subList(0, 1)), Summary.Readout.of("absorption")));
+        Assertions.assertEquals(1L, g.read(fold(g, rows.subList(0, 1)), COUNT));
+        Assertions.assertEquals(0L, g.read(g.create(), COUNT));
+        // two vectors span one direction: one source carries everything, the correlations are ±1, the matrix is singular
+        final Summary.Covariance.State two = fold(g, rows.subList(0, 2));
+        Assertions.assertEquals(1.0, (Double) g.read(two, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertEquals(1.0, (Double) g.read(two, Summary.Readout.of("effectiveRank")), 1e-12);
+        Assertions.assertEquals(1.0, (Double) g.read(two, Summary.Readout.of("meanCorrelation")), 1e-12);
+        Assertions.assertNull(g.read(two, Summary.Readout.of("logDet")));
+        // a constant series: no correlation (null); the covariance eigenvalues ignore it (z = 2x: one source), the correlation's are null
+        final Summary.Covariance.State flat = fold(g, List.of(new double[]{1, 5, 2}, new double[]{2, 5, 4}, new double[]{4, 5, 8}));
+        Assertions.assertNull(g.read(flat, Summary.Readout.of("meanCorrelation")));
+        Assertions.assertNull(g.read(flat, Summary.Readout.of("logDet")));
+        Assertions.assertNull(std.read(flat, Summary.Readout.of("absorption")));
+        Assertions.assertEquals(1.0, (Double) g.read(flat, Summary.Readout.of("absorption")), 1e-12);
+        Assertions.assertNull(g.read(fold(g, List.of(new double[]{1, 1}, new double[]{1, 1})), Summary.Readout.of("absorption")), "no variance to share");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> g.read(s, Summary.Readout.of("cov")));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> g.update(fold(g, rows), new double[]{1, 2}, 1));
+        // the anchor keeps a large common offset out of the products
+        final List<double[]> offset = new ArrayList<>();
+        for (final double[] r : rows) offset.add(new double[]{r[0] + 1e9, r[1] - 3e9, r[2] + 5e8});
+        Assertions.assertEquals(0.88991636623438009, (Double) g.read(fold(g, offset), Summary.Readout.of("absorption")), 1e-9);
+        Assertions.assertEquals(0.82473401051973383, (Double) g.read(fold(g, offset), Summary.Readout.of("meanCorrelation")), 1e-9);
+
+        final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("absorption"), Summary.Readout.of("absorption", 2), Summary.Readout.of("effectiveRank"),
+                Summary.Readout.of("meanCorrelation"), Summary.Readout.of("logDet")};
+        assertMonoid(g, rows, SummaryTest::assertClose, readouts);
+        assertMonoid(std, rows, SummaryTest::assertClose, readouts);
+        assertMonoid(g, offset, SummaryTest::assertClose, readouts);
+        final Random random = new Random(23);
+        assertInvertible(g, random, () -> {
+            final double f = Math.round(random.nextGaussian() * 1000) / 100.0;
+            return new double[]{f + Math.round(random.nextGaussian() * 300) / 100.0, 0.5 * f + Math.round(random.nextGaussian() * 300) / 100.0, Math.round(random.nextGaussian() * 300) / 100.0};
+        }, SummaryTest::assertClose, readouts);
+        // emptied by eviction, the state starts over exactly (no rounding residue, a fresh anchor)
+        final Summary.Covariance.State emptied = fold(g, rows);
+        for (final double[] r : rows) g.update(emptied, r, -1);
+        Assertions.assertEquals(0, g.count(emptied), 0);
+        Assertions.assertFalse(emptied.anchored);
+        Assertions.assertEquals(0, emptied.products.length);
+        // the anchor evicted, a constant series sits at an offset from it: still constant (no rounding residue)
+        for (int trial = 0; trial < 200; trial++) {
+            final Summary.Covariance.State drifted = g.create();
+            final double[] anchor = {Math.round(random.nextDouble() * 10000) / 100.0, 5, 1};
+            final double constant = Math.round(random.nextDouble() * 10000) / 100.0;
+            g.update(drifted, anchor, 1);
+            for (int i = 0; i < 2 + random.nextInt(28); i++) g.update(drifted, new double[]{constant, Math.round(random.nextDouble() * 100) / 10.0, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            g.update(drifted, anchor, -1);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("meanCorrelation")), "constant " + constant + " anchored at " + anchor[0]);
+            Assertions.assertNull(std.read(drifted, Summary.Readout.of("absorption")));
+        }
+        // the spec of a column: standardize picks the instance, components the readout's parameter
+        final Summary.Spec spec = Summary.Covariance.spec(Map.of("func", "absorption", "components", "2", "standardize", "true"));
+        Assertions.assertSame(std, spec.family());
+        Assertions.assertEquals("absorption", spec.readout().name());
+        Assertions.assertEquals(2.0, spec.readout().parameter());
+        Assertions.assertSame(g, Summary.Covariance.spec(Map.of("func", "logDet")).family());
+        Assertions.assertNull(Summary.Covariance.spec(Map.of("func", "logDet")).readout().parameter());
+    }
+
     @Test
     public void testCatalogMapsStatisticsToFamilies() {
         for (final String func : OperatorCatalog.REGRESSION_FUNCS) {

@@ -60,6 +60,8 @@ public class SequenceEvaluator implements Serializable {
         /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
         String against;
         int lag;
+        /** covariance: the series read together (the contribution is their vector, none when one is missing). */
+        String[] channels;
         /** regression quadrantAsymmetry: the corners' quantile ({@link RankDependence#quadrantAsymmetry}). */
         double q;
         /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
@@ -82,7 +84,8 @@ public class SequenceEvaluator implements Serializable {
         boolean ratingTeam;
         /**
          * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
-         * components of a dynamics channel (one state, read out once per component column).
+         * components of a dynamics channel (one state, read out once per component column) or by the funcs of a
+         * {@code covariance} over the same series.
          */
         String stateKey;
     }
@@ -505,6 +508,7 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.against = c.coordinates.get("against");
         plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
+        if ("covariance".equals(c.operator)) plan.channels = c.coordinates.get("fields").split(",");
         final String q = c.coordinates.get("q");
         plan.q = q == null ? RankDependence.DEFAULT_Q : Double.parseDouble(q);
         if ("fracdiff".equals(c.operator)) {
@@ -560,9 +564,9 @@ public class SequenceEvaluator implements Serializable {
         };
     }
 
-    /** The statistic token of the column ({@code aggregate} / {@code regression} func); overridden for encoding stats. */
+    /** The statistic token of the column ({@code aggregate} / {@code regression} / {@code covariance} func); overridden for encoding stats. */
     String statToken(final OutputColumn c) {
-        return "aggregate".equals(c.operator) || "regression".equals(c.operator) ? func(c) : null;
+        return "aggregate".equals(c.operator) || "regression".equals(c.operator) || "covariance".equals(c.operator) ? func(c) : null;
     }
 
     /**
@@ -577,6 +581,7 @@ public class SequenceEvaluator implements Serializable {
                     ? Signature.spec(c.coordinates, c.clocks) : Dynamics.spec(c.coordinates, c.clocks);
             case "aggregate" -> OperatorCatalog.summary(func(c));
             case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(func(c));
+            case "covariance" -> Summary.Covariance.spec(c.coordinates);
             default -> null;
         };
     }
@@ -683,6 +688,8 @@ public class SequenceEvaluator implements Serializable {
         if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
         // a point of a multi-channel path (none when a channel is missing)
         if (plan.summary.family() instanceof Signature signature) return signature.event(p);
+        // the vector of a covariance's series (none when one is missing)
+        if (plan.channels != null) return vector(p.values(), plan.channels);
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return finite(p.values().get(plan.field));
@@ -696,6 +703,17 @@ public class SequenceEvaluator implements Serializable {
     static Double finite(final Object value) {
         final Double d = FeatureValues.toDouble(value);
         return d == null || !Double.isFinite(d) ? null : d;
+    }
+
+    /** The vector a past row contributes to a covariance — every series' value — or null when one is missing ({@link #finite}). */
+    private static double[] vector(final Map<String, Object> values, final String[] channels) {
+        final double[] x = new double[channels.length];
+        for (int i = 0; i < channels.length; i++) {
+            final Double d = finite(values.get(channels[i]));
+            if (d == null) return null;
+            x[i] = d;
+        }
+        return x;
     }
 
     /** The (x, y) contribution of a regression, or null when either value is missing ({@link #finite}). */
@@ -808,6 +826,16 @@ public class SequenceEvaluator implements Serializable {
                     if (pair != null) family.update(state, pair, 1);
                 }
                 return family.read(state, Summary.Readout.of(plan.func));
+            }
+            case "covariance" -> {
+                // the same family as the incremental path, folded over the window's complete vectors
+                final Summary<Summary.Covariance.State> family = plan.summary.typed();
+                final Summary.Covariance.State state = family.create();
+                for (final Past p : window) {
+                    final double[] x = vector(p.values(), plan.channels);
+                    if (x != null) family.update(state, x, 1);
+                }
+                return family.read(state, plan.summary.readout());
             }
             case "fracdiff" -> {
                 final double[] w = plan.fracdiffWeights;

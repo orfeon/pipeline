@@ -1584,6 +1584,11 @@ public final class FeaturePlanCompiler {
                     }
                     continue;
                 }
+                if ("covariance".equals(op.type)) {
+                    // k series read together: one column per func, not one per field
+                    expandCovariance(def, op, fields, entity, window, filterRefs, reducedKey, computeAt, loc);
+                    continue;
+                }
                 if (fields.isEmpty()) {
                     // COUNT(1): a field-less aggregate counts every visible past row, nulls included
                     if ("aggregate".equals(op.type) && (op.funcs.isEmpty() || op.funcs.equals(List.of("count")))) {
@@ -2807,6 +2812,81 @@ public final class FeaturePlanCompiler {
         }
         m.appendTail(sb);
         return sb.toString();
+    }
+
+    /**
+     * §4.5 {@code covariance}: readouts of the covariance / correlation matrix of k numeric series over the window
+     * ({@link Summary.Covariance}) — one column per func, since the series are read together, named by {@code as} or by
+     * the fields joined. A past row contributes when every series is present, so every readout is over the same rows.
+     * {@code components} is the parameter of {@code absorption}; {@code standardize} makes the eigenvalue readouts
+     * those of the correlation matrix (the correlation readouts and the count are the same either way, so their
+     * columns carry no such coordinate).
+     */
+    private void expandCovariance(final FeatureDef def, final Op op, final List<String> fields, final EntityDef entity, final Window window,
+                                  final References filterRefs, final String reducedKey, final AvailableAt computeAt, final String loc) {
+        if (fields.size() < 2 || fields.size() > Summary.Covariance.MAX_DIMENSION) {
+            diagnostics.error("sequence.covariance.fields", loc, "covariance reads 2 to " + Summary.Covariance.MAX_DIMENSION
+                    + " numeric fields together (fields: [a, b, ...]; the readouts are of their covariance matrix): " + fields.size() + " given");
+            return;
+        }
+        final List<String> canonical = new ArrayList<>(), names = new ArrayList<>();
+        for (final String field : fields) {
+            final Ref ref = resolve(field);
+            if (ref == null) return;
+            if (!OperatorCatalog.isNumeric(ref.type())) {
+                diagnostics.error("sequence.op.type", loc, "op covariance expects numeric input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
+                return;
+            }
+            if (canonical.contains(ref.canonical)) {
+                diagnostics.error("sequence.covariance.fields", loc, "covariance lists '" + field + "' twice");
+                return;
+            }
+            canonical.add(ref.canonical);
+            names.add(displayName(field));
+        }
+        final List<String> funcs = op.funcs.isEmpty() ? List.of("absorption", "meanCorrelation") : op.funcs;
+        final int components = op.components == null ? Summary.Covariance.DEFAULT_COMPONENTS : op.components;
+        if (components < 1 || components >= fields.size()) {
+            diagnostics.error("sequence.covariance.components", loc, "components must be in [1, " + (fields.size() - 1)
+                    + "] - the leading eigenvalues absorption sums (all " + fields.size() + " would read 1): " + op.components);
+            return;
+        }
+        if (op.components != null && !funcs.contains("absorption")) {
+            diagnostics.warning("sequence.covariance.components", loc, "components is read by absorption only, which funcs does not list: ignored");
+        }
+        if (op.standardize && !funcs.contains("absorption") && !funcs.contains("effectiveRank")) {
+            diagnostics.warning("sequence.covariance.standardize", loc, "standardize changes the eigenvalue readouts absorption / effectiveRank only"
+                    + " (meanCorrelation and logDet are of the correlation matrix either way), which funcs does not list: ignored");
+        }
+        final String base = def.name + "_" + window.token() + "_" + (op.as != null ? op.as : String.join("_", names)) + "_";
+        if (op.as == null && fields.size() > 4 && hintedBlocks.add("sequence.covariance.as:" + def.name + ":" + window.token() + ":" + String.join(",", canonical))) {
+            diagnostics.hint("sequence.covariance.as", loc, "the default name segment joins the " + fields.size() + " field names (" + String.join("_", names)
+                    + "): declare as: to keep the column names within a sink's limit");
+        }
+        // the funcs read one running state (the same vectors fold in either way, standardize only changes the read): the
+        // O(k²) update and the k × k sums are paid once per op, not once per func. Keyed by the ordered series, so
+        // two ops over the same series and window share it too, and no other vector ever lands in it
+        final String stateKey = def.name + "_" + window.token() + "_covariance(" + String.join(",", canonical) + ")";
+        for (final String func : funcs) {
+            if (!OperatorCatalog.COVARIANCE_FUNCS.contains(func)) {
+                diagnostics.error("sequence.covariance.func", loc, "unknown covariance func: " + func + " (available: " + String.join(" | ", OperatorCatalog.COVARIANCE_FUNCS) + ")");
+                continue;
+            }
+            final boolean absorption = "absorption".equals(func);
+            final boolean eigen = absorption || "effectiveRank".equals(func);
+            // the parameters that change the value are in the name, so two ops over the same series in one block do not
+            // collide: a declared components other than the default, and standardize on the eigenvalue readouts (`_z`:
+            // of the standardised series)
+            final String suffix = (absorption && components != Summary.Covariance.DEFAULT_COMPONENTS ? func + components : func) + (op.standardize && eigen ? "_z" : "");
+            final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + suffix, "count".equals(func) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("func", func);
+            c.coordinates.put("fields", String.join(",", canonical));
+            if (absorption) c.coordinates.put("components", Integer.toString(components));
+            if (op.standardize && eigen) c.coordinates.put("standardize", "true");
+            c.coordinates.put("stateKey", stateKey);
+            for (final String field : fields) addPastInput(c, field);
+            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+        }
     }
 
     private static String displayName(final String reference) {
