@@ -23,6 +23,8 @@ public class ContextEvaluator implements Serializable {
     private transient Map<String, double[][]> harvilleCache;
     /** The group's principal components per (fields, rank, standardize): the columns of one svd op read one fit. */
     private transient Map<String, GroupOps.GroupSvd> svdCache;
+    /** The match of the group per (attack, defence, offset, dependence): the columns of one poissonProb op read one model (null = no match). */
+    private transient Map<String, Match> poissonCache;
 
     public ContextEvaluator(final List<OutputColumn> columns) {
         this.columns = columns;
@@ -58,6 +60,10 @@ public class ContextEvaluator implements Serializable {
         }
         if (plan.ratingProb() != null) {
             ratingProb(c.canonicalName, plan.field(), plan.ratingProb(), rows);
+            return;
+        }
+        if (plan.poissonProb() != null) {
+            poissonProb(c.canonicalName, plan.field(), plan.poissonProb(), rows);
             return;
         }
         if (plan.shuffle() != null) {
@@ -106,27 +112,30 @@ public class ContextEvaluator implements Serializable {
      * plain row expression); the parameterised ops carry their own record and are dispatched on it.
      */
     private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression,
-                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb, SvdColumn svd) {
+                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb, SvdColumn svd,
+                        PoissonProb poissonProb) {
 
         /** The ops whose reading is the same for every row of the group, so the group is read once. */
         private static final Set<String> GROUP_CONSTANT = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
 
         static Plan of(final String op, final String field, final boolean excludeSelf, final String value,
                        final ExpressionUtil.Expression expression) {
-            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null);
+            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null, null);
         }
 
-        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null, null); }
+        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null, null, null); }
 
-        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null, null); }
+        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null, null, null); }
 
-        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null, null); }
+        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null, null, null); }
 
-        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null, null); }
+        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null, null, null); }
 
-        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r, null); }
+        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r, null, null); }
 
-        Plan with(final SvdColumn s) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, s); }
+        Plan with(final SvdColumn s) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, s, null); }
+
+        Plan with(final PoissonProb p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null, p); }
 
         boolean groupConstant() {
             return !excludeSelf && (value != null || GROUP_CONSTANT.contains(op));
@@ -143,6 +152,17 @@ public class ContextEvaluator implements Serializable {
     private record RatingProb(String sigma, double beta, String offset, boolean logScale) {}
 
     private record Residualize(String[] against) {}
+
+    /**
+     * A column of the context {@code poissonProb}: {@code defence} the column of the row's defence rating (the field is
+     * its attack), {@code offset} the column of the row's log-rate shift (null = none), the dependence of the two scores
+     * as the rating declared it, what the column reads ({@code func}) and the total an {@code over} is read against;
+     * {@code key} names the match the columns of one op share.
+     */
+    private record PoissonProb(String defence, String offset, double rho, double covariance, String func, double threshold, String key) {}
+
+    /** The match of a group: the two rows that are its sides, in the order {@link PoissonMatch} reads them (a group with no match caches null). */
+    private record Match(int[] rows, PoissonMatch model) {}
 
     /**
      * A column of the context {@code svd}: the fields the group's rows are vectors over, the components kept, the matrix
@@ -182,6 +202,12 @@ public class ContextEvaluator implements Serializable {
                     "log".equals(at.get("offsetScale")), "null".equals(at.get("scoreNull"))));
             case "ratingProb" -> plan.with(new RatingProb(at.get("sigma"), Double.parseDouble(at.get("beta")), at.get("offset"),
                     "log".equals(at.get("offsetScale"))));
+            case "poissonProb" -> {
+                final String defence = at.get("defence"), offset = at.get("offset"), rho = at.getOrDefault("rho", "0"), covariance = at.getOrDefault("covariance", "0");
+                yield plan.with(new PoissonProb(defence, offset, Double.parseDouble(rho), Double.parseDouble(covariance), at.get("func"),
+                        at.containsKey("threshold") ? Double.parseDouble(at.get("threshold")) : Double.NaN,
+                        field + "\u0000" + defence + "\u0000" + offset + "\u0000" + rho + "\u0000" + covariance));
+            }
             case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
             case "svd" -> {
                 final String fields = at.get("fields"), rank = at.get("rank"), standardize = at.getOrDefault("standardize", "false");
@@ -344,6 +370,75 @@ public class ContextEvaluator implements Serializable {
     }
 
     /**
+     * The {@code poissonProb} readout of every row: the group is a match when exactly two rows carry a finite attack,
+     * defence (and offset, where one is named) — each side's rate is {@code exp(attack_i − defence_j + offset_i)}, the
+     * rating's own — and reads null otherwise (a group of one or of three, a side without a rating, a rate that is not
+     * a positive number up to {@link PoissonMatch#MAX_RATE}). The columns of one op read one {@link PoissonMatch}.
+     */
+    private void poissonProb(final String name, final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
+        final Match match = poissonMatch(field, plan, rows);
+        for (final Map<String, Object> row : rows) row.put(name, null);
+        if (match == null) return;
+        final PoissonMatch model = match.model();
+        // the match's own readouts are one value for both sides: computed once
+        final Double shared = switch (plan.func()) {
+            case "draw" -> model.draw();
+            case "over" -> model.over(plan.threshold());
+            case "bothScore" -> model.bothScore();
+            default -> null;
+        };
+        for (int side = 0; side < 2; side++) {
+            final Double value = shared != null ? shared : switch (plan.func()) {
+                case "expected" -> model.expected(side);
+                case "win" -> model.win(side);
+                case "lose" -> model.lose(side);
+                default -> throw new IllegalStateException("unknown poissonProb readout: " + plan.func());
+            };
+            rows.get(match.rows()[side]).put(name, value);
+        }
+    }
+
+    /**
+     * The match this column reads, built once per group and (attack, defence, offset, dependence). The sides are
+     * ordered by their rate — the sums of {@link PoissonMatch} run from side 0, so two rows that arrive the other way
+     * round read the same bits; two sides at one rate are one law and read the same bits whichever is side 0.
+     */
+    private Match poissonMatch(final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
+        caches(rows);
+        if (poissonCache.containsKey(plan.key())) return poissonCache.get(plan.key());
+        final int[] sides = new int[2];
+        final double[] attack = new double[2], defence = new double[2], offset = new double[2];
+        int m = 0;
+        for (int i = 0; i < rows.size() && m <= 2; i++) {
+            final Map<String, Object> row = rows.get(i);
+            final Double a = FeatureValues.toDouble(row.get(field)), d = FeatureValues.toDouble(row.get(plan.defence()));
+            if (a == null || !Double.isFinite(a) || d == null || !Double.isFinite(d)) continue;
+            double o = 0d;
+            if (plan.offset() != null) {
+                final Double shift = FeatureValues.toDouble(row.get(plan.offset()));
+                if (shift == null || !Double.isFinite(shift)) continue;
+                o = shift;
+            }
+            if (m < 2) {
+                sides[m] = i;
+                attack[m] = a;
+                defence[m] = d;
+                offset[m] = o;
+            }
+            m++;
+        }
+        Match match = null;
+        if (m == 2) {
+            final double[] lambda = {Math.exp(attack[0] - defence[1] + offset[0]), Math.exp(attack[1] - defence[0] + offset[1])};
+            final int first = lambda[1] < lambda[0] ? 1 : 0, second = 1 - first;
+            final PoissonMatch model = PoissonMatch.of(lambda[first], lambda[second], plan.rho(), plan.covariance());
+            if (model != null) match = new Match(new int[]{sides[first], sides[second]}, model);
+        }
+        poissonCache.put(plan.key(), match);
+        return match;
+    }
+
+    /**
      * The weight a row's offset gives it in a {@code softmax} / {@code ratingProb}: 1 without an offset column (whatever
      * the scale), else its value in probability space ({@code logScale}: exp first) — NaN when the row has no finite,
      * non-negative one and leaves the group.
@@ -432,6 +527,7 @@ public class ContextEvaluator implements Serializable {
             cachedGroup = rows;
             harvilleCache = new HashMap<>();
             svdCache = new HashMap<>();
+            poissonCache = new HashMap<>();
         }
     }
 

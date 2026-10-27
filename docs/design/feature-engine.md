@@ -327,7 +327,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `plackettLuce` shifts `m_i` by `c · o_i` with `c` summed exactly as `plackettLuce` sums it (one scale per contest,
   so the update and `plackettLuceInformation` read the same shifted strengths, and a deeper choice reads
   `o / depthScale^(q − 1)`); `ratingProb`'s `offset` is its read-back (`w · exp(mu / c)`, probability space like
-  softmax). `tauBy` replaces the rated player's (member 0's) `tau`
+  softmax); `poissonProb` is the poisson rating's read-back over a match (`PoissonMatch`: each side Poisson at the rating's
+  rate, the result law summed over the masses; the dependence applied as the rating declared it). `tauBy` replaces the rated player's (member 0's) `tau`
   in `drifted` for that entry — once per player and contest, at the largest valid value among the player's rows (its
   drift is its state: every row of it enters the contest with one prior variance) — the other members keep theirs. Under `tauPer` a read drifts up to the row at the
   row's own value (`Rating.rowTau(row)` → `read(..., rowTau)` / `readTeam(..., rowTau)`), so the field is also a self

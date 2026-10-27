@@ -75,7 +75,7 @@ time; warnings and hints from the compiler are part of that report.
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. `minInterval` is a declaration the plan relies on and the run audits (see [minInterval audit](#mininterval-audit-declaration-vs-data)). |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
-| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `ratingProb`, `residualize`, `harville`, `svd`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
+| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `ratingProb`, `poissonProb`, `residualize`, `harville`, `svd`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) `minBlocks` (default 1), `minHistory` (the same as a duration, rounded up to whole blocks; `minBlocks` wins) and `window` (the range of blocks a row reads) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
@@ -462,7 +462,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   sds let a rate vary by e^±1), no `pairs`, no team (`with` / `team`); `tau` / `tauPer` / `tauBy` drift both
   ratings. A contest of other than two rows, of two rows of one player, or with a negative score is skipped
   (`count` tells). The expected score of a row against its opponent is `exp(attack_i − defence_j + offset_i)`: the
-  opponent's `defence` comes from a context block over the match or a join. The rate has **no intercept**: `mu`
+  context op `poissonProb` reads it over the match from the `attack` / `defence` columns — expected scores, win /
+  draw / lose, the total over a line (see *Match probabilities* below). The rate has **no intercept**: `mu`
   moves attack and defence alike, so at the prior every row expects `exp(offset)` — 1 without an offset, whatever
   `mu` is. Where a typical score is far from 1 (points rather than goals), put its `ln` into the `offset` (a
   baseline `ln(mean score)`, plus any home advantage): otherwise a first match moves a rating by several log units
@@ -2201,6 +2202,67 @@ level: a row expression, or the input of a model whose initial score is the mark
   scope: row
   expr: "ln(contest_pNet_ratingProb / market_share)"
 ```
+
+### Match probabilities (context op `poissonProb`)
+
+A `poisson` rating carries its own model of a match: each side's score is Poisson at `exp(attack_i − defence_j +
+offset_i)`, the two scores independent, Dixon–Coles dependent (`rho`) or bivariate Poisson (`covariance`).
+`poissonProb` reads that model forward over the two rows of a group — the match the ratings predict, before it is
+played — on the scale of a market: expected scores, the probability of each result, the total over a line, both
+sides scoring.
+
+```yaml
+- name: skill
+  scope: sequence
+  entity: side
+  ops:
+    - {type: rating, field: score, context: match, method: poisson, rho: -0.1, offset: side_shift, as: dc}   # skill_all_dc_attack / _defence
+- name: result
+  scope: context
+  context: match
+  ops:
+    - {type: poissonProb, field: skill_all_dc_attack, defence: skill_all_dc_defence, rho: -0.1, offset: side_shift,
+       funcs: [expected, win, draw, lose, over], over: [2.5, 3.5], as: p}
+    # result_p_expected / result_p_win / result_p_draw / result_p_lose / result_p_over2p5 / result_p_over3p5
+```
+
+| key | value |
+|---|---|
+| `field` | the row's **attack** rating (a `poisson` rating's `attack` readout — any numeric column read as a log rate). One field per op: the `defence` belongs to it |
+| `defence` | required: the column of the row's **defence** rating (the matching `defence` readout). A side's rate is `exp(attack_i − defence_j + offset_i)`, its attack less the *opponent's* defence |
+| `offset` | optional: the column of the row's shift of the log rate — the same column the rating read as its `offset` (a home advantage: `ln` of the rate ratio; `ln` of the typical score when the rating has one, see *no intercept* above). A `baselines[].name` or a numeric column; no `offsetScale` / `offsetUnits` (the scale is the rating's, an error) |
+| `rho` / `covariance` | the dependence of the two scores, **as the rating declared it** (the probabilities are of the model the ratings were fitted with; a value other than the rating's is a warning): `rho` in (−1, 1) reweights the four low-score results, `covariance` in [0, 10⁴] adds a common Poisson component of that mean to both scores. One of them; both 0 (default) = independent scores |
+| `funcs` | default `[expected, win, draw, lose]`: `expected` — the side's expected score (`λ_i`, plus `covariance`); `win` / `draw` / `lose` — the probability the side scores more / the same / less than the other; `over` — the probability the **total** exceeds each line of `over` (one column per line, `_over2p5`); `bothScore` — both sides score at least once |
+| `over` | the lines of `over` (distinct, finite, ≥ 0; default `[2.5]`: a total of three or more). Declaring it implies the `over` func |
+| `as` | the name segment: `<name>_<as \| field>_<func>` (`_over<line>` with `.` as `p`) |
+
+A group is a match when **exactly two** of its rows carry a finite attack, defence (and offset, where one is
+named); every other group — one row, three, a side without a rating — reads null in every column (a third row
+without a rating is not a side: the two rated rows are still a match). A rate that is not a positive number up to
+`10⁴` reads null too (the result law is summed over the Poisson masses, about `λ + 12√λ` terms per match). Under
+`covariance` the common part cancels in the difference of the scores, so `win` / `draw` / `lose` are those of the
+independent model at the own rates — the Skellam law — while `expected` and `over` carry it (the total, twice).
+Under `rho` one mass `λ_0 λ_1 ρ e^(−λ_0 − λ_1)` moves out of the 0–0 and 1–1 cells into 0–1 and 1–0 (a negative
+`rho`, the other way: more draws), the marginals and the expected scores unchanged; a `rho` that would make a
+reweighting factor non-positive at these rates is left out, as the rating leaves it out of its update. The result
+is a pure function of the two sides (whatever order the rows arrive in), `win` of one side is `lose` of the other,
+and the three results sum to 1. `excludeSelf` has no effect (warning). The columns inherit the availability of the
+attack / defence columns and of the offset, so the probabilities are as available as the ratings: a context block
+over the match reading sequence columns, like `ratingProb`.
+
+**Reading it against a market.** `expected` is the model's expected score; `ln(p_win / p_market)` of the `win`
+column is the model's disagreement with a three-way result price, `over` against a totals line. The probabilities
+are of the rating's state **before** the match (the sequence columns are strictly past), at the prior for two
+unrated sides (rates `exp(offset)`, 1 without one — the no-intercept rule above: a `poisson` rating of large scores
+needs the `ln` of the typical score in its `offset`, and this op the same column).
+
+Diagnostics: `context.poissonProb.field` (one field per op), `context.poissonProb.defence` (required, numeric),
+`context.poissonProb.offset` (a baseline name or a numeric column), `context.poissonProb.offsetScale` (`offsetScale`
+/ `offsetUnits` do not apply), `context.poissonProb.dependence` (`rho` in (−1, 1), `covariance` in [0, 10⁴], not
+both non-zero), `context.poissonProb.func` (known, distinct), `context.poissonProb.over` (distinct finite lines ≥ 0),
+`context.poissonProb.excludeSelf` (warning), `context.poissonProb.rating` (warning: the field is a rating readout but
+not a `poisson` rating's `attack`, `defence` is not that rating's `defence` readout, or `rho` / `covariance` /
+`offset` differ from what the rating declared).
 
 ### Group solvers (context ops `residualize`, `harville`, `svd`)
 
