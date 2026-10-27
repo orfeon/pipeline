@@ -410,7 +410,7 @@ features:
       - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}  # skill_all_elo_mu ...
       - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P30D, as: rested}                 # the uncertainty reopens with the time away
       - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, as: bt}       # large fields: a contest weighs like one game
-      - {type: rating, field: quantity, context: session, method: poisson, rho: -0.1, as: goals}                                 # two-row contests scored as counts: skill_all_goals_attack / _defence / _mu / _sigma
+      - {type: rating, field: quantity, context: session, method: poisson, rho: -0.1, as: scored}                                # two-row contests scored as counts: skill_all_scored_attack / _defence / _mu / _sigma
   - name: field                        # the rating against the others of the same session: an ordinary context block
     scope: context
     context: session
@@ -462,7 +462,11 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   sds let a rate vary by e^±1), no `pairs`, no team (`with` / `team`); `tau` / `tauPer` / `tauBy` drift both
   ratings. A contest of other than two rows, of two rows of one player, or with a negative score is skipped
   (`count` tells). The expected score of a row against its opponent is `exp(attack_i − defence_j + offset_i)`: the
-  opponent's `defence` comes from a context block over the match or a join.
+  opponent's `defence` comes from a context block over the match or a join. The rate has **no intercept**: `mu`
+  moves attack and defence alike, so at the prior every row expects `exp(offset)` — 1 without an offset, whatever
+  `mu` is. Where a typical score is far from 1 (points rather than goals), put its `ln` into the `offset` (a
+  baseline `ln(mean score)`, plus any home advantage): otherwise a first match moves a rating by several log units
+  in one step (a 100-point score from the prior: about +16).
   Parameters: `mu` (prior, default 25; elo 1500; gaussian / poisson 0), `sigma` (default `mu / 3`; poisson 0.5),
   `beta` (performance noise, default `sigma / 2`; not poisson), `tau` (added to every participant's variance before
   a contest — strengths drift — default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much
@@ -868,9 +872,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     the condition as the `offset`.
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or a member
   name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
-  shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
+  shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo` or `poisson` (attack and defence per player: no team), no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.shared` (info: what a shared member
-  learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named; `poisson` takes no team), `sequence.rating.context`, `sequence.rating.method`,
+  learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named), `sequence.rating.context`, `sequence.rating.method`,
   `sequence.rating.order` (unknown, or `ascending` under `poisson`),
   `sequence.rating.func` (unknown, `sigma` under elo, `attack` / `defence` outside `poisson`), `sequence.rating.parameter` (a parameter of the other
   method family — `beta` under `poisson`, `rho` / `covariance` outside it or both at once, `rho` outside (−1, 1), a negative

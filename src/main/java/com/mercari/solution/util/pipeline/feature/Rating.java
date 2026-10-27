@@ -547,7 +547,7 @@ public final class Rating implements Serializable {
      */
     public Rating withRowInputs(final String offsetField, final String tauField) {
         if (tauField != null && method == Method.elo) {
-            throw new IllegalArgumentException("elo keeps no uncertainty to drift: tauBy is a parameter of bradleyTerry / plackettLuce / gaussian");
+            throw new IllegalArgumentException("elo keeps no uncertainty to drift: tauBy is a parameter of bradleyTerry / plackettLuce / gaussian / poisson");
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
                 offsetField, tauField, offsetLogit, rho, covariance);
@@ -969,7 +969,9 @@ public final class Rating implements Serializable {
      * what a match identifies against an average opponent — the {@code mu} readout ({@link #readPoisson}). The
      * dependence of the two scores enters the gradient ({@link #dependence}). A contest of other than two rows, of two
      * rows of one player, with a negative outcome or with a rate that overflows is no match and is skipped (the
-     * {@code count} readout tells).
+     * {@code count} readout tells). The rate has no intercept: {@code mu} moves attack and defence alike, so at the prior
+     * every row expects {@code exp(o_i)} — the typical score's {@code ln} belongs in the offset, or a first match of
+     * scores far from 1 moves a rating by several log units in one step.
      */
     private void poisson(final State state, final List<Entry> entries, final String[] ids, final long millis, final Map<String, Double> rowTaus) {
         if (entries.size() != 2 || ids[0].equals(ids[1])) return;
@@ -999,15 +1001,20 @@ public final class Rating implements Serializable {
             g[i] = y[i] - lambda[i];
         }
         dependence(y, lambda, g);
-        // per row the 2 × 2 solve over (α_i, δ_j): precision [1/vα_i + λ_i, −λ_i; −λ_i, 1/vδ_j + λ_i], gradient g_i · (1, −1)
+        // per row the 2 × 2 solve over (α_i, δ_j): precision [1/vα_i + λ_i, −λ_i; −λ_i, 1/vδ_j + λ_i], gradient g_i · (1, −1).
+        // Its inverse in closed form over den = 1 + λ_i (vα_i + vδ_j) (the determinant times vα_i vδ_j): the determinant as
+        // (1/vα + λ)(1/vδ + λ) − λ² is the difference of two near-equal products, which cancels to 0 — a NaN step that
+        // freezes both players and the pool's moments for the rest of the replay — once λ outgrows the precisions by the
+        // double's precision (a log rate past ~37, finite and far from the overflow guard above)
         final double[] dAlpha = new double[2], dDelta = new double[2], pAlpha = new double[2], pDelta = new double[2];
         for (int i = 0; i < 2; i++) {
             final int j = 1 - i;
-            final double a = 1 / vAlpha[i] + lambda[i], b = -lambda[i], d = 1 / vDelta[j] + lambda[i], det = a * d - b * b;
-            dAlpha[i] = (d + b) * g[i] / det;
-            dDelta[j] = -(a + b) * g[i] / det;
-            pAlpha[i] = d / det;
-            pDelta[j] = a / det;
+            final double den = 1 + lambda[i] * (vAlpha[i] + vDelta[j]);
+            if (!Double.isFinite(den)) return;
+            dAlpha[i] = vAlpha[i] * (g[i] / den);
+            dDelta[j] = -vDelta[j] * (g[i] / den);
+            pAlpha[i] = vAlpha[i] * ((1 + lambda[i] * vDelta[j]) / den);
+            pDelta[j] = vDelta[j] * ((1 + lambda[i] * vAlpha[i]) / den);
         }
         for (int i = 0; i < 2; i++) {
             final boolean created = attack[i] == null;
@@ -1041,7 +1048,8 @@ public final class Rating implements Serializable {
      * component {@code K} of mean {@code covariance}, {@code y_i = x_i + K}, the rate {@code λ_i} being that of the row's
      * own part {@code x_i} (the expected score is {@code λ_i + covariance}); the score in the log rate is then
      * {@code (y_i − E[K | y]) − λ_i}: the common part's conditional mean, a sum over {@code k ≤ min(y)}, taken off both.
-     * Either applies to integer scores only (a non-integer outcome reads as plain Poisson), and a {@code rho} that would
+     * Either applies to integer scores only (a non-integer outcome — or, for {@code covariance}, a score past the int
+     * range — reads as plain Poisson), and a {@code rho} that would
      * make {@code τ} non-positive at these rates is left out. The information kept is the Poisson's {@code λ_i} — the
      * corrections' curvature is of the order of the parameter and is not taken — so the step is Fisher scoring of the
      * independent model along the corrected gradient.
@@ -1052,9 +1060,10 @@ public final class Rating implements Serializable {
         if (rho != 0d) {
             final boolean zero0 = y[0] == 0d, zero1 = y[1] == 0d, one0 = y[0] == 1d, one1 = y[1] == 1d;
             if (zero0 && zero1) {
-                final double tau = 1 - lambda[0] * lambda[1] * rho;
+                final double product = lambda[0] * lambda[1], tau = 1 - product * rho;
                 if (!(tau > 0)) return;
-                final double c = -lambda[0] * lambda[1] * rho / tau;
+                // −λ_0 λ_1 ρ / τ, divided through by the product: an overflowing product (ρ < 0 keeps τ positive) reads 1, not ∞ / ∞
+                final double c = -rho / (1 / product - rho);
                 g[0] += c;
                 g[1] += c;
             } else if (zero0 && one1) {
@@ -1067,32 +1076,29 @@ public final class Rating implements Serializable {
             // 1–1: τ = 1 − ρ holds no rate; any other score is unweighted
             return;
         }
-        final int min = (int) Math.min(y[0], y[1]);
-        if (min == 0) return; // a side that scored nothing had no common part: K = 0 surely
-        // E[K | y] over k = 0..min(y): the weights λ_0^(y_0 − k) λ_1^(y_1 − k) c^k / ((y_0 − k)! (y_1 − k)! k!), in logs
-        final double[] logWeight = new double[min + 1];
-        double max = Double.NEGATIVE_INFINITY;
-        for (int k = 0; k <= min; k++) {
-            logWeight[k] = (y[0] - k) * Math.log(lambda[0]) + (y[1] - k) * Math.log(lambda[1]) + k * Math.log(covariance)
-                    - logFactorial((int) y[0] - k) - logFactorial((int) y[1] - k) - logFactorial(k);
-            max = Math.max(max, logWeight[k]);
-        }
-        double total = 0, weighted = 0;
-        for (int k = 0; k <= min; k++) {
-            final double w = Math.exp(logWeight[k] - max);
+        final double min = Math.min(y[0], y[1]);
+        // a side that scored nothing had no common part: K = 0 surely; a score past the int range is no count the sum can walk
+        if (min == 0d || min > Integer.MAX_VALUE) return;
+        // E[K | y] over k = 0..min(y): the weights t_k ∝ λ_0^(y_0 − k) λ_1^(y_1 − k) c^k / ((y_0 − k)! (y_1 − k)! k!), walked by
+        // their ratio t_(k+1) / t_k = (y_0 − k)(y_1 − k) c / ((k + 1) λ_0 λ_1) in logs and summed relative to the largest so
+        // far — one pass, O(min(y)), no factorial per term and no array sized by a score
+        final double logRatio = Math.log(covariance) - Math.log(lambda[0]) - Math.log(lambda[1]);
+        double logWeight = 0, max = 0, total = 1, weighted = 0;
+        for (long k = 0; k < min; k++) {
+            logWeight += logRatio + Math.log(y[0] - k) + Math.log(y[1] - k) - Math.log(k + 1);
+            if (logWeight > max) {
+                final double rescale = Math.exp(max - logWeight);
+                total *= rescale;
+                weighted *= rescale;
+                max = logWeight;
+            }
+            final double w = Math.exp(logWeight - max);
             total += w;
-            weighted += k * w;
+            weighted += (k + 1) * w;
         }
         final double expected = weighted / total;
         g[0] -= expected;
         g[1] -= expected;
-    }
-
-    /** {@code log n!} by the running sum (scores are small counts). */
-    private static double logFactorial(final int n) {
-        double sum = 0;
-        for (int i = 2; i <= n; i++) sum += Math.log(i);
-        return sum;
     }
 
     /** The player under {@code key}, created at the prior when the state holds none. */

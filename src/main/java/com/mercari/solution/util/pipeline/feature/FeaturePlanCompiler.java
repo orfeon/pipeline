@@ -1836,8 +1836,8 @@ public final class FeaturePlanCompiler {
             if (op.scale != null) foreign.add("scale");
         }
         if (!foreign.isEmpty()) {
-            diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce / gaussian: elo takes mu, kFactor, scale"
-                    : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau, tauPer"));
+            diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce / gaussian / poisson: elo takes mu, kFactor, scale"
+                    : " are elo parameters: " + methodName + " takes mu, sigma, " + (poisson ? "" : "beta, ") + "tau, tauPer"));
             valid = false;
         }
         if (!poisson && (op.rho != null || op.covariance != null)) {
@@ -1935,7 +1935,7 @@ public final class FeaturePlanCompiler {
         final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, "
                 + ("logit".equals(op.offsetUnits) ? "as a log-odds" : "in the rating's units"), loc);
         final Ref tauRef = elo ? null : ratingRowInput(op.tauBy, "tauBy", "the rated player's drift, read from the row", loc);
-        if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian");
+        if (elo && op.tauBy != null) diagnostics.error("sequence.rating.parameter", loc, "tauBy drifts an uncertainty elo does not keep: a parameter of bradleyTerry / plackettLuce / gaussian / poisson");
         if (op.offset != null && offsetRef == null || op.tauBy != null && tauRef == null) valid = false;
         // the offset's units: the rating's (added to the strength) or log-odds, which only a method with a comparison
         // scale can convert (gaussian reads margins, elo keeps no uncertainty)
