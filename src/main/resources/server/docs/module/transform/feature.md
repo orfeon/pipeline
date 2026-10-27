@@ -410,6 +410,7 @@ features:
       - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}  # skill_all_elo_mu ...
       - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P30D, as: rested}                 # the uncertainty reopens with the time away
       - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, as: bt}       # large fields: a contest weighs like one game
+      - {type: rating, field: quantity, context: session, method: poisson, rho: -0.1, as: goals}                                 # two-row contests scored as counts: skill_all_goals_attack / _defence / _mu / _sigma
   - name: field                        # the rating against the others of the same session: an ordinary context block
     scope: context
     context: session
@@ -442,12 +443,33 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   still narrows everyone. No `pairs` applies. The prior `mu` / `sigma` and `beta` are in the
   **outcome's units** (a margin in seconds, a standardised time: `mu: 0, sigma: 1, beta: 0.5`), so `sigma` and
   `beta` must be declared (`sequence.rating.gaussian.units`) and `mu` defaults to 0.
-  Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
-  default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
-  default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much time away, see *Drift in
-  time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field size*), `top` /
-  `depthScale` (`plackettLuce` only, see *Depth of a ranking*), `offset` / `tauBy` (see *Per-row inputs*); elo:
-  `kFactor` (32), `scale` (400).
+  `poisson` is the **scoring** update for contests of two rows — matches — whose outcome is the count each side
+  scored (goals, points, runs): a row's score is Poisson with the rate `exp(attack_i − defence_j + offset_i)`, its
+  attack less the opponent's defence (a defence is as good as it keeps the opponent's rate down), the `offset` a
+  known shift of the log rate (a home advantage: `ln` of the rate ratio). Every player holds **two** ratings,
+  `attack` and `defence`, both from the prior `(mu, sigma)`, and a match conditions the four of them at once — one
+  Laplace step from the prior means, the Poisson counterpart of Weng & Lin's: with the gradient `g_i = y_i − λ_i`
+  and the information `λ_i` along `(attack_i, −defence_j)`, the move is `(V⁻¹ + I)⁻¹ g`, two 2 × 2 solves. A score
+  above the expected rate raises the attack and lowers the opponent's defence alike, so the sum `attack + defence`
+  is what a match identifies against an average opponent: `mu` / `delta` / `deviation` / `z` read it and `sigma` its
+  uncertainty. The dependence of the two scores: `rho` (Dixon & Coles 1997; in (−1, 1), about −0.1 for football)
+  reweights the four low-score results — 0–0 and 1–1 more likely than independence says, 1–0 and 0–1 less — and
+  enters the gradient; `covariance` (the bivariate Poisson of Karlis & Ntzoufras: the two scores share a common
+  Poisson component of that mean, their covariance, so a row's expected score is `λ_i + covariance`) takes the
+  common part's conditional mean off both scores. One of them; both default to 0 (independent scores); integer
+  scores only (a non-integer outcome reads as plain Poisson). `order` is `descending` (`ascending` is rejected),
+  `beta` does not apply (the noise is the Poisson's own), `mu` defaults to 0 and `sigma` to 0.5 (a log rate: two
+  sds let a rate vary by e^±1), no `pairs`, no team (`with` / `team`); `tau` / `tauPer` / `tauBy` drift both
+  ratings. A contest of other than two rows, of two rows of one player, or with a negative score is skipped
+  (`count` tells). The expected score of a row against its opponent is `exp(attack_i − defence_j + offset_i)`: the
+  opponent's `defence` comes from a context block over the match or a join.
+  Parameters: `mu` (prior, default 25; elo 1500; gaussian / poisson 0), `sigma` (default `mu / 3`; poisson 0.5),
+  `beta` (performance noise, default `sigma / 2`; not poisson), `tau` (added to every participant's variance before
+  a contest — strengths drift — default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much
+  time away, see *Drift in time*), `pairs` (`bradleyTerry` only: `all` (default) | `adjacent` | `mean`, see *Field
+  size*), `top` / `depthScale` (`plackettLuce` only, see *Depth of a ranking*), `rho` / `covariance` (`poisson`
+  only: the dependence of a match's two scores), `offset` / `tauBy` (see *Per-row inputs*); elo: `kFactor` (32),
+  `scale` (400).
 - **Drift in time (`tauPer`).** By default `tau²` is added once per contest the player takes part in, so ten
   months away and a contest a week ago leave the same uncertainty — where contests are irregular, the absence
   is the very thing that makes a strength uncertain. With `tauPer: P30D` the variance grows by `tau² · Δt /
@@ -460,14 +482,16 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   Size `tauPer` well above the outcome's availability lag (`settlementLag` + `ingestionLag` + the `predictAt`
   offset — the window shift of the column): the newest contest the ratings may know is always that far back, so
   that lag is a floor under `Δt` that every row carries, and a `tauPer` near it inflates every `sigma` by a
-  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` / `gaussian` only; the period is wall time.
-- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far), `delta`
+  constant instead of telling absences apart. `bradleyTerry` / `plackettLuce` / `gaussian` / `poisson` only; the period is wall time.
+- **`funcs`** (default `[mu, sigma]`; elo `[mu]`; poisson `[attack, defence, mu, sigma]`): `mu`, `sigma`, `count` (contests rated so far), `delta`
   (the rating's change in its last contest, null before the first), `deviation` (`mu` net of the prior: what the
   contests added, 0 before the first) and `z` (`mu` standardised against the mean and sd of `mu` over the
   **pool's rated players** — the entity's players rated so far, one pool per `$self` filter value and, in a team,
   per member entity; null until two players with different ratings are known). `z` reads a level free of the
   pool's own scale and shift, which is what makes a member of a team comparable in itself (below). An entity never
   rated reads the prior (`count` 0, `deviation` 0, `z` at the prior's place), a row without the entity key reads null.
+  Under `poisson`, `attack` and `defence` are the player's two ratings; `mu` / `delta` / `deviation` / `z` read their
+  sum and `sigma` the sum's uncertainty (never rated: both at the prior, the sum at twice it).
   Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
 - **Serving from a snapshot (`fit.artifact` on the block).** A rating is a replay of every contest of its pool,
@@ -846,9 +870,11 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
   shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo`, no `as`, `team` without `with`
   or with an unknown readout; as an info it describes the team), `sequence.rating.shared` (info: what a shared member
-  learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named), `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
-  `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
-  method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
+  learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named; `poisson` takes no team), `sequence.rating.context`, `sequence.rating.method`,
+  `sequence.rating.order` (unknown, or `ascending` under `poisson`),
+  `sequence.rating.func` (unknown, `sigma` under elo, `attack` / `defence` outside `poisson`), `sequence.rating.parameter` (a parameter of the other
+  method family — `beta` under `poisson`, `rho` / `covariance` outside it or both at once, `rho` outside (−1, 1), a negative
+  `covariance` —, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
   `top` / `depthScale` outside `plackettLuce`, a `top` that is not one integer place >= 1, a `depthScale` below 1,
   `tauBy` under elo), `sequence.rating.offset` / `sequence.rating.tauBy` (not a numeric column or baseline),

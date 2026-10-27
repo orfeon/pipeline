@@ -186,6 +186,10 @@ public class FeatureSpec implements Serializable {
          * plackettLuce only).
          */
         public String offsetUnits;
+        /** rating poisson: Dixon &amp; Coles' low-score dependence of a match's two scores, in (−1, 1) (null / 0: independent). */
+        public Double rho;
+        /** rating poisson: the bivariate Poisson's common rate — the covariance of a match's two scores (≥ 0; null / 0: independent). */
+        public Double covariance;
         /**
          * rating: the other entities of the row that are rated with the block's entity as one team (the row's strength is
          * the sum of its members', a contest's change is shared among them by their part of the team's variance).
@@ -1595,6 +1599,8 @@ public class FeatureSpec implements Serializable {
         op.depthScale = doubleOf(o, "depthScale", diagnostics, loc);
         op.tauBy = Json.string(o, "tauBy");
         op.offsetUnits = Json.string(o, "offsetUnits");
+        op.rho = doubleOf(o, "rho", diagnostics, loc);
+        op.covariance = doubleOf(o, "covariance", diagnostics, loc);
         if (o.has("with") && !o.get("with").isJsonNull()) {
             for (final JsonElement m : arrayOf(o.get("with"))) {
                 final TeamMember member = new TeamMember();

@@ -1819,7 +1819,7 @@ public final class FeaturePlanCompiler {
             return;
         }
         final Rating.Method method = Rating.Method.valueOf(methodName);
-        final boolean elo = method == Rating.Method.elo;
+        final boolean elo = method == Rating.Method.elo, poisson = method == Rating.Method.poisson;
         if (op.order != null && !Rating.ORDERS.contains(op.order)) {
             diagnostics.error("sequence.rating.order", loc, "rating order must be ascending (a smaller outcome is better: a rank) or descending (a larger one: a score): " + op.order);
             return;
@@ -1839,6 +1839,34 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce / gaussian: elo takes mu, kFactor, scale"
                     : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau, tauPer"));
             valid = false;
+        }
+        if (!poisson && (op.rho != null || op.covariance != null)) {
+            diagnostics.error("sequence.rating.parameter", loc, "rho / covariance describe the dependence of a match's two scores: poisson parameters, " + methodName + " has none");
+            valid = false;
+        }
+        if (poisson) {
+            // a match of two scores: the Poisson's noise is its own, the two dependence models exclude each other, and the outcome is a score
+            if (op.beta != null) {
+                diagnostics.error("sequence.rating.parameter", loc, "beta is the performance noise of a Gaussian strength (bradleyTerry / plackettLuce / gaussian):"
+                        + " poisson reads counts, whose noise is the Poisson's own");
+                valid = false;
+            }
+            if (op.rho != null && op.covariance != null) {
+                diagnostics.error("sequence.rating.parameter", loc, "rho (Dixon-Coles) and covariance (bivariate Poisson) are two models of the dependence of a match's two scores: declare one");
+                valid = false;
+            }
+            if (op.rho != null && !(Math.abs(op.rho) < 1)) {
+                diagnostics.error("sequence.rating.parameter", loc, "rho must lie in (-1, 1) (Dixon-Coles' low-score correction; negative = more 0-0 and 1-1 than independence says): " + op.rho);
+                valid = false;
+            }
+            if (op.covariance != null && !(op.covariance >= 0 && Double.isFinite(op.covariance))) {
+                diagnostics.error("sequence.rating.parameter", loc, "covariance must be a finite rate >= 0 (the mean of the common component of a match's two scores): " + op.covariance);
+                valid = false;
+            }
+            if ("ascending".equals(op.order)) {
+                diagnostics.error("sequence.rating.order", loc, "poisson reads the outcome as a score - the count a row scored, a larger one better: order ascending (a rank) does not apply");
+                valid = false;
+            }
         }
         final boolean pairwise = method == Rating.Method.bradleyTerry;
         if (op.pairs != null && !pairwise) {
@@ -1888,15 +1916,21 @@ public final class FeaturePlanCompiler {
                     + " sigma=" + op.sigma + " beta=" + op.beta + " tau=" + op.tau + " kFactor=" + op.kFactor + " scale=" + op.scale);
             valid = false;
         }
-        final List<String> funcs = op.funcs.isEmpty() ? (elo ? List.of("mu") : List.of("mu", "sigma")) : op.funcs;
+        final List<String> funcs = op.funcs.isEmpty() ? (elo ? List.of("mu") : poisson ? List.of("attack", "defence", "mu", "sigma") : List.of("mu", "sigma")) : op.funcs;
         for (final String func : funcs) {
-            if (!Rating.FUNCS.contains(func) || (elo && "sigma".equals(func))) {
-                diagnostics.error("sequence.rating.func", loc, (Rating.FUNCS.contains(func) ? "elo keeps no uncertainty: sigma is a readout of bradleyTerry / plackettLuce / gaussian"
-                        : "unknown rating func: " + func) + " (available: " + String.join(" | ", Rating.FUNCS) + ")");
+            if (Rating.POISSON_FUNCS.contains(func) && !poisson) {
+                diagnostics.error("sequence.rating.func", loc, func + " is one of the two ratings a poisson player holds (attack / defence): " + methodName + " rates one strength, mu");
+                valid = false;
+            } else if (!Rating.FUNCS.contains(func) && !(poisson && Rating.POISSON_FUNCS.contains(func)) || (elo && "sigma".equals(func))) {
+                diagnostics.error("sequence.rating.func", loc, (Rating.FUNCS.contains(func) ? "elo keeps no uncertainty: sigma is a readout of bradleyTerry / plackettLuce / gaussian / poisson"
+                        : "unknown rating func: " + func) + " (available: " + String.join(" | ", Rating.FUNCS) + (poisson ? " | " + String.join(" | ", Rating.POISSON_FUNCS) : "") + ")");
                 valid = false;
             }
         }
-        if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
+        if (poisson && (!op.with.isEmpty() || !op.team.isEmpty() || op.withInvalid != null)) {
+            diagnostics.error("sequence.rating.with", loc, "poisson rates attack and defence per player (a match of two rows): a team (with / team) is not supported - rate the block's entity");
+            valid = false;
+        } else if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
         // per-row inputs: a numeric column (or a baseline) each; tauBy drifts an uncertainty elo does not keep
         final Ref offsetRef = ratingRowInput(op.offset, "offset", "the known shift of the row's performance, "
                 + ("logit".equals(op.offsetUnits) ? "as a log-odds" : "in the rating's units"), loc);
@@ -1915,7 +1949,8 @@ public final class FeaturePlanCompiler {
             valid = false;
         } else if (offsetLogit && method != Rating.Method.bradleyTerry && method != Rating.Method.plackettLuce) {
             diagnostics.error("sequence.rating.offset", loc, "offsetUnits logit scales the offset by a contest's comparison scale c: a bradleyTerry / plackettLuce parameter, "
-                    + methodName + (method == Rating.Method.gaussian ? " reads the outcome as a margin - give the offset in the outcome's units" : " keeps no uncertainty to scale by"));
+                    + methodName + (method == Rating.Method.gaussian ? " reads the outcome as a margin - give the offset in the outcome's units"
+                    : poisson ? " reads the offset as a shift of the log rate - give it in log units (ln of a rate ratio)" : " keeps no uncertainty to scale by"));
             valid = false;
         }
         if (!valid) return;
@@ -1933,7 +1968,7 @@ public final class FeaturePlanCompiler {
         }
 
         final double mu = op.mu != null ? op.mu : Rating.defaultMu(method);
-        final double sigma = op.sigma != null ? op.sigma : Rating.defaultSigma(mu);
+        final double sigma = op.sigma != null ? op.sigma : Rating.defaultSigma(method, mu);
         if (!elo && !(sigma > 0)) {
             diagnostics.error("sequence.rating.parameter", loc, "the default sigma is |mu| / 3: declare sigma when mu is 0");
             return;
@@ -1941,15 +1976,18 @@ public final class FeaturePlanCompiler {
         // the coordinates every readout column of this op shares: they define the one running state behind them
         final Map<String, String> shared = new LinkedHashMap<>();
         shared.put("method", methodName);
-        shared.put("order", op.order == null ? "ascending" : op.order);
+        shared.put("order", op.order == null ? (poisson ? "descending" : "ascending") : op.order);
         shared.put("mu", Double.toString(mu));
         if (elo) {
             shared.put("kFactor", Double.toString(op.kFactor != null ? op.kFactor : Rating.DEFAULT_K_FACTOR));
             shared.put("scale", Double.toString(op.scale != null ? op.scale : Rating.DEFAULT_SCALE));
         } else {
             shared.put("sigma", Double.toString(sigma));
-            shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
+            if (!poisson) shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
             shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
+            // the dependence of a match's two scores (0 = independent: no coordinate, the rating as it is)
+            if (poisson && op.rho != null && op.rho != 0d) shared.put("rho", Double.toString(op.rho));
+            if (poisson && op.covariance != null && op.covariance != 0d) shared.put("covariance", Double.toString(op.covariance));
             if (tauPerMillis > 0) shared.put("tauPerMillis", Long.toString(tauPerMillis));
             if (pairwise && op.pairs != null) shared.put("pairs", op.pairs);
             if (tauRef != null) shared.put("tauField", tauRef.canonical());

@@ -4690,6 +4690,7 @@ public class FeatureTransformTest {
                     - {type: rating, field: final_price, context: session, order: descending, tau: 2, tauPer: P10D, as: rest, funcs: [sigma]}
                     - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, tau: 0, as: btm, funcs: [mu]}
                     - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, tau: 0, as: gs, funcs: [mu, sigma]}
+                    - {type: rating, field: quantity, context: session, method: poisson, tau: 0, rho: -0.1, as: ps, funcs: [mu, sigma, attack, defence, count]}
                 - name: field
                   scope: context
                   context: session
@@ -4737,6 +4738,11 @@ public class FeatureTransformTest {
             final Rating.State gsA = new Rating.State(), gsC = new Rating.State();
             for (final Rating.State s : List.of(gsA, gsC)) gs.update(s, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)));
             gs.update(gsC, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)));
+            // poisson: the quantities as the scores of a match (A: 2-1, C: 4-2), the ratings after A read at C, after A and C at D
+            final Rating ps = Rating.of(Rating.Method.poisson, false, null, null, null, 0d, null, null, List.of(), List.of(), "y").withDependence(-0.1, null);
+            final Rating.State psA = new Rating.State(), psC = new Rating.State();
+            for (final Rating.State s : List.of(psA, psC)) ps.update(s, List.of(new Rating.Entry("s1", 2), new Rating.Entry("s2", 1)));
+            ps.update(psC, List.of(new Rating.Entry("s1", 4), new Rating.Entry("s2", 2)));
             int count = 0;
             for (final MElement row : rows) {
                 count++;
@@ -4767,6 +4773,28 @@ public class FeatureTransformTest {
                 Assertions.assertEquals(gsKnown == null ? 50d : (Double) gs.read(gsKnown, player, "mu"), row.getAsDouble("f_skill_all_gs_mu"), 1e-9, id);
                 Assertions.assertEquals(gsKnown == null ? 40d : (Double) gs.read(gsKnown, player, "sigma"), row.getAsDouble("f_skill_all_gs_sigma"), 1e-9, id);
                 if (id.equals("C/s1")) Assertions.assertEquals(50 + 40d * 40 / (40d * 40 * 2 + 2 * 20d * 20) * 150, row.getAsDouble("f_skill_all_gs_mu"), 1e-9, "by hand");
+                // poisson: never rated reads the prior (attack and defence 0, sigma sqrt(2) · 0.5). The quantity is an attribute,
+                // known at the event: B (two days after A) already reads contest A, which the outcome-scored ratings cannot yet
+                final Rating.State psKnown = switch (id) {
+                    case "B/s1", "C/s1", "C/s2" -> psA;
+                    case "D/s1" -> psC;
+                    default -> null;
+                };
+                for (final String func : List.of("mu", "sigma", "attack", "defence")) {
+                    Assertions.assertEquals((Double) ps.read(psKnown, player, func), row.getAsDouble("f_skill_all_ps_" + func), 1e-9, id + " " + func);
+                }
+                Assertions.assertEquals(psKnown == null ? 0L : (Long) ps.read(psKnown, player, "count"), ((Number) row.getPrimitiveValue("f_skill_all_ps_count")).longValue(), id);
+                // by hand at C: 2-1 from the prior (sigma 0.5): λ = 1 each, s1 scored one above the rate, so its attack and s2's
+                // defence move by ±4/24 (the precision [5 −1; −1 5]); s2 scored the 1 it was expected to; every variance keeps 5/24
+                if (id.equals("C/s1")) {
+                    Assertions.assertEquals(1d / 6, row.getAsDouble("f_skill_all_ps_attack"), 1e-9);
+                    Assertions.assertEquals(0d, row.getAsDouble("f_skill_all_ps_defence"), 1e-9);
+                    Assertions.assertEquals(Math.sqrt(2 * 5d / 24), row.getAsDouble("f_skill_all_ps_sigma"), 1e-9);
+                }
+                if (id.equals("C/s2")) {
+                    Assertions.assertEquals(0d, row.getAsDouble("f_skill_all_ps_attack"), 1e-9);
+                    Assertions.assertEquals(-1d / 6, row.getAsDouble("f_skill_all_ps_defence"), 1e-9);
+                }
                 // two sellers: the mean over the opponents is the one opponent — the plackettLuce value of a two-player contest
                 Assertions.assertEquals(((Number) expected[0]).doubleValue(), row.getAsDouble("f_skill_all_btm_mu"), 1e-9, id);
                 for (int i = 0; i < columns.length; i++) {
