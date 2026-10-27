@@ -418,6 +418,14 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNotNull(new SequenceEvaluator(List.of(beta)).summaryOf(beta), "the moment funcs stay incremental");
         Assertions.assertNull(SequenceEvaluator.unboundedReason(kendall), "bounded by maxAge");
         Assertions.assertNotNull(column(ranks, "recent_n5_final_price_vs_start_price_spearman"));
+        // the spread funcs (Cointegration): the same pairs, scan-only like the rank funcs
+        final FeaturePlan spread = compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [residual, residualZ, ar1, halfLife, adf]}"));
+        Assertions.assertFalse(spread.getDiagnostics().hasErrors(), spread::describe);
+        for (final String f : Cointegration.FUNCS) Assertions.assertNotNull(column(spread, "recent_365d_final_price_vs_start_price_" + f), f);
+        final OutputColumn halfLife = column(spread, "recent_365d_final_price_vs_start_price_halfLife");
+        Assertions.assertEquals("halfLife", halfLife.getCoordinates().get("func"));
+        Assertions.assertNull(new SequenceEvaluator(List.of(halfLife)).summaryOf(halfLife), "scan-only");
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(halfLife), "bounded by maxAge");
         Assertions.assertEquals("0.75", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry").getCoordinates().get("q"));
         Assertions.assertEquals("0.9", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry0p9").getCoordinates().get("q"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 0.4}")), "sequence.regression.q"));

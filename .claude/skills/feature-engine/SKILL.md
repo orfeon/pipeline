@@ -272,8 +272,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   kurt), `REGRESSION` (anchored cross moments of a pair
   `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
   events and is therefore scan-only, and its rank funcs spearman / kendall / quadrantAsymmetry (`RankDependence`,
-  `q` coordinate on the last) have no family at all: `OperatorCatalog.summary` returns null for them, so they take
-  the scan path and re-rank the window per row — keep any new rank statistic there, not in `REGRESSION`), `COVARIANCE` / `COVARIANCE_STANDARDIZED` (`Summary.Covariance`: anchored k × k cross
+  `q` coordinate on the last) and spread funcs residual / residualZ / ar1 / halfLife / adf (`Cointegration`: the
+  residuals of the window's line and their lag-1 regression) have no family at all: `OperatorCatalog.summary` returns
+  null for them, so they take the scan path and re-read the window per row — keep any new rank or residual statistic
+  there, not in `REGRESSION`), `COVARIANCE` / `COVARIANCE_STANDARDIZED` (`Summary.Covariance`: anchored k × k cross
   moments of a `double[]` vector — the sequence `covariance` op: absorption / effectiveRank / meanCorrelation / logDet / count; the two
   instances read the eigenvalues of the covariance or of the correlation matrix, so the spec is built per column by
   `Summary.Covariance.spec(coordinates)` — `standardize` picks the instance, `components` the readout parameter — not through

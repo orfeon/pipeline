@@ -803,9 +803,10 @@ public class SequenceEvaluator implements Serializable {
                 return aggregate(plan.func, window, field, c);
             }
             case "regression" -> {
-                if (RankDependence.FUNCS.contains(plan.func)) {
-                    // ranks of the window's pairs (no family: an entering event re-ranks every other); same pairing
-                    // as below, `against` as x and `field` as y
+                final boolean ranks = RankDependence.FUNCS.contains(plan.func);
+                if (ranks || Cointegration.FUNCS.contains(plan.func)) {
+                    // the window's pairs in time order (no family: an entering event re-ranks every other, or moves the
+                    // line the spread is read from); same pairing as below, `against` as x and `field` as y
                     final int size = Math.max(0, window.size() - plan.lag);
                     final double[] x = new double[size], y = new double[size];
                     int n = 0;
@@ -815,7 +816,7 @@ public class SequenceEvaluator implements Serializable {
                         x[n] = pair[0];
                         y[n++] = pair[1];
                     }
-                    return RankDependence.of(plan.func, x, y, n, plan.q);
+                    return ranks ? RankDependence.of(plan.func, x, y, n, plan.q) : Cointegration.of(plan.func, x, y, n);
                 }
                 // the same family as the incremental path, folded over the window; under a lag the field of event
                 // i is paired with `against` of event i − lag, both inside the window

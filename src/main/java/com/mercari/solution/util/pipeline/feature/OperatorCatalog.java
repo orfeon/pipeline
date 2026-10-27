@@ -103,7 +103,7 @@ public final class OperatorCatalog {
         register(Scope.sequence, "sinceEvent", InputKind.predicate, null, false, "events / days since the predicate last held");
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
-        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2, and the rank dependence spearman / kendall / quadrantAsymmetry (scan-only); lag pairs the field with the other series k events earlier (lead-lag)");
+        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2, the rank dependence spearman / kendall / quadrantAsymmetry, and the spread's mean reversion residual / residualZ / ar1 / halfLife / adf (both scan-only); lag pairs the field with the other series k events earlier (lead-lag)");
         register(Scope.sequence, "covariance", InputKind.numeric, F64, false, "readouts of the covariance / correlation matrix of k numeric fields over the window: absorption (the variance share of the leading components eigenvalues), effectiveRank (the participation ratio of the eigenvalues), meanCorrelation, logDet (of the correlation matrix), count; standardize reads the eigenvalues of the correlation matrix; a past row contributes when every field is present");
         register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
         register(Scope.sequence, "rating", InputKind.numeric, F64, false, "sequential rating of the entity from the contests it took part in (method " + String.join(" | ", Rating.METHODS) + " - gaussian conditions the whole contest at once on its outcomes as margins, its prior and beta in the outcome's units; field = the outcome, context = the contest; funcs mu | sigma | count | delta | deviation | z; poisson scores a two-row match as counts at exp(attack - opponent's defence + offset), funcs attack | defence beside the others (mu = their sum), rho = Dixon-Coles / covariance = bivariate Poisson dependence of the two scores (one of them), offset in log-rate units; with = the other members of a team (name = a member's pool and column segment, weight = the row column it counts with), team = its readouts mu | sigma | count | deviation; bradleyTerry pairs " + String.join(" | ", Rating.PAIRS) + "; plackettLuce top = the place a ranking is read to, depthScale = the factor a deeper place's scale grows by; offset = a known per-row shift of the strength a contest expects (never rated; offsetUnits rating | logit - log-odds such as ln p of a benchmark, scaled by each comparison's c, bradleyTerry / plackettLuce only); tauBy = the rated entity's drift read from the row; tauPer = the period tau is the drift of instead of one contest): every contest moves all its players at once, so the state is not mergeable - one replay per pool (global key, or the partition of a reduced window filter)");
@@ -282,10 +282,11 @@ public final class OperatorCatalog {
 
     /**
      * The funcs of the sequence {@code regression} op: the readouts of the {@link Summary.Regression} family, then the
-     * rank funcs of {@link RankDependence} (no family: scan only).
+     * rank funcs of {@link RankDependence} and the spread readouts of {@link Cointegration} (no family: scan only).
      */
     public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2",
-            RankDependence.SPEARMAN, RankDependence.KENDALL, RankDependence.QUADRANT_ASYMMETRY);
+            RankDependence.SPEARMAN, RankDependence.KENDALL, RankDependence.QUADRANT_ASYMMETRY,
+            Cointegration.RESIDUAL, Cointegration.RESIDUAL_Z, Cointegration.AR1, Cointegration.HALF_LIFE, Cointegration.ADF);
 
     /** The funcs of the context {@code svd} op: the readouts of a group's principal components ({@code GroupOps.svd}). */
     public static final List<String> CONTEXT_SVD_FUNCS = List.of("scores", "residual", "residualNorm", "absorption");
