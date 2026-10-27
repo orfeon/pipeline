@@ -60,6 +60,11 @@ public class SequenceEvaluator implements Serializable {
         /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
         String against;
         int lag;
+        /**
+         * regression on the scan path: what decides the window's pairs (the window, the two fields, the lag) — the
+         * rank and spread funcs over the same pairs read them from one collection per row ({@link #pairs}).
+         */
+        String pairKey;
         /** covariance: the series read together (the contribution is their vector, none when one is missing). */
         String[] channels;
         /** regression quadrantAsymmetry: the corners' quantile ({@link RankDependence#quadrantAsymmetry}). */
@@ -401,6 +406,9 @@ public class SequenceEvaluator implements Serializable {
     private transient Map<String, ColumnPlan> plans;
     private transient Map<String, RetainPlan> retainPlans;
     private transient Map<String, Weight> weights;
+    /** The row the scan work below was collected for, and that work: the pairs of a regression per {@link ColumnPlan#pairKey}. */
+    private transient Map<String, Object> scannedRow;
+    private transient Map<String, Pairs> pairsByKey;
 
     public SequenceEvaluator(final List<OutputColumn> columns) {
         this(columns, false);
@@ -508,6 +516,11 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.against = c.coordinates.get("against");
         plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
+        if ("regression".equals(c.operator)) {
+            plan.pairKey = String.join("\u0000", String.valueOf(plan.shiftMillis), String.valueOf(plan.maxAgeMillis), String.valueOf(plan.maxAgeTicks),
+                    String.valueOf(c.coordinates.get("windowClock")), String.valueOf(plan.maxEvents), String.valueOf(plan.filterText),
+                    String.valueOf(c.coordinates.get("direction")), plan.field, plan.against, String.valueOf(plan.lag));
+        }
         if ("covariance".equals(c.operator)) plan.channels = c.coordinates.get("fields").split(",");
         final String q = c.coordinates.get("q");
         plan.q = q == null ? RankDependence.DEFAULT_Q : Double.parseDouble(q);
@@ -723,6 +736,52 @@ public class SequenceEvaluator implements Serializable {
     }
 
     /**
+     * The pairs of a regression's window — {@code against} as x and {@code field} as y, under a lag the field of event
+     * i with {@code against} of event i − lag, both inside the window — and, read on demand, the spread they leave
+     * ({@link Cointegration.Spread}, fitted once for every spread func of the op).
+     */
+    private static final class Pairs {
+        final double[] x, y;
+        final int n;
+        private Cointegration.Spread spread;
+
+        Pairs(final double[] x, final double[] y, final int n) {
+            this.x = x;
+            this.y = y;
+            this.n = n;
+        }
+
+        Cointegration.Spread spread() {
+            if (spread == null) spread = Cointegration.Spread.of(x, y, n);
+            return spread;
+        }
+    }
+
+    /**
+     * The pairs this column reads, collected once per row: the rank and spread funcs of one regression op (the same
+     * window, fields and lag — {@link ColumnPlan#pairKey}) read one collection, and the spread funcs one line. A new
+     * row is a new map, so the work is dropped the moment the identity changes.
+     */
+    private Pairs pairs(final ColumnPlan plan, final Map<String, Object> row, final List<Past> window) {
+        if (scannedRow != row) {
+            scannedRow = row;
+            pairsByKey = new HashMap<>();
+        }
+        return pairsByKey.computeIfAbsent(plan.pairKey, key -> {
+            final int size = Math.max(0, window.size() - plan.lag);
+            final double[] x = new double[size], y = new double[size];
+            int n = 0;
+            for (int i = plan.lag; i < window.size(); i++) {
+                final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(plan.field));
+                if (pair == null) continue;
+                x[n] = pair[0];
+                y[n++] = pair[1];
+            }
+            return new Pairs(x, y, n);
+        });
+    }
+
+    /**
      * Reads the column's value from a summary state (the family's empty state when the filter value has none) as of
      * the row's time; overridden by the population evaluator. Extrema are cast to the column type (they carry the
      * input type).
@@ -806,17 +865,9 @@ public class SequenceEvaluator implements Serializable {
                 final boolean ranks = RankDependence.FUNCS.contains(plan.func);
                 if (ranks || Cointegration.FUNCS.contains(plan.func)) {
                     // the window's pairs in time order (no family: an entering event re-ranks every other, or moves the
-                    // line the spread is read from); same pairing as below, `against` as x and `field` as y
-                    final int size = Math.max(0, window.size() - plan.lag);
-                    final double[] x = new double[size], y = new double[size];
-                    int n = 0;
-                    for (int i = plan.lag; i < window.size(); i++) {
-                        final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(field));
-                        if (pair == null) continue;
-                        x[n] = pair[0];
-                        y[n++] = pair[1];
-                    }
-                    return ranks ? RankDependence.of(plan.func, x, y, n, plan.q) : Cointegration.of(plan.func, x, y, n);
+                    // line the spread is read from), collected once per row for every func over the same pairs
+                    final Pairs pairs = pairs(plan, row, window);
+                    return ranks ? RankDependence.of(plan.func, pairs.x, pairs.y, pairs.n, plan.q) : pairs.spread().read(plan.func);
                 }
                 // the same family as the incremental path, folded over the window; under a lag the field of event
                 // i is paired with `against` of event i − lag, both inside the window

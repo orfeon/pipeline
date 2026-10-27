@@ -48,58 +48,99 @@ public final class Cointegration {
 
     /** The func over the first {@code n} pairs ({@code x[i]}, {@code y[i]}), in time order; null when not finite (an overflow). */
     public static Double of(final String func, final double[] x, final double[] y, final int n) {
-        final Double value = switch (func) {
-            case RESIDUAL -> residual(x, y, n);
-            case RESIDUAL_Z -> residualZ(x, y, n);
-            case AR1 -> ar1(x, y, n);
-            case HALF_LIFE -> halfLife(x, y, n);
-            case ADF -> adf(x, y, n);
-            default -> throw new IllegalArgumentException("not a cointegration func: " + func);
-        };
-        return value == null || !Double.isFinite(value) ? null : value;
+        return Spread.of(x, y, n).read(func);
     }
 
     public static Double residual(final double[] x, final double[] y, final int n) {
-        final double[] e = residuals(x, y, n);
-        return e == null ? null : e[n - 1];
+        return Spread.of(x, y, n).residual();
     }
 
     public static Double residualZ(final double[] x, final double[] y, final int n) {
-        final double[] e = residuals(x, y, n);
-        if (e == null) return null;
-        double sum = 0;
-        for (int i = 0; i < n; i++) sum += e[i] * e[i];
-        final double sd = Math.sqrt(sum / (n - 2));
-        return sd > 0 ? e[n - 1] / sd : null;
+        return Spread.of(x, y, n).residualZ();
     }
 
     public static Double ar1(final double[] x, final double[] y, final int n) {
-        final double[] e = residuals(x, y, n);
-        return e == null ? null : phi(e, n);
+        return Spread.of(x, y, n).ar1();
     }
 
     public static Double halfLife(final double[] x, final double[] y, final int n) {
-        final Double phi = ar1(x, y, n);
-        return phi == null || !(phi > 0 && phi < 1) ? null : -Math.log(2) / Math.log(phi);
+        return Spread.of(x, y, n).halfLife();
     }
 
     public static Double adf(final double[] x, final double[] y, final int n) {
-        // m = n − 1 differences: the slope's standard error needs m − 1 > 1 degrees of freedom
-        if (n < 4) return null;
-        final double[] e = residuals(x, y, n);
-        if (e == null) return null;
-        final Double phi = phi(e, n);
-        if (phi == null) return null;
-        final double gamma = phi - 1;
-        double lagged = 0, residual = 0;
-        for (int i = 1; i < n; i++) {
-            final double u = e[i] - e[i - 1] - gamma * e[i - 1];
-            lagged += e[i - 1] * e[i - 1];
-            residual += u * u;
+        return Spread.of(x, y, n).adf();
+    }
+
+    /**
+     * The spread of one window — the residuals of its least-squares line, fitted once — and its readouts: the funcs
+     * of one op over the same window read one {@code Spread} (the evaluator keeps it for the row). {@code e} is null
+     * when there is no line (below three pairs, a constant x): every readout is then null.
+     */
+    public static final class Spread {
+
+        private final double[] e;
+        private final int n;
+
+        private Spread(final double[] e, final int n) {
+            this.e = e;
+            this.n = n;
         }
-        final double variance = residual / (n - 2);
-        if (!(variance > 0) || !(lagged > 0)) return null;
-        return gamma / Math.sqrt(variance / lagged);
+
+        /** The spread over the first {@code n} pairs ({@code x[i]}, {@code y[i]}), in time order. */
+        public static Spread of(final double[] x, final double[] y, final int n) {
+            return new Spread(residuals(x, y, n), n);
+        }
+
+        /** The readout {@code func} of this spread; null when undefined or not finite (an overflow). */
+        public Double read(final String func) {
+            final Double value = switch (func) {
+                case RESIDUAL -> residual();
+                case RESIDUAL_Z -> residualZ();
+                case AR1 -> ar1();
+                case HALF_LIFE -> halfLife();
+                case ADF -> adf();
+                default -> throw new IllegalArgumentException("not a cointegration func: " + func);
+            };
+            return value == null || !Double.isFinite(value) ? null : value;
+        }
+
+        public Double residual() {
+            return e == null ? null : e[n - 1];
+        }
+
+        public Double residualZ() {
+            if (e == null) return null;
+            double sum = 0;
+            for (int i = 0; i < n; i++) sum += e[i] * e[i];
+            final double sd = Math.sqrt(sum / (n - 2));
+            return sd > 0 ? e[n - 1] / sd : null;
+        }
+
+        public Double ar1() {
+            return e == null ? null : phi(e, n);
+        }
+
+        public Double halfLife() {
+            final Double phi = ar1();
+            return phi == null || !(phi > 0 && phi < 1) ? null : -Math.log(2) / Math.log(phi);
+        }
+
+        public Double adf() {
+            // m = n − 1 differences: the slope's standard error needs m − 1 > 1 degrees of freedom
+            if (e == null || n < 4) return null;
+            final Double phi = phi(e, n);
+            if (phi == null) return null;
+            final double gamma = phi - 1;
+            double lagged = 0, residual = 0;
+            for (int i = 1; i < n; i++) {
+                final double u = e[i] - e[i - 1] - gamma * e[i - 1];
+                lagged += e[i - 1] * e[i - 1];
+                residual += u * u;
+            }
+            final double variance = residual / (n - 2);
+            if (!(variance > 0) || !(lagged > 0)) return null;
+            return gamma / Math.sqrt(variance / lagged);
+        }
     }
 
     /** {@code Σ e_i e_(i−1) / Σ e_(i−1)²} over the consecutive residuals, null when the lagged ones carry no spread. */

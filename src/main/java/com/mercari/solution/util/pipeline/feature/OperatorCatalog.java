@@ -24,13 +24,15 @@ public final class OperatorCatalog {
 
     /**
      * @param baselineCallable the op may be called as a function from a {@code baselines[].expr}
+     * @param vector           the op reads its fields together, one vector per row (one set of columns per op, not one
+     *                         per field): the sequence {@code covariance}, the context {@code svd}
      *                         ({@code share(1 / bid)}): it reads one value per row of the group and returns one
      *                         number per row. An op that needs coordinates of its own (softmax, ratingProb, shuffle and the
      *                         group solvers) is not callable that way — {@link ContextEvaluator} has no place to
      *                         take them from, so the compiler rejects the call instead (baselines.expr.op).
      */
     public record Operator(Scope scope, String name, InputKind input, Schema.FieldType output, boolean fit,
-                           boolean baselineCallable, String description) {
+                           boolean baselineCallable, boolean vector, String description) {
         /** Output type: null in the catalog means "same as input". */
         public Schema.FieldType outputFor(final Schema.FieldType inputType) {
             return output != null ? output : inputType;
@@ -53,7 +55,12 @@ public final class OperatorCatalog {
     private static void register(final Scope scope, final String name, final InputKind input,
                                  final Schema.FieldType output, final boolean fit, final boolean baselineCallable,
                                  final String description) {
-        OPERATORS.put(scope + "." + name, new Operator(scope, name, input, output, fit, baselineCallable, description));
+        OPERATORS.put(scope + "." + name, new Operator(scope, name, input, output, fit, baselineCallable, false, description));
+    }
+
+    /** An op whose fields are read together as one vector per row (see {@link Operator#vector()}). */
+    private static void registerVector(final Scope scope, final String name, final String description) {
+        OPERATORS.put(scope + "." + name, new Operator(scope, name, InputKind.numeric, F64, false, false, true, description));
     }
 
     private static final Schema.FieldType F64 = Schema.FieldType.FLOAT64;
@@ -89,7 +96,7 @@ public final class OperatorCatalog {
         register(Scope.context, "poissonProb", InputKind.numeric, F64, false, "the result probabilities of a match of two rows from a poisson rating's attack (the field) and defence (defence: <column>) readouts:"
                 + " expected score, win / draw / lose, the total over a line (over: [2.5]), both sides scoring; rho / covariance as the rating declared them");
         register(Scope.context, "residualize", InputKind.numeric, F64, false, "residual of the field regressed (with an intercept) on the 'against' fields over the rows of the group; excludeSelf fits on the other rows");
-        register(Scope.context, "svd", InputKind.numeric, F64, false, "principal components of the group: the rows as vectors over the op's fields (read together), centred - standardized: of the correlation matrix - and projected on the leading rank components fitted per group; funcs scores (one column per component, _0 the most variance) | residual (per field, in its units) | residualNorm | absorption (the variance share of the components); a row with a missing field reads null, a group with fewer than rank + 1 complete rows reads null");
+        registerVector(Scope.context, "svd", "principal components of the group: the rows as vectors over the op's fields (read together), centred - standardized: of the correlation matrix - and projected on the leading rank components fitted per group; funcs scores (one column per component, _0 the most variance) | residual (per field, in its units) | residualNorm | absorption (the variance share of the components); a row with a missing field reads null, a group with fewer than rank + 1 complete rows reads null");
         register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place) or the gamma race model (shape: Stern's gamma shape, 1 = Harville)");
         register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");
 
@@ -104,7 +111,7 @@ public final class OperatorCatalog {
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
         register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2, the rank dependence spearman / kendall / quadrantAsymmetry, and the spread's mean reversion residual / residualZ / ar1 / halfLife / adf (both scan-only); lag pairs the field with the other series k events earlier (lead-lag)");
-        register(Scope.sequence, "covariance", InputKind.numeric, F64, false, "readouts of the covariance / correlation matrix of k numeric fields over the window: absorption (the variance share of the leading components eigenvalues), effectiveRank (the participation ratio of the eigenvalues), meanCorrelation, logDet (of the correlation matrix), count; standardize reads the eigenvalues of the correlation matrix; a past row contributes when every field is present");
+        registerVector(Scope.sequence, "covariance", "readouts of the covariance / correlation matrix of k numeric fields over the window: absorption (the variance share of the leading components eigenvalues), effectiveRank (the participation ratio of the eigenvalues), meanCorrelation, logDet (of the correlation matrix), count; standardize reads the eigenvalues of the correlation matrix; a past row contributes when every field is present");
         register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
         register(Scope.sequence, "rating", InputKind.numeric, F64, false, "sequential rating of the entity from the contests it took part in (method " + String.join(" | ", Rating.METHODS) + " - gaussian conditions the whole contest at once on its outcomes as margins, its prior and beta in the outcome's units; field = the outcome, context = the contest; funcs mu | sigma | count | delta | deviation | z; poisson scores a two-row match as counts at exp(attack - opponent's defence + offset), funcs attack | defence beside the others (mu = their sum), rho = Dixon-Coles / covariance = bivariate Poisson dependence of the two scores (one of them), offset in log-rate units; with = the other members of a team (name = a member's pool and column segment, weight = the row column it counts with), team = its readouts mu | sigma | count | deviation; bradleyTerry pairs " + String.join(" | ", Rating.PAIRS) + "; plackettLuce top = the place a ranking is read to, depthScale = the factor a deeper place's scale grows by; offset = a known per-row shift of the strength a contest expects (never rated; offsetUnits rating | logit - log-odds such as ln p of a benchmark, scaled by each comparison's c, bradleyTerry / plackettLuce only); tauBy = the rated entity's drift read from the row; tauPer = the period tau is the drift of instead of one contest): every contest moves all its players at once, so the state is not mergeable - one replay per pool (global key, or the partition of a reduced window filter)");
         register(Scope.sequence, "dynamics", InputKind.numeric, F64, false, "general form lift -> summarize.dynamics (lti: exponential | legendre | fourier measure, order, halflife / period, decayBy events|time|a declared calendar clock): one column per state component");
