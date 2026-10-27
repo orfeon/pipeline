@@ -141,7 +141,7 @@ public class FeatureSpec implements Serializable {
         public Integer components;
         /** context svd: the leading components the group's rows are projected on (default 1; the population svd's name for it). */
         public Integer rank;
-        /** covariance: read the eigenvalues of the correlation matrix rather than the covariance matrix. */
+        /** covariance: read the eigenvalues of the correlation matrix rather than the covariance matrix; context svd: fit the group's correlation matrix. */
         public boolean standardize;
         /**
          * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by

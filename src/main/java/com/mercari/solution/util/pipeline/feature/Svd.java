@@ -395,7 +395,11 @@ public final class Svd implements Serializable, FitArtifact.Model {
      * taken out). Null where {@link #transform} is null.
      */
     public double[] residual(final double[] x) {
-        final double[] scores = transform(x);
+        return residual(x, transform(x));
+    }
+
+    /** {@link #residual(double[])} from the scores {@link #transform} already gave for {@code x} (null when they are null). */
+    double[] residual(final double[] x, final double[] scores) {
         if (scores == null) return null;
         final double[] residual = new double[dimension];
         for (int i = 0; i < dimension; i++) {

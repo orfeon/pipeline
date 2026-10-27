@@ -1217,6 +1217,10 @@ public final class FeaturePlanCompiler {
                 return;
             }
         }
+        if (rank == fields.size() && funcs.stream().anyMatch(f -> !"scores".equals(f))) {
+            diagnostics.warning("context.svd.rank", loc, "rank " + rank + " keeps every component of the " + fields.size() + " fields: residual / residualNorm read 0 (rounding noise)"
+                    + " and absorption 1 on every row - keep fewer components, or read scores only");
+        }
         if (op.maxGroupSize != null) diagnostics.warning("context.op.maxGroupSize", loc, "maxGroupSize is read by harville only: svd reads every row of the group");
         if (def.excludeSelf) {
             diagnostics.warning("context.svd.excludeSelf", loc, "excludeSelf has no effect on svd: the group's components are fitted on every row (a fit per left-out row would orient each row's axes apart)");

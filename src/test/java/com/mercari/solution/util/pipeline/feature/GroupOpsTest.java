@@ -69,7 +69,16 @@ public class GroupOpsTest {
             if (i == 2) continue;
             Assertions.assertEquals(score0[j++], skipped.scores()[i][0], 1e-12, "row " + i);
         }
-        // fewer than rank + 1 complete rows: the components pass through the points, nothing is read
+        // a non-finite channel takes the row out like a missing one, instead of turning every moment into NaN
+        final double[][] infinite = {{1, 2, Double.POSITIVE_INFINITY, 3, 4, 5}, {2, 2.5, 1, 5, 4.5, 7}, {0.5, 1.5, 0, 1.0, 3.5, 2.5}};
+        final GroupOps.GroupSvd finite = GroupOps.svd(infinite, 1, false);
+        Assertions.assertEquals(5, finite.count());
+        Assertions.assertNull(finite.scores()[2]);
+        for (int i = 0, j = 0; i < 6; i++) {
+            if (i == 2) continue;
+            Assertions.assertEquals(score0[j++], finite.scores()[i][0], 1e-12, "row " + i);
+        }
+        // fewer than rank + 1 complete rows: the last component carries no variance, nothing is read
         final GroupOps.GroupSvd few = GroupOps.svd(new double[][]{{1, 2}, {3, 5}}, 2, false);
         Assertions.assertEquals(2, few.count());
         Assertions.assertNull(few.scores()[0]);
@@ -79,6 +88,17 @@ public class GroupOpsTest {
         Assertions.assertEquals(-pair.scores()[0][0], pair.scores()[1][0], 1e-12);
         Assertions.assertEquals(0d, pair.residualNorm()[0], 1e-12);
         Assertions.assertEquals(1d, pair.absorption(), 1e-12);
+        // two rows standardized: every loading is +-1/sqrt(k), tied up to rounding - the first field orients the scores in
+        // every group (the last bits of the loadings would otherwise flip the sign from one group to the next)
+        final java.util.Random random = new java.util.Random(7);
+        for (int t = 0; t < 500; t++) {
+            final double[][] rows = new double[3][2];
+            for (final double[] channel : rows) for (int i = 0; i < 2; i++) channel[i] = random.nextGaussian() * (1 + t % 7);
+            final GroupOps.GroupSvd z = GroupOps.svd(rows, 1, true);
+            final int larger = rows[0][0] > rows[0][1] ? 0 : 1;
+            Assertions.assertTrue(z.scores()[larger][0] > 0, "group " + t + ": the row with the larger first field reads the positive score");
+            Assertions.assertEquals(-z.scores()[larger][0], z.scores()[1 - larger][0], 1e-12);
+        }
         // a group without variance has no axes: the scores are 0, the share undefined
         final GroupOps.GroupSvd flat = GroupOps.svd(new double[][]{{2, 2, 2}, {5, 5, 5}}, 1, true);
         Assertions.assertEquals(0d, flat.scores()[0][0], 0d);
@@ -157,6 +177,12 @@ public class GroupOpsTest {
         Assertions.assertTrue(hasCode(warned, "context.svd.excludeSelf"), warned::describe);
         Assertions.assertTrue(hasCode(warned, "context.op.maxGroupSize"), warned::describe);
         Assertions.assertFalse(hasCode(plan, "context.svd.excludeSelf"));
+        Assertions.assertFalse(hasCode(plan, "context.svd.rank"));
+        // every component kept: the residual and the share are constants, a warning (scores alone are fine)
+        final FeaturePlan full = compile(SPEC + block.replace("rank: 2, funcs", "rank: 3, funcs"));
+        Assertions.assertFalse(full.getDiagnostics().hasErrors(), full::describe);
+        Assertions.assertTrue(hasCode(full, "context.svd.rank"), full::describe);
+        Assertions.assertFalse(hasCode(compile(SPEC + block.replace("rank: 2, funcs: [scores, residual, residualNorm, absorption]", "rank: 3, funcs: [scores]")), "context.svd.rank"));
         // a misspelled field is an unresolved reference of the block, like any other
         Assertions.assertTrue(compile(SPEC + block.replace("quantity, model_score]", "quantitty, model_score]")).getDiagnostics().hasErrors());
     }
