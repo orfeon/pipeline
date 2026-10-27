@@ -254,7 +254,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   quadrature's ~1e-9 truncation), and a run of equal values reads its mean — the solver's rounding must not hand
   tied rows different values by arrival order. The shape range `[RACE_MIN_SHAPE, RACE_MAX_SHAPE]` is checked by the
   compiler: outside it the quantiles underflow / the incomplete gamma's series runs out.
-  A new solver is a `GroupOps` function + a branch in `solve` + a record in `Plan`; it must take its sums in an
+  A new solver is a `GroupOps` function + a record implementing `Solver` (built in `plan(c)`) + a `case` in
+  `evaluateColumn` handing its values to `write`; it must take its sums in an
   order the *values* decide (`GroupOps.sort`, a primitive merge sort — no boxed index per row) — the rows of a
   group arrive in runner order, and the parallel / linear equality is compared bit for bit — and declare its
   cost (`context.op.groupSolver`, `maxGroupSize`) when it is more than linear in the group size. Prefer a

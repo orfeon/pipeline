@@ -104,11 +104,12 @@ public final class Cointegration {
             return value == null || !Double.isFinite(value) ? null : value;
         }
 
-        public Double residual() {
+        // the raw readouts (no finite check): read() is the evaluator's entry, the static wrappers above the tests'
+        private Double residual() {
             return e == null ? null : e[n - 1];
         }
 
-        public Double residualZ() {
+        private Double residualZ() {
             if (e == null) return null;
             double sum = 0;
             for (int i = 0; i < n; i++) sum += e[i] * e[i];
@@ -116,16 +117,16 @@ public final class Cointegration {
             return sd > 0 ? e[n - 1] / sd : null;
         }
 
-        public Double ar1() {
+        private Double ar1() {
             return e == null ? null : phi(e, n);
         }
 
-        public Double halfLife() {
+        private Double halfLife() {
             final Double phi = ar1();
             return phi == null || !(phi > 0 && phi < 1) ? null : -Math.log(2) / Math.log(phi);
         }
 
-        public Double adf() {
+        private Double adf() {
             // m = n − 1 differences: the slope's standard error needs m − 1 > 1 degrees of freedom
             if (e == null || n < 4) return null;
             final Double phi = phi(e, n);

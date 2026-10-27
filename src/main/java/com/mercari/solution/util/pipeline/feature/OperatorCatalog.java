@@ -24,12 +24,12 @@ public final class OperatorCatalog {
 
     /**
      * @param baselineCallable the op may be called as a function from a {@code baselines[].expr}
-     * @param vector           the op reads its fields together, one vector per row (one set of columns per op, not one
-     *                         per field): the sequence {@code covariance}, the context {@code svd}
      *                         ({@code share(1 / bid)}): it reads one value per row of the group and returns one
      *                         number per row. An op that needs coordinates of its own (softmax, ratingProb, shuffle and the
      *                         group solvers) is not callable that way — {@link ContextEvaluator} has no place to
      *                         take them from, so the compiler rejects the call instead (baselines.expr.op).
+     * @param vector           the op reads its fields together, one vector per row (one set of columns per op, not one
+     *                         per field): the sequence {@code covariance}, the context {@code svd}
      */
     public record Operator(Scope scope, String name, InputKind input, Schema.FieldType output, boolean fit,
                            boolean baselineCallable, boolean vector, String description) {

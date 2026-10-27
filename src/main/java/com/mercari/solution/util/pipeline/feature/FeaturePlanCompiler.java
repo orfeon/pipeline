@@ -1811,9 +1811,12 @@ public final class FeaturePlanCompiler {
                     }
                     continue;
                 }
-                if ("covariance".equals(op.type)) {
+                if (operator.vector()) {
                     // k series read together: one column per func, not one per field
-                    expandCovariance(def, op, fields, entity, window, filterRefs, reducedKey, computeAt, loc);
+                    switch (op.type) {
+                        case "covariance" -> expandCovariance(def, op, fields, entity, window, filterRefs, reducedKey, computeAt, loc);
+                        default -> throw new IllegalStateException("no expansion for the vector op " + op.type);
+                    }
                     continue;
                 }
                 if (fields.isEmpty()) {

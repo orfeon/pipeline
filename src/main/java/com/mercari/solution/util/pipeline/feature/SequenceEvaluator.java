@@ -406,8 +406,15 @@ public class SequenceEvaluator implements Serializable {
     private transient Map<String, ColumnPlan> plans;
     private transient Map<String, RetainPlan> retainPlans;
     private transient Map<String, Weight> weights;
-    /** The row the scan work below was collected for, and that work: the pairs of a regression per {@link ColumnPlan#pairKey}. */
+    /**
+     * The evaluation the scan work below was collected for — the row, its time and its history (held weakly: the
+     * history of a key must not outlive its replay; its length too, since a history grows in place) — and that work:
+     * the pairs of a regression per {@link ColumnPlan#pairKey}. Any change drops the work ({@link #scanContext}).
+     */
     private transient Map<String, Object> scannedRow;
+    private transient long scannedNowMillis;
+    private transient java.lang.ref.WeakReference<List<Past>> scannedHistory;
+    private transient int scannedHistorySize;
     private transient Map<String, Pairs> pairsByKey;
 
     public SequenceEvaluator(final List<OutputColumn> columns) {
@@ -617,7 +624,26 @@ public class SequenceEvaluator implements Serializable {
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
         }
         final List<Past> window = select(plan, row, nowMillis, history);
+        if (plan.pairKey != null) scanContext(row, nowMillis, history);
         return evaluateScan(c, plan, row, nowMillis, window);
+    }
+
+    /**
+     * Drops the per-row scan work ({@link #pairs}) unless it was collected for this very evaluation: the same row map,
+     * time and history. The keyed replay hands every row a new map, but a caller may read one row against two
+     * histories (a held and a trimmed one) or at two times — the work of the first must not answer the second.
+     */
+    private void scanContext(final Map<String, Object> row, final long nowMillis, final List<Past> history) {
+        if (pairsByKey != null && scannedRow == row && scannedNowMillis == nowMillis
+                && scannedHistory.get() == history && scannedHistorySize == history.size()) {
+            return;
+        }
+        scannedRow = row;
+        scannedNowMillis = nowMillis;
+        scannedHistory = new java.lang.ref.WeakReference<>(history);
+        scannedHistorySize = history.size();
+        if (pairsByKey == null) pairsByKey = new HashMap<>();
+        else pairsByKey.clear();
     }
 
     /**
@@ -759,14 +785,10 @@ public class SequenceEvaluator implements Serializable {
 
     /**
      * The pairs this column reads, collected once per row: the rank and spread funcs of one regression op (the same
-     * window, fields and lag — {@link ColumnPlan#pairKey}) read one collection, and the spread funcs one line. A new
-     * row is a new map, so the work is dropped the moment the identity changes.
+     * window, fields and lag — {@link ColumnPlan#pairKey}) read one collection, and the spread funcs one line. The
+     * work is dropped the moment the evaluation changes ({@link #scanContext}, run by {@link #evaluateColumn}).
      */
-    private Pairs pairs(final ColumnPlan plan, final Map<String, Object> row, final List<Past> window) {
-        if (scannedRow != row) {
-            scannedRow = row;
-            pairsByKey = new HashMap<>();
-        }
+    private Pairs pairs(final ColumnPlan plan, final List<Past> window) {
         return pairsByKey.computeIfAbsent(plan.pairKey, key -> {
             final int size = Math.max(0, window.size() - plan.lag);
             final double[] x = new double[size], y = new double[size];
@@ -866,7 +888,7 @@ public class SequenceEvaluator implements Serializable {
                 if (ranks || Cointegration.FUNCS.contains(plan.func)) {
                     // the window's pairs in time order (no family: an entering event re-ranks every other, or moves the
                     // line the spread is read from), collected once per row for every func over the same pairs
-                    final Pairs pairs = pairs(plan, row, window);
+                    final Pairs pairs = pairs(plan, window);
                     return ranks ? RankDependence.of(plan.func, pairs.x, pairs.y, pairs.n, plan.q) : pairs.spread().read(plan.func);
                 }
                 // the same family as the incremental path, folded over the window; under a lag the field of event
