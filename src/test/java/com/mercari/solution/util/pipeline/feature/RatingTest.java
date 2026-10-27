@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.feature;
 
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
+import com.mercari.solution.module.Schema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -74,6 +75,220 @@ public class RatingTest {
 
     private static Rating.Entry entry(final String player, final double outcome) {
         return new Rating.Entry(player, outcome);
+    }
+
+    /**
+     * The scoring update ({@code poisson}): hand values of one match from the prior — per row the Laplace step over
+     * (attack, opponent's defence) —, the readouts, the offset as a log-rate shift, a match that confirms the rates,
+     * and the contests that are no match (three rows, one player, a negative score).
+     */
+    @Test
+    public void testPoissonHandValues() {
+        // prior (0, 1), no drift: λ = 1 each; i scored 2 (g = 1), j 0 (g = −1). Per row the 2 × 2 solve [2 −1; −1 2]
+        // over (α_i, δ_j) with the gradient (g, −g) moves α_i by g/3 and δ_j by −g/3 and keeps 2/3 of each variance
+        final Rating ps = Rating.of(Rating.Method.poisson, false, 0d, 1d, null, 0d, null, null, List.of("p"), List.of("c"), "y");
+        final Rating.State state = new Rating.State();
+        ps.update(state, List.of(entry("i", 2), entry("j", 0)));
+        Assertions.assertEquals(1d / 3, (Double) ps.read(state, "i", "attack"), 1e-12);
+        Assertions.assertEquals(1d / 3, (Double) ps.read(state, "i", "defence"), 1e-12, "j scored nothing against i");
+        Assertions.assertEquals(-1d / 3, (Double) ps.read(state, "j", "attack"), 1e-12);
+        Assertions.assertEquals(-1d / 3, (Double) ps.read(state, "j", "defence"), 1e-12);
+        Assertions.assertEquals(2d / 3, (Double) ps.read(state, "i", "mu"), 1e-12, "mu = attack + defence");
+        Assertions.assertEquals(Math.sqrt(2d / 3 + 2d / 3), (Double) ps.read(state, "i", "sigma"), 1e-12);
+        Assertions.assertEquals(1L, ps.read(state, "i", "count"));
+        Assertions.assertEquals(2d / 3, (Double) ps.read(state, "i", "delta"), 1e-12);
+        Assertions.assertEquals(2d / 3, (Double) ps.read(state, "i", "deviation"), 1e-12);
+        Assertions.assertEquals(1d, (Double) ps.read(state, "i", "z"), 1e-12, "two rated players: ±1");
+        Assertions.assertEquals(-1d, (Double) ps.read(state, "j", "z"), 1e-12);
+        Assertions.assertEquals(0d, (Double) ps.read(state, "i", "attack") + (Double) ps.read(state, "j", "defence"), 1e-12, "what one attack gains the other defence loses");
+        // never rated: the prior for both ratings, the sum at twice it; a read without a state is the same
+        for (final Rating.State s : java.util.Arrays.asList(state, null)) {
+            Assertions.assertEquals(0d, (Double) ps.read(s, "k", "attack"), 0d);
+            Assertions.assertEquals(0d, (Double) ps.read(s, "k", "mu"), 0d);
+            Assertions.assertEquals(Math.sqrt(2), (Double) ps.read(s, "k", "sigma"), 1e-12);
+            Assertions.assertEquals(0L, ps.read(s, "k", "count"));
+            Assertions.assertNull(ps.read(s, "k", "delta"));
+            Assertions.assertEquals(0d, (Double) ps.read(s, "k", "deviation"), 0d);
+        }
+        Assertions.assertNull(ps.read(null, "k", "z"));
+        Assertions.assertNull(ps.read(state, null, "mu"));
+        Assertions.assertTrue(ps.describe(state).contains("players=2"), ps.describe(state));
+        // the rates now expected: i scores exp(α_i − δ_j) = exp(2/3) against j; scores equal to the rates move nothing and still narrow
+        Assertions.assertEquals(2d / 3, (Double) ps.read(state, "i", "attack") - (Double) ps.read(state, "j", "defence"), 1e-12);
+        final Rating.State confirmed = new Rating.State();
+        ps.update(confirmed, List.of(entry("i", 2), entry("j", 0)));
+        ps.update(confirmed, List.of(entry("i", Math.exp(2d / 3)), entry("j", Math.exp(-2d / 3))));
+        Assertions.assertEquals(1d / 3, (Double) ps.read(confirmed, "i", "attack"), 1e-12);
+        Assertions.assertEquals(-1d / 3, (Double) ps.read(confirmed, "j", "defence"), 1e-12);
+        Assertions.assertTrue((Double) ps.read(confirmed, "i", "sigma") < (Double) ps.read(state, "i", "sigma"));
+        Assertions.assertEquals(2L, ps.read(confirmed, "i", "count"));
+        Assertions.assertEquals(0d, (Double) ps.read(confirmed, "i", "delta"), 1e-12);
+        // the offset shifts the log rate: with ln 2 on i's row the match expected 2 of i, which it scored, so i's attack
+        // stands and its variance keeps d / det = 3/5 (λ = 2: precision [3 −2; −2 3]); j scored the 1 it was expected to
+        final Rating offset = ps.withRowInputs("o", null);
+        final Rating.State shifted = new Rating.State();
+        offset.update(shifted, List.of(new Rating.Entry(List.of("i"), 2, Math.log(2), Double.NaN), new Rating.Entry(List.of("j"), 1, 0d, Double.NaN)));
+        Assertions.assertEquals(0d, (Double) offset.read(shifted, "i", "attack"), 1e-12);
+        Assertions.assertEquals(0d, (Double) offset.read(shifted, "j", "defence"), 1e-12);
+        Assertions.assertEquals(0d, (Double) offset.read(shifted, "j", "attack"), 1e-12);
+        Assertions.assertEquals(Math.sqrt(3d / 5 + 2d / 3), (Double) offset.read(shifted, "i", "sigma"), 1e-12, "α_i from i's row at λ 2, δ_i from j's at λ 1");
+        // no match: three rows, two rows of one player, a negative score — nothing is rated
+        for (final List<Rating.Entry> contest : List.of(List.of(entry("a", 1), entry("b", 2), entry("c", 0)), List.of(entry("a", 1), entry("a", 2)), List.of(entry("a", -1), entry("b", 2)))) {
+            final Rating.State none = new Rating.State();
+            ps.update(none, contest);
+            Assertions.assertTrue(none.players.isEmpty(), contest.toString());
+        }
+        // a rank order, a team and the dependence under another method are rejected; no dependence is this rating
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Rating.of(Rating.Method.poisson, true, 0d, 1d, null, 0d, null, null, List.of("p"), List.of("c"), "y"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ps.withTeam("seller", List.of(new Rating.Member("agent", List.of("a"), 0, 1, 0))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> rating(Rating.Method.plackettLuce, true, 0d).withDependence(-0.1, null));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ps.withDependence(-0.1, 0.2));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ps.withDependence(1d, null));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ps.withDependence(null, -0.1));
+        Assertions.assertSame(ps, ps.withDependence(null, 0d));
+    }
+
+    /**
+     * The dependence of a match's two scores: Dixon &amp; Coles' {@code rho} and the bivariate Poisson's
+     * {@code covariance} enter the gradient — checked against the numerical derivative of the log likelihood they stand
+     * for, the step being {@code (V⁻¹ + I)⁻¹} of that gradient with the Poisson information.
+     */
+    @Test
+    public void testPoissonDependence() {
+        final Rating base = Rating.of(Rating.Method.poisson, false, 0d, 0.5, null, 0d, null, null, List.of("p"), List.of("c"), "y").withRowInputs("o", null);
+        // the rates 1.3 and 0.8 set by the offsets (the ratings at the prior 0), the prior variance 0.25
+        final double l0 = 1.3, l1 = 0.8, v = 0.25, h = 1e-6;
+        // row i's attack moves by (d + b) g / det with a = d = 1/v + λ and b = −λ
+        final java.util.function.DoubleBinaryOperator step = (lambda, g) -> {
+            final double a = 1 / v + lambda, b = -lambda;
+            return (a + b) * g / (a * a - b * b);
+        };
+        final java.util.function.BiFunction<Rating, double[], Rating.State> match = (r, y) -> {
+            final Rating.State s = new Rating.State();
+            r.update(s, List.of(new Rating.Entry(List.of("i"), y[0], Math.log(l0), Double.NaN), new Rating.Entry(List.of("j"), y[1], Math.log(l1), Double.NaN)));
+            return s;
+        };
+        // Dixon-Coles at rho −0.1: the log likelihood gains log τ, whose derivative in each log rate is added to y − λ
+        final double rho = -0.1;
+        final Rating dc = base.withDependence(rho, null);
+        final java.util.function.ToDoubleFunction<double[]> logTau = p -> {  // p = {y0, y1, λ0, λ1}
+            if (p[0] == 0 && p[1] == 0) return Math.log(1 - p[2] * p[3] * rho);
+            if (p[0] == 0 && p[1] == 1) return Math.log(1 + p[2] * rho);
+            if (p[0] == 1 && p[1] == 0) return Math.log(1 + p[3] * rho);
+            if (p[0] == 1 && p[1] == 1) return Math.log(1 - rho);
+            return 0d;
+        };
+        for (final double[] y : new double[][]{{0, 0}, {0, 1}, {1, 0}, {1, 1}, {2, 1}, {0, 3}}) {
+            final double d0 = (logTau.applyAsDouble(new double[]{y[0], y[1], l0 * Math.exp(h), l1}) - logTau.applyAsDouble(new double[]{y[0], y[1], l0 * Math.exp(-h), l1})) / (2 * h);
+            final double d1 = (logTau.applyAsDouble(new double[]{y[0], y[1], l0, l1 * Math.exp(h)}) - logTau.applyAsDouble(new double[]{y[0], y[1], l0, l1 * Math.exp(-h)})) / (2 * h);
+            final Rating.State s = match.apply(dc, y);
+            Assertions.assertEquals(step.applyAsDouble(l0, y[0] - l0 + d0), (Double) dc.read(s, "i", "attack"), 1e-8, java.util.Arrays.toString(y));
+            Assertions.assertEquals(step.applyAsDouble(l1, y[1] - l1 + d1), (Double) dc.read(s, "j", "attack"), 1e-8, java.util.Arrays.toString(y));
+            // the variances are the independent model's: the correction is in the gradient only
+            Assertions.assertEquals((Double) base.read(match.apply(base, y), "i", "sigma"), (Double) dc.read(s, "i", "sigma"), 1e-12);
+        }
+        Assertions.assertEquals(step.applyAsDouble(l0, -l0 - l0 * l1 * rho / (1 - l0 * l1 * rho)), (Double) dc.read(match.apply(dc, new double[]{0, 0}), "i", "attack"), 1e-12, "0-0 by hand");
+        // a rho that makes τ non-positive at these rates is left out: 0-0 at rho 0.99 with λ0 λ1 = 1.04 reads independent
+        final Rating extreme = base.withDependence(0.99, null);
+        Assertions.assertEquals((Double) base.read(match.apply(base, new double[]{0, 0}), "i", "attack"), (Double) extreme.read(match.apply(extreme, new double[]{0, 0}), "i", "attack"), 1e-12);
+        // bivariate Poisson with the common rate 0.2: the gradient of log P(y) in each log rate, P the finite sum over the common count
+        final double cov = 0.2;
+        final Rating bp = base.withDependence(null, cov);
+        final java.util.function.ToDoubleFunction<double[]> logP = p -> {
+            double sum = 0;
+            for (int k = 0; k <= Math.min(p[0], p[1]); k++) {
+                sum += Math.exp((p[0] - k) * Math.log(p[2]) + (p[1] - k) * Math.log(p[3]) + k * Math.log(cov) - lnFactorial((int) p[0] - k) - lnFactorial((int) p[1] - k) - lnFactorial(k));
+            }
+            return -(p[2] + p[3] + cov) + Math.log(sum);
+        };
+        for (final double[] y : new double[][]{{2, 1}, {3, 3}, {1, 0}, {2, 2}, {0, 0}, {7, 5}}) {
+            final double d0 = (logP.applyAsDouble(new double[]{y[0], y[1], l0 * Math.exp(h), l1}) - logP.applyAsDouble(new double[]{y[0], y[1], l0 * Math.exp(-h), l1})) / (2 * h);
+            final double d1 = (logP.applyAsDouble(new double[]{y[0], y[1], l0, l1 * Math.exp(h)}) - logP.applyAsDouble(new double[]{y[0], y[1], l0, l1 * Math.exp(-h)})) / (2 * h);
+            final Rating.State s = match.apply(bp, y);
+            Assertions.assertEquals(step.applyAsDouble(l0, d0), (Double) bp.read(s, "i", "attack"), 1e-8, java.util.Arrays.toString(y));
+            Assertions.assertEquals(step.applyAsDouble(l1, d1), (Double) bp.read(s, "j", "attack"), 1e-8, java.util.Arrays.toString(y));
+        }
+        // 2-1: E[K | y] = 0.2 · 1.3 / (0.2 · 1.3 + 1.3² · 0.8 / 2) = 5/18 taken off both scores (numpy: 0.06397306397306399)
+        Assertions.assertEquals(0.06397306397306399, (Double) bp.read(match.apply(bp, new double[]{2, 1}), "i", "attack"), 1e-12);
+        Assertions.assertEquals(step.applyAsDouble(l0, 2 - 5d / 18 - l0), (Double) bp.read(match.apply(bp, new double[]{2, 1}), "i", "attack"), 1e-12);
+        // a non-integer score reads as plain Poisson under either dependence
+        for (final Rating r : List.of(dc, bp)) {
+            Assertions.assertEquals(step.applyAsDouble(l0, 1.5 - l0), (Double) r.read(match.apply(r, new double[]{1.5, 1}), "i", "attack"), 1e-12);
+        }
+    }
+
+    private static double lnFactorial(final int n) {
+        double sum = 0;
+        for (int i = 2; i <= n; i++) sum += Math.log(i);
+        return sum;
+    }
+
+    /** The {@code poisson} compile contract: the method's defaults (order descending, sigma 0.5, no beta), its parameters, columns and diagnostics. */
+    @Test
+    public void testPoissonCompile() {
+        final String op = "      - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma, count, delta]}";
+        Assertions.assertTrue(SPEC.contains(op));
+        final String poisson = "      - {type: rating, field: final_price, context: session, method: poisson, ";
+        final FeaturePlan plan = compile(SPEC.replace(op, poisson + "rho: -0.1, as: ps}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn attack = plan.getColumn("skill_all_ps_attack");
+        Assertions.assertNotNull(attack, plan::describe);
+        Assertions.assertEquals("poisson", attack.getCoordinates().get("method"));
+        Assertions.assertEquals("descending", attack.getCoordinates().get("order"), "a score by default");
+        Assertions.assertEquals("0.0", attack.getCoordinates().get("mu"));
+        Assertions.assertEquals(Double.toString(Rating.POISSON_DEFAULT_SIGMA), attack.getCoordinates().get("sigma"));
+        Assertions.assertNull(attack.getCoordinates().get("beta"), "no performance noise: the Poisson's own");
+        Assertions.assertEquals("-0.1", attack.getCoordinates().get("rho"));
+        Assertions.assertNull(attack.getCoordinates().get("covariance"));
+        Assertions.assertEquals("skill_all_ps", attack.getCoordinates().get("stateKey"));
+        for (final String func : List.of("attack", "defence", "mu", "sigma")) Assertions.assertNotNull(plan.getColumn("skill_all_ps_" + func), func);
+        Assertions.assertNull(plan.getColumn("skill_all_ps_count"), "the default funcs");
+        // the rating the coordinates build carries the dependence: a 0-0 reads as the explicit one does
+        final Rating built = Rating.of(attack.getCoordinates()), explicit = Rating.of(Rating.Method.poisson, false, 0d, 0.5, null, 0.005, null, null,
+                List.of("seller_id"), List.of("session_id"), "final_price").withDependence(-0.1, null);
+        final Rating.State b = new Rating.State(), e = new Rating.State();
+        built.update(b, List.of(entry("i", 0), entry("j", 0)));
+        explicit.update(e, List.of(entry("i", 0), entry("j", 0)));
+        Assertions.assertEquals((Double) explicit.read(e, "i", "attack"), (Double) built.read(b, "i", "attack"), 0d);
+        Assertions.assertNotEquals(0d, (Double) built.read(b, "i", "attack"));
+        // the errors
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(poisson + "order: ascending, as: ps}", "sequence.rating.order");
+        cases.put(poisson + "beta: 2, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "rho: -0.1, covariance: 0.2, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "rho: 1, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "covariance: -0.2, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "pairs: mean, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "top: 1, as: ps}", "sequence.rating.parameter");
+        cases.put(poisson + "offset: start_price, offsetUnits: logit, as: ps}", "sequence.rating.offset");
+        cases.put(poisson + "with: [seller], as: ps}", "sequence.rating.with");
+        cases.put(poisson + "funcs: [mean], as: ps}", "sequence.rating.func");
+        cases.put("      - {type: rating, field: final_price, context: session, order: descending, funcs: [attack]}", "sequence.rating.func");
+        cases.put("      - {type: rating, field: final_price, context: session, order: descending, rho: -0.1}", "sequence.rating.parameter");
+        cases.put("      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, sigma: 1, beta: 1, covariance: 0.2}", "sequence.rating.parameter");
+        for (final Map.Entry<String, String> c : cases.entrySet()) {
+            final FeaturePlan p = compile(SPEC.replace(op, c.getKey()));
+            Assertions.assertTrue(hasCode(p, c.getValue()), () -> c.getKey() + "\n" + p.describe());
+            Assertions.assertTrue(p.getDiagnostics().hasErrors(), c.getKey());
+        }
+        // covariance alone, an offset (a log-rate shift), a drift in time and the full readout list are accepted
+        final FeaturePlan bp = compile(SPEC.replace(op, poisson + "covariance: 0.2, offset: start_price, tau: 0.01, tauPer: P30D, funcs: [attack, defence, mu, sigma, count, delta, deviation, z], as: bp}"));
+        Assertions.assertFalse(bp.getDiagnostics().hasErrors(), bp::describe);
+        Assertions.assertEquals("0.2", bp.getColumn("skill_all_bp_attack").getCoordinates().get("covariance"));
+        Assertions.assertNull(bp.getColumn("skill_all_bp_attack").getCoordinates().get("rho"));
+        Assertions.assertEquals("start_price", bp.getColumn("skill_all_bp_attack").getCoordinates().get("offsetField"));
+        Assertions.assertEquals(Schema.Type.int64, bp.getColumn("skill_all_bp_count").getFieldType().getType());
+        Assertions.assertEquals(bp.getColumn("skill_all_bp_attack").getStatus(), bp.getColumn("skill_all_bp_z").getStatus());
+        // a declared 0 is the independent model (as the rating reads it): rho 0 beside a covariance is no clash, and writes no rho
+        final FeaturePlan zero = compile(SPEC.replace(op, poisson + "rho: 0, covariance: 0.2, as: z0}"));
+        Assertions.assertFalse(zero.getDiagnostics().hasErrors(), zero::describe);
+        Assertions.assertNull(zero.getColumn("skill_all_z0_attack").getCoordinates().get("rho"));
+        Assertions.assertEquals("0.2", zero.getColumn("skill_all_z0_attack").getCoordinates().get("covariance"));
+        // no intercept: without an offset the op is hinted once; with one (the bp op above) it is not
+        Assertions.assertTrue(hasCode(plan, "sequence.rating.poisson.intercept"), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.poisson.intercept")).count());
+        Assertions.assertFalse(hasCode(bp, "sequence.rating.poisson.intercept"), bp::describe);
+        Assertions.assertFalse(hasCode(compile(SPEC), "sequence.rating.poisson.intercept"), "other methods have an intercept in mu");
     }
 
     @Test
@@ -409,8 +624,9 @@ public class RatingTest {
     public void testPlayerArithmeticIsUnchangedByTeams() {
         int compared = 0;
         for (final Rating.Method method : Rating.Method.values()) {
-            // gaussian came after the oracle was frozen: its team-of-one arithmetic is the shared sharing code (testGaussianMargin)
-            if (method == Rating.Method.gaussian) continue;
+            // gaussian came after the oracle was frozen: its team-of-one arithmetic is the shared sharing code (testGaussianMargin);
+            // poisson has no team form and rates two-row matches only (testPoissonHandValues)
+            if (method == Rating.Method.gaussian || method == Rating.Method.poisson) continue;
             for (final Rating.Pairs pairs : method == Rating.Method.bradleyTerry ? Rating.Pairs.values() : new Rating.Pairs[]{null}) {
                 for (final Long tauPer : method == Rating.Method.elo ? new Long[]{null} : new Long[]{null, 3 * DAY}) {
                     final Double tau = method == Rating.Method.elo ? null : 1.5;
@@ -1614,6 +1830,8 @@ public class RatingTest {
     @Test
     public void testContestProperties() {
         for (final Rating.Method method : Rating.Method.values()) {
+            // poisson rates two-row matches scored as counts: its properties are testPoissonHandValues'
+            if (method == Rating.Method.poisson) continue;
             final Rating rating = rating(method, true, null);
             final List<Rating.Entry> contest = List.of(entry("a", 1), entry("b", 2), entry("c", 2), entry("d", 4), entry("e", 5));
             final Rating.State state = new Rating.State();
@@ -1797,6 +2015,8 @@ public class RatingTest {
     @Test
     public void testRowOffset() {
         for (final Rating.Method method : Rating.Method.values()) {
+            // a three-row contest is no poisson match; its offset (a log-rate shift) is testPoissonHandValues'
+            if (method == Rating.Method.poisson) continue;
             final Rating plain = method == Rating.Method.gaussian
                     ? Rating.of(method, false, 0d, 1d, 0.5, 0d, null, null, List.of("p"), List.of("c"), "y")
                     : Rating.of(method, false, null, null, null, 0d, null, null, List.of("p"), List.of("c"), "y");
@@ -1976,6 +2196,8 @@ public class RatingTest {
     @Test
     public void testRowInputsOrderFree() {
         for (final Rating.Method method : Rating.Method.values()) {
+            // two rows of one player are no poisson match (its two-row contests are sorted by player like any other)
+            if (method == Rating.Method.poisson) continue;
             final Rating base = method == Rating.Method.gaussian
                     ? Rating.of(method, false, 0d, 1d, 0.5, 0.3, null, null, List.of("p"), List.of("c"), "y")
                     : Rating.of(method, false, null, null, null, 0.3, null, null, List.of("p"), List.of("c"), "y");
@@ -2242,7 +2464,9 @@ public class RatingTest {
                 + "      - {type: rating, field: final_price, context: session, order: descending, method: gaussian, mu: 50, sigma: 40, beta: 20, as: gs}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, top: 2, depthScale: 1.5, as: deep}\n"
                 + "      - {type: rating, field: final_price, context: session, order: descending, offset: start_price, tauBy: start_price, tau: 1, tauPer: P1D, as: rowwise}\n"
-                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, offset: start_price, offsetUnits: logit, as: lo}\n";
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: mean, offset: start_price, offsetUnits: logit, as: lo}\n"
+                + "      - {type: rating, field: final_price, context: session, method: poisson, rho: -0.1, tau: 0.01, tauPer: P1D, offset: start_price, funcs: [mu, sigma, attack, defence, count, delta, z], as: ps}\n"
+                + "      - {type: rating, field: final_price, context: session, method: poisson, covariance: 0.3, funcs: [attack, defence], as: bp}\n";
         final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
         final FeaturePlan plan = compile(SPEC.substring(0, from) + ops + SPEC.substring(to));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -2260,7 +2484,9 @@ public class RatingTest {
         Assertions.assertTrue(plan.getColumn("skill_all_rowwise_mu").getInputs().contains("start_price"), "under tauPer every column of the op reads tauBy from the row");
         Assertions.assertNull(plan.getColumn("skill_all_pl_mu").getCoordinates().get("offsetField"));
         Assertions.assertEquals("logit", plan.getColumn("skill_all_lo_mu").getCoordinates().get("offsetUnits"));
-        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 16);
+        Assertions.assertEquals("-0.1", plan.getColumn("skill_all_ps_attack").getCoordinates().get("rho"));
+        Assertions.assertEquals("0.3", plan.getColumn("skill_all_bp_defence").getCoordinates().get("covariance"));
+        assertIncrementalMatchesScanAndTrimmed(SPEC.substring(0, from) + ops + SPEC.substring(to), 25);
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {

@@ -21,7 +21,8 @@ import java.util.TreeMap;
  * closed-form Bayesian approximations of Weng &amp; Lin (JMLR 2011) over a Gaussian strength {@code (mu, sigma)}:
  * {@code bradleyTerry} (pairwise — every opponent, the rank neighbours only, or the mean over the opponents:
  * {@link Pairs}) and {@code plackettLuce} (the ranking likelihood), and {@code gaussian} (the margin-of-victory
- * update on the signed margin of every pair, paired as {@code bradleyTerry} is). Before a contest every participant's variance
+ * update on the signed margin of every pair, paired as {@code bradleyTerry} is), and {@code poisson} (a match's two
+ * scores as Poisson counts of attack less defence, two ratings per player — {@link #poisson}). Before a contest every participant's variance
  * grows by {@code tau²} (strengths drift) — per contest, or, with {@code tauPer}, in proportion to the time since the
  * player's previous contest, so that an absence reopens the uncertainty and a busy stretch does not.
  *
@@ -77,8 +78,14 @@ public final class Rating implements Serializable {
      * {@code gaussian}: the margin-of-victory update — the outcome is a continuous score and every strength of the
      * contest is conditioned at once on the outcomes up to a common shift (exact Gaussian conditioning, see
      * {@link #gaussian}). The prior and {@code beta} are in the outcome's units; no pairing applies.
+     *
+     * <p>{@code poisson}: the scoring update — a contest of two rows whose outcomes are the counts each side scored,
+     * each Poisson at {@code exp(attack − opponent's defence + offset)}; every player holds an attack and a defence
+     * rating, conditioned by one Laplace step per match ({@link #poisson}), with Dixon &amp; Coles' {@code rho} or the
+     * bivariate Poisson's {@code covariance} for the dependence of the two scores ({@link #dependence}). No
+     * {@code beta} (the noise is the Poisson's own), no pairing, no team; the order is a score's.
      */
-    public enum Method { elo, bradleyTerry, plackettLuce, gaussian }
+    public enum Method { elo, bradleyTerry, plackettLuce, gaussian, poisson }
 
     /**
      * The opponents a {@code bradleyTerry} / {@code gaussian} player is paired with. {@code all}: every opponent, the sums growing with
@@ -109,10 +116,21 @@ public final class Rating implements Serializable {
      */
     public static final List<String> FUNCS = List.of("mu", "sigma", "count", "delta", "deviation", "z");
 
+    /**
+     * The two ratings a {@code poisson} player holds, beside {@link #FUNCS}: {@code attack} (its log scoring rate
+     * against an average defence) and {@code defence} (what it takes off an average attack's log rate). Under
+     * {@code poisson}, {@code mu} / {@code delta} / {@code deviation} / {@code z} read their sum and {@code sigma} the
+     * sum's uncertainty ({@link #readPoisson}).
+     */
+    public static final List<String> POISSON_FUNCS = List.of("attack", "defence");
+
     public static final List<String> ORDERS = List.of("ascending", "descending");
 
     /** Lower bound of the factor a contest shrinks a variance by (Weng &amp; Lin's κ). */
     private static final double KAPPA = 1e-4;
+
+    /** The prior {@code sigma} of a {@code poisson} rating when the spec declares none: a log rate, two sds letting a rate vary by e^±1. */
+    public static final double POISSON_DEFAULT_SIGMA = 0.5;
 
     /** One player's running rating. */
     public static final class Player implements Serializable {
@@ -255,6 +273,8 @@ public final class Rating implements Serializable {
      * could make two pools meet on one state key is a separator inside a <b>pool</b>, which {@link #withTeam} rejects.
      */
     private static final char POOL_SEPARATOR = '\u0001', MEMBER_SEPARATOR = '\u0002';
+    /** The namespace of a {@code poisson} player's defence rating in the state (its attack is under the bare key). */
+    private static final String DEFENCE_PREFIX = "defence" + POOL_SEPARATOR;
 
     private final Method method;
     /** Whether a smaller outcome is the better one (a rank / finishing position) rather than a larger one (a score). */
@@ -288,11 +308,15 @@ public final class Rating implements Serializable {
     private final boolean offsetLogit;
     /** Whether any member counts with a weight read from the row ({@link Member#weightField}); derived from {@code members}. */
     private final boolean weighted;
+    /** {@code poisson}: the dependence of a match's two scores — Dixon &amp; Coles' {@code rho}, or the bivariate Poisson's common rate {@code covariance} (0: independent). */
+    private final double rho, covariance;
 
     private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
                    final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members,
                    final boolean countTeams, final int top, final double depthScale, final String offsetField, final String tauField,
-                   final boolean offsetLogit) {
+                   final boolean offsetLogit, final double rho, final double covariance) {
+        this.rho = rho;
+        this.covariance = covariance;
         this.members = members;
         this.weighted = members.stream().anyMatch(m -> m.weightField() != null);
         this.countTeams = countTeams;
@@ -317,6 +341,7 @@ public final class Rating implements Serializable {
         return switch (method) {
             case elo -> 1500d;
             case gaussian -> 0d; // a margin's origin: the prior mu is a typical outcome, 0 for a standardised one
+            case poisson -> 0d; // a log rate's origin: attack and defence at 0 are an average player
             default -> 25d;
         };
     }
@@ -324,6 +349,11 @@ public final class Rating implements Serializable {
     /** The defaults that derive from the prior: {@code sigma = |mu| / 3}, {@code beta = sigma / 2}, {@code tau = sigma / 100}. */
     public static double defaultSigma(final double mu) {
         return Math.abs(mu) / 3d;
+    }
+
+    /** {@link #defaultSigma(double)} for a method: a {@code poisson} prior is a log rate at 0, so its default is {@link #POISSON_DEFAULT_SIGMA}. */
+    public static double defaultSigma(final Method method, final double mu) {
+        return method == Method.poisson ? POISSON_DEFAULT_SIGMA : defaultSigma(mu);
     }
 
     public static double defaultBeta(final double sigma) {
@@ -354,12 +384,15 @@ public final class Rating implements Serializable {
         final double m = mu != null ? mu : defaultMu(method);
         // a margin model has no scale of its own (the compiler requires sigma and beta): the class-level default is a standardised
         // margin, mu 0 / sigma 1 / beta 0.5, rather than |mu| / 3 of a prior at 0
-        final double s = sigma != null ? sigma : method == Method.gaussian ? 1d : defaultSigma(m);
+        final double s = sigma != null ? sigma : method == Method.gaussian ? 1d : defaultSigma(method, m);
+        if (method == Method.poisson && ascending) {
+            throw new IllegalArgumentException("poisson reads the outcome as a score (the count a row scored): a larger one is the better one, order descending");
+        }
         // a rating without a team: one member under no pool, its state keyed by the bare keys as it always was
         return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
                 tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
-                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false, 0, 1d, null, null, false);
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))), false, 0, 1d, null, null, false, 0d, 0d);
     }
 
     /**
@@ -374,7 +407,8 @@ public final class Rating implements Serializable {
         final Rating players = playersOf(coordinates)
                 .withDepth(top == null ? 0 : Integer.parseInt(top), depthScale == null ? 1d : Double.parseDouble(depthScale))
                 .withRowInputs(coordinates.get("offsetField"), coordinates.get("tauField"))
-                .withOffsetUnits("logit".equals(coordinates.get("offsetUnits")));
+                .withOffsetUnits("logit".equals(coordinates.get("offsetUnits")))
+                .withDependence(number(coordinates, "rho"), number(coordinates, "covariance"));
         final String members = coordinates.get("teamMembers");
         return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members),
                 "true".equals(coordinates.get("teamCounts")));
@@ -448,6 +482,9 @@ public final class Rating implements Serializable {
         if (method == Method.elo) {
             throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce / gaussian");
         }
+        if (method == Method.poisson) {
+            throw new IllegalArgumentException("poisson rates attack and defence per player (a match of two rows): a team is rated by bradleyTerry / plackettLuce / gaussian");
+        }
         // the whole team is declared at once: a second call would otherwise drop the members the first one added
         if (members.size() > 1) {
             throw new IllegalArgumentException("this rating already has a team of " + members.size() + " members: withTeam declares the whole team at once");
@@ -480,7 +517,7 @@ public final class Rating implements Serializable {
             }
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team), countTeams, top, depthScale,
-                offsetField, tauField, offsetLogit);
+                offsetField, tauField, offsetLogit, rho, covariance);
     }
 
     /**
@@ -494,7 +531,7 @@ public final class Rating implements Serializable {
             throw new IllegalArgumentException("top / depthScale read the depth of a ranking: a plackettLuce parameter, not " + method);
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
-                offsetField, tauField, offsetLogit);
+                offsetField, tauField, offsetLogit, rho, covariance);
     }
 
     /**
@@ -510,10 +547,10 @@ public final class Rating implements Serializable {
      */
     public Rating withRowInputs(final String offsetField, final String tauField) {
         if (tauField != null && method == Method.elo) {
-            throw new IllegalArgumentException("elo keeps no uncertainty to drift: tauBy is a parameter of bradleyTerry / plackettLuce / gaussian");
+            throw new IllegalArgumentException("elo keeps no uncertainty to drift: tauBy is a parameter of bradleyTerry / plackettLuce / gaussian / poisson");
         }
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
-                offsetField, tauField, offsetLogit);
+                offsetField, tauField, offsetLogit, rho, covariance);
     }
 
     /**
@@ -531,7 +568,28 @@ public final class Rating implements Serializable {
         }
         if (logit && offsetField == null) throw new IllegalArgumentException("offsetUnits logit without an offset");
         return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
-                offsetField, tauField, logit);
+                offsetField, tauField, logit, rho, covariance);
+    }
+
+    /**
+     * This {@code poisson} rating with the dependence of a match's two scores: {@code rho}, Dixon &amp; Coles' low-score
+     * correction (in (−1, 1); negative: more 0–0 and 1–1 draws than independence says), or {@code covariance}, the
+     * mean of the bivariate Poisson's common component (≥ 0; the covariance of the two scores) — one of them; null or
+     * 0 both: independent scores, this rating. See {@link #dependence}.
+     */
+    public Rating withDependence(final Double rho, final Double covariance) {
+        final double r = rho == null ? 0d : rho, c = covariance == null ? 0d : covariance;
+        if (r == 0d && c == 0d) return this;
+        if (method != Method.poisson) {
+            throw new IllegalArgumentException("rho / covariance describe the dependence of a match's two scores: poisson parameters, not " + method);
+        }
+        if (!(Math.abs(r) < 1)) throw new IllegalArgumentException("rho must lie in (-1, 1): " + rho);
+        if (!(c >= 0 && Double.isFinite(c))) throw new IllegalArgumentException("covariance must be a finite rate >= 0: " + covariance);
+        if (r != 0d && c != 0d) {
+            throw new IllegalArgumentException("rho (Dixon-Coles) and covariance (bivariate Poisson) are two models of the dependence: declare one");
+        }
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, members, countTeams, top, depthScale,
+                offsetField, tauField, offsetLogit, r, c);
     }
 
     /**
@@ -732,6 +790,11 @@ public final class Rating implements Serializable {
         if (tauField != null) {
             for (final Entry e : entries) if (!Double.isNaN(e.tau())) rowTaus.merge(e.members().get(0), e.tau(), Math::max);
         }
+        // a match of two scores: its own step over (attack, defence) — no teams, no shared members, no pairing
+        if (method == Method.poisson) {
+            poisson(state, entries, ids, millis, rowTaus);
+            return;
+        }
 
         // pre-contest ratings per entry (the variance already carries the drift): a team is the sum of its members.
         // The per-member values are held flat (index i * k + j): one array rather than one per entry
@@ -888,6 +951,164 @@ public final class Rating implements Serializable {
                 if (i == 0 || !ids[i].equals(ids[i - 1])) state.teams.merge(ids[i], 1L, Long::sum);
             }
         }
+    }
+
+
+    /**
+     * The scoring update ({@link Method#poisson}): a contest of two rows — a match — whose outcomes are what each side
+     * scored (goals, points, runs: counts), read as Poisson with the rate {@code λ_i = exp(α_i − δ_j + o_i)}: the row's
+     * attack less the opponent's defence (a defence is as good as it keeps the opponent's rate down), plus the row's
+     * known offset, a shift of the log rate (a home advantage, a venue). Each player holds two Gaussian ratings, attack
+     * {@code α} and defence {@code δ}, both from the prior {@code (mu, sigma)} and both drifting by {@code tau}; a
+     * match conditions the four of them at once by one Laplace step from the prior means — what the Weng–Lin updates
+     * are for the ordinal methods: the gradient of the log likelihood in the log rate, {@code g_i = y_i − λ_i}, along
+     * {@code (α_i, −δ_j)}, the Fisher information {@code λ_i} along the same direction, the move {@code (V⁻¹ + I)⁻¹ g}
+     * and the variances the diagonal of {@code (V⁻¹ + I)⁻¹}. Row i reads {@code (α_i, δ_j)} and row j {@code (α_j, δ_i)}:
+     * no parameter is shared, so the step is two 2 × 2 solves. A score above the rate it expected raises the attack and
+     * lowers the opponent's defence by equal amounts (at equal prior variances), so the sum {@code α + δ} of a player is
+     * what a match identifies against an average opponent — the {@code mu} readout ({@link #readPoisson}). The
+     * dependence of the two scores enters the gradient ({@link #dependence}). A contest of other than two rows, of two
+     * rows of one player, with a negative outcome or with a rate that overflows is no match and is skipped (the
+     * {@code count} readout tells). The rate has no intercept: {@code mu} moves attack and defence alike, so at the prior
+     * every row expects {@code exp(o_i)} — the typical score's {@code ln} belongs in the offset, or a first match of
+     * scores far from 1 moves a rating by several log units in one step.
+     */
+    private void poisson(final State state, final List<Entry> entries, final String[] ids, final long millis, final Map<String, Double> rowTaus) {
+        if (entries.size() != 2 || ids[0].equals(ids[1])) return;
+        final double[] y = {entries.get(0).outcome(), entries.get(1).outcome()};
+        if (!(y[0] >= 0) || !(y[1] >= 0)) return;
+        final Member member = members.get(0);
+        final String[] attackKey = new String[2], defenceKey = new String[2];
+        final Player[] attack = new Player[2], defence = new Player[2];
+        final double[] alpha = new double[2], delta = new double[2], vAlpha = new double[2], vDelta = new double[2];
+        for (int i = 0; i < 2; i++) {
+            attackKey[i] = entries.get(i).player();
+            defenceKey[i] = DEFENCE_PREFIX + attackKey[i];
+            attack[i] = state.players.get(attackKey[i]);
+            defence[i] = state.players.get(defenceKey[i]);
+            // the row's drift is the player's: both its ratings drift by it
+            final double rowTau = rowTaus.getOrDefault(attackKey[i], Double.NaN);
+            alpha[i] = attack[i] == null ? member.mu() : attack[i].mu;
+            delta[i] = defence[i] == null ? member.mu() : defence[i].mu;
+            vAlpha[i] = drifted(member, attack[i], millis, true, rowTau);
+            vDelta[i] = drifted(member, defence[i], millis, true, rowTau);
+        }
+        // the rates the match expected, at the prior means: row i scores against j's defence
+        final double[] lambda = new double[2], g = new double[2];
+        for (int i = 0; i < 2; i++) {
+            lambda[i] = Math.exp(alpha[i] - delta[1 - i] + entries.get(i).offset());
+            if (!Double.isFinite(lambda[i])) return;
+            g[i] = y[i] - lambda[i];
+        }
+        dependence(y, lambda, g);
+        // per row the 2 × 2 solve over (α_i, δ_j): precision [1/vα_i + λ_i, −λ_i; −λ_i, 1/vδ_j + λ_i], gradient g_i · (1, −1).
+        // Its inverse in closed form over den = 1 + λ_i (vα_i + vδ_j) (the determinant times vα_i vδ_j): the determinant as
+        // (1/vα + λ)(1/vδ + λ) − λ² is the difference of two near-equal products, which cancels to 0 — a NaN step that
+        // freezes both players and the pool's moments for the rest of the replay — once λ outgrows the precisions by the
+        // double's precision (a log rate past ~37, finite and far from the overflow guard above)
+        final double[] dAlpha = new double[2], dDelta = new double[2], pAlpha = new double[2], pDelta = new double[2];
+        for (int i = 0; i < 2; i++) {
+            final int j = 1 - i;
+            final double den = 1 + lambda[i] * (vAlpha[i] + vDelta[j]);
+            if (!Double.isFinite(den)) return;
+            dAlpha[i] = vAlpha[i] * (g[i] / den);
+            dDelta[j] = -vDelta[j] * (g[i] / den);
+            pAlpha[i] = vAlpha[i] * ((1 + lambda[i] * vDelta[j]) / den);
+            pDelta[j] = vDelta[j] * ((1 + lambda[i] * vAlpha[i]) / den);
+        }
+        for (int i = 0; i < 2; i++) {
+            final boolean created = attack[i] == null;
+            final double before = alpha[i] + delta[i];
+            attack[i] = place(state, attackKey[i], attack[i], member);
+            defence[i] = place(state, defenceKey[i], defence[i], member);
+            attack[i].mu = alpha[i] + dAlpha[i];
+            attack[i].sigma = Math.sqrt(pAlpha[i]);
+            defence[i].mu = delta[i] + dDelta[i];
+            defence[i].sigma = Math.sqrt(pDelta[i]);
+            // the player's change (of the sum) rides on the attack, the defence keeps its own; both count the match
+            attack[i].delta = dAlpha[i] + dDelta[i];
+            defence[i].delta = dDelta[i];
+            for (final Player p : new Player[]{attack[i], defence[i]}) {
+                p.count++;
+                p.lastMillis = millis;
+            }
+            // the pool's moments are of the sum (the strength the other methods' mu is)
+            final Pool pool = state.pools.computeIfAbsent("", key -> new Pool());
+            if (created) pool.add(attack[i].mu + defence[i].mu, 2 * member.mu()); else pool.move(before, attack[i].mu + defence[i].mu);
+        }
+    }
+
+    /**
+     * The dependence between the two scores of a match, as a correction of the Poisson scores {@code g_i = y_i − λ_i}
+     * (the gradient of the log likelihood in the log rates). <b>{@code rho}</b> (Dixon &amp; Coles 1997): the four
+     * low-score results are reweighted by {@code τ = 1 − λ_i λ_j ρ} (0–0), {@code 1 + λ_i ρ} (0–1, i scoring 0),
+     * {@code 1 + λ_j ρ} (1–0), {@code 1 − ρ} (1–1) — a negative {@code rho} makes 0–0 and 1–1 more likely than
+     * independence says, as football scores are — and {@code ∂ log τ / ∂ log λ} is added to the score of each rate
+     * {@code τ} holds. <b>{@code covariance}</b> (Karlis &amp; Ntzoufras 2003): the scores share a common Poisson
+     * component {@code K} of mean {@code covariance}, {@code y_i = x_i + K}, the rate {@code λ_i} being that of the row's
+     * own part {@code x_i} (the expected score is {@code λ_i + covariance}); the score in the log rate is then
+     * {@code (y_i − E[K | y]) − λ_i}: the common part's conditional mean, a sum over {@code k ≤ min(y)}, taken off both.
+     * Either applies to integer scores only (a non-integer outcome — or, for {@code covariance}, a score past the int
+     * range — reads as plain Poisson), and a {@code rho} that would
+     * make {@code τ} non-positive at these rates is left out. The information kept is the Poisson's {@code λ_i} — the
+     * corrections' curvature is of the order of the parameter and is not taken — so the step is Fisher scoring of the
+     * independent model along the corrected gradient.
+     */
+    private void dependence(final double[] y, final double[] lambda, final double[] g) {
+        if (rho == 0d && covariance == 0d) return;
+        if (y[0] != Math.rint(y[0]) || y[1] != Math.rint(y[1]) || !(lambda[0] > 0) || !(lambda[1] > 0)) return;
+        if (rho != 0d) {
+            final boolean zero0 = y[0] == 0d, zero1 = y[1] == 0d, one0 = y[0] == 1d, one1 = y[1] == 1d;
+            if (zero0 && zero1) {
+                final double product = lambda[0] * lambda[1], tau = 1 - product * rho;
+                if (!(tau > 0)) return;
+                // −λ_0 λ_1 ρ / τ, divided through by the product: an overflowing product (ρ < 0 keeps τ positive) reads 1, not ∞ / ∞
+                final double c = -rho / (1 / product - rho);
+                g[0] += c;
+                g[1] += c;
+            } else if (zero0 && one1) {
+                final double tau = 1 + lambda[0] * rho;
+                if (tau > 0) g[0] += lambda[0] * rho / tau;
+            } else if (one0 && zero1) {
+                final double tau = 1 + lambda[1] * rho;
+                if (tau > 0) g[1] += lambda[1] * rho / tau;
+            }
+            // 1–1: τ = 1 − ρ holds no rate; any other score is unweighted
+            return;
+        }
+        final double min = Math.min(y[0], y[1]);
+        // a side that scored nothing had no common part: K = 0 surely; a score past the int range is no count the sum can walk
+        if (min == 0d || min > Integer.MAX_VALUE) return;
+        // E[K | y] over k = 0..min(y): the weights t_k ∝ λ_0^(y_0 − k) λ_1^(y_1 − k) c^k / ((y_0 − k)! (y_1 − k)! k!), walked by
+        // their ratio t_(k+1) / t_k = (y_0 − k)(y_1 − k) c / ((k + 1) λ_0 λ_1) in logs and summed relative to the largest so
+        // far — one pass, O(min(y)), no factorial per term and no array sized by a score
+        final double logRatio = Math.log(covariance) - Math.log(lambda[0]) - Math.log(lambda[1]);
+        double logWeight = 0, max = 0, total = 1, weighted = 0;
+        for (long k = 0; k < min; k++) {
+            logWeight += logRatio + Math.log(y[0] - k) + Math.log(y[1] - k) - Math.log(k + 1);
+            if (logWeight > max) {
+                final double rescale = Math.exp(max - logWeight);
+                total *= rescale;
+                weighted *= rescale;
+                max = logWeight;
+            }
+            final double w = Math.exp(logWeight - max);
+            total += w;
+            weighted += (k + 1) * w;
+        }
+        final double expected = weighted / total;
+        g[0] -= expected;
+        g[1] -= expected;
+    }
+
+    /** The player under {@code key}, created at the prior when the state holds none. */
+    private static Player place(final State state, final String key, final Player p, final Member member) {
+        if (p != null) return p;
+        final Player created = new Player();
+        created.mu = member.mu();
+        created.sigma = member.sigma();
+        state.players.put(key, created);
+        return created;
     }
 
     /** 1 when entry i did better than entry j, 0.5 on equal outcomes, else 0. */
@@ -1302,6 +1523,7 @@ public final class Rating implements Serializable {
     public Object read(final State state, final int member, final String key, final String func, final long nowMillis, final double rowTau) {
         if (key == null) return null;
         final Member m = members.get(member);
+        if (method == Method.poisson) return readPoisson(state, m, key, func, nowMillis, member == 0 ? rowTau : Double.NaN);
         final Player p = state == null ? null : state.players.get(key);
         return switch (func) {
             case "mu" -> p == null ? m.mu() : p.mu;
@@ -1324,6 +1546,32 @@ public final class Rating implements Serializable {
         if (pool == null || pool.players < 2) return null;
         final double sd = pool.sd();
         return sd > 0 ? (mu - pool.mean()) / sd : null;
+    }
+
+    /**
+     * A {@code poisson} player's readouts: {@code attack} / {@code defence} as the state holds them, and the sum
+     * {@code attack + defence} behind {@code mu} / {@code delta} / {@code deviation} / {@code z} — against an average
+     * opponent the expected log score difference is this sum up to a shift of the pool, so it is the player's strength
+     * as the other methods' {@code mu} is. {@code sigma} is the uncertainty of the sum, the two ratings read as
+     * uncorrelated (the step keeps no cross term). Never rated: both at the prior {@code mu}, the sum at twice it.
+     */
+    private Object readPoisson(final State state, final Member m, final String key, final String func, final long nowMillis, final double rowTau) {
+        final Player a = state == null ? null : state.players.get(key), d = state == null ? null : state.players.get(DEFENCE_PREFIX + key);
+        final double attack = a == null ? m.mu() : a.mu, defence = d == null ? m.mu() : d.mu;
+        return switch (func) {
+            case "attack" -> attack;
+            case "defence" -> defence;
+            case "mu" -> attack + defence;
+            case "sigma" -> {
+                final double sa = a == null ? m.sigma() : sigmaAt(m, a, nowMillis, rowTau), sd = d == null ? m.sigma() : sigmaAt(m, d, nowMillis, rowTau);
+                yield Math.sqrt(sa * sa + sd * sd);
+            }
+            case "count" -> a == null ? 0L : a.count;
+            case "delta" -> a == null ? null : (Object) a.delta;
+            case "deviation" -> attack + defence - 2 * m.mu();
+            case "z" -> poolZ(state, m, attack + defence);
+            default -> throw new IllegalArgumentException("unknown rating readout: " + func);
+        };
     }
 
     /**
@@ -1396,6 +1644,8 @@ public final class Rating implements Serializable {
     public String describe(final State state) {
         final Map<String, List<Long>> counts = new TreeMap<>();
         for (final Map.Entry<String, Player> e : state.players.entrySet()) {
+            // a poisson player's defence rides beside its attack: one player, counted once
+            if (method == Method.poisson && e.getKey().startsWith(DEFENCE_PREFIX)) continue;
             final int at = members.get(0).pool() == null ? -1 : e.getKey().indexOf(POOL_SEPARATOR);
             counts.computeIfAbsent(at < 0 ? "" : e.getKey().substring(0, at), k -> new ArrayList<>()).add(e.getValue().count);
         }
