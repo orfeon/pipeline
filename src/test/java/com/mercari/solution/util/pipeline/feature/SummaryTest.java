@@ -384,8 +384,9 @@ public class SummaryTest {
     @Test
     public void testCatalogMapsStatisticsToFamilies() {
         for (final String func : OperatorCatalog.REGRESSION_FUNCS) {
-            // the rank funcs re-rank the window at every row: no family, scan only
+            // the rank funcs re-rank the window at every row, the spread funcs re-read the line it moves: no family, scan only
             if (RankDependence.FUNCS.contains(func)) Assertions.assertNull(OperatorCatalog.summary(func), func + " is a rank statistic: scan only");
+            else if (Cointegration.FUNCS.contains(func)) Assertions.assertNull(OperatorCatalog.summary(func), func + " is a residual statistic: scan only");
             else Assertions.assertSame(Summary.Summaries.REGRESSION, OperatorCatalog.summary(func).family(), func);
         }
         Assertions.assertSame(Summary.Summaries.MOMENTS, OperatorCatalog.summary("mean").family());

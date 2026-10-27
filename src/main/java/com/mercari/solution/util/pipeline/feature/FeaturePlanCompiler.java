@@ -1938,6 +1938,17 @@ public final class FeaturePlanCompiler {
                                         + (lag > 0 ? " with lag " + lag : "") + ": its corner needs (1 - q) * pairs >= " + RankDependence.MIN_TAIL
                                         + " (q " + q + " needs " + (int) Math.ceil(RankDependence.MIN_TAIL / (1 - q) - 1e-9) + " pairs) - lower q or lengthen the window");
                             }
+                            // a maxEvents window holds at most maxEvents − lag pairs: a spread func that can never see three of them (adf four)
+                            // is a column of nulls
+                            if (window.maxEvents != null) {
+                                final int pairs = window.maxEvents - lag;
+                                final List<String> starved = funcs.stream().filter(Cointegration.FUNCS::contains)
+                                        .filter(f -> pairs < (Cointegration.ADF.equals(f) ? 4 : 3)).toList();
+                                if (!starved.isEmpty()) {
+                                    diagnostics.warning("sequence.regression.func", loc, String.join(" / ", starved) + (starved.size() == 1 ? " is" : " are") + " always null over a maxEvents "
+                                            + window.maxEvents + " window" + (lag > 0 ? " with lag " + lag : "") + ": the spread needs three pairs (adf four) - lengthen the window");
+                                }
+                            }
                             final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
                             for (final String func : funcs) {
                                 if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {
@@ -3247,7 +3258,8 @@ public final class FeaturePlanCompiler {
     /**
      * Whether an op of a sequence block can be expanded in the block's direction: {@code future} windows need a
      * {@code maxAge} (the label horizon) and accept the ops of {@link OperatorCatalog#FUTURE_OPS} (a lagged
-     * regression reads the window in one direction and is rejected); {@code barrier} exists only there.
+     * regression, and the spread funcs of {@link Cointegration} — the residuals in time order — read the window in one
+     * direction and are rejected); {@code barrier} exists only there.
      */
     private boolean directionAccepts(final FeatureDef def, final Window window, final Op op) {
         final String loc = def.location();
@@ -3270,10 +3282,13 @@ public final class FeaturePlanCompiler {
             }
             return false;
         }
-        if (!OperatorCatalog.FUTURE_OPS.contains(op.type) || ("regression".equals(op.type) && op.lag != null && op.lag > 0)) {
+        // the future window is replayed on the mirrored clock: an op that reads it in time order would read it reversed
+        final boolean lagged = "regression".equals(op.type) && op.lag != null && op.lag > 0;
+        final boolean spread = "regression".equals(op.type) && op.funcs.stream().anyMatch(Cointegration.FUNCS::contains);
+        if (!OperatorCatalog.FUTURE_OPS.contains(op.type) || lagged || spread) {
             if (directionReported.add(def.name + ":op:" + op.type)) {
-                diagnostics.error("sequence.direction.op", loc, "op " + op.type + (op.lag != null && op.lag > 0 ? " with lag" : "")
-                        + " is not defined over a future window (available: " + String.join(" | ", OperatorCatalog.FUTURE_OPS) + "; regression without lag)");
+                diagnostics.error("sequence.direction.op", loc, "op " + op.type + (lagged ? " with lag" : spread ? " with a spread func (" + String.join(" | ", Cointegration.FUNCS) + ")" : "")
+                        + " is not defined over a future window (available: " + String.join(" | ", OperatorCatalog.FUTURE_OPS) + "; regression without lag or spread funcs)");
             }
             return false;
         }

@@ -299,6 +299,7 @@ shrinkage scale:
     - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # vs_index_90d_final_price_vs_start_price_beta / _corr
     - {type: regression, field: final_price, against: start_price, lag: 1, funcs: [corr]} # ..._vs_start_price_lag1_corr
     - {type: regression, field: final_price, against: start_price, funcs: [spearman, kendall, quadrantAsymmetry]}  # rank dependence
+    - {type: regression, field: final_price, against: start_price, funcs: [residualZ, halfLife, adf]}               # the spread's mean reversion
     - {type: fracdiff, field: start_price, d: 0.4, k: 20}                                 # vs_index_90d_start_price_fracdiff0p4
 ```
 
@@ -327,6 +328,26 @@ shrinkage scale:
   Kendall's τ, so it is a row `expr` over the `kendall` column rather than another func — Clayton's lower tail
   `kendall > 0 ? pow(2, -(1 - kendall) / (2 * kendall)) : 0`, Gumbel's upper tail `kendall > 0 ? 2 - pow(2, 1 - kendall) : 0`
   — and carries nothing more than τ for a tree model.
+- **The spread's mean reversion** — the residuals `e_i = y_i − a − b x_i` of the window's least-squares line are
+  the *spread* between the two series (a pair's log prices, the same quantity in two markets), and these funcs say
+  where it stands and how fast it returns (Engle–Granger's second stage over a window):
+  - `residual` — the spread at the window's latest event, in the units of `field` (the current row's own spread is
+    a row `expr` over the `intercept` / `beta` columns: `y − intercept − beta · x`);
+  - `residualZ` — that spread over the residual standard error `√(Σ e² / (n − 2))`: how far from its usual size;
+  - `ar1` — the lag-1 regression of the spread on itself, `φ = Σ e_i e_(i−1) / Σ e_(i−1)²` (no intercept, the
+    residuals have mean 0): 1 is a random walk (no cointegration), 0 a spread that forgets itself every event;
+  - `halfLife` — `−ln 2 / ln φ`, the events the spread takes to halve, for `0 < φ < 1` (null when it does not revert,
+    `φ ≥ 1`, or overshoots, `φ ≤ 0`);
+  - `adf` — the Dickey–Fuller statistic of the spread, `(φ − 1) / se(φ)` from `Δe_i = (φ − 1) e_(i−1) + u_i` (no lags,
+    no constant). More negative = stronger reversion; its critical values are Engle–Granger's, not the normal's, so
+    it ranks pairs by the strength of their reversion rather than tests them.
+
+  The residuals are consecutive among the window's complete pairs (a pair with a missing value is left out). All
+  five are null below three pairs (`adf` four) and for a constant `x` (no line — where `beta` is null too); for a
+  spread of nothing (`y` on the line, up to rounding) `residual` reads 0 and the other four are null. `residual` /
+  `residualZ` read the latest **past** event (strictly past, like every sequence op). They combine with `lag`, but
+  not with a `direction: future` window (they read the spread in time order). A half-life in events is in time only
+  where the entity's events are evenly spaced.
 - **`lag: k`** (lead-lag) pairs `field` of each event with `against` **k events earlier** inside the window —
   "does x lead y by k events" (swap the two fields for the other direction; `lag` ≥ 0). Columns are named
   `..._lag<k>_<func>`.
@@ -337,13 +358,15 @@ shrinkage scale:
   filter over fewer terms would be a different series). Like every sequence op it is strictly past: the value
   as of the latest past event, not including the current row.
 - **Cost / retention.** A same-event `regression` runs incrementally (running cross moments, evicted under
-  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression` and the rank funcs are evaluated by
-  scanning the window per row (an event entering the window moves every other event's rank, so nothing is kept
-  running; `kendall` is O(w log w), `spearman` / `quadrantAsymmetry` sort the window): bound it with `maxAge` or
+  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression`, the rank funcs and the spread funcs are
+  evaluated by scanning the window per row (an event entering the window moves every other event's rank, and the
+  line the spread is read from, so nothing is kept running; `kendall` is O(w log w), `spearman` /
+  `quadrantAsymmetry` sort the window, the spread funcs are two passes over it): bound it with `maxAge` or
   `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
   only its last `k` events.
-- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
-  `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
+- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func` (unknown: error; a
+  `maxEvents` window whose `maxEvents − lag` pairs cannot reach three — four for `adf` — makes the spread funcs
+  always null: warning), `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
   `quadrantAsymmetry` among the funcs: warning; a `maxEvents` window whose `maxEvents − lag` pairs can never fill a
   corner: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
@@ -2804,11 +2827,12 @@ output:
 - **Ops read from the row outwards** (`sequence.direction.op` lists them): `aggregate` (every func; `first` is the
   nearest event, `last` the furthest), `lag` — named `lead<k>`, the k-th next event —, `ewma` (weighted by the
   distance ahead), `sinceEvent` — named `until_<unit>`: events / days until the predicate first holds —,
-  `countMatch`, `runLength` (the run starting with the next event), `regression` without `lag`, and **`barrier`**:
+  `countMatch`, `runLength` (the run starting with the next event), `regression` without `lag` or a spread func, and **`barrier`**:
   `1` when the path first moves up by `up` (relative to the current row's own value of the field), `-1` when it first
   moves down by `down`, `0` when it touches neither within the window, null without a future value or a current
   value (`up` > 0 and / or `down` < 0, `sequence.barrier.levels`; future windows only, `sequence.barrier.direction`).
-  `delta`, `trend`, `fracdiff` and a lagged `regression` read the window in one direction and are rejected, as is the
+  `delta`, `trend`, `fracdiff`, a lagged `regression` and the `regression` spread funcs (`residual` / `residualZ` /
+  `ar1` / `halfLife` / `adf`) read the window in one direction and are rejected, as is the
   general form (`lift` + `summarize`), which reads the past window only.
 - **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
   latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
@@ -2986,7 +3010,7 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail (`ewma` and the path
   summaries are running states and keep none). Only the operators that re-read their window — `runLength` /
-  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression` or one of its rank funcs,
+  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression` or one of its rank / spread funcs,
   `weightBy` — without `maxAge` or `maxEvents`, and any window with a `filter` but no `maxAge`, read the key's
   full history, and they keep only the fields they read for it (the history is trimmed per field, so the
   other columns' fields still leave with their own windows, though each retained row keeps a ~40-byte entry

@@ -1347,7 +1347,7 @@ public class FeatureTransformTest {
                       scope: sequence
                       entity: seller
                       ops:
-                        - {type: regression, field: final_price, against: start_price, funcs: [beta, corr, spearman, kendall]}
+                        - {type: regression, field: final_price, against: start_price, funcs: [beta, corr, spearman, kendall, residualZ, ar1, halfLife, adf]}
                         - {type: fracdiff, field: start_price, d: 1, k: 2}
                 """;
         final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
@@ -1378,6 +1378,12 @@ public class FeatureTransformTest {
                         // ranks x (2, 3, 1), y (3, 1, 2): Spearman -1 / 2; of the three pairs one is concordant, two discordant
                         Assertions.assertEquals(-0.5, row.getAsDouble("f_pair_all_final_price_vs_start_price_spearman"), 1e-12);
                         Assertions.assertEquals(-1.0 / 3, row.getAsDouble("f_pair_all_final_price_vs_start_price_kendall"), 1e-12);
+                        // the spread of the three pairs (numpy): its latest value over the residual standard error, the lag-1
+                        // regression of the residuals (below 0: no half-life); the Dickey-Fuller statistic needs four pairs
+                        Assertions.assertEquals(-0.63500063500095127, row.getAsDouble("f_pair_all_final_price_vs_start_price_residualZ"), 1e-9);
+                        Assertions.assertEquals(-0.027027027027027323, row.getAsDouble("f_pair_all_final_price_vs_start_price_ar1"), 1e-9);
+                        Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_halfLife"));
+                        Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_adf"));
                     }
                     case "C/s1" -> {
                         // two pairs: a line through (100, 150) and (200, 0)
@@ -1386,6 +1392,7 @@ public class FeatureTransformTest {
                         Assertions.assertEquals(200.0 - 100.0, row.getAsDouble("f_pair_all_start_price_fracdiff1"), 1e-9);
                         Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_spearman"), 1e-12);
                         Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_kendall"), 1e-12);
+                        for (final String f : List.of("residualZ", "ar1", "halfLife", "adf")) Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_" + f), f + ": two pairs leave no spread");
                     }
                     case "A/s1", "A/s2", "B/s1", "C/s2" -> {
                         Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_beta"), id + ": fewer than two pairs");

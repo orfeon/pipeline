@@ -418,6 +418,23 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNotNull(new SequenceEvaluator(List.of(beta)).summaryOf(beta), "the moment funcs stay incremental");
         Assertions.assertNull(SequenceEvaluator.unboundedReason(kendall), "bounded by maxAge");
         Assertions.assertNotNull(column(ranks, "recent_n5_final_price_vs_start_price_spearman"));
+        // the spread funcs (Cointegration): the same pairs, scan-only like the rank funcs
+        final FeaturePlan spread = compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [residual, residualZ, ar1, halfLife, adf]}"));
+        Assertions.assertFalse(spread.getDiagnostics().hasErrors(), spread::describe);
+        for (final String f : Cointegration.FUNCS) Assertions.assertNotNull(column(spread, "recent_365d_final_price_vs_start_price_" + f), f);
+        final OutputColumn halfLife = column(spread, "recent_365d_final_price_vs_start_price_halfLife");
+        Assertions.assertEquals("halfLife", halfLife.getCoordinates().get("func"));
+        Assertions.assertNull(new SequenceEvaluator(List.of(halfLife)).summaryOf(halfLife), "scan-only");
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(halfLife), "bounded by maxAge");
+        Assertions.assertFalse(hasCode(spread, "sequence.regression.func"), "five pairs: every spread func can read");
+        // a maxEvents window too short for the spread: a warning naming the funcs that are always null (adf needs four pairs, the others three)
+        Assertions.assertTrue(spec.contains("maxEvents: 5"));
+        final FeaturePlan starvedAdf = compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [ar1, adf]}"));
+        Assertions.assertFalse(starvedAdf.getDiagnostics().hasErrors(), starvedAdf::describe);
+        Assertions.assertTrue(starvedAdf.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.regression.func") && m.message().startsWith("adf is always null")), starvedAdf::describe);
+        final FeaturePlan starved = compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, lag: 1, funcs: [residualZ, halfLife]}"));
+        Assertions.assertTrue(starved.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.regression.func") && m.message().startsWith("residualZ / halfLife are always null")), starved::describe);
+        Assertions.assertFalse(hasCode(compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [ar1, beta]}")), "sequence.regression.func"));
         Assertions.assertEquals("0.75", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry").getCoordinates().get("q"));
         Assertions.assertEquals("0.9", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry0p9").getCoordinates().get("q"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 0.4}")), "sequence.regression.q"));
@@ -4806,6 +4823,9 @@ public class FeaturePlanCompilerTest {
             Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e + "\n" + bad.describe());
         }
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lag, "- {type: regression, field: final_price, against: start_price, lag: 1}")), "sequence.direction.op"));
+        // the spread funcs read the residuals in time order: the mirrored replay would reverse them
+        final FeaturePlan spread = compile(SOURCES, spec.replace(lag, "- {type: regression, field: final_price, against: start_price, funcs: [beta, ar1]}"));
+        Assertions.assertTrue(hasCode(spread, "sequence.direction.op"), spread::describe);
         final FeaturePlan sameEvent = compile(SOURCES, spec.replace(lag, lag + "\n      - {type: regression, field: final_price, against: start_price}"));
         Assertions.assertFalse(sameEvent.getDiagnostics().hasErrors(), sameEvent::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("up: 0.05, down: -0.05", "up: -0.05")), "sequence.barrier.levels"));
