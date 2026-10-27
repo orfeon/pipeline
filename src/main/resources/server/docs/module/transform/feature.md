@@ -364,8 +364,9 @@ shrinkage scale:
   `quadrantAsymmetry` sort the window, the spread funcs are two passes over it): bound it with `maxAge` or
   `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
   only its last `k` events.
-- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
-  `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
+- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func` (unknown: error; a
+  `maxEvents` window whose `maxEvents − lag` pairs cannot reach three — four for `adf` — makes the spread funcs
+  always null: warning), `sequence.regression.lag`, `sequence.regression.q` (outside (0.5, 1): error; declared without
   `quadrantAsymmetry` among the funcs: warning; a `maxEvents` window whose `maxEvents − lag` pairs can never fill a
   corner: warning), `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 

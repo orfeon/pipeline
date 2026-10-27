@@ -1938,6 +1938,17 @@ public final class FeaturePlanCompiler {
                                         + (lag > 0 ? " with lag " + lag : "") + ": its corner needs (1 - q) * pairs >= " + RankDependence.MIN_TAIL
                                         + " (q " + q + " needs " + (int) Math.ceil(RankDependence.MIN_TAIL / (1 - q) - 1e-9) + " pairs) - lower q or lengthen the window");
                             }
+                            // a maxEvents window holds at most maxEvents − lag pairs: a spread func that can never see three of them (adf four)
+                            // is a column of nulls
+                            if (window.maxEvents != null) {
+                                final int pairs = window.maxEvents - lag;
+                                final List<String> starved = funcs.stream().filter(Cointegration.FUNCS::contains)
+                                        .filter(f -> pairs < (Cointegration.ADF.equals(f) ? 4 : 3)).toList();
+                                if (!starved.isEmpty()) {
+                                    diagnostics.warning("sequence.regression.func", loc, String.join(" / ", starved) + (starved.size() == 1 ? " is" : " are") + " always null over a maxEvents "
+                                            + window.maxEvents + " window" + (lag > 0 ? " with lag " + lag : "") + ": the spread needs three pairs (adf four) - lengthen the window");
+                                }
+                            }
                             final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
                             for (final String func : funcs) {
                                 if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {

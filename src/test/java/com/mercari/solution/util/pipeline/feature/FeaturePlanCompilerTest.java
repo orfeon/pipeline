@@ -426,6 +426,15 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("halfLife", halfLife.getCoordinates().get("func"));
         Assertions.assertNull(new SequenceEvaluator(List.of(halfLife)).summaryOf(halfLife), "scan-only");
         Assertions.assertNull(SequenceEvaluator.unboundedReason(halfLife), "bounded by maxAge");
+        Assertions.assertFalse(hasCode(spread, "sequence.regression.func"), "five pairs: every spread func can read");
+        // a maxEvents window too short for the spread: a warning naming the funcs that are always null (adf needs four pairs, the others three)
+        Assertions.assertTrue(spec.contains("maxEvents: 5"));
+        final FeaturePlan starvedAdf = compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [ar1, adf]}"));
+        Assertions.assertFalse(starvedAdf.getDiagnostics().hasErrors(), starvedAdf::describe);
+        Assertions.assertTrue(starvedAdf.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.regression.func") && m.message().startsWith("adf is always null")), starvedAdf::describe);
+        final FeaturePlan starved = compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, lag: 1, funcs: [residualZ, halfLife]}"));
+        Assertions.assertTrue(starved.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.regression.func") && m.message().startsWith("residualZ / halfLife are always null")), starved::describe);
+        Assertions.assertFalse(hasCode(compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [ar1, beta]}")), "sequence.regression.func"));
         Assertions.assertEquals("0.75", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry").getCoordinates().get("q"));
         Assertions.assertEquals("0.9", column(ranks, "recent_365d_final_price_vs_start_price_quadrantAsymmetry0p9").getCoordinates().get("q"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [quadrantAsymmetry], q: 0.4}")), "sequence.regression.q"));
