@@ -125,6 +125,7 @@ public class GroupOpsTest {
                     ops:
                       - {type: svd, fields: [start_price, quantity, model_score], rank: 2, funcs: [scores, residual, residualNorm, absorption], as: pc}
                       - {type: svd, fields: [start_price, quantity], standardize: true}
+                      - {type: svd, fields: [start_price, quantity]}
                 """;
         final FeaturePlan plan = compile(SPEC + block);
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -145,12 +146,16 @@ public class GroupOpsTest {
         Assertions.assertEquals("residualNorm", plan.getColumn("shape_pc_residnorm").getCoordinates().get("func"));
         Assertions.assertNull(plan.getColumn("shape_pc_residnorm").getCoordinates().get("index"));
         Assertions.assertEquals("absorption", plan.getColumn("shape_pc_absorption").getCoordinates().get("func"));
-        // the default: rank 1, scores, the fields joined as the name
-        final OutputColumn plain = plan.getColumn("shape_start_price_quantity_0");
+        // the default: rank 1, scores, the fields joined as the name; standardize is in the name (`_z`), so the op with it
+        // and the one without over the same fields are two sets of columns
+        final OutputColumn plain = plan.getColumn("shape_start_price_quantity_z_0");
         Assertions.assertNotNull(plain, plan::describe);
         Assertions.assertEquals("1", plain.getCoordinates().get("rank"));
         Assertions.assertEquals("true", plain.getCoordinates().get("standardize"));
         Assertions.assertEquals(OutputColumn.Status.staticSafe, plain.getStatus());
+        Assertions.assertNotNull(plan.getColumn("shape_start_price_quantity_0"), plan::describe);
+        Assertions.assertNull(plan.getColumn("shape_start_price_quantity_0").getCoordinates().get("standardize"));
+        Assertions.assertFalse(hasCode(plan, "column.duplicate"), plan::describe);
         // linear in the group size: no cost info of its own (the one in the plan is the harville block's)
         Assertions.assertEquals(compile(SPEC).getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count(),
                 plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count());

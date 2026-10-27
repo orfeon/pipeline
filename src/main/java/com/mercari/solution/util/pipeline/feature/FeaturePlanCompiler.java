@@ -1225,7 +1225,9 @@ public final class FeaturePlanCompiler {
         if (def.excludeSelf) {
             diagnostics.warning("context.svd.excludeSelf", loc, "excludeSelf has no effect on svd: the group's components are fitted on every row (a fit per left-out row would orient each row's axes apart)");
         }
-        final String base = def.name + "_" + (op.as != null ? op.as : String.join("_", names));
+        // standardize changes every readout, so it is in the name (`_z`: of the standardized fields, as the covariance op
+        // names its eigenvalue readouts): an op with it and one without over the same fields do not collide
+        final String base = def.name + "_" + (op.as != null ? op.as : String.join("_", names)) + (op.standardize ? "_z" : "");
         final Map<String, String> shared = new LinkedHashMap<>();
         shared.put("fields", String.join(",", canonical));
         shared.put("rank", Integer.toString(rank));

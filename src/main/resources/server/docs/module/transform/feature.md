@@ -2222,7 +2222,7 @@ Three context ops fit a small model over the rows of the group and hand each row
   scope: context
   context: session
   ops:
-    - {type: svd, fields: [log_market, quantity, model_score], rank: 2, standardize: true, funcs: [scores, residualNorm], as: pc}   # shape_pc_0 / shape_pc_1 / shape_pc_residnorm
+    - {type: svd, fields: [log_market, quantity, model_score], rank: 2, standardize: true, funcs: [scores, residualNorm], as: pc}   # shape_pc_z_0 / shape_pc_z_1 / shape_pc_z_residnorm
 ```
 
 - **`residualize`** regresses `field` on the `against` fields (one name or a list; input fields or columns),
@@ -2263,7 +2263,9 @@ Three context ops fit a small model over the rows of the group and hand each row
   correlation matrix's components, for fields of unlike scale) and projects every row on the leading `rank`
   principal components of the group (default 1, at most the number of fields): a PCA **per group**, fitted on the
   rows of that group alone, where the population `svd` fits one on the whole input. Funcs (default `[scores]`):
-  `scores` — one column per component, `<name>_<as | fields joined>_0` carrying the most variance, each component
+  `scores` — one column per component, `<name>_<as | fields joined>_0` carrying the most variance (`_z` after the
+  segment under `standardize`, as the sequence `covariance` names its standardized readouts: an op with it and one
+  without over the same fields are two sets of columns), each component
   oriented so its largest loading is positive — the first field's on a tie, as in a group of two standardized
   rows where every loading has the same size (the same field dominating two groups gives their scores one sign);
   `residual` — what the components do not explain of the row, one column per field (`_resid_<field>`) in the

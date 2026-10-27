@@ -230,10 +230,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   Work shared by several columns of one group is cached on the group's list identity (`caches(rows)`: `harvillePlaces` — every
   place of a `top` is one pass — and `groupSvd` — the columns of one svd op read one fit; a new group is a new list, so
   the caches cannot outlive it). The context `svd` (`GroupOps.svd`: the complete rows sorted by their values, folded into
-  `Svd.Moments`, `Svd.fit(rank, center, standardize)` per group — the same orientation rule as the population svd —,
+  `Svd.Moments`, `Svd.fit(rank, center, standardize)` per group — the population svd's orientation, re-read by
+  `GroupOps.orientation` so that loadings tied up to rounding (two standardized rows: every loading ±1/√k) let the FIRST
+  field decide the sign, not the last bits —,
   readouts scores / residual / residualNorm / absorption, null below `rank + 1` rows) is expanded by
   `expandContextSvd` BEFORE the per-field loop of `expandContext`, since its fields are one vector (one set of columns
-  per op, named `_0` / `_resid_<field>` / `_residnorm` / `_absorption` like the population svd's outputs); its
+  per op, named `_0` / `_resid_<field>` / `_residnorm` / `_absorption` like the population svd's outputs, the segment
+  ending in `_z` under `standardize`); its
   coordinates are `fields` / `rank` / `standardize` / `func` / `index`.
   `harville` with `shape` ≠ 1 is `GroupOps.racePlaces` (the gamma race model: rates calibrated per group by Newton on
   log θ against the input win probabilities, one Simpson pass in log time per step for the win probabilities, their
