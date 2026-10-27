@@ -162,6 +162,10 @@ public class FeatureSpec implements Serializable {
         public Double sigma;
         /** ratingProb: {@code sigma} given as a column name (the row's uncertainty) rather than a number. */
         public String sigmaField;
+        /** poissonProb: the column of the row's defence rating (the field is its attack). */
+        public String defence;
+        /** poissonProb: the totals an {@code over} readout is read against (default 2.5). */
+        public List<Double> over = new ArrayList<>();
         public Double beta;
         public Double tau;
         public Double kFactor;
@@ -1594,6 +1598,8 @@ public class FeatureSpec implements Serializable {
             op.sigma = doubleOf(o, "sigma", diagnostics, loc);
         }
         op.beta = doubleOf(o, "beta", diagnostics, loc);
+        op.defence = Json.string(o, "defence");
+        op.over = doubles(o, "over", diagnostics, loc);
         op.tau = doubleOf(o, "tau", diagnostics, loc);
         op.kFactor = doubleOf(o, "kFactor", diagnostics, loc);
         op.scale = doubleOf(o, "scale", diagnostics, loc);

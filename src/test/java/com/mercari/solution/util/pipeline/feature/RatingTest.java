@@ -1233,6 +1233,80 @@ public class RatingTest {
                 .replace("  - {name: seller, keys: [seller_id], minInterval: P30D}\n", "  - {name: seller, keys: [seller_id], minInterval: P30D}\n  - {name: agent, keys: [agent_id]}\n");
     }
 
+    /** The context {@code poissonProb}: the match read forward from a poisson rating's attack / defence columns - names, coordinates, defaults, diagnostics. */
+    @Test
+    public void testPoissonProbCompile() {
+        final String op = "      - {type: rating, field: final_price, context: session, order: descending, funcs: [mu, sigma, count, delta]}";
+        Assertions.assertTrue(SPEC.contains(op));
+        final String rated = SPEC.replace(op, "      - {type: rating, field: final_price, context: session, method: poisson, rho: -0.1, as: ps}");
+        final String block = """
+                  - name: match
+                    scope: context
+                    context: session
+                    ops:
+                      - {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, rho: -0.1, funcs: [expected, win, draw, lose, over, bothScore], over: [2.5, 3.5], as: p}
+                      - {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence}
+                """;
+        final FeaturePlan plan = compile(rated + block);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn win = plan.getColumn("match_p_win");
+        Assertions.assertNotNull(win, plan::describe);
+        Assertions.assertEquals("poissonProb", win.getOperator());
+        Assertions.assertEquals("skill_all_ps_attack", win.getCoordinates().get("field"));
+        Assertions.assertEquals("skill_all_ps_defence", win.getCoordinates().get("defence"));
+        Assertions.assertEquals("-0.1", win.getCoordinates().get("rho"));
+        Assertions.assertNull(win.getCoordinates().get("covariance"));
+        Assertions.assertNull(win.getCoordinates().get("offset"));
+        Assertions.assertEquals("win", win.getCoordinates().get("func"));
+        Assertions.assertNull(win.getCoordinates().get("threshold"));
+        Assertions.assertTrue(win.getInputs().containsAll(List.of("skill_all_ps_attack", "skill_all_ps_defence", "session_id")), win.getInputs().toString());
+        for (final String f : List.of("expected", "draw", "lose", "bothScore")) Assertions.assertNotNull(plan.getColumn("match_p_" + f), f);
+        Assertions.assertEquals("2.5", plan.getColumn("match_p_over2p5").getCoordinates().get("threshold"));
+        Assertions.assertEquals("over", plan.getColumn("match_p_over3p5").getCoordinates().get("func"));
+        // the defaults: expected / win / draw / lose under the field's name, independent scores, no over
+        for (final String f : List.of("expected", "win", "draw", "lose")) Assertions.assertNotNull(plan.getColumn("match_skill_all_ps_attack_" + f), f);
+        Assertions.assertNull(plan.getColumn("match_skill_all_ps_attack_over2p5"));
+        Assertions.assertNull(plan.getColumn("match_skill_all_ps_attack_bothScore"));
+        Assertions.assertNull(plan.getColumn("match_skill_all_ps_attack_win").getCoordinates().get("rho"));
+        // an over list implies the readout, at every line listed
+        final FeaturePlan implied = compile(rated + block.replace("funcs: [expected, win, draw, lose, over, bothScore], over: [2.5, 3.5]", "funcs: [win], over: [1.5]"));
+        Assertions.assertFalse(implied.getDiagnostics().hasErrors(), implied::describe);
+        Assertions.assertNotNull(implied.getColumn("match_p_over1p5"), implied::describe);
+        Assertions.assertNull(implied.getColumn("match_p_draw"));
+        // a declared 0 is the independent model (no clash with a covariance); the offset is an input of every column
+        final FeaturePlan shifted = compile(rated + block.replace("rho: -0.1, funcs", "rho: 0, covariance: 0.2, offset: start_price, funcs"));
+        Assertions.assertFalse(shifted.getDiagnostics().hasErrors(), shifted::describe);
+        Assertions.assertEquals("0.2", shifted.getColumn("match_p_win").getCoordinates().get("covariance"));
+        Assertions.assertNull(shifted.getColumn("match_p_win").getCoordinates().get("rho"));
+        Assertions.assertEquals("start_price", shifted.getColumn("match_p_win").getCoordinates().get("offset"));
+        Assertions.assertTrue(shifted.getColumn("match_p_over2p5").getInputs().contains("start_price"));
+        // excludeSelf has no effect: a warning
+        final FeaturePlan warned = compile(rated + block.replace("context: session\n", "context: session\n    excludeSelf: true\n"));
+        Assertions.assertFalse(warned.getDiagnostics().hasErrors(), warned::describe);
+        Assertions.assertTrue(hasCode(warned, "context.poissonProb.excludeSelf"), warned::describe);
+        Assertions.assertFalse(hasCode(plan, "context.poissonProb.excludeSelf"));
+        // the errors
+        final String one = "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, rho: -0.1, funcs: [expected, win, draw, lose, over, bothScore], over: [2.5, 3.5], as: p}";
+        Assertions.assertTrue(block.contains(one));
+        final String prefix = "- {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, ";
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put("- {type: poissonProb, field: skill_all_ps_attack, as: p}", "context.poissonProb.defence");
+        cases.put("- {type: poissonProb, field: skill_all_ps_attack, defence: category, as: p}", "context.poissonProb.defence");
+        cases.put("- {type: poissonProb, fields: [skill_all_ps_attack, skill_all_ps_mu], defence: skill_all_ps_defence, as: p}", "context.poissonProb.field");
+        cases.put(prefix + "rho: -0.1, covariance: 0.2, as: p}", "context.poissonProb.dependence");
+        cases.put(prefix + "rho: 1.5, as: p}", "context.poissonProb.dependence");
+        cases.put(prefix + "covariance: -1, as: p}", "context.poissonProb.dependence");
+        cases.put(prefix + "funcs: [exact], as: p}", "context.poissonProb.func");
+        cases.put(prefix + "over: [-1], as: p}", "context.poissonProb.over");
+        cases.put(prefix + "offset: start_price, offsetScale: log, as: p}", "context.poissonProb.offsetScale");
+        cases.put(prefix + "offset: category, as: p}", "context.poissonProb.offset");
+        for (final Map.Entry<String, String> e : cases.entrySet()) {
+            final FeaturePlan p = compile(rated + block.replace(one, e.getKey()));
+            Assertions.assertTrue(p.getDiagnostics().hasErrors(), e::getKey);
+            Assertions.assertTrue(hasCode(p, e.getValue()), () -> e.getKey() + "\n" + p.describe());
+        }
+    }
+
     private static FeaturePlan compileTeam(final String op) {
         return compileTeamSpec(teamSpec(op));
     }

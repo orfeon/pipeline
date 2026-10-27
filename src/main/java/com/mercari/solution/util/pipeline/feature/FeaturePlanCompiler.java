@@ -36,7 +36,7 @@ public final class FeaturePlanCompiler {
             "and", "or", "not", "null", "true", "false", "in", "is", "like", "between", "case", "when", "then", "else", "end");
     private static final Set<String> PARENT_CONTEXT_OPS = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
     /** Context ops whose column can be null although the field is present (a null offset, a group the solver declines). */
-    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "ratingProb", "residualize", "harville", "svd");
+    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "ratingProb", "poissonProb", "residualize", "harville", "svd");
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
@@ -543,7 +543,9 @@ public final class FeaturePlanCompiler {
             // the uncertainty column of a ratingProb: it may come from a block declared after this one
             if (op.sigmaField != null) refs.add(op.sigmaField);
             // ... and the offset of a ratingProb / softmax (the benchmark it is read against)
-            if (def.scope == Scope.context && List.of("ratingProb", "softmax").contains(op.type) && op.offset != null) refs.add(op.offset);
+            if (def.scope == Scope.context && List.of("ratingProb", "softmax", "poissonProb").contains(op.type) && op.offset != null) refs.add(op.offset);
+            // ... and the defence column of a poissonProb (the rating's other readout, from the same later block as its attack)
+            if (def.scope == Scope.context && "poissonProb".equals(op.type) && op.defence != null) refs.add(op.defence);
             // a rating's per-row inputs: the known shift of a row's performance and the rated player's drift
             if (def.scope == Scope.sequence && op.offset != null) refs.add(op.offset);
             if (op.tauBy != null) refs.add(op.tauBy);
@@ -1262,7 +1264,7 @@ public final class FeaturePlanCompiler {
      * places of a harville (one column each).
      */
     private record ContextOpParams(Map<String, String> coordinates, List<String> inputs, Duration validFor,
-                                   List<String> against, List<Integer> top) {}
+                                   List<String> against, List<Integer> top, List<Variant> variants) {}
 
     /**
      * Validates the parameters of one context op and resolves what its columns are built from: {@code softmax}
@@ -1274,6 +1276,7 @@ public final class FeaturePlanCompiler {
         final List<String> inputs = new ArrayList<>();
         final List<String> against = new ArrayList<>();
         List<Integer> top = List.of();
+        final List<Variant> variants = new ArrayList<>();
         Duration validFor = null;
         switch (op.type) {
             case "residualize" -> {
@@ -1390,6 +1393,81 @@ public final class FeaturePlanCompiler {
                     if (!"log".equals(offsetScale)) warnLogitOffset(op, ref, loc);
                 }
             }
+            case "poissonProb" -> {
+                // the field is a poisson rating's attack, defence the column of its defence: the two rows of the group are a
+                // match, each side's rate exp(attack_i - defence_j + offset_i) as the rating's update read it
+                final int fieldCount = !op.fields.isEmpty() ? op.fields.size() : def.inputs.size();
+                if (fieldCount > 1) {
+                    diagnostics.error("context.poissonProb.field", loc, "poissonProb reads one field (the row's attack rating) beside its defence column"
+                            + " (this op covers " + fieldCount + ") - declare one poissonProb op per rating");
+                    return null;
+                }
+                if (op.defence == null) {
+                    diagnostics.error("context.poissonProb.defence", loc, "poissonProb requires defence: the column of the row's defence rating (the poisson rating's defence readout beside the attack in field)");
+                    return null;
+                }
+                final Ref defence = resolve(op.defence);
+                if (defence == null || !OperatorCatalog.isNumeric(defence.type())) {
+                    diagnostics.error("context.poissonProb.defence", loc, "poissonProb defence must name a numeric column (the row's defence rating): " + op.defence
+                            + (defence == null ? "" : " is " + (defence.type() == null ? "unknown" : defence.type().getType())));
+                    return null;
+                }
+                coordinates.put("defence", defence.canonical());
+                inputs.add(defence.canonical());
+                // the offset is the shift of the log rate the rating read (ln of a rate ratio): one scale, no offsetScale
+                if (op.offsetScale != null) {
+                    diagnostics.error("context.poissonProb.offsetScale", loc, "poissonProb reads offset as the rating did - a shift of the row's log rate (a home advantage: ln of the rate ratio): offsetScale does not apply");
+                    return null;
+                }
+                if (op.offset != null) {
+                    final Ref ref = contextOffset(op, loc);
+                    if (ref == null) return null;
+                    coordinates.put("offset", ref.canonical());
+                    inputs.add(ref.canonical());
+                    validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
+                }
+                // the dependence of the two scores, as the rating declares it (a declared 0 is the independent model)
+                final double rho = op.rho == null ? 0d : op.rho, covariance = op.covariance == null ? 0d : op.covariance;
+                if (rho != 0d && covariance != 0d) {
+                    diagnostics.error("context.poissonProb.dependence", loc, "rho (Dixon-Coles) and covariance (bivariate Poisson) are two models of the dependence of a match's two scores: declare one (0 = independent)");
+                    return null;
+                }
+                if (!(Math.abs(rho) < 1)) {
+                    diagnostics.error("context.poissonProb.dependence", loc, "rho must lie in (-1, 1): " + op.rho);
+                    return null;
+                }
+                if (!(covariance >= 0) || Double.isInfinite(covariance)) {
+                    diagnostics.error("context.poissonProb.dependence", loc, "covariance must be a finite rate >= 0 (the mean of the scores' common part): " + op.covariance);
+                    return null;
+                }
+                if (rho != 0d) coordinates.put("rho", Double.toString(rho));
+                if (covariance != 0d) coordinates.put("covariance", Double.toString(covariance));
+                final List<String> funcs = new ArrayList<>(op.funcs.isEmpty() ? List.of("expected", "win", "draw", "lose") : op.funcs);
+                if (!op.over.isEmpty() && !funcs.contains("over")) funcs.add("over");
+                for (final String func : funcs) {
+                    if (!PoissonMatch.FUNCS.contains(func)) {
+                        diagnostics.error("context.poissonProb.func", loc, "unknown poissonProb func: " + func + " (available: " + String.join(" | ", PoissonMatch.FUNCS) + ")");
+                        return null;
+                    }
+                }
+                final List<Double> over = op.over.isEmpty() ? List.of(PoissonMatch.DEFAULT_OVER) : op.over;
+                for (final Double line : over) {
+                    if (line == null || !(line >= 0) || line.isInfinite()) {
+                        diagnostics.error("context.poissonProb.over", loc, "over lists the totals a match must exceed (finite numbers >= 0; 2.5 reads three or more): " + op.over);
+                        return null;
+                    }
+                }
+                if (def.excludeSelf) {
+                    diagnostics.warning("context.poissonProb.excludeSelf", loc, "excludeSelf has no effect on poissonProb (the row is one side of its own match)");
+                }
+                for (final String func : funcs) {
+                    if ("over".equals(func)) {
+                        for (final Double line : over) variants.add(new Variant("_over" + number(line), Schema.FieldType.FLOAT64, Map.of("func", func, "threshold", Double.toString(line))));
+                    } else {
+                        variants.add(new Variant("_" + func, Schema.FieldType.FLOAT64, Map.of("func", func)));
+                    }
+                }
+            }
             case "softmax" -> {
                 if (op.offset != null) {
                     final Ref ref = contextOffset(op, loc);
@@ -1439,7 +1517,7 @@ public final class FeaturePlanCompiler {
             }
             default -> { }
         }
-        return new ContextOpParams(coordinates, inputs, validFor, against, top);
+        return new ContextOpParams(coordinates, inputs, validFor, against, top, variants);
     }
 
     /**
@@ -1519,6 +1597,7 @@ public final class FeaturePlanCompiler {
         if (!params.top().isEmpty()) {
             return params.top().stream().map(k -> new Variant("_harville_top" + k, Schema.FieldType.FLOAT64, Map.of("top", Integer.toString(k)))).toList();
         }
+        if (!params.variants().isEmpty()) return params.variants();
         return List.of(new Variant("_" + op.type, operator.outputFor(ref.type()), Map.of()));
     }
 

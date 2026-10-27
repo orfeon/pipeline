@@ -223,7 +223,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
   `softmax`, `ratingProb` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
   probability space with a max-shift; `ratingProb` = the Plackett-Luce contest read forward, `exp(mu / c)` normalised with
-  `c² = Σ (sigma² + beta²)` over the group's active rows — coordinates `sigma` (column, optional) and `beta`; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
+  `c² = Σ (sigma² + beta²)` over the group's active rows — coordinates `sigma` (column, optional) and `beta`; `poissonProb` = the poisson
+  rating's match read forward (`PoissonMatch`: the Skellam difference law summed over the Poisson masses, Dixon–Coles as one tilt of the four
+  low-score cells, bivariate Poisson as a common part that cancels in the difference and doubles in the total) over the two rated rows of the
+  group — coordinates `defence`, `offset`, `rho` / `covariance`, `func`, `threshold`; one model per op and group (`poissonCache`), the sides
+  ordered by rate so the bits do not depend on the arrival order; `variants` of `ContextOpParams` carry its per-func columns; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
   `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
   group solvers `residualize` / `harville` / `svd` go through `solve(name, plan, rows)` → `GroupOps` (pure
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.

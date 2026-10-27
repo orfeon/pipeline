@@ -108,6 +108,75 @@ public class ContextEvaluatorTest {
         }
     }
 
+    /** poissonProb: a group of two rated rows is a match every column reads from one model; one or three rows, or a side without a rating, read null. */
+    @Test
+    public void testPoissonProbColumns() {
+        final java.util.List<OutputColumn> columns = new java.util.ArrayList<>();
+        for (final String[] f : new String[][]{{"expected", null}, {"win", null}, {"draw", null}, {"lose", null}, {"over", "2.5"}, {"bothScore", null}}) {
+            final OutputColumn c = new OutputColumn();
+            c.canonicalName = "m_" + f[0];
+            c.scope = FeatureSpec.Scope.context;
+            c.operator = "poissonProb";
+            c.coordinates.put("field", "attack");
+            c.coordinates.put("defence", "defence");
+            c.coordinates.put("offset", "home");
+            c.coordinates.put("rho", "-0.1");
+            c.coordinates.put("func", f[0]);
+            if (f[1] != null) c.coordinates.put("threshold", f[1]);
+            columns.add(c);
+        }
+        final ContextEvaluator evaluator = new ContextEvaluator(columns);
+        evaluator.setup();
+        final java.util.List<java.util.Map<String, Object>> rows = new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, 0.2), match(-0.1, 0.25, 0d)));
+        evaluator.evaluate(rows);
+        // the first row's rate exp(0.3 - 0.25 + 0.2) = exp(0.25), the second's exp(-0.1 - 0.1); the model reads the smaller rate as side 0
+        final PoissonMatch reference = PoissonMatch.of(Math.exp(-0.2), Math.exp(0.25), -0.1, 0d);
+        Assertions.assertEquals(reference.expected(1), (Double) rows.get(0).get("m_expected"), 0d);
+        Assertions.assertEquals(reference.expected(0), (Double) rows.get(1).get("m_expected"), 0d);
+        Assertions.assertEquals(reference.win(1), (Double) rows.get(0).get("m_win"), 0d);
+        Assertions.assertEquals(reference.win(0), (Double) rows.get(1).get("m_win"), 0d);
+        Assertions.assertEquals(reference.lose(1), (Double) rows.get(0).get("m_lose"), 0d);
+        Assertions.assertEquals(reference.draw(), (Double) rows.get(0).get("m_draw"), 0d);
+        Assertions.assertEquals(reference.draw(), (Double) rows.get(1).get("m_draw"), 0d);
+        Assertions.assertEquals(reference.over(2.5), (Double) rows.get(0).get("m_over"), 0d);
+        Assertions.assertEquals(reference.bothScore(), (Double) rows.get(1).get("m_bothScore"), 0d);
+        Assertions.assertEquals((Double) rows.get(0).get("m_win"), (Double) rows.get(1).get("m_lose"), 0d);
+        Assertions.assertEquals(1d, (Double) rows.get(0).get("m_win") + (Double) rows.get(0).get("m_draw") + (Double) rows.get(0).get("m_lose"), 1e-12);
+        Assertions.assertTrue((Double) rows.get(0).get("m_win") > (Double) rows.get(1).get("m_win"), "the higher rate is the favourite");
+        // the arrival order: the same two rows the other way round read the same bits
+        final java.util.List<java.util.Map<String, Object>> reversed = new java.util.ArrayList<>(java.util.List.of(match(-0.1, 0.25, 0d), match(0.3, 0.1, 0.2)));
+        evaluator.evaluate(reversed);
+        for (final String f : java.util.List.of("m_expected", "m_win", "m_draw", "m_lose", "m_over", "m_bothScore")) {
+            Assertions.assertEquals(rows.get(0).get(f), reversed.get(1).get(f), f);
+            Assertions.assertEquals(rows.get(1).get(f), reversed.get(0).get(f), f);
+        }
+        // no match: a group of one, of three rated rows, a side without a defence, a side without the offset that is named
+        for (final java.util.List<java.util.Map<String, Object>> group : java.util.List.of(
+                new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, 0.2))),
+                new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, 0.2), match(-0.1, 0.25, 0d), match(0d, 0d, 0d))),
+                new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, 0.2), match(-0.1, null, 0d))),
+                new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, null), match(-0.1, 0.25, 0d))))) {
+            evaluator.evaluate(group);
+            for (final java.util.Map<String, Object> row : group) {
+                for (final String f : java.util.List.of("m_expected", "m_win", "m_over")) Assertions.assertNull(row.get(f), f);
+            }
+        }
+        // a third row without a rating is not a side: the two rated rows are still a match
+        final java.util.List<java.util.Map<String, Object>> withSpectator = new java.util.ArrayList<>(java.util.List.of(match(0.3, 0.1, 0.2), match(null, null, null), match(-0.1, 0.25, 0d)));
+        evaluator.evaluate(withSpectator);
+        Assertions.assertEquals(rows.get(0).get("m_win"), withSpectator.get(0).get("m_win"));
+        Assertions.assertNull(withSpectator.get(1).get("m_win"));
+        Assertions.assertEquals(rows.get(1).get("m_win"), withSpectator.get(2).get("m_win"));
+    }
+
+    private static java.util.Map<String, Object> match(final Double attack, final Double defence, final Double home) {
+        final java.util.Map<String, Object> row = new java.util.HashMap<>();
+        row.put("attack", attack);
+        row.put("defence", defence);
+        row.put("home", home);
+        return row;
+    }
+
     private static OutputColumn ratingProb(final String name, final String offsetScale) {
         final OutputColumn c = new OutputColumn();
         c.canonicalName = name;

@@ -7,6 +7,7 @@ import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.feature.Copula;
+import com.mercari.solution.util.pipeline.feature.PoissonMatch;
 import com.mercari.solution.util.pipeline.feature.Rating;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -4720,6 +4721,11 @@ public class FeatureTransformTest {
                   context: session
                   inputs: [skill_all_elo_mu]
                   ops: [gapToBest]
+                - name: match
+                  scope: context
+                  context: session
+                  ops:
+                    - {type: poissonProb, field: skill_all_ps_attack, defence: skill_all_ps_defence, rho: -0.1, funcs: [expected, win, draw, over], as: p}
             """.replaceAll("(?m)^", "    ");
 
     /**
@@ -4818,6 +4824,35 @@ public class FeatureTransformTest {
                 if (id.equals("C/s2")) {
                     Assertions.assertEquals(0d, row.getAsDouble("f_skill_all_ps_attack"), 1e-9);
                     Assertions.assertEquals(-1d / 6, row.getAsDouble("f_skill_all_ps_defence"), 1e-9);
+                }
+                // poissonProb: the match read forward from the ratings the row sees — A: both sides at the prior (rates 1 and 1); C: s1 at
+                // exp(1/6 − (−1/6)) against s2 at exp(0 − 0); B and D are sessions of one row, no match (null)
+                final PoissonMatch match = switch (id) {
+                    case "A/s1", "A/s2" -> PoissonMatch.of(1d, 1d, -0.1, 0d);
+                    case "C/s1", "C/s2" -> PoissonMatch.of(Math.exp(1d / 3), 1d, -0.1, 0d);
+                    default -> null;
+                };
+                if (match == null) {
+                    for (final String f : List.of("expected", "win", "draw", "over2p5")) Assertions.assertNull(row.getPrimitiveValue("f_match_p_" + f), id + " " + f);
+                } else {
+                    final int side = player.equals("s1") ? 0 : 1;
+                    Assertions.assertEquals(match.expected(side), row.getAsDouble("f_match_p_expected"), 1e-12, id);
+                    Assertions.assertEquals(match.win(side), row.getAsDouble("f_match_p_win"), 1e-12, id);
+                    Assertions.assertEquals(match.draw(), row.getAsDouble("f_match_p_draw"), 1e-12, id);
+                    Assertions.assertEquals(match.over(2.5), row.getAsDouble("f_match_p_over2p5"), 1e-12, id);
+                }
+                // numpy grid sums: the prior match under rho −0.1, and s1 at C
+                if (id.equals("A/s1")) {
+                    Assertions.assertEquals(1d, row.getAsDouble("f_match_p_expected"), 1e-12);
+                    Assertions.assertEquals(0.33221231039950322, row.getAsDouble("f_match_p_win"), 1e-12);
+                    Assertions.assertEquals(0.33557537920099367, row.getAsDouble("f_match_p_draw"), 1e-12);
+                    Assertions.assertEquals(0.32332358381693654, row.getAsDouble("f_match_p_over2p5"), 1e-12);
+                }
+                if (id.equals("C/s1")) {
+                    Assertions.assertEquals(1.3956124250860897, row.getAsDouble("f_match_p_expected"), 1e-12);
+                    Assertions.assertEquals(0.44756611481165703, row.getAsDouble("f_match_p_win"), 1e-12);
+                    Assertions.assertEquals(0.29559628796993959, row.getAsDouble("f_match_p_draw"), 1e-12);
+                    Assertions.assertEquals(0.42914450375423718, row.getAsDouble("f_match_p_over2p5"), 1e-12);
                 }
                 // two sellers: the mean over the opponents is the one opponent — the plackettLuce value of a two-player contest
                 Assertions.assertEquals(((Number) expected[0]).doubleValue(), row.getAsDouble("f_skill_all_btm_mu"), 1e-9, id);

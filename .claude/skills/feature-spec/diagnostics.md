@@ -47,7 +47,7 @@ not expand because another block failed).
 | `contexts.invalid` / `contexts.duplicate` | error | same for contexts |
 | `baselines.invalid` | error | each baseline needs `name` and `expr` |
 | `baselines.context` | error | the baseline's `context` is unknown |
-| `baselines.expr.op` | error | the baseline expression calls a context op that cannot be called that way (`softmax`, `ratingProb`, `residualize`, `harville`, `svd`, `shuffle` take parameters of their own — declare them as ops of a context block), or calls one without naming the `context` it is computed over |
+| `baselines.expr.op` | error | the baseline expression calls a context op that cannot be called that way (`softmax`, `ratingProb`, `poissonProb`, `residualize`, `harville`, `svd`, `shuffle` take parameters of their own — declare them as ops of a context block), or calls one without naming the `context` it is computed over |
 | `baselines.declaredMarket` | error | a baseline reads a `market` field with `evidence: declared`; baselines must be time-consistent (`measured`, or `allowDeclared`) |
 | `fit.mode` | error | `expanding`, `static`, `fold` or `forward` |
 | `fit.blocks` / `fit.blocks.bucket` / `fit.blocks.size` / `fit.blocks.field` / `fit.minBlocks` | error | forward blocks: `{bucket: year \| quarter \| month \| week \| day}` or `{size: <positive duration>}` (not both); `field` must be `time.field`; `minBlocks` ≥ 1 |
@@ -163,6 +163,11 @@ not expand because another block failed).
 | `context.ratingProb.offset` / `.offsetScale` | error | `offset` must be a `baselines[].name` or a numeric column (the benchmark, read in probability space; an unknown name is `reference.unresolved`); `offsetScale` is `probability` or `log`, and needs an `offset` (`offsetUnits` is the rating op's parameter: use `offsetScale: log`) |
 | `context.ratingProb.offsetScale` | warning | the offset is the column a rating reads with `offsetUnits: logit`, but is read here in probability space: declare `offsetScale: log` (every negative `ln p` reads null otherwise) |
 | `context.ratingProb.excludeSelf` | warning | `excludeSelf` has no effect on ratingProb (the row is part of its own contest) |
+| `context.poissonProb.field` / `.defence` | error | `poissonProb` reads one `field` (the row's attack rating) beside its `defence` column (required, numeric: the matching `defence` readout) — one op per rating |
+| `context.poissonProb.offset` / `.offsetScale` | error | `offset` must be a `baselines[].name` or a numeric column (the row's log-rate shift, the column the rating read as its `offset`); `offsetScale` does not apply (the scale is the rating's) |
+| `context.poissonProb.dependence` | error | `rho` in (−1, 1), `covariance` a finite rate ≥ 0, not both non-zero (a declared 0 is the independent model) — declare what the rating declared |
+| `context.poissonProb.func` / `.over` | error | funcs are expected / win / draw / lose / over / bothScore; `over` lists finite lines ≥ 0 (2.5 = three or more) |
+| `context.poissonProb.excludeSelf` | warning | `excludeSelf` has no effect on poissonProb (the row is one side of its own match) |
 | `context.residualize.against` | error | `residualize` needs `against` — one numeric field / column or a list of distinct ones, none of them the field itself (the key is `against`; a bare `on` is a YAML boolean). A regressor produced by the same block must be declared **before** the `residualize` op; one declared later is not yet a column |
 | `context.harville.top` / `.discount` / `context.op.maxGroupSize` | error | `top` lists distinct integer places in 1..3; `discount` at most two positive exponents (2nd, 3rd place); `maxGroupSize` ≥ 2 |
 | `context.harville.shape` | error | `shape` is a number in [0.05, 1000] (outside it the race model cannot be solved), and it is not combined with `discount` — the two correct the same bias: declare one of them |
