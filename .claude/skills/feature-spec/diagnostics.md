@@ -166,9 +166,11 @@ not expand because another block failed).
 | `context.residualize.against` | error | `residualize` needs `against` — one numeric field / column or a list of distinct ones, none of them the field itself (the key is `against`; a bare `on` is a YAML boolean). A regressor produced by the same block must be declared **before** the `residualize` op; one declared later is not yet a column |
 | `context.harville.top` / `.discount` / `context.op.maxGroupSize` | error | `top` lists distinct integer places in 1..3; `discount` at most two positive exponents (2nd, 3rd place); `maxGroupSize` ≥ 2 |
 | `context.harville.shape` | error | `shape` is a number in [0.05, 1000] (outside it the race model cannot be solved), and it is not combined with `discount` — the two correct the same bias: declare one of them |
-| `context.op.maxGroupSize` | warning | `maxGroupSize` on `residualize`: the key is read by `harville` only and is ignored |
+| `context.op.maxGroupSize` | warning | `maxGroupSize` on `residualize` / `svd`: the key is read by `harville` only and is ignored |
 | `context.op.groupSolver` | info | a group solver runs on one worker: `harville` is quadratic (2nd place) / cubic (3rd) in the group size and a group with more than `maxGroupSize` valid rows reads null; with `shape` every group is calibrated numerically (milliseconds per group). `residualize` is linear in the group size with or without `excludeSelf` and raises no cost info |
 | `context.harville.excludeSelf` | warning | `excludeSelf` has no effect on harville |
+| `context.svd.fields` / `.rank` / `.func` | error | the context `svd` needs two or more distinct numeric `fields` (read together as one vector per row); `rank` in [1, the number of fields] (the parameter is `rank`, as for the population svd — `components` is the sequence covariance's); funcs are scores / residual / residualNorm / absorption |
+| `context.svd.excludeSelf` | warning | `excludeSelf` has no effect on the context `svd` (the group's components are fitted on every row) |
 | `context.shuffle.seed` | error | `shuffle` needs an integer `seed` |
 | `context.shuffle.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp are ordered by their input values only |
 

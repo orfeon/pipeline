@@ -87,6 +87,7 @@ public final class OperatorCatalog {
         register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
         register(Scope.context, "ratingProb", InputKind.numeric, F64, false, "the probability a rating model gives the row within the group: exp(mu / c) normalised over the group, c = sqrt(sum(sigma^2 + beta^2)) over the group (the Plackett-Luce contest of a rating); offset = a benchmark read in probability space like softmax's (offsetScale probability | log): w exp(mu / c) normalised");
         register(Scope.context, "residualize", InputKind.numeric, F64, false, "residual of the field regressed (with an intercept) on the 'against' fields over the rows of the group; excludeSelf fits on the other rows");
+        register(Scope.context, "svd", InputKind.numeric, F64, false, "principal components of the group: the rows as vectors over the op's fields (read together), centred - standardized: of the correlation matrix - and projected on the leading rank components fitted per group; funcs scores (one column per component, _0 the most variance) | residual (per field, in its units) | residualNorm | absorption (the variance share of the components); a row with a missing field reads null, a group with fewer than rank + 1 complete rows reads null");
         register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place) or the gamma race model (shape: Stern's gamma shape, 1 = Harville)");
         register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");
 
@@ -283,6 +284,9 @@ public final class OperatorCatalog {
      */
     public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2",
             RankDependence.SPEARMAN, RankDependence.KENDALL, RankDependence.QUADRANT_ASYMMETRY);
+
+    /** The funcs of the context {@code svd} op: the readouts of a group's principal components ({@code GroupOps.svd}). */
+    public static final List<String> CONTEXT_SVD_FUNCS = List.of("scores", "residual", "residualNorm", "absorption");
 
     /** The funcs of the sequence {@code covariance} op: the readouts of the {@link Summary.Covariance} family. */
     public static final List<String> COVARIANCE_FUNCS = List.of("absorption", "effectiveRank", "meanCorrelation", "logDet", "count");

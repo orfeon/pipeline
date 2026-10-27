@@ -2202,9 +2202,9 @@ level: a row expression, or the input of a model whose initial score is the mark
   expr: "ln(contest_pNet_ratingProb / market_share)"
 ```
 
-### Group solvers (context ops `residualize`, `harville`)
+### Group solvers (context ops `residualize`, `harville`, `svd`)
 
-Two context ops fit a small model over the rows of the group and hand each row its part of the solution:
+Three context ops fit a small model over the rows of the group and hand each row its part of the solution:
 
 ```yaml
 - name: neutral                     # what is left of the score once the group's dependence on the market is taken out
@@ -2218,6 +2218,11 @@ Two context ops fit a small model over the rows of the group and hand each row i
   ops:
     - {type: harville, field: prob_pWin_softmax, as: p, top: [2, 3], discount: [0.81, 0.65]}   # placed_p_harville_top2 / _top3
     - {type: harville, field: prob_pWin_softmax, as: race, top: [2, 3], shape: 2}            # the gamma race model (Stern) instead of the discount
+- name: shape                       # where each row sits on the group's main axes of variation
+  scope: context
+  context: session
+  ops:
+    - {type: svd, fields: [log_market, quantity, model_score], rank: 2, standardize: true, funcs: [scores, residualNorm], as: pc}   # shape_pc_0 / shape_pc_1 / shape_pc_residnorm
 ```
 
 - **`residualize`** regresses `field` on the `against` fields (one name or a list; input fields or columns),
@@ -2253,6 +2258,23 @@ Two context ops fit a small model over the rows of the group and hand each row i
   negative rows follow the conventions above, and rows of equal value read the same. `shape` is a number in
   [0.05, 1000] (outside it the race cannot be solved; at 1000 a running time spreads by 3% of its mean, the
   normal model in all but name). `shape` and `discount` are not combined (`context.harville.shape`).
+- **`svd`** reads two or more numeric `fields` **together** — the rows of the group as vectors over them — centres
+  them with the group's means (and divides by the group's standard deviations under `standardize: true`: the
+  correlation matrix's components, for fields of unlike scale) and projects every row on the leading `rank`
+  principal components of the group (default 1, at most the number of fields): a PCA **per group**, fitted on the
+  rows of that group alone, where the population `svd` fits one on the whole input. Funcs (default `[scores]`):
+  `scores` — one column per component, `<name>_<as | fields joined>_0` carrying the most variance, each component
+  oriented so its largest loading is positive (the same field dominating two groups gives their scores one sign);
+  `residual` — what the components do not explain of the row, one column per field (`_resid_<field>`) in the
+  field's units; `residualNorm` (`_residnorm`) — the Euclidean length of that residual, how atypical the row is for
+  the group's structure; `absorption` (`_absorption`) — the share of the group's variance the `rank` components
+  carry (1 with every field's worth kept), one value for the group. A row takes part when every field is present
+  (null otherwise, in every column: the readouts are over the same rows); a group needs `rank + 1` such rows or
+  every row reads null (with fewer the components pass through the points); a group without variance reads
+  scores 0 and no `absorption`. The result does not depend on the order the rows arrive in. `excludeSelf` has no
+  effect (`context.svd.excludeSelf`). The parameter is `rank`, as for the population svd (`components` is the
+  sequence `covariance`'s). Scores are in the fields' units (or standard deviations): read them relative to the
+  group's scale when groups differ in spread, or standardize.
 - **A residual does not remove its regressors from the model.** The residual is `field − a − b · against`
   within the group, so a model that is given the residual **and** `field` (or anything monotone in it within the
   group, such as its `zscore`) can rebuild `against`'s position in the group from the two. That is harmless when
@@ -2277,7 +2299,8 @@ Two context ops fit a small model over the rows of the group and hand each row i
   about 2 and 4 (Henery's normal model is the large-shape limit); start at `2`, and fit it against realised
   placings as you would the exponents. The price is compute: see *Cost*.
 - **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
-  without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
+  without `excludeSelf`), `svd` linear too (one k × k eigendecomposition per group and op, shared by its
+  columns), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
   in one `top` are one pass, not one per place. With `shape` the group is calibrated numerically (Newton on the
   rates, each step a quadrature pass of a few hundred nodes, quadratic in the group size): about 1–10 ms per group
   of eight to eighteen rows, so a million groups is an hour or more of worker CPU, spread over the workers the
@@ -2290,7 +2313,9 @@ Two context ops fit a small model over the rows of the group and hand each row i
 - Diagnostics: `context.residualize.against` (missing, non-numeric, repeated, or the field itself),
   `context.harville.top` (distinct integers in 1..3), `context.harville.discount` (at most two positive
   exponents), `context.harville.shape` (a number in [0.05, 1000]; not beside `discount`), `context.op.maxGroupSize`
-  (≥ 2; a warning on `residualize`).
+  (≥ 2; a warning on `residualize` / `svd`), `context.svd.fields` (two or more distinct numeric fields),
+  `context.svd.rank` (in [1, the number of fields]; `components` is not its name), `context.svd.func`,
+  `context.svd.excludeSelf` (warning).
 
 ### Array readouts (row, `type: vector`)
 

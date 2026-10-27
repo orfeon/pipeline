@@ -21,6 +21,8 @@ public class ContextEvaluator implements Serializable {
     private transient Map<String, Integer> places;
     private transient List<Map<String, Object>> cachedGroup;
     private transient Map<String, double[][]> harvilleCache;
+    /** The group's principal components per (fields, rank, standardize): the columns of one svd op read one fit. */
+    private transient Map<String, GroupOps.GroupSvd> svdCache;
 
     public ContextEvaluator(final List<OutputColumn> columns) {
         this.columns = columns;
@@ -62,7 +64,7 @@ public class ContextEvaluator implements Serializable {
             shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
             return;
         }
-        if (plan.residualize() != null || plan.harville() != null) {
+        if (plan.residualize() != null || plan.harville() != null || plan.svd() != null) {
             solve(c.canonicalName, plan, rows);
             return;
         }
@@ -104,25 +106,27 @@ public class ContextEvaluator implements Serializable {
      * plain row expression); the parameterised ops carry their own record and are dispatched on it.
      */
     private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression,
-                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb) {
+                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb, SvdColumn svd) {
 
         /** The ops whose reading is the same for every row of the group, so the group is read once. */
         private static final Set<String> GROUP_CONSTANT = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
 
         static Plan of(final String op, final String field, final boolean excludeSelf, final String value,
                        final ExpressionUtil.Expression expression) {
-            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null);
+            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null);
         }
 
-        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null); }
+        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null, null); }
 
-        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null); }
+        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null, null); }
 
-        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null); }
+        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null, null); }
 
-        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null); }
+        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null, null); }
 
-        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r); }
+        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r, null); }
+
+        Plan with(final SvdColumn s) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, s); }
 
         boolean groupConstant() {
             return !excludeSelf && (value != null || GROUP_CONSTANT.contains(op));
@@ -139,6 +143,14 @@ public class ContextEvaluator implements Serializable {
     private record RatingProb(String sigma, double beta, String offset, boolean logScale) {}
 
     private record Residualize(String[] against) {}
+
+    /**
+     * A column of the context {@code svd}: the fields the group's rows are vectors over, the components kept, the matrix
+     * fitted ({@code standardize}: the correlation's), what the column reads ({@code func}: scores / residual /
+     * residualNorm / absorption) and which component or channel ({@code index}); {@code key} names the fit the columns
+     * of one op share.
+     */
+    private record SvdColumn(String[] fields, int rank, boolean standardize, String func, int index, String key) {}
 
     /** {@code key} names the pass this column reads: the same field, discount, shape and bound are computed once per group ({@code shape} 1 = the Harville closed form). */
     private record Harville(int top, double[] discount, double shape, int maxGroupSize, String key) {}
@@ -171,6 +183,11 @@ public class ContextEvaluator implements Serializable {
             case "ratingProb" -> plan.with(new RatingProb(at.get("sigma"), Double.parseDouble(at.get("beta")), at.get("offset"),
                     "log".equals(at.get("offsetScale"))));
             case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
+            case "svd" -> {
+                final String fields = at.get("fields"), rank = at.get("rank"), standardize = at.getOrDefault("standardize", "false");
+                yield plan.with(new SvdColumn(split(fields), Integer.parseInt(rank), "true".equals(standardize), at.get("func"),
+                        at.containsKey("index") ? Integer.parseInt(at.get("index")) : -1, fields + "\u0000" + rank + "\u0000" + standardize));
+            }
             case "harville" -> {
                 final String discount = at.get("discount");
                 final int maxGroupSize = Integer.parseInt(at.get("maxGroupSize"));
@@ -359,6 +376,21 @@ public class ContextEvaluator implements Serializable {
             final double[][] x = new double[against.length][];
             for (int k = 0; k < against.length; k++) x[k] = channel(rows, against[k]);
             result = GroupOps.residualize(channel(rows, plan.field()), x, plan.excludeSelf());
+        } else if (plan.svd() != null) {
+            final SvdColumn column = plan.svd();
+            final GroupOps.GroupSvd svd = groupSvd(column, rows);
+            result = new double[rows.size()];
+            for (int i = 0; i < rows.size(); i++) {
+                // a row that took no part (a missing field) reads null whatever the readout: every column is over the same rows
+                final boolean fitted = svd.scores()[i] != null;
+                result[i] = switch (column.func()) {
+                    case "scores" -> fitted ? svd.scores()[i][column.index()] : Double.NaN;
+                    case "residual" -> fitted ? svd.residual()[i][column.index()] : Double.NaN;
+                    case "residualNorm" -> svd.residualNorm()[i];
+                    case "absorption" -> fitted ? svd.absorption() : Double.NaN;
+                    default -> throw new IllegalStateException("unknown svd readout: " + column.func());
+                };
+            }
         } else {
             result = harvillePlaces(plan, rows)[plan.harville().top() - 1];
         }
@@ -371,10 +403,7 @@ public class ContextEvaluator implements Serializable {
      * (only possible when {@link #setup()} has not seen every column) recomputes it.
      */
     private double[][] harvillePlaces(final Plan plan, final List<Map<String, Object>> rows) {
-        if (cachedGroup != rows) {
-            cachedGroup = rows;
-            harvilleCache = new HashMap<>();
-        }
+        caches(rows);
         final Harville harville = plan.harville();
         double[][] cached = harvilleCache.get(harville.key());
         if (cached == null || cached.length < harville.top()) {
@@ -385,6 +414,25 @@ public class ContextEvaluator implements Serializable {
             harvilleCache.put(harville.key(), cached);
         }
         return cached;
+    }
+
+    /** The group's principal components this column reads ({@link GroupOps#svd}), fitted once per group and (fields, rank, standardize). */
+    private GroupOps.GroupSvd groupSvd(final SvdColumn column, final List<Map<String, Object>> rows) {
+        caches(rows);
+        return svdCache.computeIfAbsent(column.key(), key -> {
+            final double[][] channels = new double[column.fields().length][];
+            for (int c = 0; c < channels.length; c++) channels[c] = channel(rows, column.fields()[c]);
+            return GroupOps.svd(channels, column.rank(), column.standardize());
+        });
+    }
+
+    /** The per-group caches, dropped the moment the group changes (a new group arrives as a new list). */
+    private void caches(final List<Map<String, Object>> rows) {
+        if (cachedGroup != rows) {
+            cachedGroup = rows;
+            harvilleCache = new HashMap<>();
+            svdCache = new HashMap<>();
+        }
     }
 
     /**

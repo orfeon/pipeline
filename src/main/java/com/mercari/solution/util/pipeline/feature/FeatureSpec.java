@@ -139,6 +139,8 @@ public class FeatureSpec implements Serializable {
         public Double shape;
         /** covariance: the leading eigenvalues {@code absorption} sums (default 1). */
         public Integer components;
+        /** context svd: the leading components the group's rows are projected on (default 1; the population svd's name for it). */
+        public Integer rank;
         /** covariance: read the eigenvalues of the correlation matrix rather than the covariance matrix. */
         public boolean standardize;
         /**
@@ -1572,6 +1574,7 @@ public class FeatureSpec implements Serializable {
         op.decayBy = Json.string(o, "decayBy");
         op.weightBy = Json.string(o, "weightBy");
         op.components = integerOf(o, "components", diagnostics, loc);
+        op.rank = integerOf(o, "rank", diagnostics, loc);
         if (o.has("standardize") && !o.get("standardize").isJsonNull()) {
             // a boolean only: `standardize: yes` is a string under YAML 1.2, which parseBoolean would read as false
             final JsonElement flag = o.get("standardize");

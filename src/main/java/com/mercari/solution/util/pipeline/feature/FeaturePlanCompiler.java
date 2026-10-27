@@ -36,7 +36,7 @@ public final class FeaturePlanCompiler {
             "and", "or", "not", "null", "true", "false", "in", "is", "like", "between", "case", "when", "then", "else", "end");
     private static final Set<String> PARENT_CONTEXT_OPS = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
     /** Context ops whose column can be null although the field is present (a null offset, a group the solver declines). */
-    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "ratingProb", "residualize", "harville");
+    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "ratingProb", "residualize", "harville", "svd");
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
@@ -1138,6 +1138,11 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("context.fields", loc, "op " + op.type + " requires 'fields' (or block-level 'inputs')");
                 continue;
             }
+            if ("svd".equals(op.type)) {
+                // the fields are read together, one vector per row: one set of columns per op, not one per field
+                expandContextSvd(def, op, fields, context, computeAt, loc);
+                continue;
+            }
             // the op's own parameters are validated once here — an op over three fields reports a bad one once
             final ContextOpParams params = validateContextOp(op, def, context, loc);
             if (params == null) continue;
@@ -1165,6 +1170,79 @@ public final class FeaturePlanCompiler {
                     finishContext(c, def, context, op);
                 }
             }
+        }
+    }
+
+    /**
+     * The context {@code svd}: the rows of the group as vectors over the op's fields, their principal components fitted
+     * per group ({@link GroupOps#svd}) — one set of columns per op, named by {@code as} or by the fields joined, as the
+     * population {@code svd} names its outputs: a score per component ({@code _0}, {@code _1}, ...), the residual per
+     * field ({@code _resid_<field>}), its norm ({@code _residnorm}) and the components' variance share
+     * ({@code _absorption}). Every column reads the same rows (those with every field present).
+     */
+    private void expandContextSvd(final FeatureDef def, final Op op, final List<String> fields, final ContextDef context,
+                                  final AvailableAt computeAt, final String loc) {
+        if (fields.size() < 2) {
+            diagnostics.error("context.svd.fields", loc, "svd reads two or more numeric fields together (fields: [a, b, ...] - the group's rows are vectors over them): " + fields.size() + " given");
+            return;
+        }
+        final List<String> canonical = new ArrayList<>(), names = new ArrayList<>();
+        for (final String field : fields) {
+            final Ref ref = resolve(field);
+            if (ref == null) return;
+            if (!OperatorCatalog.isNumeric(ref.type())) {
+                diagnostics.error("context.op.type", loc, "op svd expects numeric input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
+                return;
+            }
+            if (canonical.contains(ref.canonical())) {
+                diagnostics.error("context.svd.fields", loc, "svd lists '" + field + "' twice");
+                return;
+            }
+            canonical.add(ref.canonical());
+            names.add(displayName(field));
+        }
+        if (op.components != null) {
+            diagnostics.error("context.svd.rank", loc, "svd takes rank (the components the rows are projected on, as the population svd names it): components is the sequence covariance's parameter");
+            return;
+        }
+        final int rank = op.rank == null ? 1 : op.rank;
+        if (rank < 1 || rank > fields.size()) {
+            diagnostics.error("context.svd.rank", loc, "rank must be in [1, " + fields.size() + "] - the leading components the group's rows are projected on (at most the number of fields): " + op.rank);
+            return;
+        }
+        final List<String> funcs = op.funcs.isEmpty() ? List.of("scores") : op.funcs;
+        for (final String func : funcs) {
+            if (!OperatorCatalog.CONTEXT_SVD_FUNCS.contains(func)) {
+                diagnostics.error("context.svd.func", loc, "unknown svd func: " + func + " (available: " + String.join(" | ", OperatorCatalog.CONTEXT_SVD_FUNCS) + ")");
+                return;
+            }
+        }
+        if (op.maxGroupSize != null) diagnostics.warning("context.op.maxGroupSize", loc, "maxGroupSize is read by harville only: svd reads every row of the group");
+        if (def.excludeSelf) {
+            diagnostics.warning("context.svd.excludeSelf", loc, "excludeSelf has no effect on svd: the group's components are fitted on every row (a fit per left-out row would orient each row's axes apart)");
+        }
+        final String base = def.name + "_" + (op.as != null ? op.as : String.join("_", names));
+        final Map<String, String> shared = new LinkedHashMap<>();
+        shared.put("fields", String.join(",", canonical));
+        shared.put("rank", Integer.toString(rank));
+        if (op.standardize) shared.put("standardize", "true");
+        record Readout(String name, String func, int index) {}
+        final List<Readout> readouts = new ArrayList<>();
+        for (final String func : funcs) {
+            switch (func) {
+                case "scores" -> { for (int j = 0; j < rank; j++) readouts.add(new Readout(base + "_" + j, func, j)); }
+                case "residual" -> { for (int f = 0; f < fields.size(); f++) readouts.add(new Readout(base + "_resid_" + names.get(f), func, f)); }
+                case "residualNorm" -> readouts.add(new Readout(base + "_residnorm", func, -1));
+                default -> readouts.add(new Readout(base + "_" + func, func, -1));
+            }
+        }
+        for (final Readout r : readouts) {
+            final OutputColumn c = newColumn(def.name, Scope.context, op.type, r.name(), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.putAll(shared);
+            c.coordinates.put("func", r.func());
+            if (r.index() >= 0) c.coordinates.put("index", Integer.toString(r.index()));
+            for (final String field : fields) addSelfInput(c, field);
+            finishContext(c, def, context, op);
         }
     }
 

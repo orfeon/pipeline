@@ -9,10 +9,157 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
-/** The group solvers behind the context ops {@code residualize} and {@code harville}, and their compile contract. */
+/** The group solvers behind the context ops {@code residualize}, {@code harville} and {@code svd}, and their compile contract. */
 public class GroupOpsTest {
 
     private static final double NaN = Double.NaN;
+
+    /**
+     * The group's principal components against numpy (five rows over three channels: the eigenvectors of the sample
+     * covariance / correlation, each oriented so its largest loading is positive), the residuals and the variance share,
+     * then the rows that take no part, the groups too small to read and the independence from the arrival order.
+     */
+    @Test
+    public void testGroupSvdHandValues() {
+        final double[][] channels = {{1, 2, 3, 4, 5}, {2, 2.5, 5, 4.5, 7}, {0.5, 1.5, 1.0, 3.5, 2.5}};
+        final GroupOps.GroupSvd one = GroupOps.svd(channels, 1, false);
+        Assertions.assertEquals(5, one.count());
+        final double[] score0 = {-3.2300517220312073, -1.9418081627898665, 0.32622170474348322, 1.37092017948877, 3.4747180005888199};
+        final double[] norm1 = {0.31107213472637718, 0.45758175108131544, 1.0833186970389901, 1.4493370420542202, 0.50629518700460341};
+        for (int i = 0; i < 5; i++) {
+            Assertions.assertEquals(1, one.scores()[i].length);
+            Assertions.assertEquals(score0[i], one.scores()[i][0], 1e-12, "row " + i);
+            Assertions.assertEquals(norm1[i], one.residualNorm()[i], 1e-12, "row " + i);
+            // the residual is in the channels' units: the vector less the mean less the score along the component
+            double sum = 0;
+            for (final double v : one.residual()[i]) sum += v * v;
+            Assertions.assertEquals(norm1[i], Math.sqrt(sum), 1e-12);
+        }
+        Assertions.assertEquals(0.88047853554097733, one.absorption(), 1e-12);
+        final GroupOps.GroupSvd two = GroupOps.svd(channels, 2, false);
+        final double[] score1 = {-0.3068575991721319, 0.44676828692676701, -1.0829741939593527, 1.4484365525021003, -0.50537304629738256};
+        final double[] norm2 = {0.051032213684502621, 0.098889618864492865, 0.027318392565182474, 0.051082431875423107, 0.030543419260615871};
+        for (int i = 0; i < 5; i++) {
+            Assertions.assertEquals(score0[i], two.scores()[i][0], 1e-12, "the first component is the same whatever the rank");
+            Assertions.assertEquals(score1[i], two.scores()[i][1], 1e-12, "row " + i);
+            Assertions.assertEquals(norm2[i], two.residualNorm()[i], 1e-12, "row " + i);
+        }
+        Assertions.assertEquals(0.9994806213884273, two.absorption(), 1e-12);
+        // every component kept: nothing is left over
+        final GroupOps.GroupSvd all = GroupOps.svd(channels, 3, false);
+        for (int i = 0; i < 5; i++) Assertions.assertEquals(0d, all.residualNorm()[i], 1e-9);
+        Assertions.assertEquals(1d, all.absorption(), 1e-12);
+        // standardized: the correlation matrix's components over the z-scored channels
+        final GroupOps.GroupSvd std = GroupOps.svd(channels, 1, true);
+        final double[] zScore0 = {-1.9873143025316566, -1.0109186966139336, -0.12283039986477015, 1.225871896377281, 1.895191502633079};
+        final double[] zNorm1 = {0.11099156765709003, 0.63047867153416548, 1.1932684066514039, 1.4658894094771007, 0.79673159620956724};
+        for (int i = 0; i < 5; i++) {
+            Assertions.assertEquals(zScore0[i], std.scores()[i][0], 1e-12, "row " + i);
+            Assertions.assertEquals(zNorm1[i], std.residualNorm()[i], 1e-12, "row " + i);
+        }
+        Assertions.assertEquals(0.84008123277680835, std.absorption(), 1e-12);
+        // a row with a missing channel takes no part (null, NaN) and leaves the others' fit untouched
+        final double[][] holed = {{1, 2, 9, 3, 4, 5}, {2, 2.5, NaN, 5, 4.5, 7}, {0.5, 1.5, 0, 1.0, 3.5, 2.5}};
+        final GroupOps.GroupSvd skipped = GroupOps.svd(holed, 1, false);
+        Assertions.assertEquals(5, skipped.count());
+        Assertions.assertNull(skipped.scores()[2]);
+        Assertions.assertNull(skipped.residual()[2]);
+        Assertions.assertTrue(Double.isNaN(skipped.residualNorm()[2]));
+        for (int i = 0, j = 0; i < 6; i++) {
+            if (i == 2) continue;
+            Assertions.assertEquals(score0[j++], skipped.scores()[i][0], 1e-12, "row " + i);
+        }
+        // fewer than rank + 1 complete rows: the components pass through the points, nothing is read
+        final GroupOps.GroupSvd few = GroupOps.svd(new double[][]{{1, 2}, {3, 5}}, 2, false);
+        Assertions.assertEquals(2, few.count());
+        Assertions.assertNull(few.scores()[0]);
+        Assertions.assertTrue(Double.isNaN(few.absorption()));
+        final GroupOps.GroupSvd pair = GroupOps.svd(new double[][]{{1, 2}, {3, 5}}, 1, false);
+        Assertions.assertEquals(Math.sqrt(1 + 4) / 2, Math.abs(pair.scores()[0][0]), 1e-12, "two rows (1, 3) and (2, 5): half their distance each way");
+        Assertions.assertEquals(-pair.scores()[0][0], pair.scores()[1][0], 1e-12);
+        Assertions.assertEquals(0d, pair.residualNorm()[0], 1e-12);
+        Assertions.assertEquals(1d, pair.absorption(), 1e-12);
+        // a group without variance has no axes: the scores are 0, the share undefined
+        final GroupOps.GroupSvd flat = GroupOps.svd(new double[][]{{2, 2, 2}, {5, 5, 5}}, 1, true);
+        Assertions.assertEquals(0d, flat.scores()[0][0], 0d);
+        Assertions.assertTrue(Double.isNaN(flat.absorption()));
+        // the arrival order does not reach the result: the rows reversed read the same bits
+        final double[][] reversed = new double[3][5];
+        for (int c = 0; c < 3; c++) for (int i = 0; i < 5; i++) reversed[c][i] = channels[c][4 - i];
+        final GroupOps.GroupSvd back = GroupOps.svd(reversed, 2, true), forth = GroupOps.svd(channels, 2, true);
+        for (int i = 0; i < 5; i++) {
+            Assertions.assertEquals(Double.doubleToLongBits(forth.scores()[i][0]), Double.doubleToLongBits(back.scores()[4 - i][0]));
+            Assertions.assertEquals(Double.doubleToLongBits(forth.scores()[i][1]), Double.doubleToLongBits(back.scores()[4 - i][1]));
+            Assertions.assertEquals(Double.doubleToLongBits(forth.residualNorm()[i]), Double.doubleToLongBits(back.residualNorm()[4 - i]));
+        }
+        Assertions.assertEquals(Double.doubleToLongBits(forth.absorption()), Double.doubleToLongBits(back.absorption()));
+    }
+
+    /** The context {@code svd}: one set of columns per op (names as the population svd's), the coordinates, the shared fit, the diagnostics. */
+    @Test
+    public void testCompileSvd() {
+        final String block = """
+                  - name: shape
+                    scope: context
+                    context: session
+                    ops:
+                      - {type: svd, fields: [start_price, quantity, model_score], rank: 2, funcs: [scores, residual, residualNorm, absorption], as: pc}
+                      - {type: svd, fields: [start_price, quantity], standardize: true}
+                """;
+        final FeaturePlan plan = compile(SPEC + block);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn first = plan.getColumn("shape_pc_0"), second = plan.getColumn("shape_pc_1");
+        Assertions.assertNotNull(first, plan::describe);
+        Assertions.assertNotNull(second, plan::describe);
+        Assertions.assertNull(plan.getColumn("shape_pc_2"));
+        Assertions.assertEquals("svd", first.getOperator());
+        Assertions.assertEquals("start_price,quantity,model_score", first.getCoordinates().get("fields"));
+        Assertions.assertEquals("2", first.getCoordinates().get("rank"));
+        Assertions.assertNull(first.getCoordinates().get("standardize"));
+        Assertions.assertEquals("scores", first.getCoordinates().get("func"));
+        Assertions.assertEquals("0", first.getCoordinates().get("index"));
+        Assertions.assertEquals("1", second.getCoordinates().get("index"));
+        Assertions.assertTrue(first.getInputs().containsAll(List.of("start_price", "quantity", "model_score", "session_id")), first.getInputs().toString());
+        Assertions.assertEquals("residual", plan.getColumn("shape_pc_resid_quantity").getCoordinates().get("func"));
+        Assertions.assertEquals("1", plan.getColumn("shape_pc_resid_quantity").getCoordinates().get("index"));
+        Assertions.assertEquals("residualNorm", plan.getColumn("shape_pc_residnorm").getCoordinates().get("func"));
+        Assertions.assertNull(plan.getColumn("shape_pc_residnorm").getCoordinates().get("index"));
+        Assertions.assertEquals("absorption", plan.getColumn("shape_pc_absorption").getCoordinates().get("func"));
+        // the default: rank 1, scores, the fields joined as the name
+        final OutputColumn plain = plan.getColumn("shape_start_price_quantity_0");
+        Assertions.assertNotNull(plain, plan::describe);
+        Assertions.assertEquals("1", plain.getCoordinates().get("rank"));
+        Assertions.assertEquals("true", plain.getCoordinates().get("standardize"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, plain.getStatus());
+        // linear in the group size: no cost info of its own (the one in the plan is the harville block's)
+        Assertions.assertEquals(compile(SPEC).getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count(),
+                plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count());
+        // the errors and warnings
+        final String op = "      - {type: svd, fields: [start_price, quantity, model_score], rank: 2, funcs: [scores, residual, residualNorm, absorption], as: pc}";
+        Assertions.assertTrue(block.contains(op.trim()));
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(op.replace("fields: [start_price, quantity, model_score]", "fields: [start_price]"), "context.svd.fields");
+        cases.put(op.replace("fields: [start_price, quantity, model_score]", "fields: [start_price, quantity, start_price]"), "context.svd.fields");
+        cases.put(op.replace("fields: [start_price, quantity, model_score]", "fields: [start_price, category]"), "context.op.type");
+        cases.put(op.replace("rank: 2", "rank: 0"), "context.svd.rank");
+        cases.put(op.replace("rank: 2", "rank: 4"), "context.svd.rank");
+        cases.put(op.replace("rank: 2", "components: 2"), "context.svd.rank");
+        cases.put(op.replace("rank: 2", "rank: 1.5"), "rank.invalid");
+        cases.put(op.replace("funcs: [scores, residual, residualNorm, absorption]", "funcs: [loadings]"), "context.svd.func");
+        for (final Map.Entry<String, String> e : cases.entrySet()) {
+            final FeaturePlan p = compile(SPEC + block.replace(op.trim(), e.getKey().trim()));
+            Assertions.assertTrue(hasCode(p, e.getValue()), () -> e.getKey() + "\n" + p.describe());
+            Assertions.assertTrue(p.getDiagnostics().hasErrors(), e.getKey());
+        }
+        final FeaturePlan warned = compile(SPEC + block.replace("    context: session\n    ops:\n      - {type: svd, fields: [start_price, quantity, model_score], rank: 2",
+                "    context: session\n    excludeSelf: true\n    ops:\n      - {type: svd, fields: [start_price, quantity, model_score], rank: 2, maxGroupSize: 8"));
+        Assertions.assertFalse(warned.getDiagnostics().hasErrors(), warned::describe);
+        Assertions.assertTrue(hasCode(warned, "context.svd.excludeSelf"), warned::describe);
+        Assertions.assertTrue(hasCode(warned, "context.op.maxGroupSize"), warned::describe);
+        Assertions.assertFalse(hasCode(plan, "context.svd.excludeSelf"));
+        // a misspelled field is an unresolved reference of the block, like any other
+        Assertions.assertTrue(compile(SPEC + block.replace("quantity, model_score]", "quantitty, model_score]")).getDiagnostics().hasErrors());
+    }
 
     @Test
     public void testResidualizeHandValues() {
