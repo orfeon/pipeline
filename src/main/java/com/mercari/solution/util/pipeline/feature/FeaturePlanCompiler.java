@@ -1851,8 +1851,9 @@ public final class FeaturePlanCompiler {
                         + " poisson reads counts, whose noise is the Poisson's own");
                 valid = false;
             }
-            if (op.rho != null && op.covariance != null) {
-                diagnostics.error("sequence.rating.parameter", loc, "rho (Dixon-Coles) and covariance (bivariate Poisson) are two models of the dependence of a match's two scores: declare one");
+            // a declared 0 is the independent model, as the rating reads it (Rating.withDependence): only two non-zero ones clash
+            if (op.rho != null && op.rho != 0d && op.covariance != null && op.covariance != 0d) {
+                diagnostics.error("sequence.rating.parameter", loc, "rho (Dixon-Coles) and covariance (bivariate Poisson) are two models of the dependence of a match's two scores: declare one (0 = independent)");
                 valid = false;
             }
             if (op.rho != null && !(Math.abs(op.rho) < 1)) {
@@ -2070,6 +2071,12 @@ public final class FeaturePlanCompiler {
                     + " the pool from scratch and rewrites it" + (shared.containsKey("artifactRefit") ? "; refit: true - this run replays every pool from scratch"
                     : "") + (shared.containsKey("artifactRequired") ? "; require: true - a pool without a snapshot fails instead of replaying from the prior"
                     : "; a serving run over a short input without a snapshot would replay from the prior and write that as the snapshot: set require: true"));
+        }
+        // the rate has no intercept (mu moves attack and defence alike): at the prior every row expects exp(offset), 1 without one
+        if (previous == null && poisson && offsetRef == null && hintedBlocks.add("sequence.rating.poisson.intercept:" + stateKey)) {
+            diagnostics.hint("sequence.rating.poisson.intercept", loc, "poisson '" + segment + "' has no offset: the rate exp(attack - defence) has no intercept, so at the prior"
+                    + " every row expects a score of 1 whatever mu is. Where a typical score is far from 1 (points rather than goals), declare offset: <column> holding"
+                    + " ln of the typical score (plus any home advantage) - otherwise a first match moves a rating by several log units in one step");
         }
         if (previous != null && !previous.equals(shared.toString())) {
             diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"

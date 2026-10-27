@@ -279,6 +279,16 @@ public class RatingTest {
         Assertions.assertEquals("start_price", bp.getColumn("skill_all_bp_attack").getCoordinates().get("offsetField"));
         Assertions.assertEquals(Schema.Type.int64, bp.getColumn("skill_all_bp_count").getFieldType().getType());
         Assertions.assertEquals(bp.getColumn("skill_all_bp_attack").getStatus(), bp.getColumn("skill_all_bp_z").getStatus());
+        // a declared 0 is the independent model (as the rating reads it): rho 0 beside a covariance is no clash, and writes no rho
+        final FeaturePlan zero = compile(SPEC.replace(op, poisson + "rho: 0, covariance: 0.2, as: z0}"));
+        Assertions.assertFalse(zero.getDiagnostics().hasErrors(), zero::describe);
+        Assertions.assertNull(zero.getColumn("skill_all_z0_attack").getCoordinates().get("rho"));
+        Assertions.assertEquals("0.2", zero.getColumn("skill_all_z0_attack").getCoordinates().get("covariance"));
+        // no intercept: without an offset the op is hinted once; with one (the bp op above) it is not
+        Assertions.assertTrue(hasCode(plan, "sequence.rating.poisson.intercept"), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.poisson.intercept")).count());
+        Assertions.assertFalse(hasCode(bp, "sequence.rating.poisson.intercept"), bp::describe);
+        Assertions.assertFalse(hasCode(compile(SPEC), "sequence.rating.poisson.intercept"), "other methods have an intercept in mu");
     }
 
     @Test

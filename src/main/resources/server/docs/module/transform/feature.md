@@ -466,7 +466,8 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   moves attack and defence alike, so at the prior every row expects `exp(offset)` — 1 without an offset, whatever
   `mu` is. Where a typical score is far from 1 (points rather than goals), put its `ln` into the `offset` (a
   baseline `ln(mean score)`, plus any home advantage): otherwise a first match moves a rating by several log units
-  in one step (a 100-point score from the prior: about +16).
+  in one step (a 100-point score from the prior: about +16). A `poisson` op without an `offset` is hinted
+  (`sequence.rating.poisson.intercept`).
   Parameters: `mu` (prior, default 25; elo 1500; gaussian / poisson 0), `sigma` (default `mu / 3`; poisson 0.5),
   `beta` (performance noise, default `sigma / 2`; not poisson), `tau` (added to every participant's variance before
   a contest — strengths drift — default `sigma / 100`), `tauPer` (a duration: `tau` becomes the drift per that much
@@ -877,13 +878,14 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   learns from, and how each one drifts — `tau 0` or the op's undeclared `tau` named), `sequence.rating.context`, `sequence.rating.method`,
   `sequence.rating.order` (unknown, or `ascending` under `poisson`),
   `sequence.rating.func` (unknown, `sigma` under elo, `attack` / `defence` outside `poisson`), `sequence.rating.parameter` (a parameter of the other
-  method family — `beta` under `poisson`, `rho` / `covariance` outside it or both at once, `rho` outside (−1, 1), a negative
+  method family — `beta` under `poisson`, `rho` / `covariance` outside it or both non-zero at once (a declared 0 is the independent model), `rho` outside (−1, 1), a negative
   `covariance` —, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`, `pairs` outside
   `bradleyTerry` or unknown — `gaussian` conditions on the whole contest —, a `tauPer` that is not positive or comes without `tau`,
   `top` / `depthScale` outside `plackettLuce`, a `top` that is not one integer place >= 1, a `depthScale` below 1,
   `tauBy` under elo), `sequence.rating.offset` / `sequence.rating.tauBy` (not a numeric column or baseline),
   `sequence.rating.gaussian.units` (error: `gaussian` without `sigma` or `beta` — a margin model has no scale of its
-  own; declare them in the outcome's units),
+  own; declare them in the outcome's units), `sequence.rating.poisson.intercept` (hint: a `poisson` op without an
+  `offset` — the rate has no intercept, so a typical score far from 1 belongs in the offset as its `ln`),
   `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
   segment with different parameters — they would share one running state; name them apart with `as`).
 
