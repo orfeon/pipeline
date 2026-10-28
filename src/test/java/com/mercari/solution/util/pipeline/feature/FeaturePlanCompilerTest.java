@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -427,6 +429,40 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNull(new SequenceEvaluator(List.of(halfLife)).summaryOf(halfLife), "scan-only");
         Assertions.assertNull(SequenceEvaluator.unboundedReason(halfLife), "bounded by maxAge");
         Assertions.assertFalse(hasCode(spread, "sequence.regression.func"), "five pairs: every spread func can read");
+        // the rank and spread funcs of one op read one pair collection per row (both windows' columns in one evaluator,
+        // so two pair keys): each column reads what it reads alone, and one row map read against another history
+        // reads that history, not the pairs the first read collected
+        final double[] xs = {10.0, 10.4, 10.1, 10.9, 11.3, 11.0, 11.8, 12.1, 11.7, 12.5, 12.9, 12.6};
+        final double[] ys = {7.5, 7.4, 7.45, 7.15, 7.55, 7.8, 8.0, 7.65, 7.65, 8.45, 8.75, 8.2};
+        for (final FeaturePlan scanned : List.of(spread, ranks)) {
+            final List<OutputColumn> pairColumns = scanned.getColumns().stream()
+                    .filter(c -> "regression".equals(c.getOperator()))
+                    .filter(c -> Cointegration.FUNCS.contains(c.getCoordinates().get("func")) || RankDependence.FUNCS.contains(c.getCoordinates().get("func")))
+                    .toList();
+            Assertions.assertTrue(pairColumns.size() > 1, scanned::describe);
+            final SequenceEvaluator shared = new SequenceEvaluator(pairColumns);
+            shared.setup();
+            final long day = 86_400_000L, now = 1_700_000_000_000L;
+            final long edge = now - (pairColumns.get(0).windowShift == null ? 0L : pairColumns.get(0).windowShift.toMillis()) - day;
+            final List<SequenceEvaluator.Past> longer = new ArrayList<>(), shorter = new ArrayList<>();
+            for (int i = 0; i < xs.length; i++) {
+                final SequenceEvaluator.Past p = new SequenceEvaluator.Past(edge - (xs.length - i) * day, new HashMap<>(Map.of("start_price", xs[i], "final_price", ys[i])));
+                longer.add(p);
+                if (i >= 3) shorter.add(p);
+            }
+            final Map<String, Object> row = new HashMap<>();
+            boolean differs = false;
+            for (final List<SequenceEvaluator.Past> history : List.of(longer, shorter)) {
+                for (final OutputColumn c : pairColumns) {
+                    final SequenceEvaluator alone = new SequenceEvaluator(List.of(c));
+                    alone.setup();
+                    final Object expected = alone.evaluateColumn(c, new HashMap<>(), now, history, null);
+                    Assertions.assertEquals(expected, shared.evaluateColumn(c, row, now, history, null), c.getCanonicalName() + " over " + history.size());
+                    if (history == shorter && !java.util.Objects.equals(expected, alone.evaluateColumn(c, new HashMap<>(), now, longer, null))) differs = true;
+                }
+            }
+            Assertions.assertTrue(differs, "the two histories must read differently, or the equality above says nothing");
+        }
         // a maxEvents window too short for the spread: a warning naming the funcs that are always null (adf needs four pairs, the others three)
         Assertions.assertTrue(spec.contains("maxEvents: 5"));
         final FeaturePlan starvedAdf = compile(SOURCES, spec.replace("maxEvents: 5", "maxEvents: 3").replace(reg, "- {type: regression, field: final_price, against: start_price, funcs: [ar1, adf]}"));

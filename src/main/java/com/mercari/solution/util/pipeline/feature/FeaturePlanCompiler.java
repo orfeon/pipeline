@@ -1140,9 +1140,12 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("context.fields", loc, "op " + op.type + " requires 'fields' (or block-level 'inputs')");
                 continue;
             }
-            if ("svd".equals(op.type)) {
+            if (operator.vector()) {
                 // the fields are read together, one vector per row: one set of columns per op, not one per field
-                expandContextSvd(def, op, fields, context, computeAt, loc);
+                switch (op.type) {
+                    case "svd" -> expandContextSvd(def, op, fields, context, computeAt, loc);
+                    default -> throw new IllegalStateException("no expansion for the vector op " + op.type);
+                }
                 continue;
             }
             // the op's own parameters are validated once here — an op over three fields reports a bad one once
@@ -1188,21 +1191,9 @@ public final class FeaturePlanCompiler {
             diagnostics.error("context.svd.fields", loc, "svd reads two or more numeric fields together (fields: [a, b, ...] - the group's rows are vectors over them): " + fields.size() + " given");
             return;
         }
-        final List<String> canonical = new ArrayList<>(), names = new ArrayList<>();
-        for (final String field : fields) {
-            final Ref ref = resolve(field);
-            if (ref == null) return;
-            if (!OperatorCatalog.isNumeric(ref.type())) {
-                diagnostics.error("context.op.type", loc, "op svd expects numeric input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
-                return;
-            }
-            if (canonical.contains(ref.canonical())) {
-                diagnostics.error("context.svd.fields", loc, "svd lists '" + field + "' twice");
-                return;
-            }
-            canonical.add(ref.canonical());
-            names.add(displayName(field));
-        }
+        final VectorFields vector = resolveVectorFields("svd", Scope.context, fields, "context.svd.fields", loc);
+        if (vector == null) return;
+        final List<String> canonical = vector.canonical(), names = vector.names();
         if (op.components != null) {
             diagnostics.error("context.svd.rank", loc, "svd takes rank (the components the rows are projected on, as the population svd names it): components is the sequence covariance's parameter");
             return;
@@ -1252,6 +1243,34 @@ public final class FeaturePlanCompiler {
             for (final String field : fields) addSelfInput(c, field);
             finishContext(c, def, context, op);
         }
+    }
+
+    /** The fields of a vector op, resolved: their canonical names (the coordinates) and display names (the column names). */
+    private record VectorFields(List<String> canonical, List<String> names) {}
+
+    /**
+     * Resolves the fields an op reads together as one vector per row ({@link OperatorCatalog.Operator#vector()}: the
+     * sequence {@code covariance}, the context {@code svd}): every field numeric ({@code <scope>.op.type}) and listed
+     * once ({@code fieldsCode}). Null after reporting — or, for a field that does not resolve yet, silently: the block
+     * waits for it like any reference.
+     */
+    private VectorFields resolveVectorFields(final String opName, final Scope scope, final List<String> fields, final String fieldsCode, final String loc) {
+        final List<String> canonical = new ArrayList<>(), names = new ArrayList<>();
+        for (final String field : fields) {
+            final Ref ref = resolve(field);
+            if (ref == null) return null;
+            if (!OperatorCatalog.isNumeric(ref.type())) {
+                diagnostics.error(scope.name() + ".op.type", loc, "op " + opName + " expects numeric input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
+                return null;
+            }
+            if (canonical.contains(ref.canonical())) {
+                diagnostics.error(fieldsCode, loc, opName + " lists '" + field + "' twice");
+                return null;
+            }
+            canonical.add(ref.canonical());
+            names.add(displayName(field));
+        }
+        return new VectorFields(canonical, names);
     }
 
     /** Groups with more valid rows than this read null under {@code harville} unless the op declares its own bound. */
@@ -1792,9 +1811,12 @@ public final class FeaturePlanCompiler {
                     }
                     continue;
                 }
-                if ("covariance".equals(op.type)) {
+                if (operator.vector()) {
                     // k series read together: one column per func, not one per field
-                    expandCovariance(def, op, fields, entity, window, filterRefs, reducedKey, computeAt, loc);
+                    switch (op.type) {
+                        case "covariance" -> expandCovariance(def, op, fields, entity, window, filterRefs, reducedKey, computeAt, loc);
+                        default -> throw new IllegalStateException("no expansion for the vector op " + op.type);
+                    }
                     continue;
                 }
                 if (fields.isEmpty()) {
@@ -3093,21 +3115,9 @@ public final class FeaturePlanCompiler {
                     + " numeric fields together (fields: [a, b, ...]; the readouts are of their covariance matrix): " + fields.size() + " given");
             return;
         }
-        final List<String> canonical = new ArrayList<>(), names = new ArrayList<>();
-        for (final String field : fields) {
-            final Ref ref = resolve(field);
-            if (ref == null) return;
-            if (!OperatorCatalog.isNumeric(ref.type())) {
-                diagnostics.error("sequence.op.type", loc, "op covariance expects numeric input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
-                return;
-            }
-            if (canonical.contains(ref.canonical)) {
-                diagnostics.error("sequence.covariance.fields", loc, "covariance lists '" + field + "' twice");
-                return;
-            }
-            canonical.add(ref.canonical);
-            names.add(displayName(field));
-        }
+        final VectorFields vector = resolveVectorFields("covariance", Scope.sequence, fields, "sequence.covariance.fields", loc);
+        if (vector == null) return;
+        final List<String> canonical = vector.canonical(), names = vector.names();
         final List<String> funcs = op.funcs.isEmpty() ? List.of("absorption", "meanCorrelation") : op.funcs;
         final int components = op.components == null ? Summary.Covariance.DEFAULT_COMPONENTS : op.components;
         if (components < 1 || components >= fields.size()) {

@@ -39,9 +39,7 @@ public class ContextEvaluator implements Serializable {
         places = new HashMap<>();
         for (final OutputColumn c : columns) {
             final Plan plan = plans.computeIfAbsent(c.canonicalName, name -> plan(c));
-            if (plan.harville() != null) {
-                places.merge(plan.harville().key(), plan.harville().top(), Math::max);
-            }
+            if (plan.solver() instanceof Harville harville) places.merge(harville.key(), harville.top(), Math::max);
         }
     }
 
@@ -54,25 +52,16 @@ public class ContextEvaluator implements Serializable {
     /** Evaluates one context column for every row of the group (rows are mutated in place). */
     public void evaluateColumn(final OutputColumn c, final List<Map<String, Object>> rows) {
         final Plan plan = plan(c.canonicalName, c);
-        if (plan.softmax() != null) {
-            softmax(c.canonicalName, plan.field(), plan.softmax(), rows);
-            return;
-        }
-        if (plan.ratingProb() != null) {
-            ratingProb(c.canonicalName, plan.field(), plan.ratingProb(), rows);
-            return;
-        }
-        if (plan.poissonProb() != null) {
-            poissonProb(c.canonicalName, plan.field(), plan.poissonProb(), rows);
-            return;
-        }
-        if (plan.shuffle() != null) {
-            shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
-            return;
-        }
-        if (plan.residualize() != null || plan.harville() != null || plan.svd() != null) {
-            solve(c.canonicalName, plan, rows);
-            return;
+        // a parameterised op is dispatched on its solver; the group solvers (GroupOps) hand back one value per row, NaN = null
+        switch (plan.solver()) {
+            case null -> { }
+            case Softmax softmax -> { softmax(c.canonicalName, plan.field(), softmax, rows); return; }
+            case RatingProb ratingProb -> { ratingProb(c.canonicalName, plan.field(), ratingProb, rows); return; }
+            case PoissonProb poissonProb -> { poissonProb(c.canonicalName, plan.field(), poissonProb, rows); return; }
+            case Shuffle shuffle -> { shuffle(c.canonicalName, plan.field(), shuffle, rows); return; }
+            case Residualize residualize -> { write(c.canonicalName, rows, residualize(residualize, plan.field(), plan.excludeSelf(), rows)); return; }
+            case SvdColumn svd -> { write(c.canonicalName, rows, svdReadout(svd, rows)); return; }
+            case Harville harville -> { write(c.canonicalName, rows, harvillePlaces(harville, plan.field(), rows)[harville.top() - 1]); return; }
         }
         final String op = plan.op();
         if (op == null) {
@@ -109,49 +98,42 @@ public class ContextEvaluator implements Serializable {
 
     /**
      * One column's coordinates, parsed. {@code op} is the operator to apply over the group's values (null for a
-     * plain row expression); the parameterised ops carry their own record and are dispatched on it.
+     * plain row expression); a parameterised op carries its {@link Solver} instead and is dispatched on it.
      */
-    private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression,
-                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle, RatingProb ratingProb, SvdColumn svd,
-                        PoissonProb poissonProb) {
+    private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression, Solver solver) {
 
         /** The ops whose reading is the same for every row of the group, so the group is read once. */
         private static final Set<String> GROUP_CONSTANT = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
 
         static Plan of(final String op, final String field, final boolean excludeSelf, final String value,
                        final ExpressionUtil.Expression expression) {
-            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null, null);
+            return new Plan(op, field, excludeSelf, value, expression, null);
         }
 
-        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null, null, null, null); }
-
-        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null, null, null, null); }
-
-        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null, null, null, null); }
-
-        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p, null, null, null); }
-
-        Plan with(final RatingProb r) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, r, null, null); }
-
-        Plan with(final SvdColumn s) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, s, null); }
-
-        Plan with(final PoissonProb p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, null, null, null, p); }
+        Plan with(final Solver solver) { return new Plan(op, field, excludeSelf, value, expression, solver); }
 
         boolean groupConstant() {
             return !excludeSelf && (value != null || GROUP_CONSTANT.contains(op));
         }
     }
 
-    private record Softmax(String offset, double temperature, boolean logScale, boolean scoreNullIsNull) {}
+    /**
+     * The parsed parameters of a context op that does not run through {@link #apply}: one per op kind, one per column.
+     * {@link #evaluateColumn} dispatches on the kind; the ops that solve the group as a whole ({@code residualize} /
+     * {@code harville} / {@code svd}) hand back one value per row through {@link #write}.
+     */
+    private sealed interface Solver permits Softmax, RatingProb, PoissonProb, Residualize, SvdColumn, Harville, Shuffle {}
+
+    private record Softmax(String offset, double temperature, boolean logScale, boolean scoreNullIsNull) implements Solver {}
 
     /**
      * {@code sigma} the column of the row's uncertainty (null = none), {@code beta} the rating's performance noise,
      * {@code offset} the column of a benchmark the probability is read against (null = none; {@code logScale}: read as
      * a log-probability).
      */
-    private record RatingProb(String sigma, double beta, String offset, boolean logScale) {}
+    private record RatingProb(String sigma, double beta, String offset, boolean logScale) implements Solver {}
 
-    private record Residualize(String[] against) {}
+    private record Residualize(String[] against) implements Solver {}
 
     /**
      * A column of the context {@code poissonProb}: {@code defence} the column of the row's defence rating (the field is
@@ -159,7 +141,7 @@ public class ContextEvaluator implements Serializable {
      * as the rating declared it, what the column reads ({@code func}) and the total an {@code over} is read against;
      * {@code key} names the match the columns of one op share.
      */
-    private record PoissonProb(String defence, String offset, double rho, double covariance, String func, double threshold, String key) {}
+    private record PoissonProb(String defence, String offset, double rho, double covariance, String func, double threshold, String key) implements Solver {}
 
     /** The match of a group: the two rows that are its sides, in the order {@link PoissonMatch} reads them (a group with no match caches null). */
     private record Match(int[] rows, PoissonMatch model) {}
@@ -170,13 +152,13 @@ public class ContextEvaluator implements Serializable {
      * residualNorm / absorption) and which component or channel ({@code index}); {@code key} names the fit the columns
      * of one op share.
      */
-    private record SvdColumn(String[] fields, int rank, boolean standardize, String func, int index, String key) {}
+    private record SvdColumn(String[] fields, int rank, boolean standardize, String func, int index, String key) implements Solver {}
 
     /** {@code key} names the pass this column reads: the same field, discount, shape and bound are computed once per group ({@code shape} 1 = the Harville closed form). */
-    private record Harville(int top, double[] discount, double shape, int maxGroupSize, String key) {}
+    private record Harville(int top, double[] discount, double shape, int maxGroupSize, String key) implements Solver {}
 
     /** {@code order} is the row identity followed by the tie break, {@code contextKeys} the group key. */
-    private record Shuffle(long seed, List<String> order, List<String> contextKeys) {}
+    private record Shuffle(long seed, List<String> order, List<String> contextKeys) implements Solver {}
 
     /** The column's plan, built on first use when {@link #setup()} has not run (a direct call from a test). */
     private Plan plan(final String name, final OutputColumn c) {
@@ -267,10 +249,10 @@ public class ContextEvaluator implements Serializable {
         };
     }
 
-    /** Group softmax over one column (the plan of {@code c}); see {@link #softmax(String, String, Softmax, List)}. */
+    /** Group softmax over one column (its plan parsed from the coordinates); see {@link #softmax(String, String, Softmax, List)}. */
     static void softmax(final OutputColumn c, final List<Map<String, Object>> rows) {
         final Plan plan = plan(c);
-        softmax(c.canonicalName, plan.field(), plan.softmax(), rows);
+        softmax(c.canonicalName, plan.field(), (Softmax) plan.solver(), rows);
     }
 
     /**
@@ -460,52 +442,53 @@ public class ContextEvaluator implements Serializable {
     }
 
     /**
-     * The group solvers ({@link GroupOps}): the op's fields become one vector per channel over the rows of the group
-     * (a missing or non-finite value is NaN), the solver returns every row's value (NaN = null). The places of a
-     * harville are one pass per (field, discount, shape, bound) — the {@code top} columns of a group read the same one.
+     * Writes a group solver's result ({@link GroupOps}: one value per row, NaN = null) into the column. The solvers read
+     * the op's fields as one vector per channel over the rows of the group (a missing or non-finite value is NaN).
      */
-    private void solve(final String name, final Plan plan, final List<Map<String, Object>> rows) {
-        final double[] result;
-        if (plan.residualize() != null) {
-            final String[] against = plan.residualize().against();
-            final double[][] x = new double[against.length][];
-            for (int k = 0; k < against.length; k++) x[k] = channel(rows, against[k]);
-            result = GroupOps.residualize(channel(rows, plan.field()), x, plan.excludeSelf());
-        } else if (plan.svd() != null) {
-            final SvdColumn column = plan.svd();
-            final GroupOps.GroupSvd svd = groupSvd(column, rows);
-            result = new double[rows.size()];
-            for (int i = 0; i < rows.size(); i++) {
-                // a row that took no part (a missing field) reads null whatever the readout: every column is over the same rows
-                final boolean fitted = svd.scores()[i] != null;
-                result[i] = switch (column.func()) {
-                    case "scores" -> fitted ? svd.scores()[i][column.index()] : Double.NaN;
-                    case "residual" -> fitted ? svd.residual()[i][column.index()] : Double.NaN;
-                    case "residualNorm" -> svd.residualNorm()[i];
-                    case "absorption" -> fitted ? svd.absorption() : Double.NaN;
-                    default -> throw new IllegalStateException("unknown svd readout: " + column.func());
-                };
-            }
-        } else {
-            result = harvillePlaces(plan, rows)[plan.harville().top() - 1];
-        }
+    private static void write(final String name, final List<Map<String, Object>> rows, final double[] result) {
         for (int i = 0; i < rows.size(); i++) rows.get(i).put(name, Double.isNaN(result[i]) ? null : (Object) result[i]);
     }
 
+    /** The field residualised against the regressors over the group ({@link GroupOps#residualize}). */
+    private static double[] residualize(final Residualize plan, final String field, final boolean excludeSelf, final List<Map<String, Object>> rows) {
+        final String[] against = plan.against();
+        final double[][] x = new double[against.length][];
+        for (int k = 0; k < against.length; k++) x[k] = channel(rows, against[k]);
+        return GroupOps.residualize(channel(rows, field), x, excludeSelf);
+    }
+
+    /** One readout of the group's principal components ({@link #groupSvd}): a row that took no part reads null whatever the readout. */
+    private double[] svdReadout(final SvdColumn column, final List<Map<String, Object>> rows) {
+        final GroupOps.GroupSvd svd = groupSvd(column, rows);
+        final double[] result = new double[rows.size()];
+        for (int i = 0; i < rows.size(); i++) {
+            // every column is over the same rows: those with every field present
+            final boolean fitted = svd.scores()[i] != null;
+            result[i] = switch (column.func()) {
+                case "scores" -> fitted ? svd.scores()[i][column.index()] : Double.NaN;
+                case "residual" -> fitted ? svd.residual()[i][column.index()] : Double.NaN;
+                case "residualNorm" -> svd.residualNorm()[i];
+                case "absorption" -> fitted ? svd.absorption() : Double.NaN;
+                default -> throw new IllegalStateException("unknown svd readout: " + column.func());
+            };
+        }
+        return result;
+    }
+
     /**
-     * The harville pass this column reads, computed once per group: a new group arrives as a new list, so the cache
-     * is dropped the moment the identity changes. A column asking for a place beyond what the cached pass holds
-     * (only possible when {@link #setup()} has not seen every column) recomputes it.
+     * The harville pass this column reads — one per (field, discount, shape, bound): the {@code top} columns of a group
+     * read the same one — computed once per group: a new group arrives as a new list, so the cache is dropped the
+     * moment the identity changes. A column asking for a place beyond what the cached pass holds (only possible when
+     * {@link #setup()} has not seen every column) recomputes it.
      */
-    private double[][] harvillePlaces(final Plan plan, final List<Map<String, Object>> rows) {
+    private double[][] harvillePlaces(final Harville harville, final String field, final List<Map<String, Object>> rows) {
         caches(rows);
-        final Harville harville = plan.harville();
         double[][] cached = harvilleCache.get(harville.key());
         if (cached == null || cached.length < harville.top()) {
             final int maxTop = Math.max(harville.top(), places == null ? 0 : places.getOrDefault(harville.key(), 0));
             cached = harville.shape() == 1d
-                    ? GroupOps.harvillePlaces(channel(rows, plan.field()), maxTop, harville.discount(), harville.maxGroupSize())
-                    : GroupOps.racePlaces(channel(rows, plan.field()), maxTop, harville.shape(), harville.maxGroupSize());
+                    ? GroupOps.harvillePlaces(channel(rows, field), maxTop, harville.discount(), harville.maxGroupSize())
+                    : GroupOps.racePlaces(channel(rows, field), maxTop, harville.shape(), harville.maxGroupSize());
             harvilleCache.put(harville.key(), cached);
         }
         return cached;
@@ -538,7 +521,7 @@ public class ContextEvaluator implements Serializable {
      */
     static void shuffle(final OutputColumn c, final List<Map<String, Object>> rows) {
         final Plan plan = plan(c);
-        shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
+        shuffle(c.canonicalName, plan.field(), (Shuffle) plan.solver(), rows);
     }
 
     static void shuffle(final String name, final String field, final Shuffle plan, final List<Map<String, Object>> rows) {

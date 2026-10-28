@@ -219,7 +219,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   `JointSpec.apply` in the fit stage, not row columns.
 - `ContextEvaluator.evaluateColumn` — one group at a time, driven by a per-column `Plan` built once in
   `setup()` (`plan(c)`: every coordinate parsed there, never per group — `against` / `discount` / `order`
-  splits, `seed`, `top`, `maxGroupSize`); `apply(op, values, self, excludeSelf)`; group-constant ops are
+  splits, `seed`, `top`, `maxGroupSize`); a parameterised op's parsed parameters are its `Solver` (a sealed interface:
+  `Softmax` / `RatingProb` / `PoissonProb` / `Residualize` / `SvdColumn` / `Harville` / `Shuffle` — one slot in the `Plan`,
+  dispatched by a pattern switch; a new parameterised op is a new record implementing it, a new case, nothing else);
+  `apply(op, values, self, excludeSelf)` serves the rest; group-constant ops are
   evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
   `softmax`, `ratingProb` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
   probability space with a max-shift; `ratingProb` = the Plackett-Luce contest read forward, `exp(mu / c)` normalised with
@@ -229,7 +232,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   group — coordinates `defence`, `offset`, `rho` / `covariance`, `func`, `threshold`; one model per op and group (`poissonCache`), the sides
   ordered by rate so the bits do not depend on the arrival order; `variants` of `ContextOpParams` carry its per-func columns; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
   `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
-  group solvers `residualize` / `harville` / `svd` go through `solve(name, plan, rows)` → `GroupOps` (pure
+  group solvers `residualize` / `harville` / `svd` hand back one value per row through `write` ← `GroupOps` (pure
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.
   Work shared by several columns of one group is cached on the group's list identity (`caches(rows)`: `harvillePlaces` — every
   place of a `top` is one pass — and `groupSvd` — the columns of one svd op read one fit; a new group is a new list, so
@@ -251,7 +254,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   quadrature's ~1e-9 truncation), and a run of equal values reads its mean — the solver's rounding must not hand
   tied rows different values by arrival order. The shape range `[RACE_MIN_SHAPE, RACE_MAX_SHAPE]` is checked by the
   compiler: outside it the quantiles underflow / the incomplete gamma's series runs out.
-  A new solver is a `GroupOps` function + a branch in `solve` + a record in `Plan`; it must take its sums in an
+  A new solver is a `GroupOps` function + a record implementing `Solver` (built in `plan(c)`) + a `case` in
+  `evaluateColumn` handing its values to `write`; it must take its sums in an
   order the *values* decide (`GroupOps.sort`, a primitive merge sort — no boxed index per row) — the rows of a
   group arrive in runner order, and the parallel / linear equality is compared bit for bit — and declare its
   cost (`context.op.groupSolver`, `maxGroupSize`) when it is more than linear in the group size. Prefer a
@@ -274,8 +278,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   events and is therefore scan-only, and its rank funcs spearman / kendall / quadrantAsymmetry (`RankDependence`,
   `q` coordinate on the last) and spread funcs residual / residualZ / ar1 / halfLife / adf (`Cointegration`: the
   residuals of the window's line and their lag-1 regression) have no family at all: `OperatorCatalog.summary` returns
-  null for them, so they take the scan path and re-read the window per row — keep any new rank or residual statistic
-  there, not in `REGRESSION`), `COVARIANCE` / `COVARIANCE_STANDARDIZED` (`Summary.Covariance`: anchored k × k cross
+  null for them, so they take the scan path and re-read the window per row — the pairs are collected once per row for
+  every func over the same window / fields / lag (`SequenceEvaluator.pairs`, keyed by `ColumnPlan.pairKey`, dropped with
+  the row's identity) and the spread funcs read one `Cointegration.Spread` from them; keep any new rank or residual
+  statistic there, not in `REGRESSION`), `COVARIANCE` / `COVARIANCE_STANDARDIZED` (`Summary.Covariance`: anchored k × k cross
   moments of a `double[]` vector — the sequence `covariance` op: absorption / effectiveRank / meanCorrelation / logDet / count; the two
   instances read the eigenvalues of the covariance or of the correlation matrix, so the spec is built per column by
   `Summary.Covariance.spec(coordinates)` — `standardize` picks the instance, `components` the readout parameter — not through
