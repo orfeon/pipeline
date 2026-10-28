@@ -285,6 +285,10 @@ public class SummaryTest {
             // (the eviction left the mean a long way from the anchor in units of a vanished spread: the anchor moved onto
             // the constant, and the sums are the residue of the far anchor — which the mass floor tells from spread)
             Assertions.assertEquals(constantX, drifted.moments.shift[0], 1e-9 * constantX, "the anchor moved onto the constant");
+            // the residue left on the constant is below the mass floor: it does not read as far and move the anchor again
+            final double[] settled = drifted.moments.shift.clone();
+            g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            Assertions.assertArrayEquals(settled, drifted.moments.shift, 0d, "the anchor settled on the constant");
         }
         // a window sliding along a trend: the anchor follows the mean (left at the first pair it would be 1e5 away by the
         // end, and the sums, each eviction cancelling terms 1e10 times the variance, read cov 4e-6 and intercept 7e-5 off),
@@ -397,6 +401,10 @@ public class SummaryTest {
             Assertions.assertNull(g.read(drifted, Summary.Readout.of("meanCorrelation")), "constant " + constant + " anchored at " + anchor[0]);
             Assertions.assertNull(std.read(drifted, Summary.Readout.of("absorption")));
             Assertions.assertEquals(constant, drifted.moments.shift[0], 1e-9 * constant, "the anchor moved onto the constant");
+            // the residue left on the constant is below the mass floor: it does not read as far and drag every anchor again
+            final double[] settled = drifted.moments.shift.clone();
+            g.update(drifted, new double[]{constant, Math.round(random.nextDouble() * 100) / 10.0, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            Assertions.assertArrayEquals(settled, drifted.moments.shift, 0d, "the anchors settled");
         }
         // a window sliding along a trend (two series trending at their own rates, one not): the anchor follows the mean,
         // so the running state keeps agreeing with a fresh fold of the window (left at the first vector, logDet read 1e-5 off)

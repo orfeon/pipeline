@@ -168,9 +168,10 @@ public final class Svd implements Serializable, FitArtifact.Model {
             if (n == 0) clear();
         }
 
-        /** Back to the empty state (no count, no anchor); the skip counters stay. */
+        /** Back to the empty state (no count, no dimension, no anchor); the skip counters stay. */
         public void clear() {
             n = 0;
+            dimension = 0;
             shift = new double[0];
             sum = new double[0];
             products = new double[0];
@@ -184,9 +185,12 @@ public final class Svd implements Serializable, FitArtifact.Model {
          * every fold rounds at that multiple of the variance's own floor (a 30-pair window 200 000 events along a trend
          * read its covariance 4e-6 off, its intercept 7e-5): four deviations keep the multiple under 20 — the rounding of
          * a few hundred thousand folds stays below 1e-8 — at one shift per window length along a trend and none on a
-         * stationary series (a window mean four deviations out is a 4√n-sigma event). The window families call this
-         * after every {@link #fold}. A fit never does: its anchor stays the first vector of its block, and an artifact
-         * refits bit for bit.
+         * stationary series (a window mean four deviations out is a 4√n-sigma event). The deviation is floored at the
+         * rounding of the sums ({@link #mass}, the floor the variance snap reads): once the anchor has moved onto a
+         * constant left behind by evictions, that component's sums are pure residue — a residue mean over a residue
+         * (often negative) variance — which must not read as "far" and re-run the k × k shift of every component on
+         * every later fold. The window families call this after every {@link #fold}. A fit never does: its anchor stays
+         * the first vector of its block, and an artifact refits bit for bit.
          */
         public void recentre() {
             if (n <= 0) return;
@@ -194,7 +198,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
             boolean far = false;
             for (int i = 0; i < d && !far; i++) {
                 final double m = sum[i] / n;
-                far = m * m > 16 * (products[i * d + i] / n - m * m);
+                far = m * m > 16 * Math.max(products[i * d + i] / n - m * m, 1e-14 * mass[i] / n);
             }
             if (!far) return;
             // the new anchor is a rounded double: shift the sums by the move actually made (exact — the two anchors are

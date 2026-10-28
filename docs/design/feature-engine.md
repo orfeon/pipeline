@@ -1275,7 +1275,9 @@ about an anchor `m` away round at `(m / σ)²` times the variance's own floor (a
 a trend read its covariance 4e-6 off, its intercept 7e-5; with the move it agrees with a fresh fold to 1e-9). The
 move is the merge shift with δ = −mean, applied by the anchor's *realised* (rounded) displacement so the sums and
 the anchor never drift apart, and the per-component `mass` (Σ(x − a)² of everything folded in or out since the state
-was empty) stays the floor the variance snap reads, since the residue of the far anchor's sums is of that scale.
+was empty) stays the floor the variance snap reads, since the residue of the far anchor's sums is of that scale —
+and the floor of the deviation the move rule compares against, so the residue left on a constant does not read as a
+far mean and re-run the shift on every later fold.
 The anchored cross moments have **one implementation**, `Svd.Moments`: the fits (`svd`, `smooth`, `copula`) `add`
 vectors and read `mean(i)` / `centred(i, j)` (sample moments over n − 1, the first vector of the block as the anchor,
 never moved — an artifact refits bit for bit); `REGRESSION` (a pair as a 2-vector) and `COVARIANCE` hold one and
