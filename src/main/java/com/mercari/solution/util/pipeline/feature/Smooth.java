@@ -197,14 +197,14 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         final int d = m + 1;
         // centred moments Σ(z − z̄)(z − z̄)ᵀ do not depend on the anchor; XᵀX is rebuilt from them and the basis means
         final double[] mean = new double[d];
-        for (int i = 0; i < d; i++) mean[i] = moments.shift[i] + moments.sum[i] / n;
+        for (int i = 0; i < d; i++) mean[i] = moments.mean(i);
         final double[][] a = new double[m][m];
         final double[] r = new double[m];
         for (int i = 0; i < m; i++) {
-            for (int j = 0; j < m; j++) a[i][j] = moments.products[i * d + j] - moments.sum[i] * moments.sum[j] / n + n * mean[i] * mean[j];
-            r[i] = moments.products[i * d + m] - moments.sum[i] * moments.sum[m] / n;
+            for (int j = 0; j < m; j++) a[i][j] = moments.centred(i, j) + n * mean[i] * mean[j];
+            r[i] = moments.centred(i, m);
         }
-        final double yy = Math.max(0, moments.products[m * d + m] - moments.sum[m] * moments.sum[m] / n);
+        final double yy = Math.max(0, moments.centred(m, m));
         final double[][] p = penalty(m, penaltyOrder);
 
         double traceA = 0, traceP = 0;

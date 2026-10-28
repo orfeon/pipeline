@@ -198,8 +198,13 @@ Writing the family (worked examples: `Summary.Shape` — the smallest; `Summary.
 2. `update(state, contribution, ±1)`: the contribution type is the family's contract (`Number`, `double[]{x, y}`,
    a category) — document it; a non-invertible family throws `UnsupportedOperationException` on `−1`.
    - Sums of order ≥ 2 over values that may carry a level: subtract an **anchor** (the first contribution), make
-     `merge` re-anchor `other` onto `into` (binomial shift), and **reset exactly when `n` returns to 0** so rounding
-     residue does not outlive a window and the next value re-anchors.
+     `merge` re-anchor `other` onto `into` (binomial shift), **move the anchor onto the mean** once the window slides
+     far from it, and **reset exactly when `n` returns to 0** so rounding residue does not outlive a window and the
+     next value re-anchors. For cross moments do not write the sums again: hold a `Svd.Moments` and `fold(x, ±1)` /
+     `recentre()` / `merge` it, as `Summary.Regression` (a pair is a 2-vector) and `Summary.Covariance` do; its
+     per-component `mass` is the floor the variance snap reads (`Regression.variance`), and `mean(i)` /
+     `centred(i, j)` are what the fits read from the same accumulator (`add`, which never moves the anchor).
+     `Summary.Shape` (fourth powers) carries its own sums with the same rules.
    - `merge(into, other)` must not modify `other` (DirectRunner immutability, and `BlockSeries` re-merges parts).
 3. `read(state, Readout)`: population moments, **null — never NaN —** below the minimum count or without spread
    (guard the variance against the rounding floor of the sums it is formed from, not against `== 0`); unknown

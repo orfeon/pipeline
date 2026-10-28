@@ -415,9 +415,9 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   carrying one at stage setup instead of replaying it: admitting `maxAge` / `maxEvents` / a general filter at the
   compile layer means implementing both halves first.
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
-  into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
-  on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like
-  the moments. The lead-lag form (`lag: k`, `field` of event i with `against` of event i − k) is *not* a
+  into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, moved onto
+  the mean as the window slides, re-anchored on merge: a 2-vector `Svd.Moments`) so a price level does not cancel
+  the covariance away; invertible, so it evicts under `maxAge` like the moments. The lead-lag form (`lag: k`, `field` of event i with `against` of event i − k) is *not* a
   per-event contribution — evicting the far edge would need the rows before it — so `summaryOf` gives it no
   family and it folds the same family over the scanned window. `fracdiff` is a fixed FIR over the last k events
   (`fracdiffWeights`, resolved once into the column plan): a bounded tail, no state.
@@ -1259,16 +1259,27 @@ Families (`Summary.Summaries`, plus the two that live with their model class):
 | `EXTREMA` | max, min | **no** | max / min | sequence `aggregate` (scan under `maxAge`) |
 | `COUNTS` | value → count | yes | distribution | encoding `distribution` |
 | `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
-| `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
-| `COVARIANCE` / `COVARIANCE_STANDARDIZED` | n, Σx, Σxxᵀ of a k-vector about an anchor | yes | absorption (components) / effectiveRank / meanCorrelation / logDet / count — the two instances read the eigenvalues of the covariance or of the correlation matrix (`standardize`) | sequence `covariance` |
-| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3); `type: copula` fits (the vector of normal scores, §9.6.3) |
+| `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor that follows the mean (a 2-vector `Svd.Moments`) | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
+| `COVARIANCE` / `COVARIANCE_STANDARDIZED` | n, Σx, Σxxᵀ of a k-vector about an anchor that follows the mean (`Svd.Moments`) | yes | absorption (components) / effectiveRank / meanCorrelation / logDet / count — the two instances read the eigenvalues of the covariance or of the correlation matrix (`standardize`) | sequence `covariance` |
+| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor (the block's first vector, never moved) | **no** by declaration — a fit's blocks are merged over the readable range, never differenced; the arithmetic itself is signed (`Svd.Moments.fold`) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3); `type: copula` fits (the vector of normal scores, §9.6.3) |
 | `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
 
 Conventions every family follows: population moments (the `std` convention) and null — never NaN — when a
 readout is undefined (too few contributions, no spread); power sums of order ≥ 2 over values that may carry a
 level (prices, epoch times) are taken **about an anchor** (the first contribution; `merge` re-anchors by the
 binomial shift) because a central moment formed from raw sums cancels away; a state emptied by eviction resets
-exactly, so rounding residue does not outlive a window.
+exactly, so rounding residue does not outlive a window. A state that *evicts* also **moves its anchor onto the
+mean** once a component's mean is four deviations from it (`Svd.Moments.recentre`; `Shape` has the same rule at
+32): a window sliding along a trend would otherwise leave its first contribution behind, and the second moments
+about an anchor `m` away round at `(m / σ)²` times the variance's own floor (a 30-pair window 200 000 events along
+a trend read its covariance 4e-6 off, its intercept 7e-5; with the move it agrees with a fresh fold to 1e-9). The
+move is the merge shift with δ = −mean, applied by the anchor's *realised* (rounded) displacement so the sums and
+the anchor never drift apart, and the per-component `mass` (Σ(x − a)² of everything folded in or out since the state
+was empty) stays the floor the variance snap reads, since the residue of the far anchor's sums is of that scale.
+The anchored cross moments have **one implementation**, `Svd.Moments`: the fits (`svd`, `smooth`, `copula`) `add`
+vectors and read `mean(i)` / `centred(i, j)` (sample moments over n − 1, the first vector of the block as the anchor,
+never moved — an artifact refits bit for bit); `REGRESSION` (a pair as a 2-vector) and `COVARIANCE` hold one and
+`fold(x, ±1)` / `recentre` it, reading population moments.
 
 **The path rule.** `OperatorCatalog.summary(stat)` maps a statistic token to `(family, Readout)` and is the only
 place that decides what runs incrementally. `SequenceEvaluator.plan()` then reads:

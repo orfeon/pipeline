@@ -95,6 +95,12 @@ public final class Svd implements Serializable, FitArtifact.Model {
      * both taken relative to an anchor ({@code shift}, the first accepted vector) so that the covariance is not
      * formed by cancelling two huge raw moments when the values carry a large offset (epoch times, ids). Merging
      * re-expresses the other accumulator relative to this anchor (exact algebra, additions only).
+     *
+     * <p>The one implementation of anchored cross moments. The fits ({@link Svd}, {@link Copula}, {@link Smooth})
+     * {@link #add} vectors and read {@link #mean} / {@link #centred}; the invertible window families
+     * ({@link Summary.Regression} — a pair is a 2-vector — and {@link Summary.Covariance}) {@link #fold} vectors in and
+     * out and {@link #recentre} as their window slides. {@link #mass} is the rounding floor of the diagonal, for a
+     * read that must tell a constant left behind by evictions from spread.
      */
     public static final class Moments implements Serializable {
         public int dimension;
@@ -108,7 +114,15 @@ public final class Svd implements Serializable, FitArtifact.Model {
         public double[] sum = new double[0];
         /** Σ (x − shift)(x − shift)ᵀ, flattened row-major. */
         public double[] products = new double[0];
+        /**
+         * Σ (x − shift)² per component over every vector folded in <em>or out</em> since the state was last empty: the
+         * scale of the rounding residue evictions leave on the diagonal (the current sums alone cannot tell it from
+         * spread once the vectors left behind sit on the anchor). Not reduced by {@link #recentre}: the residue is of
+         * the scale the sums had when it was made.
+         */
+        public double[] mass = new double[0];
 
+        /** Adds a vector to a fit: null, a NaN component or a length other than the first vector's is counted and skipped. */
         public void add(final double[] x) {
             if (x == null) {
                 skipped++;
@@ -120,21 +134,92 @@ public final class Svd implements Serializable, FitArtifact.Model {
                     return;
                 }
             }
+            if (n > 0 && x.length != dimension) {
+                mismatched++;
+                return;
+            }
+            fold(x, 1);
+        }
+
+        /**
+         * Folds one complete vector in ({@code sign = +1}) or out ({@code −1}). The first vector folded into an empty
+         * state is the anchor; a state whose count returns to 0 is {@link #clear}ed exactly, so no rounding residue
+         * outlives a window and the next vector re-anchors.
+         *
+         * @throws IllegalArgumentException on a vector of another length than the anchor's
+         */
+        public void fold(final double[] x, final int sign) {
             if (n == 0) {
                 dimension = x.length;
                 shift = x.clone();
                 sum = new double[dimension];
                 products = new double[dimension * dimension];
+                mass = new double[dimension];
             } else if (x.length != dimension) {
-                mismatched++;
-                return;
+                throw new IllegalArgumentException("a vector of " + x.length + " components into moments of " + dimension);
             }
-            n++;
+            n += sign;
             for (int i = 0; i < dimension; i++) {
-                final double di = x[i] - shift[i];
-                sum[i] += di;
-                for (int j = 0; j < dimension; j++) products[i * dimension + j] += di * (x[j] - shift[j]);
+                final double di = x[i] - shift[i], si = sign * di;
+                sum[i] += si;
+                for (int j = 0; j < dimension; j++) products[i * dimension + j] += si * (x[j] - shift[j]);
+                mass[i] += di * di;
             }
+            if (n == 0) clear();
+        }
+
+        /** Back to the empty state (no count, no anchor); the skip counters stay. */
+        public void clear() {
+            n = 0;
+            shift = new double[0];
+            sum = new double[0];
+            products = new double[0];
+            mass = new double[0];
+        }
+
+        /**
+         * Moves the anchor onto the mean once a component's mean is more than four of its deviations away from it — exact
+         * algebra, the shift of {@link #merge} with δ = −mean. A window sliding along a trend leaves its first vector
+         * behind, and the second moments about an anchor {@code m} away carry {@code (m / σ)²} times the variance, so
+         * every fold rounds at that multiple of the variance's own floor (a 30-pair window 200 000 events along a trend
+         * read its covariance 4e-6 off, its intercept 7e-5): four deviations keep the multiple under 20 — the rounding of
+         * a few hundred thousand folds stays below 1e-8 — at one shift per window length along a trend and none on a
+         * stationary series (a window mean four deviations out is a 4√n-sigma event). The window families call this
+         * after every {@link #fold}. A fit never does: its anchor stays the first vector of its block, and an artifact
+         * refits bit for bit.
+         */
+        public void recentre() {
+            if (n <= 0) return;
+            final int d = dimension;
+            boolean far = false;
+            for (int i = 0; i < d && !far; i++) {
+                final double m = sum[i] / n;
+                far = m * m > 16 * (products[i * d + i] / n - m * m);
+            }
+            if (!far) return;
+            // the new anchor is a rounded double: shift the sums by the move actually made (exact — the two anchors are
+            // close), or every recentre would leave the sums about one point and the anchor at another, 1e-11 apart at a
+            // level of 1e5, and the inconsistency would add up over thousands of moves
+            final double[] delta = new double[d];
+            for (int i = 0; i < d; i++) {
+                final double moved = shift[i] + sum[i] / n;
+                delta[i] = shift[i] - moved;
+                shift[i] = moved;
+            }
+            for (int i = 0; i < d; i++) {
+                for (int j = 0; j < d; j++) products[i * d + j] += sum[i] * delta[j] + delta[i] * sum[j] + n * delta[i] * delta[j];
+            }
+            for (int i = 0; i < d; i++) sum[i] += n * delta[i];
+        }
+
+        /** The mean of component {@code i}: the anchor plus the mean of the anchored sums. */
+        public double mean(final int i) {
+            return shift[i] + sum[i] / n;
+        }
+
+        /** Σ (x_i − x̄_i)(x_j − x̄_j), the centred cross product — the same number about any anchor. */
+        public double centred(final int i, final int j) {
+            return products[i * dimension + j] - sum[i] * sum[j] / n;
         }
 
         public void merge(final Moments other) {
@@ -146,6 +231,7 @@ public final class Svd implements Serializable, FitArtifact.Model {
                 shift = other.shift.clone();
                 sum = other.sum.clone();
                 products = other.products.clone();
+                mass = other.mass.clone();
                 n = other.n;
                 return;
             }
@@ -163,7 +249,10 @@ public final class Svd implements Serializable, FitArtifact.Model {
                     products[i * d + j] += other.products[i * d + j] + other.sum[i] * delta[j] + delta[i] * other.sum[j] + other.n * delta[i] * delta[j];
                 }
             }
-            for (int i = 0; i < d; i++) sum[i] += other.sum[i] + other.n * delta[i];
+            for (int i = 0; i < d; i++) {
+                sum[i] += other.sum[i] + other.n * delta[i];
+                mass[i] += other.mass[i] + other.n * delta[i] * delta[i];
+            }
             n += other.n;
         }
     }
@@ -171,7 +260,8 @@ public final class Svd implements Serializable, FitArtifact.Model {
     /**
      * The moments as a {@link Summary} family (contributions are {@code double[]} vectors): a monoid — one
      * {@code Combine} per block of a forward fit, merged over the blocks a row reads ({@link BlockSeries}) — that
-     * is not invertible (the anchored sums are not meant to be subtracted vector by vector).
+     * is declared not invertible: a fit's blocks are merged over the readable range, never differenced (the arithmetic
+     * itself is signed — {@link Moments#fold} — which is what the window families use).
      */
     public static final Summary<Svd.Moments> SUMMARY = new MomentsSummary();
 
@@ -230,15 +320,14 @@ public final class Svd implements Serializable, FitArtifact.Model {
         }
         final double n = m.n;
         final double[] mean = new double[d];
-        if (center) for (int i = 0; i < d; i++) mean[i] = m.shift[i] + m.sum[i] / n;
+        if (center) for (int i = 0; i < d; i++) mean[i] = m.mean(i);
         // covariance (centred, n − 1) or the uncentred second-moment matrix (n), both from the anchored sums
         final double[][] c = new double[d][d];
         for (int i = 0; i < d; i++) {
             for (int j = 0; j < d; j++) {
-                final double p = m.products[i * d + j];
                 c[i][j] = center
-                        ? (p - m.sum[i] * m.sum[j] / n) / (n - 1)
-                        : (p + m.sum[i] * m.shift[j] + m.shift[i] * m.sum[j] + n * m.shift[i] * m.shift[j]) / n;
+                        ? m.centred(i, j) / (n - 1)
+                        : (m.products[i * d + j] + m.sum[i] * m.shift[j] + m.shift[i] * m.sum[j] + n * m.shift[i] * m.shift[j]) / n;
             }
         }
         final double[] scale = ones(d);

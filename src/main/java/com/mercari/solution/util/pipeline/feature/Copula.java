@@ -182,8 +182,8 @@ public final class Copula implements Serializable, FitArtifact.Model {
         final double[] sd = new double[d];
         final double[][] cov = new double[d][d];
         for (int i = 0; i < d; i++) {
-            mean[i] = m.shift[i] + m.sum[i] / n;
-            for (int j = 0; j < d; j++) cov[i][j] = (m.products[i * d + j] - m.sum[i] * m.sum[j] / n) / (n - 1);
+            mean[i] = m.mean(i);
+            for (int j = 0; j < d; j++) cov[i][j] = m.centred(i, j) / (n - 1);
         }
         for (int i = 0; i < d; i++) {
             // a constant score (every value on one mass point) has no correlation with anything
@@ -602,6 +602,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
         head.n = m.n;
         head.shift = Arrays.copyOf(m.shift, d);
         head.sum = Arrays.copyOf(m.sum, d);
+        head.mass = Arrays.copyOf(m.mass, d);
         head.products = new double[d * d];
         for (int i = 0; i < d; i++) System.arraycopy(m.products, i * full, head.products, i * d, d);
         return head;
@@ -867,11 +868,7 @@ public final class Copula implements Serializable, FitArtifact.Model {
 
     /** The sample correlation of scores {@code a} and {@code b} (no shrinkage, no eigenvalue floor), from the anchored sums. */
     static double sampleCorrelation(final Svd.Moments m, final int a, final int b) {
-        final int dim = m.dimension;
-        final double n = m.n;
-        final double cab = m.products[a * dim + b] - m.sum[a] * m.sum[b] / n;
-        final double caa = m.products[a * dim + a] - m.sum[a] * m.sum[a] / n;
-        final double cbb = m.products[b * dim + b] - m.sum[b] * m.sum[b] / n;
+        final double cab = m.centred(a, b), caa = m.centred(a, a), cbb = m.centred(b, b);
         return Math.max(-1d, Math.min(1d, cab / Math.sqrt(caa * cbb)));
     }
 

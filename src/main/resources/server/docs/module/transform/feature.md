@@ -407,7 +407,8 @@ shrinkage scale:
   decide the ratio. `meanCorrelation` and `logDet` are of the correlation matrix either way, and every correlation
   readout is null when a series is constant over the window.
 - **Cost / retention.** The op runs incrementally: one running k × k cross-moment state per op and window, shared
-  by its funcs (anchored at the first vector so a common level stays out of the products, evicted under `maxAge`),
+  by its funcs (taken about an anchor that follows the window, so a common level or a trend stays out of the
+  products; evicted under `maxAge`),
   O(k²) per event and one k × k eigendecomposition per row read, shared by the funcs that read it — the window's
   length does not enter. Under
   `maxEvents` or a general `filter` it re-reads the window per row: bound it with `maxAge` / `maxEvents` (a filter

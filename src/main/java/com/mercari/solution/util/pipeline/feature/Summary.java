@@ -392,16 +392,15 @@ public interface Summary<S extends Serializable> extends Serializable {
 
     /**
      * (n, Σx, Σy, Σx², Σy², Σxy) of a pair series — the sufficient statistics of the simple regression of y on x.
-     * A contribution is a {@code double[]{x, y}}. The sums are taken relative to an anchor (the first pair folded
-     * in), so the covariance of values with a large offset (a price level) is not the difference of two huge raw
-     * moments; merging re-anchors {@code other} onto {@code into}.
+     * A contribution is a {@code double[]{x, y}}, folded as a 2-vector into {@link Svd.Moments}: the sums are taken
+     * relative to an anchor (the first pair; moved onto the mean once the window slides far from it, re-anchored on
+     * merge), so the covariance of values with a large offset (a price level) is not the difference of two huge raw
+     * moments.
      */
     final class Regression implements Summary<Regression.State> {
         public static final class State implements Serializable {
-            public double n, sx, sy, sxx, syy, sxy;
-            /** The anchor subtracted from every pair (unset while the state is empty). */
-            public double ax, ay;
-            public boolean anchored;
+            /** The pair's moments: x is component 0, y component 1. */
+            public final Svd.Moments moments = new Svd.Moments();
         }
 
         @Override
@@ -411,26 +410,8 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         @Override
         public void update(final State s, final Object contribution, final int sign) {
-            final double[] pair = (double[]) contribution;
-            if (!s.anchored) {
-                s.ax = pair[0];
-                s.ay = pair[1];
-                s.anchored = true;
-            }
-            final double x = pair[0] - s.ax, y = pair[1] - s.ay;
-            s.n += sign;
-            s.sx += sign * x;
-            s.sy += sign * y;
-            s.sxx += sign * x * x;
-            s.syy += sign * y * y;
-            s.sxy += sign * x * y;
-            // an emptied window starts over: no rounding residue, and the next pair re-anchors
-            if (s.n == 0) reset(s);
-        }
-
-        private static void reset(final State s) {
-            s.sx = s.sy = s.sxx = s.syy = s.sxy = 0;
-            s.anchored = false;
+            s.moments.fold((double[]) contribution, sign);
+            s.moments.recentre();
         }
 
         @Override
@@ -440,25 +421,12 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         @Override
         public void merge(final State into, final State other) {
-            if (other.n == 0) return;
-            if (!into.anchored) {
-                into.ax = other.ax;
-                into.ay = other.ay;
-                into.anchored = true;
-            }
-            // shift other's sums from its anchor to into's: x − a = (x − b) + (b − a)
-            final double dx = other.ax - into.ax, dy = other.ay - into.ay;
-            into.sxx += other.sxx + 2 * dx * other.sx + other.n * dx * dx;
-            into.syy += other.syy + 2 * dy * other.sy + other.n * dy * dy;
-            into.sxy += other.sxy + dx * other.sy + dy * other.sx + other.n * dx * dy;
-            into.sx += other.sx + other.n * dx;
-            into.sy += other.sy + other.n * dy;
-            into.n += other.n;
+            into.moments.merge(other.moments);
         }
 
         @Override
         public double count(final State s) {
-            return s.n;
+            return s.moments.n;
         }
 
         /**
@@ -468,11 +436,13 @@ public interface Summary<S extends Serializable> extends Serializable {
          */
         @Override
         public Object read(final State s, final Readout readout) {
-            if ("count".equals(readout.name())) return (long) s.n;
-            if (s.n < 2) return null;
-            final double mx = s.sx / s.n, my = s.sy / s.n;
-            final double vx = variance(s.sxx / s.n, mx), vy = variance(s.syy / s.n, my);
-            final double cov = s.sxy / s.n - mx * my;
+            final Svd.Moments m = s.moments;
+            if ("count".equals(readout.name())) return m.n;
+            if (m.n < 2) return null;
+            final double n = m.n;
+            final double mx = m.sum[0] / n, my = m.sum[1] / n;
+            final double vx = variance(m.products[0] / n, mx, m.mass[0] / n), vy = variance(m.products[3] / n, my, m.mass[1] / n);
+            final double cov = m.products[1] / n - mx * my;
             return switch (readout.name()) {
                 case "cov" -> cov;
                 case "corr" -> vx == 0 || vy == 0 ? null : clamp(cov / Math.sqrt(vx * vy));
@@ -482,20 +452,22 @@ public interface Summary<S extends Serializable> extends Serializable {
                     yield r * r;
                 }
                 case "beta" -> vx == 0 ? null : cov / vx;
-                case "intercept" -> vx == 0 ? null : (my + s.ay) - cov / vx * (mx + s.ax);
+                case "intercept" -> vx == 0 ? null : (my + m.shift[1]) - cov / vx * (mx + m.shift[0]);
                 default -> throw new IllegalArgumentException("regression cannot read " + readout.name());
             };
         }
 
         /**
-         * E[x²] − E[x]², snapped to 0 within rounding of E[x²]: once the anchor pair is evicted a constant series sits
-         * at a non-zero offset from the anchor, and the running sums leave a residue (~1e-16 relative) that would
-         * otherwise turn a constant x into a spurious beta / corr instead of null (the scan path anchors inside the
-         * window and gets an exact 0).
+         * E[x²] − E[x]², snapped to 0 within the rounding of the sums it is formed from: of E[x²] itself, and of the
+         * mass every contribution folded in or out since the state was empty left on it ({@code massOverN},
+         * {@link Svd.Moments#mass}). Once the anchor pair is evicted a constant series sits at a non-zero offset from
+         * the anchor — or, after a {@link Svd.Moments#recentre}, on an anchor whose sums are nothing but the residue of
+         * that eviction (~1e-16 of the mass) — and the residue would otherwise turn a constant x into a spurious
+         * beta / corr instead of null (the scan path anchors inside the window and gets an exact 0).
          */
-        static double variance(final double secondMoment, final double mean) {
+        static double variance(final double secondMoment, final double mean, final double massOverN) {
             final double v = secondMoment - mean * mean;
-            return v <= 1e-12 * secondMoment ? 0d : v;
+            return v <= 1e-12 * secondMoment || v <= 1e-14 * massOverN ? 0d : v;
         }
 
         static double clamp(final double r) {
@@ -504,8 +476,9 @@ public interface Summary<S extends Serializable> extends Serializable {
     }
 
     /**
-     * The second moments of a k-vector — n, Σ(x − a), Σ(x − a)(x − a)ᵀ about an anchor a (the first vector folded in,
-     * re-anchored on merge, reset exactly when n returns to 0) — read as the window's covariance / correlation matrix:
+     * The second moments of a k-vector — n, Σ(x − a), Σ(x − a)(x − a)ᵀ about an anchor a ({@link Svd.Moments}: the first
+     * vector folded in, moved onto the mean once the window slides far from it, re-anchored on merge, reset exactly when
+     * n returns to 0) — read as the window's covariance / correlation matrix:
      * the sequence {@code covariance} op over k series of the entity's past events. A contribution is a
      * {@code double[]} with every component present (the evaluator skips a row with a missing one), so every readout is
      * over the same rows. Readouts (null below two contributions): {@code absorption} — the share of the total variance
@@ -517,19 +490,12 @@ public interface Summary<S extends Serializable> extends Serializable {
      * no more vectors than series — n centred vectors span at most n − 1 dimensions, so the matrix is singular for
      * n ≤ k), {@code count}. The eigenvalue readouts are of the
      * covariance matrix, or of the correlation matrix under {@code standardize} ({@link Summaries#COVARIANCE_STANDARDIZED});
-     * the correlation readouts are null when a series is constant over the window.
+     * the correlation readouts are null when a series is constant over the window. The readouts are population
+     * moments (the fits read the same moments as sample ones, {@link Svd.Moments#centred} over n − 1).
      */
     final class Covariance implements Summary<Covariance.State> {
         public static final class State implements Serializable {
-            public int dimension;
-            public double n;
-            /** The anchor subtracted from every vector (unset while the state is empty). */
-            public double[] anchor = new double[0];
-            /** Σ (x − anchor). */
-            public double[] sum = new double[0];
-            /** Σ (x − anchor)(x − anchor)ᵀ, row-major. */
-            public double[] products = new double[0];
-            public boolean anchored;
+            public final Svd.Moments moments = new Svd.Moments();
             /** Bumped by every update / merge: what the eigenvalue caches below are valid at (a read cache, not state: transient). */
             transient long version;
             /** The eigenvalues last swept of the covariance and of the correlation matrix, valid at the version beside them. */
@@ -568,34 +534,9 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         @Override
         public void update(final State s, final Object contribution, final int sign) {
-            final double[] x = (double[]) contribution;
             s.version++;
-            if (!s.anchored) {
-                s.dimension = x.length;
-                s.anchor = x.clone();
-                s.sum = new double[x.length];
-                s.products = new double[x.length * x.length];
-                s.anchored = true;
-            } else if (x.length != s.dimension) {
-                throw new IllegalArgumentException("covariance contribution of " + x.length + " series into a state of " + s.dimension);
-            }
-            final int k = s.dimension;
-            final double[] d = new double[k];
-            for (int i = 0; i < k; i++) d[i] = x[i] - s.anchor[i];
-            s.n += sign;
-            for (int i = 0; i < k; i++) {
-                s.sum[i] += sign * d[i];
-                for (int j = 0; j < k; j++) s.products[i * k + j] += sign * d[i] * d[j];
-            }
-            // an emptied window starts over: no rounding residue, and the next vector re-anchors
-            if (s.n == 0) reset(s);
-        }
-
-        private static void reset(final State s) {
-            s.sum = new double[0];
-            s.products = new double[0];
-            s.anchor = new double[0];
-            s.anchored = false;
+            s.moments.fold((double[]) contribution, sign);
+            s.moments.recentre();
         }
 
         @Override
@@ -606,47 +547,29 @@ public interface Summary<S extends Serializable> extends Serializable {
         @Override
         public void merge(final State into, final State other) {
             into.version++;
-            if (other.n == 0) return;
-            if (!into.anchored) {
-                into.dimension = other.dimension;
-                into.anchor = other.anchor.clone();
-                into.sum = other.sum.clone();
-                into.products = other.products.clone();
-                into.n = other.n;
-                into.anchored = true;
-                return;
+            if (other.moments.n == 0) return;
+            if (into.moments.n > 0 && into.moments.dimension != other.moments.dimension) {
+                throw new IllegalArgumentException("covariance states of " + into.moments.dimension + " and " + other.moments.dimension + " series");
             }
-            if (into.dimension != other.dimension) {
-                throw new IllegalArgumentException("covariance states of " + into.dimension + " and " + other.dimension + " series");
-            }
-            // other's sums are about other.anchor; with δ = other.anchor − into.anchor and z = y + δ:
-            // Σz = Σy + n δ, Σzzᵀ = Σyyᵀ + (Σy)δᵀ + δ(Σy)ᵀ + n δδᵀ
-            final int k = into.dimension;
-            final double[] delta = new double[k];
-            for (int i = 0; i < k; i++) delta[i] = other.anchor[i] - into.anchor[i];
-            for (int i = 0; i < k; i++) {
-                for (int j = 0; j < k; j++) {
-                    into.products[i * k + j] += other.products[i * k + j] + other.sum[i] * delta[j] + delta[i] * other.sum[j] + other.n * delta[i] * delta[j];
-                }
-            }
-            for (int i = 0; i < k; i++) into.sum[i] += other.sum[i] + other.n * delta[i];
-            into.n += other.n;
+            into.moments.merge(other.moments);
         }
 
         @Override
         public double count(final State s) {
-            return s.n;
+            return s.moments.n;
         }
 
         @Override
         public Object read(final State s, final Readout readout) {
-            if ("count".equals(readout.name())) return (long) s.n;
-            if (s.n < 2) return null;
-            final int k = s.dimension;
+            final Svd.Moments m = s.moments;
+            if ("count".equals(readout.name())) return m.n;
+            if (m.n < 2) return null;
+            final int k = m.dimension;
+            final double n = m.n;
             final double[] mean = new double[k], variance = new double[k];
             for (int i = 0; i < k; i++) {
-                mean[i] = s.sum[i] / s.n;
-                variance[i] = Regression.variance(s.products[i * k + i] / s.n, mean[i]);
+                mean[i] = m.sum[i] / n;
+                variance[i] = Regression.variance(m.products[i * k + i] / n, mean[i], m.mass[i] / n);
             }
             boolean constant = false;
             for (final double v : variance) constant |= v == 0;
@@ -655,7 +578,7 @@ public interface Summary<S extends Serializable> extends Serializable {
             for (int i = 0; i < k; i++) {
                 cov[i][i] = variance[i];
                 for (int j = i + 1; j < k; j++) {
-                    final double c = variance[i] == 0 || variance[j] == 0 ? 0d : s.products[i * k + j] / s.n - mean[i] * mean[j];
+                    final double c = variance[i] == 0 || variance[j] == 0 ? 0d : m.products[i * k + j] / n - mean[i] * mean[j];
                     cov[i][j] = cov[j][i] = c;
                 }
             }
