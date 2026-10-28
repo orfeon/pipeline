@@ -129,6 +129,67 @@ public class SvdTest {
         Assertions.assertEquals(0, Svd.fit(new Svd.Moments(), 2, true, false).dimension);
     }
 
+    /**
+     * The moments as the window families use them: {@code fold} in and out reads like a fresh fold of what is inside,
+     * {@code recentre} moves the anchor onto the mean without changing what is read, {@code add} never moves it (a fit's
+     * anchor stays its block's first vector), and {@code mean} / {@code centred} are the anchor-free reads.
+     */
+    @Test
+    public void testMomentsFoldAndRecentre() {
+        final double[] far = {1e6, 3};
+        final Svd.Moments added = new Svd.Moments(), folded = new Svd.Moments(), inside = new Svd.Moments();
+        added.add(far);
+        folded.fold(far, 1);
+        for (int i = 0; i < 20; i++) {
+            final double[] x = {i, 2 * i + 1 + (i % 3)};
+            added.add(x);
+            folded.fold(x, 1);
+            inside.add(x);
+        }
+        folded.fold(far, -1);
+        Assertions.assertEquals(20, folded.n);
+        Assertions.assertEquals(1e6, folded.shift[0], 0d, "fold does not move the anchor");
+        for (int i = 0; i < 2; i++) {
+            Assertions.assertEquals(inside.mean(i), folded.mean(i), 1e-9);
+            for (int j = 0; j < 2; j++) Assertions.assertEquals(inside.centred(i, j), folded.centred(i, j), 1e-4 * Math.max(1, Math.abs(inside.centred(i, j))));
+        }
+        // the far first vector left the window: the mean is 1e6 deviations from the anchor, so recentre moves it onto the mean
+        folded.recentre();
+        Assertions.assertEquals(inside.mean(0), folded.shift[0], 1e-9);
+        Assertions.assertEquals(0d, folded.sum[0], 1e-6);
+        for (int i = 0; i < 2; i++) {
+            Assertions.assertEquals(inside.mean(i), folded.mean(i), 1e-9);
+            for (int j = 0; j < 2; j++) Assertions.assertEquals(inside.centred(i, j), folded.centred(i, j), 1e-4 * Math.max(1, Math.abs(inside.centred(i, j))));
+        }
+        Assertions.assertTrue(folded.mass[0] > 19 * 1e12, "the mass keeps the scale the sums had: " + folded.mass[0]);
+        // recentre is a no-op while the mean is near the anchor; add never calls it
+        inside.recentre();
+        Assertions.assertEquals(0d, inside.shift[0], 0d);
+        Assertions.assertEquals(1e6, added.shift[0], 0d, "a fit's anchor is its first vector");
+        Assertions.assertEquals(1e6 / 21 + 190d / 21, added.mean(0), 1e-6);
+        // folded out to nothing: cleared exactly, the next vector anchors
+        final Svd.Moments emptied = new Svd.Moments();
+        emptied.fold(new double[]{5, 7}, 1);
+        emptied.fold(new double[]{9, 1}, 1);
+        emptied.fold(new double[]{5, 7}, -1);
+        emptied.fold(new double[]{9, 1}, -1);
+        Assertions.assertEquals(0, emptied.n);
+        Assertions.assertEquals(0, emptied.products.length);
+        emptied.fold(new double[]{2, 2}, 1);
+        Assertions.assertArrayEquals(new double[]{2, 2}, emptied.shift, 0d);
+        // a vector of another length: fold throws (a family's contract), add counts it
+        Assertions.assertThrows(IllegalArgumentException.class, () -> emptied.fold(new double[]{1}, 1));
+        emptied.add(new double[]{1});
+        Assertions.assertEquals(1, emptied.mismatched);
+        Assertions.assertEquals(1, emptied.n);
+        // merging carries the mass with the anchor shift
+        final Svd.Moments merged = new Svd.Moments();
+        merged.merge(inside);
+        merged.merge(folded);
+        Assertions.assertEquals(40, merged.n);
+        Assertions.assertEquals(inside.mass[0] + folded.mass[0] + 20 * Math.pow(folded.shift[0] - inside.shift[0], 2), merged.mass[0], 1e-6 * merged.mass[0]);
+    }
+
     @Test
     public void testJacobiOnAKnownSpectrum() {
         // Q diag(5, 2, 1) Qᵀ with an orthonormal Q

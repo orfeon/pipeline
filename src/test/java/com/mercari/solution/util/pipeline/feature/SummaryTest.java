@@ -69,10 +69,14 @@ public class SummaryTest {
     }
 
     private static void assertClose(final Object expected, final Object actual) {
+        assertClose(expected, actual, 1e-9);
+    }
+
+    private static void assertClose(final Object expected, final Object actual, final double relative) {
         if (expected == null || actual == null) {
             Assertions.assertEquals(expected, actual);
         } else if (expected instanceof Double e) {
-            Assertions.assertEquals(e, (Double) actual, 1e-9 * Math.max(1, Math.abs(e)));
+            Assertions.assertEquals(e, (Double) actual, relative * Math.max(1, Math.abs(e)));
         } else {
             Assertions.assertEquals(expected, actual);
         }
@@ -266,8 +270,8 @@ public class SummaryTest {
         final Summary.Regression.State emptied = fold(g, pairs);
         for (final double[] p : pairs) g.update(emptied, p, -1);
         Assertions.assertEquals(0, g.count(emptied), 0);
-        Assertions.assertFalse(emptied.anchored);
-        Assertions.assertEquals(0.0, emptied.sxy, 0);
+        Assertions.assertEquals(0, emptied.moments.n);
+        Assertions.assertEquals(0, emptied.moments.products.length);
         // the anchor pair evicted, a constant x sits at an offset from the anchor: still no slope (no rounding residue)
         for (int trial = 0; trial < 200; trial++) {
             final Summary.Regression.State drifted = g.create();
@@ -278,7 +282,32 @@ public class SummaryTest {
             g.update(drifted, anchor, -1);
             Assertions.assertNull(g.read(drifted, Summary.Readout.of("beta")), "x " + constantX + " anchored at " + anchor[0]);
             Assertions.assertNull(g.read(drifted, Summary.Readout.of("corr")));
+            // (the eviction left the mean a long way from the anchor in units of a vanished spread: the anchor moved onto
+            // the constant, and the sums are the residue of the far anchor — which the mass floor tells from spread)
+            Assertions.assertEquals(constantX, drifted.moments.shift[0], 1e-9 * constantX, "the anchor moved onto the constant");
+            // the residue left on the constant is below the mass floor: it does not read as far and move the anchor again
+            final double[] settled = drifted.moments.shift.clone();
+            g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            Assertions.assertArrayEquals(settled, drifted.moments.shift, 0d, "the anchor settled on the constant");
         }
+        // a window sliding along a trend: the anchor follows the mean (left at the first pair it would be 1e5 away by the
+        // end, and the sums, each eviction cancelling terms 1e10 times the variance, read cov 4e-6 and intercept 7e-5 off),
+        // so the running state keeps agreeing with a fresh fold of the window — to the rounding 400 000 folds about an anchor
+        // within four deviations leave, a few 1e-9
+        final Random walk = new Random(5);
+        final List<double[]> trend = new ArrayList<>();
+        for (int i = 0; i < 200_000; i++) {
+            final double x = i * 0.5 + walk.nextGaussian();
+            trend.add(new double[]{x, 0.3 * x + walk.nextGaussian()});
+        }
+        final Summary.Regression.State sliding = g.create();
+        for (int i = 0; i < trend.size(); i++) {
+            g.update(sliding, trend.get(i), 1);
+            if (i >= 30) g.update(sliding, trend.get(i - 30), -1);
+        }
+        final Summary.Regression.State fresh = fold(g, trend.subList(trend.size() - 30, trend.size()));
+        for (final Summary.Readout r : readouts) assertClose(g.read(fresh, r), g.read(sliding, r), 1e-9);
+        Assertions.assertTrue(sliding.moments.shift[0] > trend.get(trend.size() - 100)[0], "the anchor moved with the window: " + sliding.moments.shift[0]);
     }
 
     /**
@@ -359,8 +388,8 @@ public class SummaryTest {
         final Summary.Covariance.State emptied = fold(g, rows);
         for (final double[] r : rows) g.update(emptied, r, -1);
         Assertions.assertEquals(0, g.count(emptied), 0);
-        Assertions.assertFalse(emptied.anchored);
-        Assertions.assertEquals(0, emptied.products.length);
+        Assertions.assertEquals(0, emptied.moments.n);
+        Assertions.assertEquals(0, emptied.moments.products.length);
         // the anchor evicted, a constant series sits at an offset from it: still constant (no rounding residue)
         for (int trial = 0; trial < 200; trial++) {
             final Summary.Covariance.State drifted = g.create();
@@ -371,7 +400,29 @@ public class SummaryTest {
             g.update(drifted, anchor, -1);
             Assertions.assertNull(g.read(drifted, Summary.Readout.of("meanCorrelation")), "constant " + constant + " anchored at " + anchor[0]);
             Assertions.assertNull(std.read(drifted, Summary.Readout.of("absorption")));
+            Assertions.assertEquals(constant, drifted.moments.shift[0], 1e-9 * constant, "the anchor moved onto the constant");
+            // the residue left on the constant is below the mass floor: it does not read as far and drag every anchor again
+            final double[] settled = drifted.moments.shift.clone();
+            g.update(drifted, new double[]{constant, Math.round(random.nextDouble() * 100) / 10.0, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            Assertions.assertArrayEquals(settled, drifted.moments.shift, 0d, "the anchors settled");
         }
+        // a window sliding along a trend (two series trending at their own rates, one not): the anchor follows the mean,
+        // so the running state keeps agreeing with a fresh fold of the window (left at the first vector, logDet read 1e-5 off)
+        final Random walk = new Random(7);
+        final List<double[]> trend = new ArrayList<>();
+        for (int i = 0; i < 200_000; i++) trend.add(new double[]{i * 0.5 + walk.nextGaussian(), i * 0.2 + walk.nextGaussian(), walk.nextGaussian()});
+        final Summary.Covariance.State sliding = g.create();
+        for (int i = 0; i < trend.size(); i++) {
+            g.update(sliding, trend.get(i), 1);
+            if (i >= 30) g.update(sliding, trend.get(i - 30), -1);
+        }
+        final Summary.Covariance.State fresh = fold(g, trend.subList(trend.size() - 30, trend.size()));
+        for (final Summary.Readout r : readouts) {
+            assertClose(g.read(fresh, r), g.read(sliding, r), 1e-9);
+            assertClose(std.read(fresh, r), std.read(sliding, r), 1e-9);
+        }
+        Assertions.assertTrue(sliding.moments.shift[0] > trend.get(trend.size() - 100)[0], "the anchor moved with the window: " + sliding.moments.shift[0]);
+        Assertions.assertEquals(0d, sliding.moments.shift[2], 2, "the series that does not trend keeps an anchor near its level");
         // the spec of a column: standardize picks the instance, components the readout's parameter
         final Summary.Spec spec = Summary.Covariance.spec(Map.of("func", "absorption", "components", "2", "standardize", "true"));
         Assertions.assertSame(std, spec.family());
