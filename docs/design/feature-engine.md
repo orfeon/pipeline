@@ -560,6 +560,13 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   unpenalised fit; PCG 11–35 iterations; a sparse direct solve of the Schur complement (1.2M non-zeros) 16–43 s.
   The Gauss–Seidel path of a lattice without a fixed level is untouched. `structure: additive` (compiler) is the
   main-effects-only lattice for it; under `joint` an `additive` entry expands every key without single-key keySets.
+  **Lookups** (`KeySet.lookups` → `FeaturePlanCompiler.jointLookups`): `joint` columns of `kind: lookup` with the
+  coordinates `level` (effect-level index), `levelKeys`, `lookupBy` (the canonical `by` fields, comma-joined, parsed
+  once into `JointSpec.lookupBy`) and `read` (`effect` | `level`); `JointFit.lookup` reads the effect map of the
+  row's solution at `FeatureValues.key(row, lookupBy)` — null for an unfitted context, unlike `effect`'s 0 for a
+  shrunk level. The `by` fields are self inputs and block references (the assembly loop waits for a lag block), so
+  the keyed stage producing them precedes the fit stage. Not an as-of join (design decision 12 keeps those upstream):
+  the context is read in the model of the row's time.
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
   and a fit without an existing artifact in streaming.

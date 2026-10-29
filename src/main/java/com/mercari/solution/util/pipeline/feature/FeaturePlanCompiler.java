@@ -567,6 +567,7 @@ public final class FeaturePlanCompiler {
         for (final KeySet ks : def.keySets) {
             refs.addAll(ks.keys);
             if (ks.parentRef != null) refs.add(ks.parentRef);
+            for (final FeatureSpec.Lookup lookup : ks.lookups) for (final List<String> by : lookup.by) refs.addAll(by);
             for (final Window w : ks.windows) {
                 if (w.filter != null) {
                     final References r = expressionReferences(w.filter);
@@ -5421,6 +5422,9 @@ public final class FeaturePlanCompiler {
             if (!shrinkage.fixedLevels.isEmpty() && shrinkage.estimator != Shrinkage.Estimator.joint) {
                 diagnostics.error("encoding.shrinkage.fixedLevels", loc, "fixedLevels needs estimator: joint (a fixed level is solved with the others in one system)");
             }
+            if (!ks.lookups.isEmpty() && shrinkage.estimator != Shrinkage.Estimator.joint) {
+                diagnostics.error("encoding.keySet.lookups", loc, "lookups read a fitted joint model at other keys of the row: they need estimator: joint");
+            }
             if (shrinkage.emits("variance") && shrinkage.estimator != Shrinkage.Estimator.joint) {
                 diagnostics.error("encoding.shrinkage.output", loc, "output variance needs estimator: joint with fixedLevels and weights: varianceComponents");
             }
@@ -5511,6 +5515,8 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+        // the keySets whose lookups found a statistic of the joint fit to read (identity: a KeySet has no equals)
+        final Set<KeySet> jointExpanded = new HashSet<>();
         for (final int[] pair : pairs) {
             final Lattice lattice = lattices.get(pair[0]);
             final KeySet ks = lattice.keySet;
@@ -5588,6 +5594,7 @@ public final class FeaturePlanCompiler {
                     }
                     if (lattice.shrinkage.estimator == Shrinkage.Estimator.joint && !"share".equals(stat)) {
                         // joint: no hidden level statistics — the fit stage solves the lattice and fills the columns by lookup
+                        jointExpanded.add(ks);
                         produced += expandJoint(def, ks, lattice.levels, window, target.name, target.reference, stat, family,
                                 lattice.shrinkage, offsetColumn, computeAt, mode, fitSpec, naming, names);
                         continue;
@@ -5660,6 +5667,17 @@ public final class FeaturePlanCompiler {
                     }
                 }
             }
+        }
+        // lookups are columns of a joint statistic: a keySet whose targets fit none (count / share only) would drop them silently
+        final Set<KeySet> unreadLookups = new LinkedHashSet<>();
+        for (final int[] pair : pairs) {
+            final Lattice lattice = lattices.get(pair[0]);
+            if (!lattice.keySet.lookups.isEmpty() && lattice.shrinkage.estimator == Shrinkage.Estimator.joint
+                    && !jointExpanded.contains(lattice.keySet)) unreadLookups.add(lattice.keySet);
+        }
+        for (final KeySet ks : unreadLookups) {
+            diagnostics.error("encoding.keySet.lookups", loc, "lookups of keySet " + ks.keys + " read a statistic the joint estimator fits (a shrunk target stat such as mean / rate):"
+                    + " the keySet has none, so they would emit no column");
         }
         if (def.maxFeatures != null && produced > def.maxFeatures) {
             diagnostics.error("encoding.maxFeatures", loc, "expansion produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
@@ -5961,6 +5979,9 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("levelKeys", levels.get(neffLevel).token());
             cols.add(c);
         }
+        final List<OutputColumn> lookups = jointLookups(def, ks, levels, stat, computeAt, naming, names);
+        if (lookups == null) return 0;
+        cols.addAll(lookups);
         for (final OutputColumn c : cols) {
             populationColumn(c, ks, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
             c.coordinates.put("joint", id);
@@ -5976,6 +5997,94 @@ public final class FeaturePlanCompiler {
             register(c);
         }
         return cols.size();
+    }
+
+    /**
+     * The keySet's {@code lookups} of a joint lattice: one {@code joint} column of kind {@code lookup} per entry of
+     * {@code by}, reading the model the row reads (its fold's, its usable block's) at the context the row's {@code by}
+     * fields name rather than its own keys — a past context named by a lag column, read with the model of the row's
+     * time. {@code read: effect} (default) is the level's effect on the transform scale, {@code level} is {@code μ +}
+     * it; a context the model did not fit (outside the window, not yet readable, never seen) reads null. Null after an
+     * error.
+     */
+    private List<OutputColumn> jointLookups(final FeatureDef def, final KeySet ks, final List<JointFit.Level> levels, final String stat,
+                                            final AvailableAt computeAt, final String naming, final Map<String, String> names) {
+        final String loc = def.location();
+        final java.util.function.BiConsumer<String, String> report = (code, message) -> {
+            if (hintedBlocks.add(def.name + "#jointLookup#" + message)) diagnostics.error(code, loc, message);
+        };
+        final java.util.function.Consumer<String> error = message -> report.accept("encoding.keySet.lookups", message);
+        // the effect levels in the order the solution indexes its effects by (the global level carries none): the
+        // coordinate `level`, the level's keys and its token all come from this one list
+        final List<JointFit.Level> effects = JointFit.effectLevelsOf(levels);
+        final List<String> tokens = new ArrayList<>();
+        for (final JointFit.Level l : effects) tokens.add(l.token());
+        final List<OutputColumn> out = new ArrayList<>();
+        boolean failed = false;
+        for (final FeatureSpec.Lookup lookup : ks.lookups) {
+            if (lookup.malformed) {
+                error.accept("lookups must be a list of {level, by: [<field> | [<field>, ...]], read: effect | level}");
+                failed = true;
+                continue;
+            }
+            if (!lookup.unknown.isEmpty()) {
+                error.accept("unknown lookup parameter(s) " + lookup.unknown + " (available: level, by, read)");
+                failed = true;
+            }
+            final int level = lookup.level == null ? -1 : tokens.indexOf(lookup.level);
+            if (level < 0) {
+                error.accept("lookup level " + lookup.level + " is no level of the lattice (available: " + tokens + ")");
+                failed = true;
+                continue;
+            }
+            final String read = lookup.read == null ? "effect" : lookup.read;
+            if (!List.of("effect", "level").contains(read)) {
+                error.accept("lookup read must be effect | level: " + read);
+                failed = true;
+                continue;
+            }
+            if (lookup.by.isEmpty()) {
+                error.accept("lookup of level " + lookup.level + " needs by: the row's fields that name the context to read");
+                failed = true;
+                continue;
+            }
+            final List<String> levelKeys = effects.get(level).keys();
+            for (final List<String> by : lookup.by) {
+                if (by.size() != levelKeys.size()) {
+                    error.accept("lookup by " + by + " must name one field per key of level " + lookup.level + " " + levelKeys);
+                    failed = true;
+                    continue;
+                }
+                final List<String> canonical = new ArrayList<>();
+                final List<String> display = new ArrayList<>();
+                for (final String field : by) {
+                    final Ref ref = resolve(field);
+                    if (ref == null) {
+                        // reached when the block expands waiting for itself (a field spelled like one of its own columns):
+                        // an unresolved field must not become a column that reads null for every row
+                        report.accept("reference.unresolved", "lookup by field '" + field + "' is no input field or column");
+                        continue;
+                    }
+                    canonical.add(ref.canonical);
+                    // named like every other column built from a reference (a block.column spelling keeps the column part)
+                    display.add(displayName(field));
+                }
+                if (canonical.size() != by.size()) {
+                    failed = true;
+                    continue;
+                }
+                names.put("stat", stat + "__" + read + "__" + String.join("_", display));
+                final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
+                c.coordinates.put("kind", "lookup");
+                c.coordinates.put("level", Integer.toString(level));
+                c.coordinates.put("levelKeys", effects.get(level).token());
+                c.coordinates.put("lookupBy", String.join(",", canonical));
+                c.coordinates.put("read", read);
+                for (final String field : by) addSelfInput(c, field);
+                out.add(c);
+            }
+        }
+        return failed ? null : out;
     }
 
     /**

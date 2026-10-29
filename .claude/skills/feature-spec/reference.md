@@ -231,6 +231,8 @@ that fraction of the current row's value, 0 when neither, null without a future 
       hierarchy: [[coarser keys], additive, []]  # explicit lattice, fine → coarse
       shrinkage: {...}                           # per-keySet override
       as: <name>                                 # replaces the {keys} segment of the emitted names (default: the keys joined by _) — short names for lag-column paths, and the same keys twice in one block
+      lookups:                                   # estimator: joint only — read a level of the row's model at a context another column names
+        - {level: <level token>, by: [<field> | [<field>, ...]], read: effect | level}   # one column <...>__<stat>__<read>__<by> per by entry; null for a context the model did not fit (outside the window, not yet readable, unseen) or a null field
   targets:
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}

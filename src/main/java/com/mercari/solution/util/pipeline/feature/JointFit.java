@@ -924,6 +924,21 @@ public final class JointFit implements Serializable {
     }
 
     /**
+     * A {@code lookups} column: the effect of {@code level} — {@code μ +} it with {@code level read} — at the context the
+     * row's {@code fields} name (a past context in a lag column, read with the model of the row's time). Null without a
+     * solution, with a null field, or for a context the solve did not fit: no prior to fall back to, the question is
+     * what the model fitted for that context.
+     */
+    public Double lookup(final Solution s, final int level, final Map<String, Object> row, final List<String> fields, final boolean levelRead) {
+        if (s == null || s.isEmpty()) return null;
+        final String key = FeatureValues.key(row, fields);
+        if (key == null) return null;
+        final Double e = s.effects.get(level).get(key);
+        if (e == null) return null;
+        return levelRead ? s.mu + e : e;
+    }
+
+    /**
      * Effective sample size of the leaf: its n plus the leaf pseudo-count (the whole fit when fully shrunk). Under a
      * fixed level it is that of the first shrunk level: its information once the fixed level is absorbed — the rows
      * that tell its contexts apart, a row alone in its fixed context telling nothing — plus λ.
