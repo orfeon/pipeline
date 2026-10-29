@@ -2971,6 +2971,47 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * lookups: the session levels of {@link #testJointEstimatorFixedLevel} (A 1/2, B −1/6, C 1, D 5/6, μ = 11/18) read
+     * at the seller's previous session (a lag column): s1 at B reads A's level, at C B's, at D C's; a seller's first
+     * listing has no previous session (null).
+     */
+    @Test
+    public void testJointEstimatorLookup() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = FEATURE_CONFIG
+                .replace("{type: lag, fields: [sold, start_price], k: 2}", "{type: lag, fields: [sold, start_price, session_id], k: 2}")
+                .replace("            - keys: [seller_id]\n          targets:",
+                        "            - keys: [session_id, seller_id]\n              structure: additive\n"
+                                + "              lookups: [{level: session_id, by: [recent_n5_session_id_lag1], read: level}, {level: session_id, by: [recent_n5_session_id_lag1]}]\n"
+                                + "          targets:")
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {estimator: joint, scale: identity, priorWeight: 1, fixedLevels: [session_id]}")
+                .replace("      output:\n", "      fit: {mode: static, artifact: {uri: \"" + dir + "\"}}\n      output:\n");
+        Assertions.assertTrue(config.contains("lookups:") && config.contains("session_id], k: 2"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final String level = "f_enc__session_id_seller_id__e1__mean__level__recent_n5_session_id_lag1";
+        final String effect = "f_enc__session_id_seller_id__e1__mean__effect__recent_n5_session_id_lag1";
+        Assertions.assertEquals("lookup", outputs.get("features").getSchema().getField(level).getOptions().get("feature.coord.kind"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final Map<String, Double> expected = Map.of("B/s1", 0.5, "C/s1", -1.0 / 6, "D/s1", 1.0, "C/s2", 0.5);
+            for (final Map.Entry<String, Double> e : expected.entrySet()) {
+                Assertions.assertEquals(e.getValue(), byKey.get(e.getKey()).getAsDouble(level), 1e-9, e.getKey());
+                Assertions.assertEquals(e.getValue() - 11.0 / 18, byKey.get(e.getKey()).getAsDouble(effect), 1e-9, e.getKey());
+            }
+            for (final String first : List.of("A/s1", "A/s2")) {
+                Assertions.assertNull(byKey.get(first).getPrimitiveValue(level), first + ": no previous session");
+                Assertions.assertNull(byKey.get(first).getPrimitiveValue(effect), first);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
     private static double logit(final double p) {
         return Math.log(p / (1 - p));
     }

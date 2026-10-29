@@ -3182,7 +3182,7 @@ public final class FeatureStages {
      */
     record JointSpec(String id, List<JointFit.Level> levels, String field, String offsetColumn, Shrinkage.Scale scale,
                      String weights, double priorWeight, int fixedLevel, boolean mainEffects, List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis,
-                     String artifactUri, boolean refit, List<OutputColumn> columns) implements StaticFitBlock<JointFit> {
+                     String artifactUri, boolean refit, List<OutputColumn> columns, Map<String, List<String>> lookupBy) implements StaticFitBlock<JointFit> {
         @Override
         public String block() {
             return id;
@@ -3258,6 +3258,8 @@ public final class FeatureStages {
                         case "deviation" -> model.effect(solution, Integer.parseInt(col.getCoordinates().get("level")), values);
                         case "effectiveN" -> model.effectiveN(solution, values);
                         case "variance" -> model.variance(solution, values);
+                        case "lookup" -> model.lookup(solution, Integer.parseInt(col.getCoordinates().get("level")), values,
+                                lookupBy.get(col.getCanonicalName()), "level".equals(col.getCoordinates().get("read")));
                         default -> model.estimate(solution, values);
                     };
                 }
@@ -3284,9 +3286,18 @@ public final class FeatureStages {
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(k.get("folds")) : 0,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
-                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
+                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), lookupFields(e.getValue())));
         }
         return specs;
+    }
+
+    /** The row fields each {@code lookup} column of a joint reads its context from (coordinate {@code lookupBy}), parsed once. */
+    private static Map<String, List<String>> lookupFields(final List<OutputColumn> columns) {
+        final Map<String, List<String>> fields = new HashMap<>();
+        for (final OutputColumn c : columns) {
+            if ("lookup".equals(c.getCoordinates().get("kind"))) fields.put(c.getCanonicalName(), List.of(c.getCoordinates().get("lookupBy").split(",")));
+        }
+        return fields;
     }
 
     /** One (cell, (y − b, b)) per row — plus the fold-tagged part under fold, or keyed by the row's block under forward. */

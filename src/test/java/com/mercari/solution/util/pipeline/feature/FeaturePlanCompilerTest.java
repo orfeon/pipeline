@@ -1900,6 +1900,64 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * lookups read a level of the joint model the row reads at the context another column of the row names — a past
+     * session in a lag column: one column per by entry, the by field a self input, the fit stage after the lag's stage.
+     */
+    @Test
+    public void testJointLookups() {
+        final String joint = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: forward, blocks: {size: P30D}, window: P365D}
+                    keySets:
+                      - keys: [session_id, seller_id]
+                        structure: additive
+                        lookups:
+                          - {level: session_id, by: [recent_n5_session_id_lag1, recent_n5_session_id_lag2], read: level}
+                          - {level: seller_id, by: [seller_id]}
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {scale: identity, estimator: joint, weights: varianceComponents, fixedLevels: [session_id], output: [deviations]}
+            """;
+        final String spec = withEncoding(joint).replace("{type: lag, fields: [sold, start_price], k: 2}", "{type: lag, fields: [sold, start_price, session_id], k: 2}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn lag1 = column(plan, "enc__session_id_seller_id__e1__mean__level__recent_n5_session_id_lag1");
+        Assertions.assertEquals("joint", lag1.getOperator());
+        Assertions.assertEquals("lookup", lag1.getCoordinates().get("kind"));
+        Assertions.assertEquals("0", lag1.getCoordinates().get("level"));
+        Assertions.assertEquals("session_id", lag1.getCoordinates().get("levelKeys"));
+        Assertions.assertEquals("recent_n5_session_id_lag1", lag1.getCoordinates().get("lookupBy"));
+        Assertions.assertEquals("level", lag1.getCoordinates().get("read"));
+        Assertions.assertTrue(lag1.getInputs().contains("recent_n5_session_id_lag1"), lag1.getInputs()::toString);
+        Assertions.assertNotNull(plan.getColumn("enc__session_id_seller_id__e1__mean__level__recent_n5_session_id_lag2"), plan::describe);
+        Assertions.assertEquals("effect", column(plan, "enc__session_id_seller_id__e1__mean__effect__seller_id").getCoordinates().get("read"));
+        // the lag's keyed stage precedes the fit stage that applies the lookup
+        final FeaturePlan.Stage lagStage = plan.getStages().stream().filter(s -> s.columnNames().contains("recent_n5_session_id_lag1")).findFirst().orElseThrow();
+        final FeaturePlan.Stage fitStage = plan.getStages().stream().filter(s -> s.columnNames().contains(lag1.getCanonicalName())).findFirst().orElseThrow();
+        Assertions.assertEquals(FeaturePlan.StageKind.fit, fitStage.kind());
+        Assertions.assertTrue(lagStage.index() < fitStage.index(), plan::describe);
+        final FeatureStages.JointSpec jointSpec = FeatureStages.jointSpecs(List.of(lag1)).get(0);
+        Assertions.assertEquals(List.of("recent_n5_session_id_lag1"), jointSpec.lookupBy().get(lag1.getCanonicalName()));
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
+
+        final java.util.function.Consumer<String> rejects = replaced -> {
+            final FeaturePlan p = compile(SOURCES, replaced);
+            Assertions.assertTrue(p.getDiagnostics().getMessages().stream().anyMatch(m -> "encoding.keySet.lookups".equals(m.code()) && m.level() == Diagnostics.Level.error), p::describe);
+        };
+        rejects.accept(spec.replace("level: session_id, by", "level: category, by"));
+        rejects.accept(spec.replace("read: level}", "read: mean}"));
+        rejects.accept(spec.replace("- {level: seller_id, by: [seller_id]}", "- {level: seller_id, by: [[seller_id, category]]}"));
+        rejects.accept(spec.replace("- {level: seller_id, by: [seller_id]}", "- {level: seller_id}"));
+        rejects.accept(spec.replace("- {level: seller_id, by: [seller_id]}", "- {level: seller_id, by: [seller_id], as: x}"));
+        rejects.accept(spec.replace("estimator: joint, weights: varianceComponents, fixedLevels: [session_id], output: [deviations]", "estimator: sequential")
+                .replace("structure: additive", "structure: cross"));
+        // an unknown by field is an unresolved reference of the block
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("by: [seller_id]", "by: [no_such_field]")), "reference.unresolved"));
+    }
+
+    /**
      * structure: additive = the main effects of the keys alone (no cell level), and needs no single-key keySets under
      * joint; fixedLevels leaves one level unshrunk (coordinate jointFixed), effectiveN / variance then read the first
      * shrunk level, and every rule the solve rests on is a compile error.

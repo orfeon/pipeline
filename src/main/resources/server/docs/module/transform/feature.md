@@ -2052,6 +2052,50 @@ cell the rows are aggregated in.
   `solver` and `sigma2`. One fixed level at most; at least one level left to shrink, and none whose keys are part
   of the fixed one (fixing the cell of a `cross` would absorb its main effects whole).
 
+**Lookups (`keySets[].lookups`, joint only).** A joint column reads the model at the row's own keys. A lookup reads
+a level of the same model — the one the row reads: the whole-input fit, its fold's, its usable block's — at the
+context **another column of the row** names, typically a past context held by a `lag` column:
+
+```yaml
+  - name: recent
+    scope: sequence
+    entity: seller
+    windows: [{maxEvents: 5}]
+    ops:
+      - {type: lag, fields: [session_id], k: 2}          # recent_n5_session_id_lag1, _lag2
+  - name: level
+    scope: population
+    type: encoding
+    keySets:
+      - keys: [session_id, seller_id]
+        structure: additive
+        lookups:
+          - {level: session_id, by: [recent_n5_session_id_lag1, recent_n5_session_id_lag2], read: level}
+    targets:
+      - {field: price_rel, stats: [mean]}
+    shrinkage: {estimator: joint, scale: identity, weights: varianceComponents, fixedLevels: [session_id]}
+    fit: {mode: forward, blocks: {size: P90D}, window: P730D, minBlocks: 4}
+# level__session_id_seller_id__price_rel__mean__level__recent_n5_session_id_lag1 (and _lag2): the level today's model
+# gives the seller's previous session; a row expression price_rel_lag1 - that column is the previous result net of
+# the session as the model sees it now — re-read with every later session the other sellers of it ran in.
+```
+
+- `level`: a level of the lattice (its token: the key, or the keys joined by `_`). `by`: one column per entry, each
+  a field (or a list of fields, one per key of a multi-key level) of the row whose value names the context to read.
+  `read: effect` (default) is the level's effect on the transform scale — the `dev` the context's own rows read;
+  `read: level` is `μ +` it, the identified quantity of a fixed level (a fixed level's `effect` is its level minus the
+  row-weighted mean of the levels).
+- Columns `<...>__<stat>__<read>__<by fields joined by _>`, float64. The `by` fields are self inputs of the column:
+  a lag column is computed before the fit stage, and its availability is the column's.
+- **Null** when the model did not fit that context — outside the window, in a block the row cannot read yet, never
+  seen —, when a `by` field is null, and where the row reads no model (`minBlocks`). Unlike a row's own unseen
+  context on a shrunk level (whose effect is the prior's 0), a lookup asks what the model fitted for a context, so an
+  unfitted one has no value.
+- It reads a model, it is not an as-of join: the value for a past session changes as later blocks re-fit it (that is
+  the point of re-reading it), and a row only ever reads a model fitted on blocks it may read. Error
+  `encoding.keySet.lookups` (an unknown level / read / parameter, a `by` entry of the wrong arity, a non-joint
+  keySet).
+
 **Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
 scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)
 posterior means coincide — `parent + n / (n + λ) · (ȳ − parent)` — and the one-way moment estimator of λ is

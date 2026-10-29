@@ -554,6 +554,31 @@ public class JointFitTest {
                 fixedAb.estimate(fixedAb.total, row("a2", null)), 1e-12, "a null b adds no b effect");
     }
 
+    /**
+     * A lookup reads a level of the solution at the context another field of the row names: the effect, or μ + it
+     * (the fixed level's identified level); null for a context the solve did not fit — on a shrunk level too, where
+     * the row's own unseen context reads the prior's 0 — and for a null field.
+     */
+    @Test
+    public void testLookupReadsALevelAtAnotherField() {
+        final List<JointFit.Cell> cells = cellsOf(List.of("a", "b"), new Object[][]{
+                {"a1", "b1", 3.0, 1.0}, {"a1", "b2", 2.0, 0.4}, {"a2", "b1", 4.0, 0.7}, {"a2", "b2", 1.0, 0.1}});
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", 1, cells, 0, false, 0, 0, true);
+        final JointFit.Solution s = fit.total;
+        final Map<String, Object> row = new HashMap<>(Map.of("a", "a9", "b", "b9", "prev_a", "a2", "prev_b", "b1"));
+        final double a2 = s.effects.get(0).get(FeatureValues.keyOf(List.of("a2")));
+        Assertions.assertEquals(a2, fit.lookup(s, 0, row, List.of("prev_a"), false), 0d);
+        Assertions.assertEquals(s.mu + a2, fit.lookup(s, 0, row, List.of("prev_a"), true), 0d, "level = mu + effect");
+        Assertions.assertEquals(s.effects.get(1).get(FeatureValues.keyOf(List.of("b1"))), fit.lookup(s, 1, row, List.of("prev_b"), false), 0d);
+        // a context the solve did not fit reads null on either level; the row's own unseen b reads 0 through effect()
+        Assertions.assertNull(fit.lookup(s, 0, row, List.of("a"), true));
+        Assertions.assertNull(fit.lookup(s, 1, row, List.of("b"), false));
+        Assertions.assertEquals(0d, fit.effect(s, 1, row), 0d);
+        row.put("prev_a", null);
+        Assertions.assertNull(fit.lookup(s, 0, row, List.of("prev_a"), true), "a null field");
+        Assertions.assertNull(fit.lookup(new JointFit.Solution(), 0, row, List.of("prev_b"), true), "no solution");
+    }
+
     @Test
     public void testFixedLevelForwardAndArtifact() {
         final List<JointFit.Cell> cells = crossedDesign(9, 300, 6, 500, 1, 1, 1);

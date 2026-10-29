@@ -118,7 +118,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   Gauss–Seidel swept coarse → fine, fold / forward variants, `<id>.joint.avro`; with a fixed level
   (`shrinkage.fixedLevels` → coordinate `jointFixed`) the level is absorbed and the rest solved by diagonal-PCG
   (`solveAbsorbed` / `AbsorbedSystem`), λ by Henderson III (`henderson`), effectiveN / variance of the first shrunk
-  level — the Gauss–Seidel path must stay as it is for lattices without one),
+  level — the Gauss–Seidel path must stay as it is for lattices without one; `KeySet.lookups` → `joint` columns of
+  kind `lookup` read `JointFit.lookup` at the row's `lookupBy` fields, null for an unfitted context),
   `Discretization` (quantile edges + `<block>.bins.json`), `QuantileTransform` (CDF knots
   + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → the leading eigenpairs, `<block>.svd.json`), `SymmetricEigen` (the leading `k` eigenpairs of a dense symmetric matrix, by magnitude or — PSD — by value: `Svd.jacobi` up to 128 rows, so every earlier artifact is reproduced bit for bit, and ojalgo's symmetric decomposition beyond — 0.15 s at 700 rows against the sweep's 7–15 s. A hand-rolled restarted block Krylov iteration with a warm start from the previous change point was built, measured against it on 300–1024-row matrices, and removed: it won only on fast-decaying spectra (0.16 s vs 0.18 s) and lost 2–8x on the slowly decaying ones co-occurrence data has. Do not reintroduce an iterative path without that measurement), `Smooth` (`type: smooth`: a P-spline of a
   target over a numeric key — uniform B-splines on a declared range, difference penalty, λ by REML — solved from the
