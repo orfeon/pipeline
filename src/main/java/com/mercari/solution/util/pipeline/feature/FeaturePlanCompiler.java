@@ -5944,8 +5944,9 @@ public final class FeaturePlanCompiler {
                 cols.add(c);
             }
         }
-        // effectiveN / variance read the leaf, or under a fixed level the first shrunk level
-        final int neffLevel = fixed.isEmpty() || !levels.get(0).token().equals(fixed) ? 0 : 1;
+        // effectiveN / variance read the leaf, or under a fixed level the first shrunk level: JointFit's rule, so the
+        // column names the level the solve fills (the global level is last, so the effect-level index is the lattice's)
+        final int neffLevel = JointFit.effectiveNLevel(JointFit.effectLevelIndex(levels, fixed));
         if (shrinkage.emits("effectiveN")) {
             names.put("stat", stat + "__neff");
             final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);

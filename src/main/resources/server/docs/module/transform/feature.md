@@ -2027,7 +2027,12 @@ cell the rows are aggregated in.
   another) does not see. Only `μ + e_session` is identified; `μ` is reported as the row-weighted mean of the
   sessions' levels and `dev` of the fixed level as the level minus it. A session the model has not seen (the row's
   own, in a forward fit) has no fixed effect: its `dev` is null and `composed` reads the seller in the average
-  session, `μ + a_seller`. A cell without the fixed level's key is left out of the fit.
+  session, `μ + a_seller`.
+- **Null keys**: a row without the fixed level's key takes no part (no fit, `composed` null). Under `structure:
+  additive` any other null key leaves the row out of that level only — it is fitted with the levels it has and reads
+  `composed` without that level's effect (its `dev` null) — so the order the keys are declared in changes nothing;
+  without a fixed level a row needs one of the keys. A lattice with a leaf (`cross`, a chain) needs the leaf key, as
+  before.
 - **λ (`weights: varianceComponents`)** is estimated by Henderson's method III, one estimate per solve (per
   change point under `forward`): `σ²` from the residuals of the unshrunk fit of both levels, `τ²` from how much the
   seller level reduces the residuals beyond the sessions, both with their exact expectations over the design. The

@@ -545,8 +545,12 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   absorbed — `JointFit.solveAbsorbed` solves `(Zᵀ W (I − P_F) Z + R) x = Zᵀ W (I − P_F) z` for the shrunk levels
   matrix-free (`AbsorbedSystem`: two passes over the cells per product) by conjugate gradients preconditioned with
   the diagonal (the absorbed information + ridge), then each fixed context's level is the weighted mean of
-  `z − Z x`; μ = their weighted mean, `e_F = level − μ`, an unseen fixed context reads null. Cells without the
-  fixed key are dropped. Under `weights: varianceComponents` λ of the one shrunk level is Henderson III
+  `z − Z x`; μ = their weighted mean, `e_F = level − μ`, an unseen fixed context reads null. Which rows take
+  part is one rule, `JointFit.takesPart`, shared by the cell extraction and `estimate`: the fixed key is needed;
+  over main effects alone (`structure: additive` → `JointFit.mainEffects`, from the `structure` coordinate) any other
+  null key only drops that level's indicator / effect (key-order free; without a fixed level one key is needed);
+  a lattice with a leaf needs the leaf key. The level effectiveN / variance read is `JointFit.effectiveNLevel`,
+  which the compiler calls too. Under `weights: varianceComponents` λ of the one shrunk level is Henderson III
   (`JointFit.henderson`: the unpenalised absorbed fit, rank `K_F + K_A − c` by union-find over the bipartite
   graph, trace = Σ absorbed information) instead of `lambdaFromMoments` per level, which in a crossed design
   counts the fixed level's variance as noise (synthetic 7k × 14k × 10⁵ cells: one-way 5.9–6.2 vs true 4.0,

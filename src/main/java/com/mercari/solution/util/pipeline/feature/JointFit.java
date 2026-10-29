@@ -155,14 +155,17 @@ public final class JointFit implements Serializable {
     public final TreeSet<Long> observedBlocks;
     /** The effect level that is not shrunk ({@code shrinkage.fixedLevels}), or −1. */
     public final int fixedLevel;
+    /** The lattice is the main effects alone ({@code structure: additive}): no leaf level a row must have. */
+    public final boolean mainEffects;
 
     JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
              final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
-        this(levels, scale, offset, total, folds, blocks, observedBlocks, -1);
+        this(levels, scale, offset, total, folds, blocks, observedBlocks, -1, false);
     }
 
     JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
-             final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks, final int fixedLevel) {
+             final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks, final int fixedLevel,
+             final boolean mainEffects) {
         this.levels = levels;
         this.effectLevels = effectLevelsOf(levels);
         this.scale = scale;
@@ -172,6 +175,7 @@ public final class JointFit implements Serializable {
         this.blocks = blocks;
         this.observedBlocks = observedBlocks;
         this.fixedLevel = fixedLevel;
+        this.mainEffects = mainEffects;
     }
 
     /** The index of a level token among the effect levels, or −1 (null / empty token = no fixed level). */
@@ -182,9 +186,34 @@ public final class JointFit implements Serializable {
         throw new IllegalArgumentException("no effect level '" + token + "' in " + encodeLevels(levels));
     }
 
-    /** The level effectiveN and variance read: the leaf, or under a fixed level the first shrunk level. */
-    public int effectiveNLevel() {
+    /**
+     * The effect level effectiveN and variance read: the leaf, or under a fixed level the first shrunk level. The one
+     * rule: the compiler names those columns' level with it, the solve fills that level's information.
+     */
+    public static int effectiveNLevel(final int fixedLevel) {
         return fixedLevel == 0 ? 1 : 0;
+    }
+
+    public int effectiveNLevel() {
+        return effectiveNLevel(fixedLevel);
+    }
+
+    /**
+     * Whether a row takes part in the fit and reads an estimate — the one rule of the cell extraction and of
+     * {@link #estimate}: a lattice with a leaf (flat / hierarchy / cross / sequence) needs the leaf key; a lattice of
+     * main effects alone needs any one of its keys, each null key leaving the row out of that level only (no indicator
+     * in the fit, no effect in the estimate), so the order the keys are declared in decides nothing; a fixed level's key
+     * is needed in either case (its context carries the row's intercept).
+     */
+    public static boolean takesPart(final List<Level> effectLevels, final int fixedLevel, final boolean mainEffects, final Map<String, Object> row) {
+        if (effectLevels.isEmpty()) return true;
+        if (fixedLevel >= 0) {
+            if (FeatureValues.key(row, effectLevels.get(fixedLevel).keys()) == null) return false;
+            if (mainEffects) return true;
+        }
+        if (!mainEffects) return FeatureValues.key(row, effectLevels.get(0).keys()) != null;
+        for (final Level l : effectLevels) if (FeatureValues.key(row, l.keys()) != null) return true;
+        return false;
     }
 
     /** The effect levels (non-global) of a lattice in lattice order. */
@@ -222,12 +251,16 @@ public final class JointFit implements Serializable {
      */
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks) {
-        return fit(levels, scale, offset, weights, priorWeight, entries, folds, forward, windowBlocks, -1);
+        return fit(levels, scale, offset, weights, priorWeight, entries, folds, forward, windowBlocks, -1, false);
     }
 
-    /** {@link #fit} with a fixed (unshrunk) effect level, −1 for none. */
+    /**
+     * {@link #fit} with a fixed (unshrunk) effect level (−1 for none) over a lattice of main effects alone or not
+     * ({@link #takesPart}).
+     */
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
-                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel) {
+                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel,
+                               final boolean mainEffects) {
         final List<String> cellKeys = cellKeysOf(levels);
         final Map<String, Cell> total = new HashMap<>();
         final Map<Integer, Map<String, Cell>> foldParts = new HashMap<>();
@@ -294,7 +327,7 @@ public final class JointFit implements Serializable {
                 blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight, fixedLevel));
             }
         }
-        return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed, fixedLevel);
+        return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed, fixedLevel, mainEffects);
     }
 
     private static void merge(final Map<String, Cell> into, final String key, final Cell part) {
@@ -611,7 +644,7 @@ public final class JointFit implements Serializable {
         }
         // effectiveN's level: its contexts' information in rows (over the ridge unit: rows on identity, a context's mean
         // delta-method weight on logit / log, the fit's information per row on the score scale)
-        final int neff = shrunk.get(0);
+        final int neff = effectiveNLevel(fixed); // = shrunk.get(0)
         for (int k = 0; k < contextKeys.get(neff).size(); k++) {
             final double unit = score ? solution.infoPerRow : wsum[neff][k] / nsum[neff][k];
             solution.information.put(contextKeys.get(neff).get(k), information[neff][k] / unit);
@@ -865,11 +898,11 @@ public final class JointFit implements Serializable {
 
     /**
      * The composed estimate on the original scale — or, under an offset, the additive term on the shrinkage scale
-     * itself; null without a leaf key or a solution.
+     * itself; null without a solution or for a row that takes no part ({@link #takesPart}: a null leaf key).
      */
     public Double estimate(final Solution s, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
-        if (!effectLevels.isEmpty() && FeatureValues.key(row, effectLevels.get(0).keys()) == null) return null;
+        if (!takesPart(effectLevels, fixedLevel, mainEffects, row)) return null;
         double eta = s.mu;
         for (int l = 0; l < effectLevels.size(); l++) {
             final Double e = effect(s, l, row);
@@ -1042,12 +1075,12 @@ public final class JointFit implements Serializable {
     /** Loads the whole-input solution written by {@link #write} (the geometry comes from the column coordinates). */
     public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
                                 final Shrinkage.Scale scale, final boolean offset) {
-        return read(artifactUri, planHash, id, levels, scale, offset, -1);
+        return read(artifactUri, planHash, id, levels, scale, offset, -1, false);
     }
 
-    /** {@link #read} of a fit with a fixed effect level (−1 for none). */
+    /** {@link #read} of a fit with a fixed effect level (−1 for none) over a lattice of main effects alone or not. */
     public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
-                                final Shrinkage.Scale scale, final boolean offset, final int fixedLevel) {
+                                final Shrinkage.Scale scale, final boolean offset, final int fixedLevel, final boolean mainEffects) {
         final String path = artifactPath(artifactUri, planHash, id);
         final Solution s = new Solution();
         final List<Level> effectLevels = effectLevelsOf(levels);
@@ -1087,7 +1120,7 @@ public final class JointFit implements Serializable {
                     + " (no infoPerRow): its effects are on the old transformed-mean scale; refit the block (fit.artifact.refit: true)");
         }
         LOG.info("loaded joint fit artifact {}", path);
-        return new JointFit(levels, scale, offset, s, null, null, null, fixedLevel);
+        return new JointFit(levels, scale, offset, s, null, null, null, fixedLevel, mainEffects);
     }
 
 }

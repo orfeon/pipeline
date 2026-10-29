@@ -391,7 +391,7 @@ public class JointFitTest {
         as.add(FeatureValues.keyOf(List.of("a6")));
         cells.add(new JointFit.Cell(FeatureValues.keyWithNulls(row("a0", null), List.of("a", "b")), 3, 3 * 0.4, 3 * 0.4 * 0.4));
         final double lambda = 2.5;
-        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", lambda, cells, 0, false, 0, 0);
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", lambda, cells, 0, false, 0, 0, true);
         final JointFit.Solution s = fit.total;
         // the dictionaries of the reference follow the solution's contexts (b8 may be unobserved)
         bs.retainAll(s.effects.get(1).keySet());
@@ -459,7 +459,7 @@ public class JointFitTest {
     public void testHendersonEstimatesLambdaBesideAFixedLevel() {
         final double sigma2 = 4, tau2 = 1;
         final List<JointFit.Cell> cells = crossedDesign(3, 3000, 10, 6000, sigma2, tau2, 2);
-        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0, true);
         final JointFit.Solution s = fit.total;
         Assertions.assertEquals(sigma2, s.sigma2, 0.25, "sigma2");
         Assertions.assertEquals(sigma2 / tau2, s.lambdas[1], 0.8, "lambda " + s.lambdas[1]);
@@ -473,7 +473,7 @@ public class JointFitTest {
         // are taken out every b means 0, so R(b | a) = 0 < (rank − K_a) σ² — here σ² = SSE / (6 − (2 + 3 − 1)) = 4 / 2
         final List<JointFit.Cell> noB = List.of(cell("r0", "h1", 1, 1), cell("r0", "h2", 1, 3), cell("r0", "h3", 1, 2),
                 cell("r1", "h1", 1, 3), cell("r1", "h2", 1, 1), cell("r1", "h3", 1, 2));
-        final JointFit flat = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, noB, 0, false, 0, 0);
+        final JointFit flat = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, noB, 0, false, 0, 0, true);
         Assertions.assertEquals(2.0, flat.total.sigma2, 1e-9);
         Assertions.assertTrue(Double.isInfinite(flat.total.lambdas[1]), Double.toString(flat.total.lambdas[1]));
         Assertions.assertTrue(flat.total.effects.get(1).values().stream().allMatch(v -> v == 0d));
@@ -491,8 +491,67 @@ public class JointFitTest {
         final List<JointFit.Cell> cells = List.of(cell("r0", "h1", 1, 1), cell("r0", "h2", 1, 3),
                 new JointFit.Cell(FeatureValues.keyWithNulls(row("r0", null), List.of("a", "b")), 1, 2, 4),
                 cell("r1", "h1", 1, 4), cell("r1", "h2", 1, 2));
-        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0, true);
         Assertions.assertEquals(4.0, fit.total.sigma2, 1e-9);
+    }
+
+    /** The cells of (a, b, n, mean) rows keyed in the order of {@code keys}, null components kept. */
+    private static List<JointFit.Cell> cellsOf(final List<String> keys, final Object[][] rows) {
+        final List<JointFit.Cell> cells = new ArrayList<>();
+        for (final Object[] r : rows) {
+            final double n = (Double) r[2], mean = (Double) r[3];
+            cells.add(new JointFit.Cell(FeatureValues.keyWithNulls(row((String) r[0], (String) r[1]), keys), n, n * mean, n * mean * mean));
+        }
+        return cells;
+    }
+
+    /**
+     * Over main effects alone a null key leaves the row out of that level only — in the fit and in the estimate —
+     * so declaring [a, b] or [b, a] fits and reads the same: a row needs one key (no fixed level) or the fixed key.
+     */
+    @Test
+    public void testMainEffectsNullKeysDoNotDependOnTheKeyOrder() {
+        final Object[][] rows = {
+                {"a1", "b1", 3.0, 1.0}, {"a1", "b2", 2.0, 0.4}, {"a2", "b1", 4.0, 0.7}, {"a2", "b2", 1.0, 0.1},
+                {null, "b1", 2.0, 0.9}, {"a2", null, 3.0, 0.2}, {"a3", "b2", 2.0, 0.5}};
+        final List<JointFit.Level> ba = List.of(MAINS.get(1), MAINS.get(0), MAINS.get(2));
+        final List<Map<String, Object>> probes = List.of(row("a1", "b1"), row(null, "b2"), row("a2", null), row(null, null), row("a9", "b1"));
+        // without a fixed level: a row with either key takes part
+        final JointFit ab = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", 1, cellsOf(List.of("a", "b"), rows), 0, false, 0, -1, true);
+        final JointFit reversed = JointFit.fit(ba, Shrinkage.Scale.identity, false, "fixed", 1, cellsOf(List.of("b", "a"), rows), 0, false, 0, -1, true);
+        Assertions.assertEquals(ab.total.rows, reversed.total.rows, 0d);
+        Assertions.assertEquals(17.0, ab.total.rows, 0d, "the null-key rows are fitted");
+        for (final Map<String, Object> r : probes) {
+            final Double x = ab.estimate(ab.total, r), y = reversed.estimate(reversed.total, r);
+            if (r.get("a") == null && r.get("b") == null) {
+                Assertions.assertNull(x);
+                Assertions.assertNull(y);
+            } else {
+                Assertions.assertEquals(x, y, 1e-8, r.toString());
+            }
+        }
+        // the leaf rule stays for a lattice with a leaf: a chain needs its leaf key
+        Assertions.assertFalse(JointFit.takesPart(JointFit.effectLevelsOf(LEVELS), -1, false, row(null, "b1")));
+        Assertions.assertTrue(JointFit.takesPart(JointFit.effectLevelsOf(MAINS), -1, true, row(null, "b1")));
+        // a fixed a: its key is needed (null a reads null), a null b reads the a level alone — whichever comes first
+        final JointFit fixedAb = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", 1, cellsOf(List.of("a", "b"), rows), 0, false, 0, 0, true);
+        final JointFit fixedBa = JointFit.fit(ba, Shrinkage.Scale.identity, false, "fixed", 1, cellsOf(List.of("b", "a"), rows), 0, false, 0, 1, true);
+        Assertions.assertEquals(15.0, fixedAb.total.rows, 0d, "the null-a rows leave the fit");
+        Assertions.assertEquals(fixedAb.total.rows, fixedBa.total.rows, 0d);
+        Assertions.assertEquals(1, fixedAb.effectiveNLevel(), "effectiveN reads b");
+        Assertions.assertEquals(0, fixedBa.effectiveNLevel(), "effectiveN reads b");
+        for (final Map<String, Object> r : probes) {
+            final Double x = fixedAb.estimate(fixedAb.total, r), y = fixedBa.estimate(fixedBa.total, r);
+            if (r.get("a") == null) {
+                Assertions.assertNull(x, r.toString());
+                Assertions.assertNull(y, r.toString());
+            } else {
+                Assertions.assertEquals(x, y, 1e-9, r.toString());
+            }
+            Assertions.assertEquals(fixedAb.effectiveN(fixedAb.total, r), fixedBa.effectiveN(fixedBa.total, r));
+        }
+        Assertions.assertEquals(fixedAb.total.mu + fixedAb.total.effects.get(0).get(FeatureValues.keyOf(List.of("a2"))),
+                fixedAb.estimate(fixedAb.total, row("a2", null)), 1e-12, "a null b adds no b effect");
     }
 
     @Test
@@ -503,17 +562,17 @@ public class JointFitTest {
             final JointFit.Cell c = cells.get(i);
             blocks.add(new JointFit.Cell(JointFit.blockEntry(c.key(), i * 3L / cells.size()), c.n(), c.sum(), c.sumSq()));
         }
-        final JointFit forward = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, blocks, 0, true, 2, 0);
+        final JointFit forward = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, blocks, 0, true, 2, 0, true);
         Assertions.assertEquals(Set.of(0L, 1L, 2L, 3L, 4L), forward.blocks.keySet());
         for (final JointFit.Solution s : forward.blocks.values()) {
             if (s.isEmpty()) continue;
             Assertions.assertEquals(0d, s.lambdas[0], 0d);
             Assertions.assertFalse(Double.isNaN(s.sigma2));
         }
-        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0, true);
         final String dir = "target/feature-artifacts/" + UUID.randomUUID();
         JointFit.write(dir, "hash", "enc__a_b__e1", fit);
-        final JointFit back = JointFit.read(dir, "hash", "enc__a_b__e1", MAINS, Shrinkage.Scale.identity, false, 0);
+        final JointFit back = JointFit.read(dir, "hash", "enc__a_b__e1", MAINS, Shrinkage.Scale.identity, false, 0, true);
         for (final String[] r : new String[][]{{"r0", "h1"}, {"r1", "h2"}, {"r9999", "h3"}, {"r2", "unseen"}}) {
             final Map<String, Object> row = row(r[0], r[1]);
             Assertions.assertEquals(fit.estimate(fit.total, row), back.estimate(back.total, row), 1e-12, Arrays.toString(r));

@@ -1934,6 +1934,7 @@ public class FeaturePlanCompilerTest {
                 && m.message().contains("Henderson") && m.message().contains("fixed")), plan::describe);
         final FeatureStages.JointSpec spec = FeatureStages.jointSpecs(List.of(composed)).get(0);
         Assertions.assertEquals(0, spec.fixedLevel());
+        Assertions.assertTrue(spec.mainEffects(), "structure: additive reaches the cell extraction (JointFit.takesPart)");
         Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
         // the fixed level changes the fit: it is in the plan hash
         Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, withEncoding(joint.replace("fixedLevels: [category], ", ""))).getHash());
