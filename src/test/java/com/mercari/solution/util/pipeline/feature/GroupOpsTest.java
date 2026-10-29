@@ -156,6 +156,9 @@ public class GroupOpsTest {
         Assertions.assertNotNull(plan.getColumn("shape_start_price_quantity_0"), plan::describe);
         Assertions.assertNull(plan.getColumn("shape_start_price_quantity_0").getCoordinates().get("standardize"));
         Assertions.assertFalse(hasCode(plan, "column.duplicate"), plan::describe);
+        // not a static fit: the population svd's registry skips it, so the manifest's artifact paths build
+        Assertions.assertTrue(FeatureStages.staticFitBlocks(plan.getColumns()).isEmpty());
+        Assertions.assertDoesNotThrow(() -> FeatureStages.artifactPaths(plan));
         // linear in the group size: no cost info of its own (the one in the plan is the harville block's)
         Assertions.assertEquals(compile(SPEC).getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count(),
                 plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("context.op.groupSolver")).count());
