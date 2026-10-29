@@ -49,6 +49,16 @@ import java.util.*;
  * effects); {@code forward} solves once per window change point on the cells of the blocks a usable block
  * reads ({@code (U − W, U]}, the encoding path's window). The artifact holds the whole-input solution only
  * ({@code <id>.joint.avro}), like the encoding-level statistics.
+ *
+ * <p>A <b>fixed level</b> ({@code shrinkage.fixedLevels}) is not shrunk: its contexts are fixed effects, the
+ * intercept with them. The solve then absorbs it exactly — within each of its contexts the weighted means are
+ * taken out — and solves the shrunk levels on what remains by conjugate gradients with the diagonal as the
+ * preconditioner ({@link #solveAbsorbed}): block Gauss–Seidel over a crossed design converges like alternating
+ * projections, slowly where the contexts are weakly connected, and the unpenalised fit the λ estimate needs is
+ * its worst case. Only {@code μ + e} of a fixed context is identified; it is reported as {@code μ} = the weighted
+ * mean of the fixed contexts' levels and {@code e} = the level minus {@code μ}. Under {@code weights:
+ * varianceComponents} the one shrunk level's λ is Henderson's method III ({@link #henderson}) rather than the
+ * one-way moments over its contexts, which in a crossed design count the fixed level's variance as noise.
  */
 public final class JointFit implements Serializable {
 
@@ -59,6 +69,10 @@ public final class JointFit implements Serializable {
     static final String FOLD_PREFIX = "#";
 
     static final int MAX_ITERATIONS = 1000;
+    /** Conjugate-gradient cap of an absorbed solve (the unpenalised fit of a weakly connected design needs the most). */
+    static final int MAX_CG_ITERATIONS = 10000;
+    /** Relative residual at which the conjugate gradients stop. */
+    static final double CG_TOLERANCE = 1e-12;
 
     /** One lattice level: its token and the key fields of its contexts (empty = the global intercept). */
     public record Level(String token, List<String> keys) implements Serializable {
@@ -105,6 +119,16 @@ public final class JointFit implements Serializable {
         public double rows;
         public int iterations;
         public double maxDelta;
+        /**
+         * Under a fixed level: the residual variance of the unpenalised fit (Henderson's method III), NaN when λ was
+         * not estimated that way.
+         */
+        public double sigma2 = Double.NaN;
+        /**
+         * Under a fixed level: the information of the first shrunk level's contexts once the fixed level is absorbed,
+         * in rows ({@code Σ_cells w − Σ_fixed (Σ w)² / W}, over the ridge unit) — what effectiveN adds λ to.
+         */
+        public Map<String, Double> information = new HashMap<>();
 
         boolean isEmpty() {
             return Double.isNaN(mu);
@@ -128,9 +152,16 @@ public final class JointFit implements Serializable {
     public final TreeMap<Long, Solution> blocks;
     /** fit.mode forward: the block indices that carried data (minBlocks counts these, not the change points). */
     public final TreeSet<Long> observedBlocks;
+    /** The effect level that is not shrunk ({@code shrinkage.fixedLevels}), or −1. */
+    public final int fixedLevel;
 
     JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
              final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
+        this(levels, scale, offset, total, folds, blocks, observedBlocks, -1);
+    }
+
+    JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
+             final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks, final int fixedLevel) {
         this.levels = levels;
         this.effectLevels = effectLevelsOf(levels);
         this.scale = scale;
@@ -139,6 +170,20 @@ public final class JointFit implements Serializable {
         this.folds = folds;
         this.blocks = blocks;
         this.observedBlocks = observedBlocks;
+        this.fixedLevel = fixedLevel;
+    }
+
+    /** The index of a level token among the effect levels, or −1 (null / empty token = no fixed level). */
+    public static int effectLevelIndex(final List<Level> levels, final String token) {
+        if (token == null || token.isEmpty()) return -1;
+        final List<Level> effects = effectLevelsOf(levels);
+        for (int l = 0; l < effects.size(); l++) if (effects.get(l).token().equals(token)) return l;
+        throw new IllegalArgumentException("no effect level '" + token + "' in " + encodeLevels(levels));
+    }
+
+    /** The level effectiveN and variance read: the leaf, or under a fixed level the first shrunk level. */
+    public int effectiveNLevel() {
+        return fixedLevel == 0 ? 1 : 0;
     }
 
     /** The effect levels (non-global) of a lattice in lattice order. */
@@ -176,6 +221,12 @@ public final class JointFit implements Serializable {
      */
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks) {
+        return fit(levels, scale, offset, weights, priorWeight, entries, folds, forward, windowBlocks, -1);
+    }
+
+    /** {@link #fit} with a fixed (unshrunk) effect level, −1 for none. */
+    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
+                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel) {
         final List<String> cellKeys = cellKeysOf(levels);
         final Map<String, Cell> total = new HashMap<>();
         final Map<Integer, Map<String, Cell>> foldParts = new HashMap<>();
@@ -195,7 +246,7 @@ public final class JointFit implements Serializable {
                 merge(total, e.key(), e);
             }
         }
-        final Solution totalSolution = solve(levels, cellKeys, total.values(), scale, offset, weights, priorWeight);
+        final Solution totalSolution = solve(levels, cellKeys, total.values(), scale, offset, weights, priorWeight, fixedLevel);
         LOG.info("joint fit: {} cells, {} rows, {} iterations (max delta {})", total.size(), totalSolution.rows, totalSolution.iterations, totalSolution.maxDelta);
         Solution[] foldSolutions = null;
         if (folds > 1) {
@@ -208,7 +259,7 @@ public final class JointFit implements Serializable {
                     final Cell rest = own == null ? e.getValue() : subtract(e.getValue(), own);
                     if (rest != null) outOfFold.put(e.getKey(), rest);
                 }
-                foldSolutions[f] = solve(levels, cellKeys, outOfFold.values(), scale, offset, weights, priorWeight);
+                foldSolutions[f] = solve(levels, cellKeys, outOfFold.values(), scale, offset, weights, priorWeight, fixedLevel);
             }
         }
         TreeMap<Long, Solution> blockSolutions = null;
@@ -239,10 +290,10 @@ public final class JointFit implements Serializable {
                         oldest++;
                     }
                 }
-                blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight));
+                blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight, fixedLevel));
             }
         }
-        return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed);
+        return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed, fixedLevel);
     }
 
     private static void merge(final Map<String, Cell> into, final String key, final Cell part) {
@@ -289,6 +340,16 @@ public final class JointFit implements Serializable {
      */
     public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
                                  final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight) {
+        return solve(levels, cellKeys, input, scale, offset, weights, priorWeight, -1);
+    }
+
+    /**
+     * {@link #solve} with a fixed effect level ({@code fixedLevel} ≥ 0): its λ is 0, a cell without its key is left out
+     * (a fixed context carries the intercept), and the system is solved by {@link #solveAbsorbed}.
+     */
+    public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
+                                 final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
+                                 final int fixedLevel) {
         final Solution solution = new Solution();
         final List<Level> effectLevels = effectLevelsOf(levels);
         final int L = effectLevels.size();
@@ -299,6 +360,15 @@ public final class JointFit implements Serializable {
         final List<Cell> cells = new ArrayList<>();
         // a cell without rows — or, under an offset term, without information (every baseline at 0 or 1) — has no term
         for (final Cell c : input) if (c.n() > 0 && (!score || c.information(scale) > 0)) cells.add(c);
+        if (fixedLevel >= 0) {
+            final List<Integer> fixedPositions = new ArrayList<>();
+            for (final String k : effectLevels.get(fixedLevel).keys()) fixedPositions.add(cellKeys.indexOf(k));
+            cells.removeIf(c -> {
+                final List<String> parts = FeatureValues.keyComponents(c.key());
+                for (final int p : fixedPositions) if (parts.get(p) == null) return true;
+                return false;
+            });
+        }
         if (cells.isEmpty()) return solution;
         cells.sort(Comparator.comparing(Cell::key));
         final int m = cells.size();
@@ -374,10 +444,16 @@ public final class JointFit implements Serializable {
                 sumSq[k] += cells.get(i).sumSq();
             }
             if (l == 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), nsum[0][k]);
+            if (l == fixedLevel) {
+                solution.lambdas[l] = 0; // not shrunk
+                continue;
+            }
             // the pseudo-count: in rows — or, on the score scale, λ′ = priorWeight · (the fit's information per row), so a
             // declared pseudo-count keeps its meaning of "rows of average information" across the estimators
             double lambda = score ? priorWeight * solution.infoPerRow : priorWeight;
-            if ("varianceComponents".equals(weights)) {
+            // under a fixed level the shrunk level's λ is estimated over the absorbed design (solveAbsorbed): the one-way
+            // moments over its contexts would count the fixed level's variance as noise
+            if ("varianceComponents".equals(weights) && fixedLevel < 0) {
                 final Double estimated;
                 if (score) {
                     // the contexts' score statistics: every context here has information (its cells do), w = V
@@ -404,6 +480,8 @@ public final class JointFit implements Serializable {
             }
             solution.lambdas[l] = lambda;
         }
+        if (fixedLevel >= 0) return solveAbsorbed(solution, cells, z, w, ctx, contextKeys, nsum, wsum, fixedLevel, score,
+                "varianceComponents".equals(weights) && scale == Shrinkage.Scale.identity);
         // block Gauss–Seidel: intercept, then every level's contexts, on the weighted transformed cell means
         final double[] eta = new double[m];
         final double[][] e = new double[L][], ridge = new double[L][], numerator = new double[L][], delta = new double[L][];
@@ -465,6 +543,281 @@ public final class JointFit implements Serializable {
         return solution;
     }
 
+    /**
+     * The solve under a fixed level F: the fixed contexts (with the intercept) are absorbed exactly — the system on the
+     * shrunk levels' effects {@code x} is {@code (Zᵀ W (I − P_F) Z + R) x = Zᵀ W (I − P_F) z}, {@code P_F} the
+     * weighted mean within each fixed context and R the ridge — and solved by conjugate gradients preconditioned with
+     * its diagonal ({@link AbsorbedSystem}); a fixed context's level is then the weighted mean of {@code z − Z x} over
+     * its cells. With {@code estimate} (identity scale, {@code weights: varianceComponents}) and one shrunk level, its λ
+     * comes from {@link #henderson} — the unpenalised fit first, then the shrunk one.
+     */
+    private static Solution solveAbsorbed(final Solution solution, final List<Cell> cells, final double[] z, final double[] w,
+                                          final int[][] ctx, final List<List<String>> contextKeys, final double[][] nsum, final double[][] wsum,
+                                          final int fixed, final boolean score, final boolean estimate) {
+        final int m = cells.size(), L = ctx.length;
+        final int[] f = ctx[fixed];
+        final int fixedContexts = contextKeys.get(fixed).size();
+        final double[] fixedWeight = new double[fixedContexts];
+        for (int i = 0; i < m; i++) fixedWeight[f[i]] += w[i];
+        final List<Integer> shrunk = new ArrayList<>();
+        for (int l = 0; l < L; l++) if (l != fixed) shrunk.add(l);
+        final double[][] information = new double[L][];
+        for (final int l : shrunk) information[l] = absorbedInformation(ctx[l], f, w, wsum[l], fixedWeight);
+        if (estimate && shrunk.size() == 1) {
+            final int a = shrunk.get(0);
+            final Henderson h = henderson(cells, z, w, ctx[a], information[a], f, fixedWeight);
+            if (h != null) {
+                solution.sigma2 = h.sigma2();
+                solution.lambdas[a] = h.lambda();
+            }
+        }
+        // the levels with a finite λ are solved; one whose λ is +∞ keeps every effect at 0, as in the Gauss–Seidel solve
+        final List<Integer> active = new ArrayList<>();
+        for (final int l : shrunk) if (!Double.isInfinite(solution.lambdas[l])) active.add(l);
+        final int[][] activeCtx = new int[active.size()][];
+        final double[][] ridge = new double[active.size()][], activeInformation = new double[active.size()][];
+        for (int j = 0; j < active.size(); j++) {
+            final int l = active.get(j);
+            activeCtx[j] = ctx[l];
+            activeInformation[j] = information[l];
+            ridge[j] = new double[wsum[l].length];
+            final double lambda = Math.max(solution.lambdas[l], 1e-9);
+            for (int k = 0; k < ridge[j].length; k++) ridge[j][k] = score ? lambda : lambda * (wsum[l][k] / nsum[l][k]);
+        }
+        final AbsorbedSystem system = new AbsorbedSystem(activeCtx, f, w, fixedWeight, ridge, activeInformation);
+        final double[] x = system.solve(system.project(z));
+        final double[] fitted = system.predict(x);
+        final double[] level = system.fixedLevels(z, fitted);
+        double mu = 0, totalW = 0;
+        for (int r = 0; r < fixedContexts; r++) {
+            mu += fixedWeight[r] * level[r];
+            totalW += fixedWeight[r];
+        }
+        mu /= totalW;
+        solution.mu = mu;
+        solution.iterations = system.iterations;
+        solution.maxDelta = system.residual;
+        for (int r = 0; r < fixedContexts; r++) solution.effects.get(fixed).put(contextKeys.get(fixed).get(r), level[r] - mu);
+        for (final int l : shrunk) {
+            final int j = active.indexOf(l);
+            for (int k = 0; k < contextKeys.get(l).size(); k++) {
+                solution.effects.get(l).put(contextKeys.get(l).get(k), j < 0 ? 0d : x[system.offsets[j] + k]);
+            }
+        }
+        // effectiveN's level: its contexts' information in rows (over the ridge unit: rows on identity, a context's mean
+        // delta-method weight on logit / log, the fit's information per row on the score scale)
+        final int neff = shrunk.get(0);
+        for (int k = 0; k < contextKeys.get(neff).size(); k++) {
+            final double unit = score ? solution.infoPerRow : wsum[neff][k] / nsum[neff][k];
+            solution.information.put(contextKeys.get(neff).get(k), information[neff][k] / unit);
+        }
+        return solution;
+    }
+
+    /** Per context of a shrunk level: {@code Σ_cells w − Σ_fixed (Σ_{cells of both} w)² / W_fixed}, the diagonal of the absorbed system. */
+    static double[] absorbedInformation(final int[] contexts, final int[] fixed, final double[] w, final double[] contextWeight, final double[] fixedWeight) {
+        final double[] information = contextWeight.clone();
+        final Map<Long, Double> pairs = new HashMap<>();
+        for (int i = 0; i < w.length; i++) {
+            if (contexts[i] < 0) continue;
+            pairs.merge((long) contexts[i] * fixedWeight.length + fixed[i], w[i], Double::sum);
+        }
+        // in key order, so the sums do not depend on the map's iteration order
+        for (final Map.Entry<Long, Double> e : new TreeMap<>(pairs).entrySet()) {
+            final int k = (int) (e.getKey() / fixedWeight.length), r = (int) (e.getKey() % fixedWeight.length);
+            information[k] -= e.getValue() * e.getValue() / fixedWeight[r];
+        }
+        for (int k = 0; k < information.length; k++) information[k] = Math.max(information[k], 0d);
+        return information;
+    }
+
+    /** The λ of Henderson's method III and the residual variance it rests on. */
+    record Henderson(double sigma2, double lambda) {}
+
+    /**
+     * Henderson's method III for one shrunk level A beside the fixed level F, on the identity scale (cell weights =
+     * rows): the reduction {@code R(A | F) = SSE(F) − SSE(F + A)} of the unpenalised fits has expectation
+     * {@code (rank(F, A) − rank(F)) σ² + tr(Zᵀ (I − P_F) Z) τ²}, with {@code σ² = SSE(F + A) / (N − rank(F, A))},
+     * {@code rank(F, A) = K_F + K_A − c} (c = the connected components of the bipartite graph of F and A contexts that
+     * hold an A context) and the trace the sum of the A contexts' absorbed information. λ = σ² / τ²; a τ² ≤ 0 fixes
+     * the level at 0 (λ = +∞, as the moment estimator truncates); null (the declared priorWeight) without residual
+     * degrees of freedom or information.
+     */
+    static Henderson henderson(final List<Cell> cells, final double[] z, final double[] w, final int[] a, final double[] information,
+                               final int[] f, final double[] fixedWeight) {
+        final int m = cells.size(), fixedContexts = fixedWeight.length, contexts = information.length;
+        double sumSq = 0, rows = 0;
+        final double[] fixedSum = new double[fixedContexts];
+        for (int i = 0; i < m; i++) {
+            sumSq += cells.get(i).sumSq();
+            rows += cells.get(i).n();
+            fixedSum[f[i]] += cells.get(i).sum();
+        }
+        double sseFixed = sumSq;
+        for (int r = 0; r < fixedContexts; r++) sseFixed -= fixedSum[r] * fixedSum[r] / fixedWeight[r];
+        final AbsorbedSystem unpenalised = new AbsorbedSystem(new int[][]{a}, f, w, fixedWeight, new double[][]{new double[contexts]},
+                new double[][]{information});
+        final double[] fitted = unpenalised.predict(unpenalised.solve(unpenalised.project(z)));
+        final double[] level = unpenalised.fixedLevels(z, fitted);
+        double sseFull = 0;
+        for (int i = 0; i < m; i++) {
+            final Cell c = cells.get(i);
+            final double fit = level[f[i]] + fitted[i];
+            sseFull += c.sumSq() - 2 * fit * c.sum() + c.n() * fit * fit;
+        }
+        sseFull = Math.max(sseFull, 0d);
+        // union-find over the F contexts [0, K_F) and the A contexts [K_F, K_F + K_A)
+        final int[] parent = new int[fixedContexts + contexts];
+        for (int v = 0; v < parent.length; v++) parent[v] = v;
+        for (int i = 0; i < m; i++) if (a[i] >= 0) union(parent, f[i], fixedContexts + a[i]);
+        final Set<Integer> components = new HashSet<>();
+        for (int k = 0; k < contexts; k++) components.add(find(parent, fixedContexts + k));
+        final double rank = fixedContexts + contexts - components.size();
+        final double df = rows - rank;
+        double trace = 0;
+        for (final double v : information) trace += v;
+        if (df <= 0 || trace <= 0) return null;
+        final double sigma2 = sseFull / df;
+        final double tau2 = (sseFixed - sseFull - (rank - fixedContexts) * sigma2) / trace;
+        LOG.info("joint fit, Henderson III: sigma2 {} tau2 {} ({} rows, rank {}, {} components, {} iterations)", sigma2, tau2, rows, rank,
+                components.size(), unpenalised.iterations);
+        return new Henderson(sigma2, tau2 > 0 ? sigma2 / tau2 : Double.POSITIVE_INFINITY);
+    }
+
+    private static int find(final int[] parent, int v) {
+        while (parent[v] != v) {
+            parent[v] = parent[parent[v]];
+            v = parent[v];
+        }
+        return v;
+    }
+
+    private static void union(final int[] parent, final int u, final int v) {
+        final int ru = find(parent, u), rv = find(parent, v);
+        if (ru != rv) parent[Math.max(ru, rv)] = Math.min(ru, rv);
+    }
+
+    /**
+     * The system of the shrunk levels once a fixed level is absorbed, applied matrix-free over the cells: one product
+     * is two passes over them. Its diagonal (the absorbed information plus the ridge) preconditions the conjugate
+     * gradients; a context without information and without ridge (its every cell alone in its fixed context — its
+     * column is 0) is left at 0.
+     */
+    static final class AbsorbedSystem {
+        final int[][] ctx;
+        final int[] offsets;
+        final int[] fixed;
+        final double[] w, fixedWeight, ridge, diagonal;
+        final int dimension;
+        int iterations;
+        double residual;
+
+        AbsorbedSystem(final int[][] ctx, final int[] fixed, final double[] w, final double[] fixedWeight, final double[][] ridge,
+                       final double[][] information) {
+            this.ctx = ctx;
+            this.fixed = fixed;
+            this.w = w;
+            this.fixedWeight = fixedWeight;
+            this.offsets = new int[ctx.length];
+            int d = 0;
+            for (int l = 0; l < ctx.length; l++) {
+                offsets[l] = d;
+                d += ridge[l].length;
+            }
+            this.dimension = d;
+            this.ridge = new double[d];
+            this.diagonal = new double[d];
+            for (int l = 0; l < ctx.length; l++) {
+                for (int k = 0; k < ridge[l].length; k++) {
+                    this.ridge[offsets[l] + k] = ridge[l][k];
+                    this.diagonal[offsets[l] + k] = information[l][k] + ridge[l][k];
+                }
+            }
+        }
+
+        /** {@code (Z x)_i}: the shrunk effects of each cell. */
+        double[] predict(final double[] x) {
+            final double[] u = new double[w.length];
+            for (int l = 0; l < ctx.length; l++) {
+                final int[] c = ctx[l];
+                for (int i = 0; i < u.length; i++) if (c[i] >= 0) u[i] += x[offsets[l] + c[i]];
+            }
+            return u;
+        }
+
+        /** {@code Zᵀ W (I − P_F) v}. */
+        double[] project(final double[] v) {
+            final double[] mean = new double[fixedWeight.length];
+            for (int i = 0; i < v.length; i++) mean[fixed[i]] += w[i] * v[i];
+            for (int r = 0; r < mean.length; r++) mean[r] /= fixedWeight[r];
+            final double[] out = new double[dimension];
+            for (int i = 0; i < v.length; i++) {
+                final double d = w[i] * (v[i] - mean[fixed[i]]);
+                for (int l = 0; l < ctx.length; l++) if (ctx[l][i] >= 0) out[offsets[l] + ctx[l][i]] += d;
+            }
+            return out;
+        }
+
+        /** Per fixed context: the weighted mean of {@code z − Z x} over its cells. */
+        double[] fixedLevels(final double[] z, final double[] fitted) {
+            final double[] level = new double[fixedWeight.length];
+            for (int i = 0; i < z.length; i++) level[fixed[i]] += w[i] * (z[i] - fitted[i]);
+            for (int r = 0; r < level.length; r++) level[r] /= fixedWeight[r];
+            return level;
+        }
+
+        double[] multiply(final double[] x) {
+            final double[] out = project(predict(x));
+            for (int j = 0; j < dimension; j++) out[j] += ridge[j] * x[j];
+            return out;
+        }
+
+        /** Preconditioned conjugate gradients from 0 until the relative residual is below {@link #CG_TOLERANCE}. */
+        double[] solve(final double[] b) {
+            final double[] x = new double[dimension];
+            final double[] r = b.clone();
+            final double bNorm = Math.sqrt(dot(b, b));
+            iterations = 0;
+            residual = 0;
+            if (!(bNorm > 0)) return x;
+            double[] s = precondition(r);
+            final double[] p = s.clone();
+            double rs = dot(r, s);
+            for (int it = 1; it <= MAX_CG_ITERATIONS; it++) {
+                final double[] q = multiply(p);
+                final double pq = dot(p, q);
+                if (!(pq > 0)) break;
+                final double alpha = rs / pq;
+                for (int j = 0; j < dimension; j++) {
+                    x[j] += alpha * p[j];
+                    r[j] -= alpha * q[j];
+                }
+                iterations = it;
+                residual = Math.sqrt(dot(r, r)) / bNorm;
+                if (residual <= CG_TOLERANCE) break;
+                s = precondition(r);
+                final double next = dot(r, s);
+                final double beta = next / rs;
+                rs = next;
+                for (int j = 0; j < dimension; j++) p[j] = s[j] + beta * p[j];
+            }
+            if (residual > CG_TOLERANCE) LOG.warn("joint fit: conjugate gradients stopped at relative residual {} after {} iterations", residual, iterations);
+            return x;
+        }
+
+        private double[] precondition(final double[] r) {
+            final double[] s = new double[dimension];
+            for (int j = 0; j < dimension; j++) s[j] = diagonal[j] > 0 ? r[j] / diagonal[j] : 0d;
+            return s;
+        }
+
+        private static double dot(final double[] a, final double[] b) {
+            double sum = 0;
+            for (int j = 0; j < a.length; j++) sum += a[j] * b[j];
+            return sum;
+        }
+    }
+
     // ------------------------------------------------------------------------------------------
     // apply
     // ------------------------------------------------------------------------------------------
@@ -501,23 +854,45 @@ public final class JointFit implements Serializable {
         return Shrinkage.output(scale, eta, offset);
     }
 
-    /** The effect of one level for the row (transform scale): 0 for an unseen context, null without a key. */
+    /**
+     * The effect of one level for the row (transform scale): 0 for an unseen context, null without a key. A fixed
+     * level has no prior to fall back to: its unseen context is null (the estimate then reads the average fixed
+     * context, {@code μ}).
+     */
     public Double effect(final Solution s, final int level, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
         final String key = FeatureValues.key(row, effectLevels.get(level).keys());
         if (key == null) return null;
-        return s.effects.get(level).getOrDefault(key, 0d);
+        return level == fixedLevel ? s.effects.get(level).get(key) : s.effects.get(level).getOrDefault(key, 0d);
     }
 
-    /** Effective sample size of the leaf: its n plus the leaf pseudo-count (the whole fit when fully shrunk). */
+    /**
+     * Effective sample size of the leaf: its n plus the leaf pseudo-count (the whole fit when fully shrunk). Under a
+     * fixed level it is that of the first shrunk level: its information once the fixed level is absorbed — the rows
+     * that tell its contexts apart, a row alone in its fixed context telling nothing — plus λ.
+     */
     public Double effectiveN(final Solution s, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
         if (effectLevels.isEmpty()) return s.rows;
-        final String key = FeatureValues.key(row, effectLevels.get(0).keys());
+        final int level = effectiveNLevel();
+        final String key = FeatureValues.key(row, effectLevels.get(level).keys());
         if (key == null) return null;
-        final double n = s.leafN.getOrDefault(key, 0d);
-        final double lambda = s.lambdas[0] / s.infoPerRow; // in rows (a score-scale λ divided by the information per row)
+        final double n = fixedLevel >= 0 ? s.information.getOrDefault(key, 0d) : s.leafN.getOrDefault(key, 0d);
+        final double lambda = s.lambdas[level] / s.infoPerRow; // in rows (a score-scale λ divided by the information per row)
         return Double.isInfinite(lambda) ? s.rows : n + lambda;
+    }
+
+    /**
+     * Under a fixed level with an estimated λ: the approximate posterior variance of the row's effect on the first
+     * shrunk level, {@code σ² / effectiveN} — the diagonal of the absorbed system, its coupling to the contexts that
+     * share fixed contexts left out; τ² = σ² / λ for an unseen context, 0 for a level fixed at 0. Null otherwise.
+     */
+    public Double variance(final Solution s, final Map<String, Object> row) {
+        if (s == null || s.isEmpty() || Double.isNaN(s.sigma2) || fixedLevel < 0) return null;
+        final int level = effectiveNLevel();
+        if (Double.isInfinite(s.lambdas[level])) return FeatureValues.key(row, effectLevels.get(level).keys()) == null ? null : 0d;
+        final Double n = effectiveN(s, row);
+        return n == null || !(n > 0) ? null : s.sigma2 / n;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -588,6 +963,8 @@ public final class JointFit implements Serializable {
                     }
                 }
                 for (final Map.Entry<String, Double> e : new TreeMap<>(s.leafN).entrySet()) writer.append(record("leafN", "", e.getKey(), e.getValue()));
+                if (!Double.isNaN(s.sigma2)) writer.append(record("sigma2", "", "", s.sigma2));
+                for (final Map.Entry<String, Double> e : new TreeMap<>(s.information).entrySet()) writer.append(record("information", "", e.getKey(), e.getValue()));
             }
             ResourceUtil.writeBytes(path, bytes.toByteArray());
             final JsonObject manifest = FitArtifact.manifest(planHash, id);
@@ -602,6 +979,12 @@ public final class JointFit implements Serializable {
                 levels.add(o);
             }
             manifest.add("levels", levels);
+            if (fit.fixedLevel >= 0) {
+                // the solve absorbed this level (conjugate gradients); its λ is 0 and μ the weighted mean of its contexts
+                manifest.addProperty("fixedLevel", effectLevels.get(fit.fixedLevel).token());
+                manifest.addProperty("solver", "conjugateGradient");
+                if (!Double.isNaN(s.sigma2)) manifest.addProperty("sigma2", s.sigma2);
+            }
             manifest.addProperty("mu", s.mu);
             final JsonObject lambdas = new JsonObject();
             final JsonObject contexts = new JsonObject();
@@ -635,6 +1018,12 @@ public final class JointFit implements Serializable {
     /** Loads the whole-input solution written by {@link #write} (the geometry comes from the column coordinates). */
     public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
                                 final Shrinkage.Scale scale, final boolean offset) {
+        return read(artifactUri, planHash, id, levels, scale, offset, -1);
+    }
+
+    /** {@link #read} of a fit with a fixed effect level (−1 for none). */
+    public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
+                                final Shrinkage.Scale scale, final boolean offset, final int fixedLevel) {
         final String path = artifactPath(artifactUri, planHash, id);
         final Solution s = new Solution();
         final List<Level> effectLevels = effectLevelsOf(levels);
@@ -659,6 +1048,8 @@ public final class JointFit implements Serializable {
                     case "lambda" -> { if (levelIndex.containsKey(level)) s.lambdas[levelIndex.get(level)] = value; }
                     case "effect" -> { if (levelIndex.containsKey(level)) s.effects.get(levelIndex.get(level)).put(key, value); }
                     case "leafN" -> s.leafN.put(key, value);
+                    case "sigma2" -> s.sigma2 = value;
+                    case "information" -> s.information.put(key, value);
                     default -> { }
                 }
             }
@@ -672,7 +1063,7 @@ public final class JointFit implements Serializable {
                     + " (no infoPerRow): its effects are on the old transformed-mean scale; refit the block (fit.artifact.refit: true)");
         }
         LOG.info("loaded joint fit artifact {}", path);
-        return new JointFit(levels, scale, offset, s, null, null, null);
+        return new JointFit(levels, scale, offset, s, null, null, null, fixedLevel);
     }
 
 }

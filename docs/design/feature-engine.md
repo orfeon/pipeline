@@ -541,6 +541,21 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   `(U − windowBlocks, U]`, so the floor entry of a row's usable block `U` is exactly the encoding path's
   window (`minBlocks` counts observed blocks, not change points); both re-fit every run, the artifact
   (`<id>.joint.avro` + manifest with μ, λ, contexts, iterations) holds the whole-input solution.
+  **Fixed level** (`shrinkage.fixedLevels`, coordinate `jointFixed`; `JointFit.fixedLevel`): the level is
+  absorbed — `JointFit.solveAbsorbed` solves `(Zᵀ W (I − P_F) Z + R) x = Zᵀ W (I − P_F) z` for the shrunk levels
+  matrix-free (`AbsorbedSystem`: two passes over the cells per product) by conjugate gradients preconditioned with
+  the diagonal (the absorbed information + ridge), then each fixed context's level is the weighted mean of
+  `z − Z x`; μ = their weighted mean, `e_F = level − μ`, an unseen fixed context reads null. Cells without the
+  fixed key are dropped. Under `weights: varianceComponents` λ of the one shrunk level is Henderson III
+  (`JointFit.henderson`: the unpenalised absorbed fit, rank `K_F + K_A − c` by union-find over the bipartite
+  graph, trace = Σ absorbed information) instead of `lambdaFromMoments` per level, which in a crossed design
+  counts the fixed level's variance as noise (synthetic 7k × 14k × 10⁵ cells: one-way 5.9–6.2 vs true 4.0,
+  Henderson 3.92–3.96). effectiveN / variance read the first shrunk level (`effectiveNLevel`): absorbed
+  information in rows + λ, `σ² / effectiveN` (the diagonal approximation, within 0.6% of `(S⁻¹)_hh` there). Solver
+  measurements on that design: Gauss–Seidel 40–120 sweeps at λ 1–4, ~850 at λ 0.1 and 450–1100 for the
+  unpenalised fit; PCG 11–35 iterations; a sparse direct solve of the Schur complement (1.2M non-zeros) 16–43 s.
+  The Gauss–Seidel path of a lattice without a fixed level is untouched. `structure: additive` (compiler) is the
+  main-effects-only lattice for it; under `joint` an `additive` entry expands every key without single-key keySets.
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
   and a fit without an existing artifact in streaming.

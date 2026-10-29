@@ -252,7 +252,7 @@ not expand because another block failed).
 |---|---|---|
 | `population.type` / `population.unsupported` | error | `type` required; every registered type is implemented: `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd`, `smooth`, `copula`, `transitionStats`, `spectralEmbedding` |
 | `encoding.keySets` / `encoding.targets` / `encoding.keySet.keys` | error | required parts |
-| `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence` |
+| `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence \| additive` |
 | `encoding.keySet.sequence` | error / warning / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain, the warning says the block declares no `shrinkage` so the chain is never composed (raw full-path statistic) |
 | `encoding.keySet.parentRef` / `encoding.keySet.cross` | error | `hierarchy` needs `parentRef`; `cross` needs ≥ 2 keys |
 | `encoding.keySet.as` | error | a keySet's name for the `{keys}` segment of the generated columns: letters, digits and `_` starting with a letter |
@@ -267,6 +267,8 @@ not expand because another block failed).
 | `encoding.offset` / `encoding.offset.computeAt` | error | offset must name a baseline; offset blocks compute at `predictAt` |
 | `encoding.offset.additive` | info | offset on a logit / log scale: the composed value is the additive term on that scale (the key's score-type estimate `Σ(y − b) / information`, one scoring step from the baseline, shrunk toward the parent's term by information) — a log-odds / log-rate ratio against the baseline, not a probability / rate; finite for a key with no success |
 | `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |
+| `encoding.shrinkage.fixedLevels` | error | `fixedLevels` needs `estimator: joint`, one level of the lattice (the message lists them), at least one level left to shrink; with `weights: varianceComponents` exactly one shrunk level and `scale: identity` (Henderson III) — else `weights: fixed` + `priorWeight` |
+| `encoding.keySet.additive` | error | `structure: additive` needs ≥ 2 keys, `estimator: joint`, no `hierarchy`, and no `share` stat (it has no leaf level) |
 | `encoding.shrinkage.joint` | info / error | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker); as error: two keySets of the block (the same keys, one of them named with `as:`) resolve to that one solve with different lattices or shrinkage — declare them in separate blocks |
 | `encoding.shrinkage.weights` | error / info | `fixed \| varianceComponents` (`heldOut` not implemented); as info: variance components are estimated from the whole batch |
 | `encoding.shrinkage.priorWeight` / `.scale` / `.output` | error / warning | numeric ≥ 0 / identity-logit-log / composed-deviations-effectiveN; as warning: `deviations` are not defined for a shrunk `distribution` (none emitted) |

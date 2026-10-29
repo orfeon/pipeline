@@ -3181,7 +3181,7 @@ public final class FeatureStages {
      * level's key fields) are aggregated per key in parallel and solved on one worker ({@link JointFit}).
      */
     record JointSpec(String id, List<JointFit.Level> levels, String field, String offsetColumn, Shrinkage.Scale scale,
-                     String weights, double priorWeight, List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis,
+                     String weights, double priorWeight, int fixedLevel, List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis,
                      String artifactUri, boolean refit, List<OutputColumn> columns) implements StaticFitBlock<JointFit> {
         @Override
         public String block() {
@@ -3201,7 +3201,7 @@ public final class FeatureStages {
 
         @Override
         public JointFit readArtifact(final String planHash) {
-            return JointFit.read(artifactUri, planHash, id, levels, scale, offsetColumn != null);
+            return JointFit.read(artifactUri, planHash, id, levels, scale, offsetColumn != null, fixedLevel);
         }
 
         @Override
@@ -3257,6 +3257,7 @@ public final class FeatureStages {
                     v = switch (col.getCoordinates().get("kind")) {
                         case "deviation" -> model.effect(solution, Integer.parseInt(col.getCoordinates().get("level")), values);
                         case "effectiveN" -> model.effectiveN(solution, values);
+                        case "variance" -> model.variance(solution, values);
                         default -> model.estimate(solution, values);
                     };
                 }
@@ -3275,9 +3276,11 @@ public final class FeatureStages {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
             final Forward forward = Forward.of(e.getValue().get(0));
             final String foldKeys = k.get("foldKeys");
-            specs.add(new JointSpec(e.getKey(), JointFit.parseLevels(k.get("jointLevels")), k.get("field"),
+            final List<JointFit.Level> levels = JointFit.parseLevels(k.get("jointLevels"));
+            specs.add(new JointSpec(e.getKey(), levels, k.get("field"),
                     k.containsKey("offset") ? "__baseline_" + k.get("offset") : null,
                     Shrinkage.Scale.valueOf(k.get("scale")), k.get("weights"), Double.parseDouble(k.get("priorWeight")),
+                    JointFit.effectLevelIndex(levels, k.get("jointFixed")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(k.get("folds")) : 0,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
@@ -3339,7 +3342,8 @@ public final class FeatureStages {
             final ArrayList<JointFit.Cell> entries = c.element();
             LOG.info("joint {}: solving {} on {} aggregation entries", spec.id(), JointFit.encodeLevels(spec.levels()), entries.size());
             final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.offsetColumn() != null, spec.weights(), spec.priorWeight(), entries,
-                    spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks());
+                    spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks(),
+                    spec.fixedLevel());
             // fold / forward re-fit every run but write the whole-input solution once (refit: true overwrites)
             if (spec.artifactUri() != null && (spec.refit() || !JointFit.exists(spec.artifactUri(), planHash, spec.id()))) {
                 JointFit.write(spec.artifactUri(), planHash, spec.id(), model);

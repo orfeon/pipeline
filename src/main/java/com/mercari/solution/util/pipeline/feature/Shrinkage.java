@@ -88,9 +88,18 @@ public final class Shrinkage implements Serializable {
     public final List<String> outputs;
     /** Declared family; null = derive from the statistic ({@link #familyFor}). */
     public final Family family;
+    /** {@code estimator: joint}: the lattice levels (tokens) fitted as fixed effects, not shrunk. */
+    public final List<String> fixedLevels;
 
     private Shrinkage(final boolean enabled, final Estimator estimator, final String weights, final double priorWeight,
                       final Scale scale, final boolean leaveNodeOut, final List<String> outputs, final Family family) {
+        this(enabled, estimator, weights, priorWeight, scale, leaveNodeOut, outputs, family, List.of());
+    }
+
+    private Shrinkage(final boolean enabled, final Estimator estimator, final String weights, final double priorWeight,
+                      final Scale scale, final boolean leaveNodeOut, final List<String> outputs, final Family family,
+                      final List<String> fixedLevels) {
+        this.fixedLevels = fixedLevels;
         this.enabled = enabled;
         this.estimator = estimator;
         this.weights = weights;
@@ -154,6 +163,7 @@ public final class Shrinkage implements Serializable {
         boolean leaveNodeOut = true;
         List<String> outputs = List.of("composed");
         Family family = null;
+        List<String> fixedLevels = List.of();
         if (legacySmoothing != null) {
             final String type = Json.string(legacySmoothing, "type");
             if (type != null && !"bayesian".equals(type)) {
@@ -213,12 +223,13 @@ public final class Shrinkage implements Serializable {
             final List<String> out = Json.strings(o, "output");
             if (!out.isEmpty()) {
                 for (final String v : out) {
-                    if (!List.of("composed", "deviations", "effectiveN").contains(v)) {
-                        diagnostics.error("encoding.shrinkage.output", location, "output must be composed | deviations | effectiveN: " + v);
+                    if (!List.of("composed", "deviations", "effectiveN", "variance").contains(v)) {
+                        diagnostics.error("encoding.shrinkage.output", location, "output must be composed | deviations | effectiveN | variance: " + v);
                     }
                 }
                 outputs = out;
             }
+            if (o.has("fixedLevels")) fixedLevels = List.copyOf(Json.strings(o, "fixedLevels"));
             final String f = Json.string(o, "family");
             if (f != null) {
                 try {
@@ -228,7 +239,7 @@ public final class Shrinkage implements Serializable {
                 }
             }
         }
-        return new Shrinkage(true, estimator, weights, priorWeight, scale, leaveNodeOut, outputs, family);
+        return new Shrinkage(true, estimator, weights, priorWeight, scale, leaveNodeOut, outputs, family, fixedLevels);
     }
 
     public boolean emits(final String output) {

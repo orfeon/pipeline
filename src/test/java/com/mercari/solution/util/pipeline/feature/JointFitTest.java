@@ -322,6 +322,194 @@ public class JointFitTest {
         Assertions.assertTrue(Double.isInfinite(JointFit.read(dir, "hash", "enc__a_b__e2", LEVELS, Shrinkage.Scale.identity, false).total.lambdas[2]), "the avro artifact keeps the double");
     }
 
+    /** structure: additive over (a, b): the two main effects and the intercept, no cell level. */
+    private static final List<JointFit.Level> MAINS = List.of(
+            new JointFit.Level("a", List.of("a")), new JointFit.Level("b", List.of("b")), new JointFit.Level(Shrinkage.GLOBAL, List.of()));
+
+    /**
+     * The reference of a fixed level a: elimination on the normal equations of {@code Σ w (z − l_a − e_b)² + λ Σ e_b²}
+     * over the unknowns (l_a per a — the intercept with it —, e_b per b); returns l then e in the dictionaries' order.
+     */
+    private static double[] denseFixed(final List<JointFit.Cell> cells, final double lambda, final List<String> as, final List<String> bs) {
+        final int dimension = as.size() + bs.size();
+        final double[][] m = new double[dimension][dimension];
+        final double[] rhs = new double[dimension];
+        for (final JointFit.Cell c : cells) {
+            final List<String> parts = FeatureValues.keyComponents(c.key());
+            final List<Integer> columns = new ArrayList<>();
+            columns.add(as.indexOf(FeatureValues.keyOf(List.of(parts.get(0)))));
+            if (parts.get(1) != null) columns.add(as.size() + bs.indexOf(FeatureValues.keyOf(List.of(parts.get(1)))));
+            final double z = c.sum() / c.n(), w = c.n();
+            for (final int i : columns) {
+                rhs[i] += w * z;
+                for (final int j : columns) m[i][j] += w;
+            }
+        }
+        for (int k = 0; k < bs.size(); k++) m[as.size() + k][as.size() + k] += lambda;
+        for (int p = 0; p < dimension; p++) {
+            int pivot = p;
+            for (int i = p + 1; i < dimension; i++) if (Math.abs(m[i][p]) > Math.abs(m[pivot][p])) pivot = i;
+            final double[] t = m[p]; m[p] = m[pivot]; m[pivot] = t;
+            final double tr = rhs[p]; rhs[p] = rhs[pivot]; rhs[pivot] = tr;
+            for (int i = p + 1; i < dimension; i++) {
+                final double f = m[i][p] / m[p][p];
+                for (int j = p; j < dimension; j++) m[i][j] -= f * m[p][j];
+                rhs[i] -= f * rhs[p];
+            }
+        }
+        final double[] x = new double[dimension];
+        for (int i = dimension - 1; i >= 0; i--) {
+            double s = rhs[i];
+            for (int j = i + 1; j < dimension; j++) s -= m[i][j] * x[j];
+            x[i] = s / m[i][i];
+        }
+        return x;
+    }
+
+    /**
+     * A fixed level is absorbed exactly: the conjugate-gradient solve reaches the normal equations of the unshrunk a
+     * (with the intercept) beside the ridge on b, reports a's level as μ + e_a (μ the row-weighted mean of the levels),
+     * reads null for an unseen a (the estimate then reads μ) and 0 for an unseen b, and effectiveN of b counts what
+     * tells b apart once a is absorbed: a row alone in its a tells nothing.
+     */
+    @Test
+    public void testFixedLevelIsAbsorbedExactly() {
+        final Random random = new Random(11);
+        final List<JointFit.Cell> cells = new ArrayList<>();
+        final List<String> as = new ArrayList<>(), bs = new ArrayList<>();
+        for (int a = 0; a < 6; a++) as.add(FeatureValues.keyOf(List.of("a" + a)));
+        for (int b = 0; b < 9; b++) bs.add(FeatureValues.keyOf(List.of("b" + b)));
+        for (int a = 0; a < 6; a++) {
+            for (int b = 0; b < 9; b++) {
+                if (random.nextDouble() < 0.55) continue;
+                final int n = random.nextDouble() < 0.7 ? 1 : 2 + random.nextInt(3);
+                cells.add(cell("a" + a, "b" + b, n, a * 0.3 + random.nextGaussian()));
+            }
+        }
+        // a lone row of a6 (nothing else in its context) and a row with a null b: both stay in a's levels only
+        cells.add(cell("a6", "b0", 1, 5.0));
+        as.add(FeatureValues.keyOf(List.of("a6")));
+        cells.add(new JointFit.Cell(FeatureValues.keyWithNulls(row("a0", null), List.of("a", "b")), 3, 3 * 0.4, 3 * 0.4 * 0.4));
+        final double lambda = 2.5;
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "fixed", lambda, cells, 0, false, 0, 0);
+        final JointFit.Solution s = fit.total;
+        // the dictionaries of the reference follow the solution's contexts (b8 may be unobserved)
+        bs.retainAll(s.effects.get(1).keySet());
+        final double[] x = denseFixed(cells, lambda, as, bs);
+        for (int a = 0; a < as.size(); a++) Assertions.assertEquals(x[a], s.mu + s.effects.get(0).get(as.get(a)), 1e-9, "level " + as.get(a));
+        for (int b = 0; b < bs.size(); b++) Assertions.assertEquals(x[as.size() + b], s.effects.get(1).get(bs.get(b)), 1e-9, "effect " + bs.get(b));
+        Assertions.assertEquals(0.0, s.lambdas[0], 0d, "the fixed level is not shrunk");
+        Assertions.assertEquals(lambda, s.lambdas[1], 0d);
+        Assertions.assertTrue(s.iterations > 0 && s.maxDelta <= JointFit.CG_TOLERANCE, s.iterations + " / " + s.maxDelta);
+        // μ = the row-weighted mean of the levels: the fixed effects sum to 0 with those weights
+        final Map<String, Double> weight = new HashMap<>();
+        for (final JointFit.Cell c : cells) weight.merge(FeatureValues.keyOf(List.of(FeatureValues.keyComponents(c.key()).get(0))), c.n(), Double::sum);
+        double weighted = 0;
+        for (final Map.Entry<String, Double> e : s.effects.get(0).entrySet()) weighted += weight.get(e.getKey()) * e.getValue();
+        Assertions.assertEquals(0.0, weighted, 1e-9);
+        // apply: an unseen a has no fixed effect (null) and the estimate reads the average a; an unseen b reads 0
+        Assertions.assertNull(fit.effect(s, 0, row("a9", "b1")));
+        Assertions.assertEquals(s.mu + s.effects.get(1).get(FeatureValues.keyOf(List.of("b1"))), fit.estimate(s, row("a9", "b1")), 1e-12);
+        Assertions.assertEquals(0.0, fit.effect(s, 1, row("a1", "b99")), 0d);
+        Assertions.assertEquals(s.mu + s.effects.get(0).get(as.get(1)), fit.estimate(s, row("a1", "b99")), 1e-12);
+        // effectiveN reads b (the first shrunk level): Σ over its cells of n − n² / N_a, plus λ
+        Assertions.assertEquals(1, fit.effectiveNLevel());
+        final Map<String, Double> rowsOfA = new HashMap<>();
+        for (final JointFit.Cell c : cells) rowsOfA.merge(FeatureValues.keyComponents(c.key()).get(0), c.n(), Double::sum);
+        for (final String b : List.of("b0", "b3")) {
+            double information = 0;
+            for (final JointFit.Cell c : cells) {
+                final List<String> parts = FeatureValues.keyComponents(c.key());
+                if (b.equals(parts.get(1))) information += c.n() - c.n() * c.n() / rowsOfA.get(parts.get(0));
+            }
+            Assertions.assertEquals(information + lambda, fit.effectiveN(s, row("a0", b)), 1e-9, b);
+        }
+        Assertions.assertEquals(lambda, fit.effectiveN(s, row("a0", "b99")), 1e-12, "an unseen b: the prior's pseudo-count");
+        Assertions.assertNull(fit.variance(s, row("a0", "b0")), "weights: fixed estimates no sigma2");
+        // without a fixed level the same cells take the Gauss–Seidel path: unchanged
+        final JointFit.Solution plain = JointFit.solve(MAINS, JointFit.cellKeysOf(MAINS), cells, Shrinkage.Scale.identity, false, "fixed", lambda);
+        Assertions.assertTrue(plain.information.isEmpty());
+        Assertions.assertEquals(JointFit.solve(MAINS, JointFit.cellKeysOf(MAINS), cells, Shrinkage.Scale.identity, false, "fixed", lambda, -1).mu, plain.mu, 0d);
+    }
+
+    /** {@code y = 0.3 + e_a + b_b + ε}: {@code races} contexts of a with {@code field} b's each, drawn from {@code players}. */
+    private static List<JointFit.Cell> crossedDesign(final long seed, final int races, final int field, final int players,
+                                                     final double sigma2, final double tau2, final double raceVariance) {
+        final Random random = new Random(seed);
+        final double[] ability = new double[players];
+        for (int h = 0; h < players; h++) ability[h] = Math.sqrt(tau2) * random.nextGaussian();
+        final List<JointFit.Cell> cells = new ArrayList<>();
+        for (int r = 0; r < races; r++) {
+            final double race = Math.sqrt(raceVariance) * random.nextGaussian();
+            final Set<Integer> picked = new TreeSet<>();
+            // a field drawn near the race's position in the pool: the design is crossed but not fully mixed
+            final int centre = random.nextInt(players);
+            while (picked.size() < field) picked.add(Math.floorMod(centre + (int) Math.round(players / 20.0 * random.nextGaussian()), players));
+            for (final int h : picked) cells.add(cell("r" + r, "h" + h, 1, 0.3 + race + ability[h] + Math.sqrt(sigma2) * random.nextGaussian()));
+        }
+        return cells;
+    }
+
+    /**
+     * Henderson's method III recovers λ = σ² / τ² of the shrunk level beside the fixed one, where the one-way moments
+     * over its contexts (what varianceComponents does without a fixed level) count the fixed level's variance as noise
+     * and over-shrink; variance = σ² / effectiveN.
+     */
+    @Test
+    public void testHendersonEstimatesLambdaBesideAFixedLevel() {
+        final double sigma2 = 4, tau2 = 1;
+        final List<JointFit.Cell> cells = crossedDesign(3, 3000, 10, 6000, sigma2, tau2, 2);
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        final JointFit.Solution s = fit.total;
+        Assertions.assertEquals(sigma2, s.sigma2, 0.25, "sigma2");
+        Assertions.assertEquals(sigma2 / tau2, s.lambdas[1], 0.8, "lambda " + s.lambdas[1]);
+        final JointFit.Solution oneWay = JointFit.solve(MAINS, JointFit.cellKeysOf(MAINS), cells, Shrinkage.Scale.identity, false, "varianceComponents", 20);
+        Assertions.assertTrue(Math.abs(oneWay.lambdas[1] - sigma2 / tau2) > 2 * Math.abs(s.lambdas[1] - sigma2 / tau2),
+                "one-way " + oneWay.lambdas[1] + " vs Henderson " + s.lambdas[1]);
+        final Map<String, Object> row = row("r0", FeatureValues.keyComponents(cells.get(0).key()).get(1));
+        Assertions.assertEquals(s.sigma2 / fit.effectiveN(s, row), fit.variance(s, row), 1e-12);
+        Assertions.assertEquals(s.sigma2 / s.lambdas[1], fit.variance(s, row("r0", "unseen")), 1e-12, "an unseen context: the prior variance tau2");
+        // a level without between-context variance is fixed at 0 (λ = +∞), as under the moment estimator: once the a's
+        // are taken out every b means 0, so R(b | a) = 0 < (rank − K_a) σ² — here σ² = SSE / (6 − (2 + 3 − 1)) = 4 / 2
+        final List<JointFit.Cell> noB = List.of(cell("r0", "h1", 1, 1), cell("r0", "h2", 1, 3), cell("r0", "h3", 1, 2),
+                cell("r1", "h1", 1, 3), cell("r1", "h2", 1, 1), cell("r1", "h3", 1, 2));
+        final JointFit flat = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, noB, 0, false, 0, 0);
+        Assertions.assertEquals(2.0, flat.total.sigma2, 1e-9);
+        Assertions.assertTrue(Double.isInfinite(flat.total.lambdas[1]), Double.toString(flat.total.lambdas[1]));
+        Assertions.assertTrue(flat.total.effects.get(1).values().stream().allMatch(v -> v == 0d));
+        Assertions.assertEquals(0d, flat.variance(flat.total, row("r0", "h1")), 0d);
+    }
+
+    @Test
+    public void testFixedLevelForwardAndArtifact() {
+        final List<JointFit.Cell> cells = crossedDesign(9, 300, 6, 500, 1, 1, 1);
+        final List<JointFit.Cell> blocks = new ArrayList<>();
+        for (int i = 0; i < cells.size(); i++) {
+            final JointFit.Cell c = cells.get(i);
+            blocks.add(new JointFit.Cell(JointFit.blockEntry(c.key(), i * 3L / cells.size()), c.n(), c.sum(), c.sumSq()));
+        }
+        final JointFit forward = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, blocks, 0, true, 2, 0);
+        Assertions.assertEquals(Set.of(0L, 1L, 2L, 3L, 4L), forward.blocks.keySet());
+        for (final JointFit.Solution s : forward.blocks.values()) {
+            if (s.isEmpty()) continue;
+            Assertions.assertEquals(0d, s.lambdas[0], 0d);
+            Assertions.assertFalse(Double.isNaN(s.sigma2));
+        }
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        final String dir = "target/feature-artifacts/" + UUID.randomUUID();
+        JointFit.write(dir, "hash", "enc__a_b__e1", fit);
+        final JointFit back = JointFit.read(dir, "hash", "enc__a_b__e1", MAINS, Shrinkage.Scale.identity, false, 0);
+        for (final String[] r : new String[][]{{"r0", "h1"}, {"r1", "h2"}, {"r9999", "h3"}, {"r2", "unseen"}}) {
+            final Map<String, Object> row = row(r[0], r[1]);
+            Assertions.assertEquals(fit.estimate(fit.total, row), back.estimate(back.total, row), 1e-12, Arrays.toString(r));
+            Assertions.assertEquals(fit.effect(fit.total, 0, row), back.effect(back.total, 0, row), Arrays.toString(r));
+            Assertions.assertEquals(fit.effectiveN(fit.total, row), back.effectiveN(back.total, row), 1e-12);
+            Assertions.assertEquals(fit.variance(fit.total, row), back.variance(back.total, row), 1e-12);
+        }
+        final String manifest = new String(com.mercari.solution.util.domain.file.ResourceUtil.readBytes(JointFit.manifestPath(dir, "hash", "enc__a_b__e1")), java.nio.charset.StandardCharsets.UTF_8);
+        Assertions.assertTrue(manifest.contains("\"fixedLevel\":\"a\"") && manifest.contains("\"sigma2\""), manifest);
+    }
+
     @Test
     public void testLevelEncodingAndKeyComponents() {
         Assertions.assertEquals("a_b=a,b;a=a;b=b;global=", JointFit.encodeLevels(LEVELS));
