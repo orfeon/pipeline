@@ -226,7 +226,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
   keySets:
     - keys: [k1, k2]
       windows: [{maxAge: P365D}]                 # optional; ignored in static / fold, rounded to blocks in forward
-      structure: flat | hierarchy | cross | sequence   # hierarchy needs parentRef (+ maxDepth); sequence: keys = a path, most recent first (lag columns), shrunk along its suffixes (k1,k2,k3) -> (k1,k2) -> (k1) -> global; null / unseen older steps read the longest known suffix
+      structure: flat | hierarchy | cross | sequence | additive   # additive: the main effects alone, no cell level (estimator: joint only); hierarchy needs parentRef (+ maxDepth); sequence: keys = a path, most recent first (lag columns), shrunk along its suffixes (k1,k2,k3) -> (k1,k2) -> (k1) -> global; null / unseen older steps read the longest known suffix
       parentRef: <field>
       hierarchy: [[coarser keys], additive, []]  # explicit lattice, fine → coarse
       shrinkage: {...}                           # per-keySet override
@@ -245,7 +245,8 @@ that fraction of the current row's value, 0 when neither, null without a future 
     family: gaussian | betaBinomial | gammaPoisson | dirichletMultinomial   # derived from the stat; conjugate families need scale identity
     scale: identity | logit | log                # required with additive
     leaveNodeOut: true                           # the leaf's rows leave every ancestor; in a chain the leaf = the deepest level that has rows (an unseen / null-keyed leaf backs off, and the level it backs off to is what is subtracted); a lattice with additive keeps the declared cell
-    output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
+    output: [composed, deviations, effectiveN, variance]   # extra columns dev0.., <stat>__neff, <stat>__var (variance: joint + fixedLevels + varianceComponents)
+    fixedLevels: [<level>]                       # joint: one level fitted as fixed effects (not shrunk) with the intercept; varianceComponents then = Henderson III (one shrunk level, scale identity)
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
   fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, fold: {by: time, purge: P20D, embargo: P7D}, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
   maxFeatures: 200
@@ -256,7 +257,12 @@ Stats: `count` int64, `share` float64 (key count / global count), `mean` / `rate
 per-category pseudo-counts, `priorWeight` as λ, no deviations), `quantile` (median) / `quantile<NN>` / `q<NN>`
 float64. `std`, `distribution` and quantiles are expanding-only. `family` changes no scalar value (the
 conjugate posterior means and the moment λ coincide with the Gaussian ones); `estimator: joint` fits every
-level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and needs a lookup fit mode.
+level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and needs a lookup fit mode. With
+`fixedLevels` (e.g. a session level beside a seller: `structure: additive`) the fixed level is not shrunk — every
+entity is compared with the others of its groups and each group's level read from the entities in it, at once —,
+`dev` of the fixed level is its level minus the row-weighted mean (null for an unseen group: `composed` then reads the
+average group), and `__neff` / `__var` describe the first shrunk level (its rows that tell it apart once the groups are
+taken out, + λ; `σ² / neff`).
 
 ### `type: factorization` (always static)
 

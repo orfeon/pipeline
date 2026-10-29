@@ -1899,6 +1899,84 @@ public class FeaturePlanCompilerTest {
                 .anyMatch(m -> "encoding.shrinkage.joint".equals(m.code()) && m.level() == Diagnostics.Level.error), conflicting::describe);
     }
 
+    /**
+     * structure: additive = the main effects of the keys alone (no cell level), and needs no single-key keySets under
+     * joint; fixedLevels leaves one level unshrunk (coordinate jointFixed), effectiveN / variance then read the first
+     * shrunk level, and every rule the solve rests on is a compile error.
+     */
+    @Test
+    public void testJointFixedLevelAndAdditiveStructure() {
+        final String joint = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: forward, blocks: {size: P30D}, window: P365D}
+                    keySets:
+                      - keys: [category, seller_id]
+                        structure: additive
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {scale: identity, estimator: joint, weights: varianceComponents, fixedLevels: [category], output: [composed, deviations, effectiveN, variance]}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(joint));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn composed = column(plan, "enc__category_seller_id__e1__mean");
+        Assertions.assertEquals("category=category;seller_id=seller_id;global=", composed.getCoordinates().get("jointLevels"), "no cell level");
+        Assertions.assertEquals("category", composed.getCoordinates().get("jointFixed"));
+        Assertions.assertEquals("category", column(plan, "enc__category_seller_id__e1__dev0").getCoordinates().get("levelKeys"));
+        Assertions.assertEquals("seller_id", column(plan, "enc__category_seller_id__e1__dev1").getCoordinates().get("levelKeys"));
+        Assertions.assertNull(plan.getColumn("enc__category_seller_id__e1__dev2"));
+        Assertions.assertEquals("seller_id", column(plan, "enc__category_seller_id__e1__mean__neff").getCoordinates().get("levelKeys"));
+        final OutputColumn variance = column(plan, "enc__category_seller_id__e1__mean__var");
+        Assertions.assertEquals("variance", variance.getCoordinates().get("kind"));
+        Assertions.assertEquals("seller_id", variance.getCoordinates().get("levelKeys"));
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "encoding.shrinkage.joint".equals(m.code())
+                && m.message().contains("Henderson") && m.message().contains("fixed")), plan::describe);
+        final FeatureStages.JointSpec spec = FeatureStages.jointSpecs(List.of(composed)).get(0);
+        Assertions.assertEquals(0, spec.fixedLevel());
+        Assertions.assertTrue(spec.mainEffects(), "structure: additive reaches the cell extraction (JointFit.takesPart)");
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
+        // the fixed level changes the fit: it is in the plan hash
+        Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, withEncoding(joint.replace("fixedLevels: [category], ", ""))).getHash());
+        // without fixedLevels the leaf (category, first) is effectiveN's level and no column says otherwise
+        final FeaturePlan plain = compile(SOURCES, withEncoding(joint.replace("fixedLevels: [category], ", "").replace(", variance]", "]")));
+        Assertions.assertFalse(plain.getDiagnostics().hasErrors(), plain::describe);
+        Assertions.assertNull(column(plain, "enc__category_seller_id__e1__mean").getCoordinates().get("jointFixed"));
+        Assertions.assertNull(column(plain, "enc__category_seller_id__e1__mean__neff").getCoordinates().get("levelKeys"));
+
+        // the errors
+        final java.util.function.BiConsumer<String, String> rejects = (replaced, code) -> {
+            final FeaturePlan p = compile(SOURCES, withEncoding(replaced));
+            Assertions.assertTrue(p.getDiagnostics().getMessages().stream().anyMatch(m -> code.equals(m.code()) && m.level() == Diagnostics.Level.error), p::describe);
+        };
+        rejects.accept(joint.replace("estimator: joint, ", "estimator: sequential, "), "encoding.keySet.additive");
+        rejects.accept(joint.replace("structure: additive", "structure: additive\n            hierarchy: [additive, []]"), "encoding.keySet.additive");
+        rejects.accept(joint.replace("stats: [mean]", "stats: [mean, share]"), "encoding.keySet.additive");
+        rejects.accept(joint.replace("fixedLevels: [category]", "fixedLevels: [condition_grade]"), "encoding.shrinkage.fixedLevels");
+        rejects.accept(joint.replace("fixedLevels: [category]", "fixedLevels: [category, seller_id]"), "encoding.shrinkage.fixedLevels");
+        rejects.accept(joint.replace("scale: identity", "scale: logit"), "encoding.shrinkage.fixedLevels");
+        rejects.accept(joint.replace("keys: [category, seller_id]", "keys: [category, seller_id, condition_grade]"), "encoding.shrinkage.fixedLevels");
+        rejects.accept(joint.replace("weights: varianceComponents", "weights: fixed"), "encoding.shrinkage.output");
+        rejects.accept(joint.replace("fixedLevels: [category], ", ""), "encoding.shrinkage.output");
+        rejects.accept(joint.replace("estimator: joint, ", "estimator: sequential, ").replace("structure: additive", "structure: cross"), "encoding.shrinkage.fixedLevels");
+        // a fixed cross cell would absorb its main effects whole
+        final FeaturePlan nested = compile(SOURCES, withEncoding(joint.replace("structure: additive", "structure: cross")
+                .replace("weights: varianceComponents", "weights: fixed").replace(", variance]", "]")
+                .replace("fixedLevels: [category]", "fixedLevels: [category_seller_id]")));
+        Assertions.assertTrue(nested.getDiagnostics().getMessages().stream().anyMatch(m -> "encoding.shrinkage.fixedLevels".equals(m.code())
+                && m.level() == Diagnostics.Level.error && m.message().contains("nests")), nested::describe);
+        // weights: fixed with a fixed level takes any scale and several shrunk levels
+        final FeaturePlan fixedWeights = compile(SOURCES, withEncoding(joint.replace("weights: varianceComponents", "weights: fixed, priorWeight: 5")
+                .replace("scale: identity", "scale: logit").replace(", variance]", "]").replace("keys: [category, seller_id]", "keys: [category, seller_id, condition_grade]")));
+        Assertions.assertFalse(fixedWeights.getDiagnostics().hasErrors(), fixedWeights::describe);
+        // joint with additive (cross) no longer needs the single-key keySets
+        final FeaturePlan cross = compile(SOURCES, withEncoding(joint.replace("structure: additive", "structure: cross")
+                .replace("fixedLevels: [category], ", "").replace(", variance]", "]")));
+        Assertions.assertFalse(cross.getDiagnostics().hasErrors(), cross::describe);
+        Assertions.assertEquals("category_seller_id=category,seller_id;category=category;seller_id=seller_id;global=",
+                column(cross, "enc__category_seller_id__e1__mean").getCoordinates().get("jointLevels"));
+    }
+
     @Test
     public void testShrinkageFamilies() {
         final String base = """

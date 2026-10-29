@@ -1929,6 +1929,8 @@ for every component; a dot product reproduces the PPMI only over the components 
       - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
         structure: sequence                       # a path, most recent first: (lag1, lag2) → (lag1) → global
         as: gradePath                             # the {keys} segment of the emitted names (default: the keys joined by _)
+      # - keys: [session_id, seller_id]
+      #   structure: additive                     # the main effects alone, no cell level (estimator: joint only; see Fixed levels)
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
@@ -1938,7 +1940,8 @@ for every component; a dot product reproduces the PPMI only over the components 
       family: gaussian                            # gaussian | betaBinomial | gammaPoisson | dirichletMultinomial; default derived from the stat
       scale: logit                                # identity | logit | log; required when a lattice uses additive
       leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor (in a chain, the leaf = the deepest level that has rows)
-      output: [composed, deviations, effectiveN]  # composed (default) | deviations (dev0, dev1, ...) | effectiveN (<stat>__neff)
+      output: [composed, deviations, effectiveN]  # composed (default) | deviations (dev0, dev1, ...) | effectiveN (<stat>__neff) | variance (<stat>__var, joint + fixedLevels)
+      # fixedLevels: [session_id]                 # joint: a level fitted as fixed effects, not shrunk (see Fixed levels)
 ```
 
 `smoothing: {type: bayesian, priorWeight: N}` is accepted as the legacy spelling of fixed-weight
@@ -1993,6 +1996,61 @@ truncates to zero is fixed at 0. A row whose leaf key is null has no estimate; a
 level leaves the row in the intercept and the levels it has (no effect for that level, as at apply time).
 The artifact is `<block>__<keys>__<window>__<target>.joint.avro` per keySet × target, holding the
 whole-input solution; `share` and unshrunk stats of a joint block still use the per-level statistics.
+Under `joint` an `additive` lattice needs no single-key keySets: the solve fits the main effects itself.
+
+**Fixed levels (`fixedLevels`, `structure: additive`).** Some contexts should not be shrunk: a context whose effect
+is a property of the whole group of rows sharing it — the level of a session, against which every listing in it
+is compared — would, shrunk, hand part of its effect to the entities in it (a strong session's sellers would read
+weak). `shrinkage.fixedLevels: [<level>]` (joint only) fits one level of the lattice as fixed effects, λ = 0, with
+the intercept; the others are shrunk as usual. `structure: additive` is the lattice of such a model: the main
+effects of the keys and the intercept, without the cell of the keys as a level of its own (in `structure: cross`
+that cell is a level, which with a row or two per cell only separates noise from noise). The keys still define the
+cell the rows are aggregated in.
+
+```yaml
+  - name: level
+    scope: population
+    type: encoding
+    keySets:
+      - keys: [session_id, seller_id]
+        structure: additive                       # session + seller + intercept
+    targets:
+      - {field: price_rel, stats: [mean]}
+    shrinkage: {estimator: joint, scale: identity, weights: varianceComponents, fixedLevels: [session_id],
+                output: [composed, deviations, effectiveN, variance]}
+    fit: {mode: forward, blocks: {size: P90D}, window: P730D, minBlocks: 4}
+```
+
+- **The model**: `y = l_session + a_seller + ε`, the seller effects shrunk with λ = σ² / τ². Every seller is compared
+  with the others of its sessions, and every session's level is read from the sellers in it, at once: a session of
+  strong sellers is a strong session, which a mean within the session (or a replay that updates one session after
+  another) does not see. Only `μ + e_session` is identified; `μ` is reported as the row-weighted mean of the
+  sessions' levels and `dev` of the fixed level as the level minus it. A session the model has not seen (the row's
+  own, in a forward fit) has no fixed effect: its `dev` is null and `composed` reads the seller in the average
+  session, `μ + a_seller`.
+- **Null keys**: a row without the fixed level's key takes no part (no fit, `composed` null). Under `structure:
+  additive` any other null key leaves the row out of that level only — it is fitted with the levels it has and reads
+  `composed` without that level's effect (its `dev` null) — so the order the keys are declared in changes nothing;
+  without a fixed level a row needs one of the keys. A lattice with a leaf (`cross`, a chain) needs the leaf key, as
+  before.
+- **λ (`weights: varianceComponents`)** is estimated by Henderson's method III, one estimate per solve (per
+  change point under `forward`): `σ²` from the residuals of the unshrunk fit of both levels, `τ²` from how much the
+  seller level reduces the residuals beyond the sessions, both with their exact expectations over the design. The
+  one-way moments the joint estimator uses without a fixed level would count the sessions' spread as noise and
+  over-shrink. It needs one shrunk level and `scale: identity` (error `encoding.shrinkage.fixedLevels`); a seller
+  level without between-seller variance is fixed at 0, as under the moment estimator. `weights: fixed` takes
+  `priorWeight` as λ on any scale and with any number of shrunk levels.
+- **Outputs**: `deviations` (`dev<i>` in lattice order: the fixed level's effect, then the shrunk ones),
+  `effectiveN` and `variance` of the **first shrunk level** (not the leaf): `effectiveN` = the seller's rows that
+  tell it apart once the sessions are taken out — each row counts `1 − 1/n` of a session with `n` rows, a row alone
+  in its session nothing — plus λ; `variance` = `σ² / effectiveN`, the approximate posterior variance of the seller's
+  effect (the diagonal of the absorbed system: within 1% of the exact one on a crossed design of 7,000 sessions ×
+  14,000 sellers; `τ²` for an unseen seller). `variance` needs `weights: varianceComponents` (σ²).
+- **Solve**: the fixed level is absorbed exactly and the shrunk levels are solved by conjugate gradients
+  preconditioned with the diagonal — tens of iterations on 10⁵ cells, where the block Gauss–Seidel of the plain
+  joint solve can take hundreds over a weakly connected crossed design. The manifest records `fixedLevel`,
+  `solver` and `sigma2`. One fixed level at most; at least one level left to shrink, and none whose keys are part
+  of the fixed one (fixing the cell of a `cross` would absorb its main effects whole).
 
 **Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
 scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)

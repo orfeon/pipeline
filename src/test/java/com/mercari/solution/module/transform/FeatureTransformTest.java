@@ -2934,6 +2934,43 @@ public class FeatureTransformTest {
         Assertions.assertTrue(new java.io.File(files[0], "enc__seller_id_category__e1.joint.avro").exists());
     }
 
+    /**
+     * A fixed session beside a shrunk seller (structure: additive, fixedLevels: [session_id], λ = 1): sessions B and D
+     * hold one listing each and tell the sellers nothing, A and C hold both. Absorbing the sessions leaves
+     * {@code [[2, −1], [−1, 2]] a = [1/2, −1/2]} (information 1 per seller plus λ; within A s1 sold and s2 did not,
+     * within C both sold), so a = ±1/6; a session's level is its mean of y − a (A 1/2, B −1/6, C 1, D 5/6) and μ their
+     * row-weighted mean 11/18. A listing reads level + a — a lone listing its own outcome.
+     */
+    @Test
+    public void testJointEstimatorFixedLevel() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = FEATURE_CONFIG
+                .replace("            - keys: [seller_id]\n          targets:", "            - {keys: [session_id, seller_id], structure: additive}\n          targets:")
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {estimator: joint, scale: identity, priorWeight: 1, fixedLevels: [session_id], output: [composed, deviations, effectiveN]}")
+                .replace("      output:\n", "      fit: {mode: static, artifact: {uri: \"" + dir + "\"}}\n      output:\n");
+        Assertions.assertTrue(config.contains("structure: additive") && config.contains("fixedLevels"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        Assertions.assertEquals("session_id", outputs.get("features").getSchema().getField("f_enc__session_id_seller_id__e1__mean").getOptions().get("feature.coord.jointFixed"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final Map<String, Double> expected = Map.of("A/s1", 2.0 / 3, "A/s2", 1.0 / 3, "B/s1", 0.0, "C/s1", 7.0 / 6, "C/s2", 5.0 / 6, "D/s1", 1.0);
+            for (final Map.Entry<String, Double> e : expected.entrySet()) {
+                final MElement row = byKey.get(e.getKey());
+                Assertions.assertEquals(e.getValue(), row.getAsDouble("f_enc__session_id_seller_id__e1__mean"), 1e-9, e.getKey());
+                Assertions.assertEquals(e.getKey().endsWith("s1") ? 1.0 / 6 : -1.0 / 6, row.getAsDouble("f_enc__session_id_seller_id__e1__dev1"), 1e-9, e.getKey());
+                Assertions.assertEquals(2.0, row.getAsDouble("f_enc__session_id_seller_id__e1__mean__neff"), 1e-9, e.getKey());
+            }
+            Assertions.assertEquals(0.5 - 11.0 / 18, byKey.get("A/s1").getAsDouble("f_enc__session_id_seller_id__e1__dev0"), 1e-9);
+            Assertions.assertEquals(5.0 / 6 - 11.0 / 18, byKey.get("D/s1").getAsDouble("f_enc__session_id_seller_id__e1__dev0"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
     private static double logit(final double p) {
         return Math.log(p / (1 - p));
     }

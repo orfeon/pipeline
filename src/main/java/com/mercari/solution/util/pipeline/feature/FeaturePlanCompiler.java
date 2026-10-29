@@ -5404,9 +5404,28 @@ public final class FeaturePlanCompiler {
                         }
                     }
                 }
-                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross | sequence: " + structure);
+                case "additive" -> {
+                    // the main effects alone: no level for the cell of the keys (an interaction a joint fit would have to
+                    // separate from the noise when the cells hold a row or two each). The cell still aggregates the rows
+                    if (ks.keys.size() < 2) diagnostics.error("encoding.keySet.additive", loc, "structure: additive requires at least two keys: " + ks.keys);
+                    if (hierarchy != null) diagnostics.error("encoding.keySet.additive", loc, "structure: additive derives its lattice (the main effects of " + ks.keys + ", then global): drop hierarchy");
+                    if (shrinkage.estimator != Shrinkage.Estimator.joint) {
+                        diagnostics.error("encoding.keySet.additive", loc, "structure: additive is the lattice of estimator: joint (the main effects fitted simultaneously); declare shrinkage.estimator: joint, or use structure: cross");
+                    }
+                    levels.clear();
+                    additiveAt = 0;
+                    levels.add(List.of(Shrinkage.ADDITIVE));
+                }
+                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross | sequence | additive: " + structure);
             }
-            if (additiveAt >= 0) {
+            if (!shrinkage.fixedLevels.isEmpty() && shrinkage.estimator != Shrinkage.Estimator.joint) {
+                diagnostics.error("encoding.shrinkage.fixedLevels", loc, "fixedLevels needs estimator: joint (a fixed level is solved with the others in one system)");
+            }
+            if (shrinkage.emits("variance") && shrinkage.estimator != Shrinkage.Estimator.joint) {
+                diagnostics.error("encoding.shrinkage.output", loc, "output variance needs estimator: joint with fixedLevels and weights: varianceComponents");
+            }
+            // a joint fit solves the main effects itself: it reads no statistics of a single-key keySet
+            if (additiveAt >= 0 && shrinkage.estimator != Shrinkage.Estimator.joint) {
                 for (final String key : ks.keys) {
                     final KeySet main = singleKeySets.get(key);
                     if (main == null) {
@@ -5415,6 +5434,8 @@ public final class FeaturePlanCompiler {
                         diagnostics.error("encoding.hierarchy.additive", loc, "'additive' on keys " + ks.keys + " requires the single-key keySet for '" + key + "' to declare the same windows");
                     }
                 }
+            }
+            if (additiveAt >= 0) {
                 final boolean scaleDeclared = (defShrinkage != null && defShrinkage.has("scale"))
                         || (parseJsonObject(ks.shrinkageJson) != null && parseJsonObject(ks.shrinkageJson).has("scale"));
                 if (!scaleDeclared) diagnostics.error("encoding.hierarchy.scale", loc, "a lattice with 'additive' requires shrinkage.scale (identity | logit | log)");
@@ -5561,9 +5582,13 @@ public final class FeaturePlanCompiler {
                         produced++;
                         continue;
                     }
+                    if ("share".equals(stat) && "additive".equals(ks.structure)) {
+                        diagnostics.error("encoding.keySet.additive", loc, "stat share is the leaf's share of the global count; structure: additive has no leaf level (use structure: cross)");
+                        continue;
+                    }
                     if (lattice.shrinkage.estimator == Shrinkage.Estimator.joint && !"share".equals(stat)) {
                         // joint: no hidden level statistics — the fit stage solves the lattice and fills the columns by lookup
-                        produced += expandJoint(def, ks, lattice.levels, singleKeySets, window, target.name, target.reference, stat, family,
+                        produced += expandJoint(def, ks, lattice.levels, window, target.name, target.reference, stat, family,
                                 lattice.shrinkage, offsetColumn, computeAt, mode, fitSpec, naming, names);
                         continue;
                     }
@@ -5855,7 +5880,7 @@ public final class FeaturePlanCompiler {
      * ({@code additive} → the main-effect key lists) become the effect levels, the global level the intercept;
      * every key field of every level is a self input (the fit projects the cell onto each level).
      */
-    private int expandJoint(final FeatureDef def, final KeySet ks, final List<List<String>> latticeLevels, final Map<String, KeySet> singleKeySets,
+    private int expandJoint(final FeatureDef def, final KeySet ks, final List<List<String>> latticeLevels,
                             final Window window, final String targetName, final String targetReference, final String stat,
                             final Shrinkage.Family family, final Shrinkage shrinkage, final String offsetColumn, final AvailableAt computeAt,
                             final FitMode mode, final FeatureSpec.FitSpec fitSpec, final String naming, final Map<String, String> names) {
@@ -5865,7 +5890,8 @@ public final class FeaturePlanCompiler {
         for (final List<String> levelKeys : latticeLevels) {
             final List<List<String>> expanded = new ArrayList<>();
             if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
-                for (final String key : ks.keys) if (singleKeySets.containsKey(key)) expanded.add(List.of(key));
+                // every key's main effect: the joint solve fits them itself, a single-key keySet of the block is not needed
+                for (final String key : ks.keys) expanded.add(List.of(key));
             } else {
                 expanded.add(levelKeys);
             }
@@ -5875,12 +5901,14 @@ public final class FeaturePlanCompiler {
             }
         }
         if (levels.isEmpty() || !levels.get(levels.size() - 1).keys().isEmpty()) levels.add(new JointFit.Level(Shrinkage.GLOBAL, List.of()));
+        final String fixed = jointFixedLevel(def, levels, shrinkage);
+        if (fixed == null) return 0;
         final String id = render("{block}__{keys}__{window}__{target}", Map.of(
                 "block", def.name, "keys", String.join("_", ks.keys), "window", window == null ? "" : window.token(), "target", targetName));
         // the id is key-derived (a keySet's `as` renames its columns, not the fit it reads), so a block declaring the
         // same keys twice resolves to one solve: the engine groups the columns by it and reads the parameters of the
         // first. Sharing is right when the lattice and the shrinkage are the same and wrong when they are not.
-        final String signature = JointFit.encodeLevels(levels) + "|" + shrinkage.scale + "|" + shrinkage.weights + "|" + shrinkage.priorWeight;
+        final String signature = JointFit.encodeLevels(levels) + "|" + shrinkage.scale + "|" + shrinkage.weights + "|" + shrinkage.priorWeight + "|" + fixed;
         final String previousSignature = jointFits.putIfAbsent(id, signature);
         if (previousSignature != null && !previousSignature.equals(signature)) {
             diagnostics.error("encoding.shrinkage.joint", loc, "two keySets of block '" + def.name + "' resolve to the same joint fit '" + id
@@ -5893,8 +5921,11 @@ public final class FeaturePlanCompiler {
             final List<String> tokens = new ArrayList<>();
             for (final JointFit.Level l : levels) tokens.add(l.token());
             diagnostics.info("encoding.shrinkage.joint", loc, "estimator joint fits the levels " + tokens + " of keySet " + ks.keys
-                    + " simultaneously (ridge / BLUP over the lattice cells, solved on one worker; lambda per level "
-                    + ("varianceComponents".equals(shrinkage.weights) ? "by the moment estimator over the level's contexts" : "= priorWeight " + shrinkage.priorWeight)
+                    + " simultaneously (ridge / BLUP over the lattice cells, solved on one worker; "
+                    + (fixed.isEmpty() ? "" : "level " + fixed + " fixed (not shrunk, absorbed exactly; conjugate gradients on the others); ")
+                    + "lambda per level "
+                    + (!"varianceComponents".equals(shrinkage.weights) ? "= priorWeight " + shrinkage.priorWeight
+                    : fixed.isEmpty() ? "by the moment estimator over the level's contexts" : "by Henderson's method III beside the fixed level")
                     + "; scale " + shrinkage.scale + ")");
         }
         final List<OutputColumn> cols = new ArrayList<>();
@@ -5913,10 +5944,21 @@ public final class FeaturePlanCompiler {
                 cols.add(c);
             }
         }
+        // effectiveN / variance read the leaf, or under a fixed level the first shrunk level: JointFit's rule, so the
+        // column names the level the solve fills (the global level is last, so the effect-level index is the lattice's)
+        final int neffLevel = JointFit.effectiveNLevel(JointFit.effectLevelIndex(levels, fixed));
         if (shrinkage.emits("effectiveN")) {
             names.put("stat", stat + "__neff");
             final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
             c.coordinates.put("kind", "effectiveN");
+            if (!fixed.isEmpty()) c.coordinates.put("levelKeys", levels.get(neffLevel).token());
+            cols.add(c);
+        }
+        if (shrinkage.emits("variance")) {
+            names.put("stat", stat + "__var");
+            final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("kind", "variance");
+            c.coordinates.put("levelKeys", levels.get(neffLevel).token());
             cols.add(c);
         }
         for (final OutputColumn c : cols) {
@@ -5929,10 +5971,71 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("weights", shrinkage.weights);
             c.coordinates.put("priorWeight", Double.toString(shrinkage.priorWeight));
             c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            if (!fixed.isEmpty()) c.coordinates.put("jointFixed", fixed);
             for (final JointFit.Level l : levels) for (final String key : l.keys()) addSelfInput(c, key);
             register(c);
         }
         return cols.size();
+    }
+
+    /**
+     * The fixed level of a joint lattice ({@code shrinkage.fixedLevels}): "" for none, null after an error. At most one
+     * level, an effect level of the lattice, at least one level left to shrink, none of the shrunk levels coarser than
+     * it (absorbed with it); {@code weights: varianceComponents}
+     * estimates the one shrunk level's λ by Henderson's method III, which is defined for one shrunk level on the
+     * identity scale, and output variance needs that estimate (σ²).
+     */
+    private String jointFixedLevel(final FeatureDef def, final List<JointFit.Level> levels, final Shrinkage shrinkage) {
+        final String loc = def.location();
+        // the block's lattice is checked once per keySet × window × target × stat: report each problem once
+        final java.util.function.BiConsumer<String, String> error = (code, message) -> {
+            if (hintedBlocks.add(def.name + "#jointFixed#" + message)) diagnostics.error(code, loc, message);
+        };
+        final List<String> effects = new ArrayList<>();
+        for (final JointFit.Level l : levels) if (!l.keys().isEmpty()) effects.add(l.token());
+        if (shrinkage.fixedLevels.isEmpty()) {
+            if (shrinkage.emits("variance")) {
+                error.accept("encoding.shrinkage.output", "output variance needs fixedLevels and weights: varianceComponents (the residual variance of Henderson's method III)");
+                return null;
+            }
+            return "";
+        }
+        if (shrinkage.fixedLevels.size() > 1) {
+            error.accept("encoding.shrinkage.fixedLevels", "fixedLevels takes one level (the one absorbed exactly): " + shrinkage.fixedLevels);
+            return null;
+        }
+        final String fixed = shrinkage.fixedLevels.get(0);
+        if (!effects.contains(fixed)) {
+            error.accept("encoding.shrinkage.fixedLevels", "fixedLevels names no level of the lattice: " + fixed + " (available: " + effects + ")");
+            return null;
+        }
+        if (effects.size() < 2) {
+            error.accept("encoding.shrinkage.fixedLevels", "fixedLevels leaves no level to shrink: " + effects);
+            return null;
+        }
+        // a level whose keys the fixed level's contexts all determine is constant within each fixed context: absorbing
+        // the fixed level absorbs it whole, so every one of its effects would be 0
+        List<String> fixedKeys = List.of();
+        for (final JointFit.Level l : levels) if (l.token().equals(fixed)) fixedKeys = l.keys();
+        final List<String> nested = new ArrayList<>();
+        for (final JointFit.Level l : levels) {
+            if (!l.keys().isEmpty() && !l.token().equals(fixed) && fixedKeys.containsAll(l.keys())) nested.add(l.token());
+        }
+        if (!nested.isEmpty()) {
+            error.accept("encoding.shrinkage.fixedLevels", "fixedLevels: " + fixed + " nests the levels " + nested
+                    + " (their keys are part of it): absorbing it absorbs them, every effect of theirs would be 0; fix a level none of the others is coarser than");
+            return null;
+        }
+        if ("varianceComponents".equals(shrinkage.weights) && (effects.size() != 2 || shrinkage.scale != Shrinkage.Scale.identity)) {
+            error.accept("encoding.shrinkage.fixedLevels", "weights: varianceComponents beside a fixed level estimates lambda by Henderson's method III,"
+                    + " defined for one shrunk level on scale identity (levels " + effects + ", scale " + shrinkage.scale + "); use weights: fixed with priorWeight");
+            return null;
+        }
+        if (shrinkage.emits("variance") && !"varianceComponents".equals(shrinkage.weights)) {
+            error.accept("encoding.shrinkage.output", "output variance needs weights: varianceComponents (the residual variance of Henderson's method III)");
+            return null;
+        }
+        return fixed;
     }
 
     /**
