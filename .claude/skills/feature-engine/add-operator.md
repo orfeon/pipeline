@@ -147,8 +147,10 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    it, and `contribution(row, views)` to filter with it (`SpectralSpec` + `vocabularyView` is the template:
    rank the values the way the solve would, so the bounded state fits the same model). The plain blocks reach
    the solve, so a view travels only to the ParDo that declares it. Register it once in `staticFitBlocks`
-   (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
-   `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
+   (`blocks.addAll(<type>Specs(population))`), which feeds both `applyFit` and the manifest's
+   `artifactPaths` — `FitApplyDoFn` needs no change. The registry reads `Scope.population` columns only (an
+   operator name is unique within a scope, not across: the context `svd` shares the population one's name), so the
+   type's columns must be built with that scope — a block of another scope is silently never fitted. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the
    memory cost in the docs (discretize: 8 bytes per row). Before writing a family, check whether the fit is a
    function of one that exists: `SmoothSpec` needs (XᵀX, Xᵀy, yᵀy), which are the second moments of the vector

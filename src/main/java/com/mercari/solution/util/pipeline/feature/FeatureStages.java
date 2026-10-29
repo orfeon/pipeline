@@ -358,17 +358,17 @@ public final class FeatureStages {
      * columns are read: an operator name is unique within a scope, not across scopes (the context {@code svd} is a
      * per-group solver whose columns carry no {@code component}).
      */
-    static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> planColumns) {
-        final List<OutputColumn> columns = planColumns.stream().filter(c -> c.getScope() == Scope.population).toList();
+    static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
+        final List<OutputColumn> population = columns.stream().filter(c -> c.getScope() == Scope.population).toList();
         final List<StaticFitBlock<?>> blocks = new ArrayList<>();
-        blocks.addAll(fmSpecs(columns));
-        blocks.addAll(discretizeSpecs(columns));
-        blocks.addAll(quantileTransformSpecs(columns));
-        blocks.addAll(svdSpecs(columns));
-        blocks.addAll(smoothSpecs(columns));
-        blocks.addAll(copulaSpecs(columns));
-        blocks.addAll(spectralSpecs(columns));
-        blocks.addAll(jointSpecs(columns));
+        blocks.addAll(fmSpecs(population));
+        blocks.addAll(discretizeSpecs(population));
+        blocks.addAll(quantileTransformSpecs(population));
+        blocks.addAll(svdSpecs(population));
+        blocks.addAll(smoothSpecs(population));
+        blocks.addAll(copulaSpecs(population));
+        blocks.addAll(spectralSpecs(population));
+        blocks.addAll(jointSpecs(population));
         return blocks;
     }
 
