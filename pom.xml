@@ -78,6 +78,7 @@
     <jetty.version>12.1.14</jetty.version>
     <mcp.version>2.1.0</mcp.version>
     <langchain4j.version>1.22.0</langchain4j.version>
+    <json-schema-validator.version>2.0.4</json-schema-validator.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -390,6 +391,33 @@
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
           <scope>runtime</scope>
+        </dependency>
+
+        <!-- Server-only (server/** is compiled only in this profile): kept out of the pipeline images. -->
+        <!-- MCP: mcp-core + the Jackson 2 JSON provider instead of the `mcp` aggregate: the aggregate brings
+             mcp-json-jackson3 (Jackson 3 databind), whose schema validator needs jackson-annotations 3.x
+             while Beam / GCP pin 2.x (NoSuchFieldError JsonFormat$Shape.POJO at server start). -->
+        <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp-core -->
+        <dependency>
+          <groupId>io.modelcontextprotocol.sdk</groupId>
+          <artifactId>mcp-core</artifactId>
+          <version>${mcp.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>io.modelcontextprotocol.sdk</groupId>
+          <artifactId>mcp-json-jackson2</artifactId>
+          <version>${mcp.version}</version>
+        </dependency>
+        <!-- Agent: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j -->
+        <dependency>
+          <groupId>dev.langchain4j</groupId>
+          <artifactId>langchain4j</artifactId>
+          <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>dev.langchain4j</groupId>
+          <artifactId>langchain4j-google-genai</artifactId>
+          <version>${langchain4j.version}-beta32</version>
         </dependency>
       </dependencies>
       <build>
@@ -1064,34 +1092,13 @@
       <scope>provided</scope>
     </dependency>
 
-    <!-- Pipeline Server for MCP -->
-    <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp-core -->
-    <!-- mcp-core + the Jackson 2 JSON provider instead of the `mcp` aggregate: the aggregate brings
-         mcp-json-jackson3 (Jackson 3 databind), whose schema validator needs jackson-annotations 3.x
-         while Beam / GCP pin 2.x (NoSuchFieldError JsonFormat$Shape.POJO at server start). -->
+    <!-- JSON Schema validation (util/schema/JsonSchemaUtil, used by module/Schema and the server's spec API).
+         Declared directly: it used to arrive only through mcp-json-jackson2, which is server-only now. -->
+    <!-- https://mvnrepository.com/artifact/com.networknt/json-schema-validator -->
     <dependency>
-      <groupId>io.modelcontextprotocol.sdk</groupId>
-      <artifactId>mcp-core</artifactId>
-      <version>${mcp.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>io.modelcontextprotocol.sdk</groupId>
-      <artifactId>mcp-json-jackson2</artifactId>
-      <version>${mcp.version}</version>
-    </dependency>
-
-    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j -->
-    <dependency>
-      <groupId>dev.langchain4j</groupId>
-      <artifactId>langchain4j</artifactId>
-      <version>${langchain4j.version}</version>
-    </dependency>
-
-    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-google-genai -->
-    <dependency>
-      <groupId>dev.langchain4j</groupId>
-      <artifactId>langchain4j-google-genai</artifactId>
-      <version>${langchain4j.version}-beta32</version>
+      <groupId>com.networknt</groupId>
+      <artifactId>json-schema-validator</artifactId>
+      <version>${json-schema-validator.version}</version>
     </dependency>
 
     <!-- Experimental LLM -->
