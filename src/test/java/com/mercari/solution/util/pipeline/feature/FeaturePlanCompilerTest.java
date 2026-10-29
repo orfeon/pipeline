@@ -1953,8 +1953,27 @@ public class FeaturePlanCompilerTest {
         rejects.accept(spec.replace("- {level: seller_id, by: [seller_id]}", "- {level: seller_id, by: [seller_id], as: x}"));
         rejects.accept(spec.replace("estimator: joint, weights: varianceComponents, fixedLevels: [session_id], output: [deviations]", "estimator: sequential")
                 .replace("structure: additive", "structure: cross"));
+        // an entry that is not an object is reported, not dropped; a keySet with no statistic of the joint fit cannot carry lookups
+        rejects.accept(spec.replace("- {level: seller_id, by: [seller_id]}", "- seller_id"));
+        rejects.accept(spec.replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {stats: [count]}"));
         // an unknown by field is an unresolved reference of the block
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("by: [seller_id]", "by: [no_such_field]")), "reference.unresolved"));
+        // ... and so is one spelled like the block's own columns (the block expands waiting for itself): never an all-null column
+        final FeaturePlan own = compile(SOURCES, spec.replace("by: [seller_id]", "by: [enc_no_such_column]"));
+        Assertions.assertTrue(hasCode(own, "reference.unresolved"), own::describe);
+        Assertions.assertTrue(own.getDiagnostics().hasErrors(), own::describe);
+        // a block.column spelling is named by its column part, like every column built from a reference
+        final FeaturePlan dotted = compile(SOURCES, spec.replace("by: [recent_n5_session_id_lag1,", "by: [recent.recent_n5_session_id_lag1,"));
+        Assertions.assertFalse(dotted.getDiagnostics().hasErrors(), dotted::describe);
+        Assertions.assertEquals("recent_n5_session_id_lag1", column(dotted, lag1.getCanonicalName()).getCoordinates().get("lookupBy"));
+        // a bare lookups: (YAML null) declares none
+        final String declared = "        lookups:\n"
+                + "          - {level: session_id, by: [recent_n5_session_id_lag1, recent_n5_session_id_lag2], read: level}\n"
+                + "          - {level: seller_id, by: [seller_id]}\n";
+        Assertions.assertTrue(spec.contains(declared), spec);
+        final FeaturePlan bare = compile(SOURCES, spec.replace(declared, "        lookups:\n"));
+        Assertions.assertFalse(bare.getDiagnostics().hasErrors(), bare::describe);
+        Assertions.assertNull(bare.getColumn(lag1.getCanonicalName()), bare::describe);
     }
 
     /**

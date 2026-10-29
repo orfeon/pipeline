@@ -976,6 +976,10 @@ public final class FeatureStages {
         }
         for (final StaticFitBlock<?> block : blocks) {
             for (final String f : block.fitInputs()) if (stageProduced.contains(f)) sameStageDeps.add(f);
+            // a joint lookup reads its context from the row at apply time: a field of this stage would not be there yet
+            if (block instanceof JointSpec joint) {
+                for (final List<String> fields : joint.lookupBy().values()) for (final String f : fields) if (stageProduced.contains(f)) sameStageDeps.add(f);
+            }
         }
         if (!sameStageDeps.isEmpty()) {
             throw new IllegalStateException("fit.mode static targets/offsets/inputs " + sameStageDeps

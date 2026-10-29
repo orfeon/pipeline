@@ -2093,8 +2093,12 @@ context **another column of the row** names, typically a past context held by a 
   unfitted one has no value.
 - It reads a model, it is not an as-of join: the value for a past session changes as later blocks re-fit it (that is
   the point of re-reading it), and a row only ever reads a model fitted on blocks it may read. Error
-  `encoding.keySet.lookups` (an unknown level / read / parameter, a `by` entry of the wrong arity, a non-joint
-  keySet).
+  `encoding.keySet.lookups` (an unknown level / read / parameter, a missing or empty `by`, a `by` entry of the wrong
+  arity, a non-joint keySet, a keySet whose targets have no statistic the joint estimator fits — `count` / `share`
+  only); an unknown `by` field is `reference.unresolved`. A `block.column` spelling of a `by` field is named by its
+  column part.
+- The value is matched as text: a `by` field must hold the context the way the level's key does (a lag of the key
+  field does; an integer key read from a float64 column, `1` against `1.0`, never matches and reads null).
 
 **Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
 scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)

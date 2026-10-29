@@ -1199,38 +1199,16 @@ public class FeatureSpec implements Serializable {
             keySet.parentRef = Json.string(ks, "parentRef");
             keySet.maxDepth = Json.integer(ks, "maxDepth");
             keySet.as = nameSegment(ks, "encoding.keySet.as", "keySet", diagnostics, loc + ".keySets");
-            for (final JsonObject l : objects(ks, "lookups")) {
-                final Lookup lookup = new Lookup();
-                lookup.level = Json.string(l, "level");
-                lookup.read = Json.string(l, "read");
-                for (final String key : l.keySet()) if (!List.of("level", "by", "read").contains(key)) lookup.unknown.add(key);
-                final JsonElement by = l.get("by");
-                if (by != null && by.isJsonPrimitive()) {
-                    lookup.by.add(List.of(by.getAsString()));
-                } else if (by != null && by.isJsonArray()) {
-                    for (final JsonElement e : by.getAsJsonArray()) {
-                        if (e.isJsonPrimitive()) {
-                            lookup.by.add(List.of(e.getAsString()));
-                        } else if (e.isJsonArray()) {
-                            final List<String> fields = new ArrayList<>();
-                            for (final JsonElement f : e.getAsJsonArray()) {
-                                if (f.isJsonPrimitive()) fields.add(f.getAsString());
-                                else lookup.malformed = true;
-                            }
-                            lookup.by.add(fields);
-                        } else {
-                            lookup.malformed = true;
-                        }
-                    }
-                } else if (by != null && !by.isJsonNull()) {
-                    lookup.malformed = true;
+            // a bare `lookups:` (YAML null) declares none; anything else that is not a list of objects is reported, never dropped
+            final JsonElement lookups = ks.get("lookups");
+            if (lookups != null && !lookups.isJsonNull()) {
+                if (lookups.isJsonArray()) {
+                    for (final JsonElement l : lookups.getAsJsonArray()) keySet.lookups.add(parseLookup(l));
+                } else {
+                    final Lookup broken = new Lookup();
+                    broken.malformed = true;
+                    keySet.lookups.add(broken);
                 }
-                keySet.lookups.add(lookup);
-            }
-            if (ks.has("lookups") && !ks.get("lookups").isJsonArray()) {
-                final Lookup broken = new Lookup();
-                broken.malformed = true;
-                keySet.lookups.add(broken);
             }
             def.keySets.add(keySet);
         }
@@ -1968,6 +1946,41 @@ public class FeatureSpec implements Serializable {
             }
             def.copulaOutputs.add(new CopulaOutput(kind, out.get(kind).getAsString(), given, Json.string(out, "as")));
         }
+    }
+
+    /** One entry of a keySet's {@code lookups}: {@code {level, by, read}}; anything but an object is {@code malformed}. */
+    private static Lookup parseLookup(final JsonElement entry) {
+        final Lookup lookup = new Lookup();
+        if (!entry.isJsonObject()) {
+            lookup.malformed = true;
+            return lookup;
+        }
+        final JsonObject l = entry.getAsJsonObject();
+        lookup.level = Json.string(l, "level");
+        lookup.read = Json.string(l, "read");
+        for (final String key : l.keySet()) if (!List.of("level", "by", "read").contains(key)) lookup.unknown.add(key);
+        final JsonElement by = l.get("by");
+        if (by != null && by.isJsonPrimitive()) {
+            lookup.by.add(List.of(by.getAsString()));
+        } else if (by != null && by.isJsonArray()) {
+            for (final JsonElement e : by.getAsJsonArray()) {
+                if (e.isJsonPrimitive()) {
+                    lookup.by.add(List.of(e.getAsString()));
+                } else if (e.isJsonArray()) {
+                    final List<String> fields = new ArrayList<>();
+                    for (final JsonElement f : e.getAsJsonArray()) {
+                        if (f.isJsonPrimitive()) fields.add(f.getAsString());
+                        else lookup.malformed = true;
+                    }
+                    lookup.by.add(fields);
+                } else {
+                    lookup.malformed = true;
+                }
+            }
+        } else if (by != null && !by.isJsonNull()) {
+            lookup.malformed = true;
+        }
+        return lookup;
     }
 
     private static List<JsonObject> objects(final JsonObject parent, final String key) {
