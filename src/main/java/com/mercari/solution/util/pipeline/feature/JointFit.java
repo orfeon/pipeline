@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.domain.file.ResourceUtil;
+import com.mercari.solution.util.domain.math.MatrixOps;
 import org.apache.avro.Schema;
 import org.apache.avro.file.DataFileReader;
 import org.apache.avro.file.DataFileWriter;
@@ -443,7 +444,8 @@ public final class JointFit implements Serializable {
                 sum[k] += cells.get(i).sum();
                 sumSq[k] += cells.get(i).sumSq();
             }
-            if (l == 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), nsum[0][k]);
+            // under a fixed level effectiveN reads the absorbed information of the first shrunk level, not the leaf's n
+            if (l == 0 && fixedLevel < 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), nsum[0][k]);
             if (l == fixedLevel) {
                 solution.lambdas[l] = 0; // not shrunk
                 continue;
@@ -569,6 +571,9 @@ public final class JointFit implements Serializable {
             if (h != null) {
                 solution.sigma2 = h.sigma2();
                 solution.lambdas[a] = h.lambda();
+            } else {
+                LOG.warn("joint fit, Henderson III: no residual degrees of freedom or no information beside the fixed level ({} cells):"
+                        + " lambda = priorWeight {}, no sigma2 (variance reads null)", m, solution.lambdas[a]);
             }
         }
         // the levels with a finite λ are solved; one whose λ is +∞ keeps every effect at 0, as in the Gauss–Seidel solve
@@ -639,7 +644,8 @@ public final class JointFit implements Serializable {
      * rows): the reduction {@code R(A | F) = SSE(F) − SSE(F + A)} of the unpenalised fits has expectation
      * {@code (rank(F, A) − rank(F)) σ² + tr(Zᵀ (I − P_F) Z) τ²}, with {@code σ² = SSE(F + A) / (N − rank(F, A))},
      * {@code rank(F, A) = K_F + K_A − c} (c = the connected components of the bipartite graph of F and A contexts that
-     * hold an A context) and the trace the sum of the A contexts' absorbed information. λ = σ² / τ²; a τ² ≤ 0 fixes
+     * hold an A context and no row without an A key: such a row breaks the component's one dependency
+     * {@code Σ F = Σ A}) and the trace the sum of the A contexts' absorbed information. λ = σ² / τ²; a τ² ≤ 0 fixes
      * the level at 0 (λ = +∞, as the moment estimator truncates); null (the declared priorWeight) without residual
      * degrees of freedom or information.
      */
@@ -669,9 +675,19 @@ public final class JointFit implements Serializable {
         // union-find over the F contexts [0, K_F) and the A contexts [K_F, K_F + K_A)
         final int[] parent = new int[fixedContexts + contexts];
         for (int v = 0; v < parent.length; v++) parent[v] = v;
-        for (int i = 0; i < m; i++) if (a[i] >= 0) union(parent, f[i], fixedContexts + a[i]);
+        // an F context holding a row without an A key keeps its component's F and A columns independent
+        final boolean[] open = new boolean[fixedContexts];
+        for (int i = 0; i < m; i++) {
+            if (a[i] >= 0) union(parent, f[i], fixedContexts + a[i]);
+            else open[f[i]] = true;
+        }
+        final boolean[] openRoot = new boolean[parent.length];
+        for (int r = 0; r < fixedContexts; r++) if (open[r]) openRoot[find(parent, r)] = true;
         final Set<Integer> components = new HashSet<>();
-        for (int k = 0; k < contexts; k++) components.add(find(parent, fixedContexts + k));
+        for (int k = 0; k < contexts; k++) {
+            final int root = find(parent, fixedContexts + k);
+            if (!openRoot[root]) components.add(root);
+        }
         final double rank = fixedContexts + contexts - components.size();
         final double df = rows - rank;
         double trace = 0;
@@ -711,6 +727,8 @@ public final class JointFit implements Serializable {
         final int dimension;
         int iterations;
         double residual;
+        /** Scratch of one product (the cells' shrunk effects, the fixed contexts' means), reused across the iterations. */
+        private final double[] cellScratch, meanScratch;
 
         AbsorbedSystem(final int[][] ctx, final int[] fixed, final double[] w, final double[] fixedWeight, final double[][] ridge,
                        final double[][] information) {
@@ -718,6 +736,8 @@ public final class JointFit implements Serializable {
             this.fixed = fixed;
             this.w = w;
             this.fixedWeight = fixedWeight;
+            this.cellScratch = new double[w.length];
+            this.meanScratch = new double[fixedWeight.length];
             this.offsets = new int[ctx.length];
             int d = 0;
             for (int l = 0; l < ctx.length; l++) {
@@ -737,7 +757,11 @@ public final class JointFit implements Serializable {
 
         /** {@code (Z x)_i}: the shrunk effects of each cell. */
         double[] predict(final double[] x) {
-            final double[] u = new double[w.length];
+            return predictInto(x, new double[w.length]);
+        }
+
+        private double[] predictInto(final double[] x, final double[] u) {
+            Arrays.fill(u, 0d);
             for (int l = 0; l < ctx.length; l++) {
                 final int[] c = ctx[l];
                 for (int i = 0; i < u.length; i++) if (c[i] >= 0) u[i] += x[offsets[l] + c[i]];
@@ -747,10 +771,15 @@ public final class JointFit implements Serializable {
 
         /** {@code Zᵀ W (I − P_F) v}. */
         double[] project(final double[] v) {
-            final double[] mean = new double[fixedWeight.length];
+            return projectInto(v, new double[dimension]);
+        }
+
+        private double[] projectInto(final double[] v, final double[] out) {
+            final double[] mean = meanScratch;
+            Arrays.fill(mean, 0d);
             for (int i = 0; i < v.length; i++) mean[fixed[i]] += w[i] * v[i];
             for (int r = 0; r < mean.length; r++) mean[r] /= fixedWeight[r];
-            final double[] out = new double[dimension];
+            Arrays.fill(out, 0d);
             for (int i = 0; i < v.length; i++) {
                 final double d = w[i] * (v[i] - mean[fixed[i]]);
                 for (int l = 0; l < ctx.length; l++) if (ctx[l][i] >= 0) out[offsets[l] + ctx[l][i]] += d;
@@ -766,26 +795,29 @@ public final class JointFit implements Serializable {
             return level;
         }
 
-        double[] multiply(final double[] x) {
-            final double[] out = project(predict(x));
+        /** {@code (Zᵀ W (I − P_F) Z + R) x} into {@code out}. */
+        private void multiplyInto(final double[] x, final double[] out) {
+            projectInto(predictInto(x, cellScratch), out);
             for (int j = 0; j < dimension; j++) out[j] += ridge[j] * x[j];
-            return out;
         }
 
         /** Preconditioned conjugate gradients from 0 until the relative residual is below {@link #CG_TOLERANCE}. */
         double[] solve(final double[] b) {
             final double[] x = new double[dimension];
             final double[] r = b.clone();
-            final double bNorm = Math.sqrt(dot(b, b));
+            final double bNorm = MatrixOps.norm(b);
             iterations = 0;
             residual = 0;
             if (!(bNorm > 0)) return x;
-            double[] s = precondition(r);
+            // not converged until an iteration says so: a breakdown on the first step must not read as a solve
+            residual = 1;
+            final double[] s = new double[dimension], q = new double[dimension];
+            precondition(r, s);
             final double[] p = s.clone();
-            double rs = dot(r, s);
+            double rs = MatrixOps.dot(r, s);
             for (int it = 1; it <= MAX_CG_ITERATIONS; it++) {
-                final double[] q = multiply(p);
-                final double pq = dot(p, q);
+                multiplyInto(p, q);
+                final double pq = MatrixOps.dot(p, q);
                 if (!(pq > 0)) break;
                 final double alpha = rs / pq;
                 for (int j = 0; j < dimension; j++) {
@@ -793,10 +825,10 @@ public final class JointFit implements Serializable {
                     r[j] -= alpha * q[j];
                 }
                 iterations = it;
-                residual = Math.sqrt(dot(r, r)) / bNorm;
+                residual = MatrixOps.norm(r) / bNorm;
                 if (residual <= CG_TOLERANCE) break;
-                s = precondition(r);
-                final double next = dot(r, s);
+                precondition(r, s);
+                final double next = MatrixOps.dot(r, s);
                 final double beta = next / rs;
                 rs = next;
                 for (int j = 0; j < dimension; j++) p[j] = s[j] + beta * p[j];
@@ -805,16 +837,8 @@ public final class JointFit implements Serializable {
             return x;
         }
 
-        private double[] precondition(final double[] r) {
-            final double[] s = new double[dimension];
+        private void precondition(final double[] r, final double[] s) {
             for (int j = 0; j < dimension; j++) s[j] = diagonal[j] > 0 ? r[j] / diagonal[j] : 0d;
-            return s;
-        }
-
-        private static double dot(final double[] a, final double[] b) {
-            double sum = 0;
-            for (int j = 0; j < a.length; j++) sum += a[j] * b[j];
-            return sum;
         }
     }
 

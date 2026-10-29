@@ -432,20 +432,20 @@ public class JointFitTest {
         Assertions.assertEquals(JointFit.solve(MAINS, JointFit.cellKeysOf(MAINS), cells, Shrinkage.Scale.identity, false, "fixed", lambda, -1).mu, plain.mu, 0d);
     }
 
-    /** {@code y = 0.3 + e_a + b_b + ε}: {@code races} contexts of a with {@code field} b's each, drawn from {@code players}. */
-    private static List<JointFit.Cell> crossedDesign(final long seed, final int races, final int field, final int players,
-                                                     final double sigma2, final double tau2, final double raceVariance) {
+    /** {@code y = 0.3 + e_a + b_b + ε}: {@code groups} contexts of a with {@code size} b's each, drawn from {@code members}. */
+    private static List<JointFit.Cell> crossedDesign(final long seed, final int groups, final int size, final int members,
+                                                     final double sigma2, final double tau2, final double groupVariance) {
         final Random random = new Random(seed);
-        final double[] ability = new double[players];
-        for (int h = 0; h < players; h++) ability[h] = Math.sqrt(tau2) * random.nextGaussian();
+        final double[] effect = new double[members];
+        for (int h = 0; h < members; h++) effect[h] = Math.sqrt(tau2) * random.nextGaussian();
         final List<JointFit.Cell> cells = new ArrayList<>();
-        for (int r = 0; r < races; r++) {
-            final double race = Math.sqrt(raceVariance) * random.nextGaussian();
+        for (int r = 0; r < groups; r++) {
+            final double group = Math.sqrt(groupVariance) * random.nextGaussian();
             final Set<Integer> picked = new TreeSet<>();
-            // a field drawn near the race's position in the pool: the design is crossed but not fully mixed
-            final int centre = random.nextInt(players);
-            while (picked.size() < field) picked.add(Math.floorMod(centre + (int) Math.round(players / 20.0 * random.nextGaussian()), players));
-            for (final int h : picked) cells.add(cell("r" + r, "h" + h, 1, 0.3 + race + ability[h] + Math.sqrt(sigma2) * random.nextGaussian()));
+            // members drawn near the group's position in the pool: the design is crossed but not fully mixed
+            final int centre = random.nextInt(members);
+            while (picked.size() < size) picked.add(Math.floorMod(centre + (int) Math.round(members / 20.0 * random.nextGaussian()), members));
+            for (final int h : picked) cells.add(cell("r" + r, "h" + h, 1, 0.3 + group + effect[h] + Math.sqrt(sigma2) * random.nextGaussian()));
         }
         return cells;
     }
@@ -478,6 +478,21 @@ public class JointFitTest {
         Assertions.assertTrue(Double.isInfinite(flat.total.lambdas[1]), Double.toString(flat.total.lambdas[1]));
         Assertions.assertTrue(flat.total.effects.get(1).values().stream().allMatch(v -> v == 0d));
         Assertions.assertEquals(0d, flat.variance(flat.total, row("r0", "h1")), 0d);
+    }
+
+    /**
+     * A row without the shrunk key in a fixed context breaks the component's dependency {@code Σ F = Σ A}: here (r0 h1 1,
+     * r0 h2 3, r0 — 2, r1 h1 4, r1 h2 2) the design [F, A] has full rank 4, so σ² = SSE / (5 − 4) with SSE = 4 (the one
+     * left null vector (1, −1, 0, −1, 1) of the design gives (1 − 3 − 4 + 2)² / 4); counting the component as one
+     * dependency would read rank 3 and σ² = 2.
+     */
+    @Test
+    public void testHendersonRankWithRowsWithoutTheShrunkKey() {
+        final List<JointFit.Cell> cells = List.of(cell("r0", "h1", 1, 1), cell("r0", "h2", 1, 3),
+                new JointFit.Cell(FeatureValues.keyWithNulls(row("r0", null), List.of("a", "b")), 1, 2, 4),
+                cell("r1", "h1", 1, 4), cell("r1", "h2", 1, 2));
+        final JointFit fit = JointFit.fit(MAINS, Shrinkage.Scale.identity, false, "varianceComponents", 20, cells, 0, false, 0, 0);
+        Assertions.assertEquals(4.0, fit.total.sigma2, 1e-9);
     }
 
     @Test

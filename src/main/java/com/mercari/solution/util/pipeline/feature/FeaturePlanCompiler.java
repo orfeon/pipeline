@@ -5588,7 +5588,7 @@ public final class FeaturePlanCompiler {
                     }
                     if (lattice.shrinkage.estimator == Shrinkage.Estimator.joint && !"share".equals(stat)) {
                         // joint: no hidden level statistics — the fit stage solves the lattice and fills the columns by lookup
-                        produced += expandJoint(def, ks, lattice.levels, singleKeySets, window, target.name, target.reference, stat, family,
+                        produced += expandJoint(def, ks, lattice.levels, window, target.name, target.reference, stat, family,
                                 lattice.shrinkage, offsetColumn, computeAt, mode, fitSpec, naming, names);
                         continue;
                     }
@@ -5880,7 +5880,7 @@ public final class FeaturePlanCompiler {
      * ({@code additive} → the main-effect key lists) become the effect levels, the global level the intercept;
      * every key field of every level is a self input (the fit projects the cell onto each level).
      */
-    private int expandJoint(final FeatureDef def, final KeySet ks, final List<List<String>> latticeLevels, final Map<String, KeySet> singleKeySets,
+    private int expandJoint(final FeatureDef def, final KeySet ks, final List<List<String>> latticeLevels,
                             final Window window, final String targetName, final String targetReference, final String stat,
                             final Shrinkage.Family family, final Shrinkage shrinkage, final String offsetColumn, final AvailableAt computeAt,
                             final FitMode mode, final FeatureSpec.FitSpec fitSpec, final String naming, final Map<String, String> names) {
@@ -5979,7 +5979,8 @@ public final class FeaturePlanCompiler {
 
     /**
      * The fixed level of a joint lattice ({@code shrinkage.fixedLevels}): "" for none, null after an error. At most one
-     * level, an effect level of the lattice, at least one level left to shrink; {@code weights: varianceComponents}
+     * level, an effect level of the lattice, at least one level left to shrink, none of the shrunk levels coarser than
+     * it (absorbed with it); {@code weights: varianceComponents}
      * estimates the one shrunk level's λ by Henderson's method III, which is defined for one shrunk level on the
      * identity scale, and output variance needs that estimate (σ²).
      */
@@ -6009,6 +6010,19 @@ public final class FeaturePlanCompiler {
         }
         if (effects.size() < 2) {
             error.accept("encoding.shrinkage.fixedLevels", "fixedLevels leaves no level to shrink: " + effects);
+            return null;
+        }
+        // a level whose keys the fixed level's contexts all determine is constant within each fixed context: absorbing
+        // the fixed level absorbs it whole, so every one of its effects would be 0
+        List<String> fixedKeys = List.of();
+        for (final JointFit.Level l : levels) if (l.token().equals(fixed)) fixedKeys = l.keys();
+        final List<String> nested = new ArrayList<>();
+        for (final JointFit.Level l : levels) {
+            if (!l.keys().isEmpty() && !l.token().equals(fixed) && fixedKeys.containsAll(l.keys())) nested.add(l.token());
+        }
+        if (!nested.isEmpty()) {
+            error.accept("encoding.shrinkage.fixedLevels", "fixedLevels: " + fixed + " nests the levels " + nested
+                    + " (their keys are part of it): absorbing it absorbs them, every effect of theirs would be 0; fix a level none of the others is coarser than");
             return null;
         }
         if ("varianceComponents".equals(shrinkage.weights) && (effects.size() != 2 || shrinkage.scale != Shrinkage.Scale.identity)) {

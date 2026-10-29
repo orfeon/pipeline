@@ -1958,6 +1958,12 @@ public class FeaturePlanCompilerTest {
         rejects.accept(joint.replace("weights: varianceComponents", "weights: fixed"), "encoding.shrinkage.output");
         rejects.accept(joint.replace("fixedLevels: [category], ", ""), "encoding.shrinkage.output");
         rejects.accept(joint.replace("estimator: joint, ", "estimator: sequential, ").replace("structure: additive", "structure: cross"), "encoding.shrinkage.fixedLevels");
+        // a fixed cross cell would absorb its main effects whole
+        final FeaturePlan nested = compile(SOURCES, withEncoding(joint.replace("structure: additive", "structure: cross")
+                .replace("weights: varianceComponents", "weights: fixed").replace(", variance]", "]")
+                .replace("fixedLevels: [category]", "fixedLevels: [category_seller_id]")));
+        Assertions.assertTrue(nested.getDiagnostics().getMessages().stream().anyMatch(m -> "encoding.shrinkage.fixedLevels".equals(m.code())
+                && m.level() == Diagnostics.Level.error && m.message().contains("nests")), nested::describe);
         // weights: fixed with a fixed level takes any scale and several shrunk levels
         final FeaturePlan fixedWeights = compile(SOURCES, withEncoding(joint.replace("weights: varianceComponents", "weights: fixed, priorWeight: 5")
                 .replace("scale: identity", "scale: logit").replace(", variance]", "]").replace("keys: [category, seller_id]", "keys: [category, seller_id, condition_grade]")));

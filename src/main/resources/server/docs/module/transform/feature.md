@@ -1928,9 +1928,9 @@ for every component; a dot product reproduces the PPMI only over the components 
         shrinkage: {priorWeight: 50}              # keySet-level override
       - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
         structure: sequence                       # a path, most recent first: (lag1, lag2) → (lag1) → global
-      - keys: [session_id, seller_id]
-        structure: additive                       # the main effects alone, no cell level (estimator: joint only; see Fixed levels)
         as: gradePath                             # the {keys} segment of the emitted names (default: the keys joined by _)
+      # - keys: [session_id, seller_id]
+      #   structure: additive                     # the main effects alone, no cell level (estimator: joint only; see Fixed levels)
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
@@ -2044,7 +2044,8 @@ cell the rows are aggregated in.
 - **Solve**: the fixed level is absorbed exactly and the shrunk levels are solved by conjugate gradients
   preconditioned with the diagonal — tens of iterations on 10⁵ cells, where the block Gauss–Seidel of the plain
   joint solve can take hundreds over a weakly connected crossed design. The manifest records `fixedLevel`,
-  `solver` and `sigma2`. One fixed level at most; at least one level left to shrink.
+  `solver` and `sigma2`. One fixed level at most; at least one level left to shrink, and none whose keys are part
+  of the fixed one (fixing the cell of a `cross` would absorb its main effects whole).
 
 **Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
 scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)
