@@ -583,7 +583,7 @@ Encodes text using a tokenizer (HuggingFace).
 | addSpecialTokens | optional | Boolean | Add the special tokens of the tokenizer post processor (e.g. `[CLS]` / `[SEP]`, `<bos>`). Default: `true`. |
 | truncation | optional | Boolean | Truncate to `maxLength`. Default: `true`: a text is cut at `maxLength`, or at 512 tokens if `maxLength` is not specified. Specify `false` to keep every token. |
 | maxLength | optional | Integer | Maximum number of tokens (with `truncation`), and the length to pad to (with `padding`). |
-| padding | optional | Boolean | With `maxLength`: pad the ids and the attention mask to `maxLength`, so that every record has the same length. Without `maxLength` a record is not padded, as each record is encoded on its own. Default: `false`. |
+| padding | optional | Boolean | With `maxLength`: pad the ids and the attention mask to `maxLength`, so that every record has the same length. Without `maxLength` a record is not padded, as each record is encoded on its own. Default: `false`. In the [onnx](onnx.md) transform, prefer `pad` of its `inputs`, which pads to the longest record of each batch. |
 | stride | optional | Integer | Stride of the overflowing tokens (with `truncation`). |
 
 ```yaml
@@ -619,6 +619,98 @@ Decodes token IDs back to text using a tokenizer.
 ```
 
 Output type: STRING.
+
+### vector_normalize
+
+L2-normalizes a numeric vector. A vector is an `array` field, or a `matrix` field with at most one dimension other than 1 (the same for `softmax`, `sigmoid`, `argmax`, `topk` and `labels`). A zero vector stays as it is.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field. |
+| size      | optional | Integer | Truncates to the first `size` values before normalizing (Matryoshka embeddings). A vector shorter than `size` fails. |
+
+```yaml
+- { name: embedding, func: vector_normalize, field: sentence_embedding, size: 256 }
+```
+
+Output type: array of float32 (float64 for float64 values).
+
+### squeeze
+
+Removes the dimensions of size 1 of an array or a matrix.
+
+| parameter | optional | type                 | description |
+|-----------|----------|----------------------|-------------|
+| field     | required | String               | Source field. |
+| axis      | optional | Integer or Array     | The dimensions to remove (negative: from the end). A dimension that is not 1 fails. Required to remove a dynamic dimension from the output type: without `axis` only the dimensions fixed to 1 in the schema change the type. |
+
+```yaml
+- { name: lastLogits, func: squeeze, field: logits, axis: 0 }
+```
+
+Output type: a matrix of the remaining dimensions, an array for one, the value type for none.
+
+### softmax
+
+Softmax of a vector of logits.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field. |
+| size      | optional | Integer | Uses only the first `size` values. |
+
+Output type: array of float32 (float64 for float64 values).
+
+### sigmoid
+
+Sigmoid of each value of a vector, or of a numeric scalar.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field. |
+| size      | optional | Integer | Uses only the first `size` values of a vector. |
+
+Output type: array of float32 for a vector, float32 for a scalar (float64 for float64 values).
+
+### argmax
+
+Index of the largest value of a vector: the first one if several are the largest. NaN is never the largest. Null if the vector has no other value.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field. |
+| size      | optional | Integer | Uses only the first `size` values. |
+
+Output type: INT64.
+
+### topk
+
+The `k` largest values of a vector with their indices, the largest first. Values that are equal keep the order of their indices, and NaN comes last.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field. |
+| k         | required | Integer | Number of values. A shorter vector gives all of its values. |
+| size      | optional | Integer | Uses only the first `size` values. |
+
+Output type: array of ELEMENT with `index` (int64) and `value` (float32, float64 for float64 values).
+
+### labels
+
+Gives names to the indices of a model output: an integer index becomes its label, and a vector becomes the labels with their values.
+
+| parameter | optional | type          | description |
+|-----------|----------|---------------|-------------|
+| field     | required | String        | Source field: an integer index, or a vector with as many values as labels. |
+| labels    | required | Array<String\> | The names, in the order of the indices. An index out of the labels fails, as does a vector of another length. |
+| size      | optional | Integer       | For a vector: uses only the first `size` values. |
+
+```yaml
+- { name: label, func: labels, field: index, labels: [negative, neutral, positive] }
+- { name: scores, func: labels, field: probabilities, labels: [negative, neutral, positive] }
+```
+
+Output type: STRING for an index, array of ELEMENT with `label` (string) and `value` (float32, float64 for float64 values) for a vector.
 
 ### cosine_similarity
 

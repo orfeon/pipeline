@@ -2,6 +2,7 @@ package com.mercari.solution.util.domain.ml.onnx;
 
 import ai.onnxruntime.*;
 import ai.onnxruntime.platform.Fp16Conversions;
+import com.mercari.solution.util.domain.math.Tensor;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.values.KV;
@@ -18,143 +19,121 @@ public class OnnxRuntimeUtil {
 
     private static final Logger LOG = LoggerFactory.getLogger(OnnxRuntimeUtil.class);
 
-    public static long[] convertShape(
-            final ValueInfo valueInfo,
-            final List<Object> values) {
-
-        return switch (valueInfo) {
-            case TensorInfo tensorInfo -> {
-                final long[] shape = new long[tensorInfo.getShape().length];
-                for(int idx = 0; idx < shape.length; idx++) {
-                    if(tensorInfo.getShape()[idx] < 0) {
-                        if(idx == 0) {
-                            shape[idx] = values.size();
-                        } else {
-                            if(values.isEmpty()) {
-                                throw new IllegalArgumentException("values must not be empty to resolve the dynamic dimension " + idx);
-                            }
-                            // the dynamic dimension idx is the length of the list nested idx levels deep (dim0 is the batch)
-                            Object nested = values.getFirst();
-                            for(int depth = 1; depth < idx; depth++) {
-                                nested = nested instanceof List<?> list && !list.isEmpty() ? list.getFirst() : null;
-                            }
-                            shape[idx] = switch (nested) {
-                                case Object[] o -> o.length;
-                                case Collection<?> c -> c.size();
-                                case null, default -> throw new IllegalArgumentException("value for tensor dimension " + idx
-                                        + " must be an array, but: " + nested);
-                            };
-                        }
-                    } else {
-                        shape[idx] = tensorInfo.getShape()[idx];
-                    }
-                }
-                yield shape;
-            }
-            case MapInfo mapInfo -> {
-                throw new IllegalArgumentException("not supported mapInfo: " + mapInfo);
-            }
-            case SequenceInfo sequenceInfo -> {
-                throw new IllegalArgumentException("not supported sequenceInfo: " + sequenceInfo);
-            }
-            default -> {
-                throw new IllegalArgumentException("not supported valueInfo: " + valueInfo);
-            }
+    /** The Tensor element type that holds values of an onnx type. */
+    public static Tensor.Type tensorType(final OnnxJavaType type) {
+        return switch (type) {
+            case FLOAT, FLOAT16, BFLOAT16 -> Tensor.Type.FLOAT;
+            case DOUBLE -> Tensor.Type.DOUBLE;
+            case INT64 -> Tensor.Type.INT64;
+            case INT32 -> Tensor.Type.INT32;
+            case INT16 -> Tensor.Type.INT16;
+            case INT8, UINT8 -> Tensor.Type.INT8;
+            case BOOL -> Tensor.Type.BOOL;
+            case STRING -> Tensor.Type.STRING;
+            default -> throw new IllegalArgumentException("Not supported onnx tensor type: " + type);
         };
-
     }
 
-    public static OnnxTensor convertTensor(
-            final OrtEnvironment environment, final TensorInfo tensorInfo, final List<Object> values)
-            throws OrtException {
-
-        final long[] shape = convertShape(tensorInfo, values);
-        checkShape(values, shape, 0);
-
-        final List<Object> flattenValues = flatten(values, shape.length);
-        return switch (tensorInfo.type) {
-            case STRING -> {
-                final String[] stringValues = new String[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    stringValues[i] = (String) flattenValues.get(i);
-                }
-                yield OnnxTensor.createTensor(environment, stringValues, shape);
-            }
-            case BOOL -> {
-                final byte[] boolValues = new byte[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    boolValues[i] = (Boolean) flattenValues.get(i) ? (byte) 1 : (byte) 0;
-                }
-                yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(boolValues), shape, OnnxJavaType.BOOL);
-            }
-            case INT8, UINT8 -> {
-                final byte[] byteValues = new byte[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    byteValues[i] = ((Number) flattenValues.get(i)).byteValue();
-                }
-                yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(byteValues), shape, tensorInfo.type);
-            }
-            case INT16 -> {
-                final short[] shortValues = new short[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    shortValues[i] = ((Number) flattenValues.get(i)).shortValue();
-                }
-                yield OnnxTensor.createTensor(environment, ShortBuffer.wrap(shortValues), shape);
-            }
-            case INT32 -> {
-                final int[] intValues = new int[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    intValues[i] = ((Number) flattenValues.get(i)).intValue();
-                }
-                yield OnnxTensor.createTensor(environment, IntBuffer.wrap(intValues), shape);
-            }
-            case INT64 -> {
-                final long[] longValues = new long[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    longValues[i] = ((Number) flattenValues.get(i)).longValue();
-                }
-                yield OnnxTensor.createTensor(environment, LongBuffer.wrap(longValues), shape);
-            }
-            case FLOAT, FLOAT16, BFLOAT16 -> {
-                final float[] floatValues = new float[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    floatValues[i] = ((Number) flattenValues.get(i)).floatValue();
-                }
-                final FloatBuffer buffer = FloatBuffer.wrap(floatValues);
-                yield switch (tensorInfo.type) {
-                    case FLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToFp16Buffer(buffer), shape, tensorInfo.type);
-                    case BFLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToBf16Buffer(buffer), shape, tensorInfo.type);
+    /** {@code tensor} holds values of {@link #tensorType(OnnxJavaType)} of {@code type}. */
+    public static OnnxTensor toOnnxTensor(final OrtEnvironment environment, final Tensor tensor, final OnnxJavaType type) throws OrtException {
+        final long[] shape = tensor.shape();
+        final int offset = tensor.offset();
+        final int size = tensor.size();
+        return switch (tensor.data()) {
+            case float[] a -> {
+                final FloatBuffer buffer = FloatBuffer.wrap(a, offset, size);
+                yield switch (type) {
+                    case FLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToFp16Buffer(buffer), shape, type);
+                    case BFLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToBf16Buffer(buffer), shape, type);
                     default -> OnnxTensor.createTensor(environment, buffer, shape);
                 };
             }
-            case DOUBLE -> {
-                final double[] doubleValues = new double[flattenValues.size()];
-                for (int i = 0; i < flattenValues.size(); i++) {
-                    doubleValues[i] = ((Number) flattenValues.get(i)).doubleValue();
+            case double[] a -> OnnxTensor.createTensor(environment, DoubleBuffer.wrap(a, offset, size), shape);
+            case long[] a -> OnnxTensor.createTensor(environment, LongBuffer.wrap(a, offset, size), shape);
+            case int[] a -> OnnxTensor.createTensor(environment, IntBuffer.wrap(a, offset, size), shape);
+            case short[] a -> OnnxTensor.createTensor(environment, ShortBuffer.wrap(a, offset, size), shape);
+            case byte[] a -> OnnxTensor.createTensor(environment, ByteBuffer.wrap(a, offset, size), shape, type);
+            case boolean[] a -> {
+                final byte[] bytes = new byte[size];
+                for(int i=0; i<size; i++) {
+                    bytes[i] = a[offset + i] ? (byte) 1 : (byte) 0;
                 }
-                yield OnnxTensor.createTensor(environment, DoubleBuffer.wrap(doubleValues), shape);
+                yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(bytes), shape, OnnxJavaType.BOOL);
             }
-            default -> throw new IllegalArgumentException("Not supported tensor type: " + tensorInfo.type);
+            case String[] a -> OnnxTensor.createTensor(environment, Arrays.copyOfRange(a, offset, offset + size), shape);
+            default -> throw new IllegalArgumentException("Not supported tensor: " + tensor);
         };
     }
 
-    // every level must match the shape: comparing only the total count would let arrays of compensating lengths through
-    // (3, 2 and 4 values for a [3, 3] tensor) and silently misalign the rows
-    private static void checkShape(final List<?> values, final long[] shape, final int dim) {
-        final long expected = shape.length == 0 ? 1 : shape[dim];
-        if(values.size() != expected) {
-            throw new IllegalArgumentException("values for tensor shape " + Arrays.toString(shape) + " must have " + expected
-                    + " elements at dimension " + dim + ", but got " + values.size() + " (records in a batch must have arrays of the same length)");
-        }
-        if(dim + 1 >= shape.length) {
-            return;
-        }
-        for(final Object value : values) {
-            if(!(value instanceof List<?> list)) {
-                throw new IllegalArgumentException("value for tensor shape " + Arrays.toString(shape) + " at dimension " + (dim + 1)
-                        + " must be an array, but: " + value);
+    /** Copies a model output to a Tensor, which outlives the {@code OrtSession.Result}: uint8 widens to int32, float16 to float. */
+    public static Tensor fromOnnxTensor(final OnnxTensor tensor) throws OrtException {
+        final long[] shape = tensor.getInfo().getShape();
+        final int size = Math.toIntExact(tensor.getInfo().getNumElements());
+        return switch (tensor.getInfo().type) {
+            case FLOAT, FLOAT16, BFLOAT16 -> {
+                final float[] values = new float[size];
+                tensor.getFloatBuffer().get(values);
+                yield Tensor.of(values, shape);
             }
-            checkShape(list, shape, dim + 1);
+            case DOUBLE -> {
+                final double[] values = new double[size];
+                tensor.getDoubleBuffer().get(values);
+                yield Tensor.of(values, shape);
+            }
+            case INT64 -> {
+                final long[] values = new long[size];
+                tensor.getLongBuffer().get(values);
+                yield Tensor.of(values, shape);
+            }
+            case INT32 -> {
+                final int[] values = new int[size];
+                tensor.getIntBuffer().get(values);
+                yield Tensor.of(values, shape);
+            }
+            case INT16 -> {
+                final short[] values = new short[size];
+                tensor.getShortBuffer().get(values);
+                yield Tensor.of(values, shape);
+            }
+            case INT8 -> {
+                final byte[] values = new byte[size];
+                tensor.getByteBuffer().get(values);
+                yield Tensor.of(values, shape);
+            }
+            case UINT8 -> {
+                final ByteBuffer buffer = tensor.getByteBuffer();
+                final int[] values = new int[size];
+                for(int i=0; i<size; i++) {
+                    values[i] = buffer.get(i) & 0xFF;
+                }
+                yield Tensor.of(values, shape);
+            }
+            case BOOL -> {
+                final ByteBuffer buffer = tensor.getByteBuffer();
+                final boolean[] values = new boolean[size];
+                for(int i=0; i<size; i++) {
+                    values[i] = buffer.get(i) != 0;
+                }
+                yield Tensor.of(values, shape);
+            }
+            case STRING -> {
+                final List<String> values = new ArrayList<>(size);
+                flattenStrings(tensor.getValue(), values);
+                yield Tensor.of(values.toArray(new String[0]), shape);
+            }
+            default -> throw new IllegalArgumentException("Not supported tensor type: " + tensor.getInfo().type);
+        };
+    }
+
+    private static void flattenStrings(final Object value, final List<String> values) {
+        if(value instanceof String[] strings) {
+            values.addAll(Arrays.asList(strings));
+        } else if(value instanceof Object[] array) {
+            for(final Object child : array) {
+                flattenStrings(child, values);
+            }
+        } else {
+            values.add((String) value);
         }
     }
 

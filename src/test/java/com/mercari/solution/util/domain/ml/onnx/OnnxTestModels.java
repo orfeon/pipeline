@@ -97,6 +97,58 @@ public class OnnxTestModels {
         return graph.model();
     }
 
+    /**
+     * The inputs of a text embedding model: {@code input_ids int64[batch, length]}, {@code attention_mask int64[batch, length]}
+     * and {@code image_features float[n, 4]}, which is not used. The output {@code sentence_embedding float[batch, 2]} is
+     * the sum of the attended ids and their number.
+     */
+    public static byte[] textEmbedding() {
+        final Graph graph = new Graph("text_embedding");
+        graph.input("input_ids", INT64, "batch", "length");
+        graph.input("attention_mask", INT64, "batch", "length");
+        graph.input("image_features", FLOAT, "n", 4L);
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.node("Cast", List.of("input_ids"), List.of("ids_float"), "to", (long) FLOAT);
+        graph.node("Cast", List.of("attention_mask"), List.of("mask_float"), "to", (long) FLOAT);
+        graph.node("Mul", List.of("ids_float", "mask_float"), List.of("masked"));
+        graph.node("ReduceSum", List.of("masked", "axes"), List.of("sum"), "keepdims", 1L);
+        graph.node("ReduceSum", List.of("mask_float", "axes"), List.of("count"), "keepdims", 1L);
+        graph.node("Concat", List.of("sum", "count"), List.of("sentence_embedding"), "axis", 1L);
+        graph.output("sentence_embedding", FLOAT, "batch", 2L);
+        return graph.model();
+    }
+
+    /** {@code x <elemType>[dims...]} with the output {@code y = x}. */
+    public static byte[] identity(final int elemType, final Object... dims) {
+        final Graph graph = new Graph("identity");
+        graph.input("x", elemType, dims);
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.output("y", elemType, dims);
+        return graph.model();
+    }
+
+    /**
+     * {@code x float[batch]} with {@code y = x}, {@code past.0 float[batch, length]} with {@code out.0 = past.0},
+     * {@code filled float[-, 2]} with {@code out.filled = filled} and {@code features float[n, 2]}, which is not used.
+     * {@code default_input} is an initializer listed as an input as well, as in models of an old IR version.
+     */
+    public static byte[] constants() {
+        final Graph graph = new Graph("constants");
+        graph.input("x", FLOAT, "batch");
+        graph.input("past.0", FLOAT, "batch", "length");
+        graph.input("filled", FLOAT, "batch", 2L);
+        graph.input("features", FLOAT, "n", 2L);
+        graph.input("default_input", FLOAT, 1L);
+        graph.initializer("default_input", FLOAT, new long[]{1}, new float[]{1});
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.node("Identity", List.of("past.0"), List.of("out.0"));
+        graph.node("Identity", List.of("filled"), List.of("out.filled"));
+        graph.output("y", FLOAT, "batch");
+        graph.output("out.0", FLOAT, "batch", "length");
+        graph.output("out.filled", FLOAT, "batch", 2L);
+        return graph.model();
+    }
+
     public static Path write(final Path path, final byte[] model) {
         try {
             Files.createDirectories(path.getParent());

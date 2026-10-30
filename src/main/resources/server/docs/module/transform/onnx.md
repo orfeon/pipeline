@@ -1,23 +1,23 @@
 ---
 type: Transform Module
 title: Onnx Transform Module
-description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model file from Google Cloud Storage or a local path, maps record fields to model inputs and model outputs to record fields, and appends the inference results to each record. Supports optional filter conditions, select-based pre/post-processing, micro-batching via bufferSize, and chained multi-step mappings. Works in both batch and streaming pipelines.
+description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
 tags: [transform, onnx, ml, inference, machinelearning, batch, streaming]
 timestamp: 2026-10-30T00:00:00Z
 ---
 
 # Onnx Transform Module
 
-Transform Module that performs inference on input records with a specified [ONNX](https://onnx.ai/) model using [ONNX Runtime](https://onnxruntime.ai/). The inference results are merged into each input record, so downstream modules see the original fields plus the model output fields.
+Transform Module that performs inference on input records with a specified [ONNX](https://onnx.ai/) model using [ONNX Runtime](https://onnxruntime.ai/). One module runs one model, and one input record gives one output record: the input fields plus the fields of `outputs`. What is specific to a model is written in the select lists `inputs` and `outputs`, not in the module.
 
 Supports:
 
-- **Model loading from GCS or local path** - A single `.onnx` file (`gs://bucket/model.onnx`), or a directory (`gs://bucket/models/xxx/` or a local directory) whose files are downloaded with their layout kept, so that external weight files (`*.onnx_data`) are found next to the model; `model.file` picks the model file inside it. The loaded session is shared by all DoFn instances (and all onnx modules using the same model and session options) in the same worker process (JVM), so one model copy serves multiple threads.
-- **Field mapping** - `mappings` connects record field names to ONNX model input names, and ONNX model output names to output field names. Multiple mapping steps run sequentially against the same model, and a later step can consume the outputs of an earlier one.
-- **Pre/post-processing** - Optional [Select](../common/select.md) function lists applied before (`preprocesses`) and after (`postprocesses`) inference.
+- **Model loading from GCS or local path** - A single `.onnx` file (`gs://bucket/model.onnx`), or a directory (`gs://bucket/models/xxx/` or a local directory) whose files are downloaded with their layout kept, so that external weight files (`*.onnx_data`) are found next to the model; `model.file` picks the model file inside it. The loaded session is shared by all DoFn instances (and all onnx modules using the same model and session options) in the same worker process (JVM), so one model copy serves multiple threads. Pipeline assembly only reads the graph of the `.onnx` file: no session is created and no weights are read.
+- **Select lists** - [`inputs`](#inputs) builds the model inputs with select functions, and [`outputs`](#outputs) builds the output fields from the model outputs.
+- **Padding and constant inputs** - `pad` pads the records of a batch to a common length; `empty` and `fill` give inputs that do not come from the record; `%d` / `%s` in a name match many model inputs.
 - **Filtering** - Optional [Filter](../common/filter.md) condition; records that do not match are dropped before inference.
-- **Micro-batching** - `bufferSize` buffers records and runs inference on the batch in one session call. dim0 of every model output is the batch: each record receives its own row of the outputs.
-- **Failure handling** - Errors are routed as failures according to the module common `failFast` / `outputFailure` / `failureSinks` settings. A failing pre/post-processing fails its record only; a failing inference fails every record of that batch.
+- **Micro-batching** - `bufferSize` buffers records and runs inference on the batch in one session call.
+- **Failure handling** - Errors are routed as failures according to the module common `failFast` / `outputFailure` / `failureSinks` settings. A failing select function fails its record only. A failing batch is retried record by record, so that only the records that fail by themselves are failures.
 
 The same processing works in batch and streaming. Large ONNX files require large worker memory at startup; multi-core workers with large memory are recommended because the model is shared in memory across threads on a worker.
 
@@ -36,45 +36,72 @@ When multiple `inputs` are specified they are unioned into a single collection b
 
 ## Onnx transform module parameters
 
-| parameter     | optional | type                                     | description                                                                                                                                                                          |
-|---------------|----------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| model         | required | [Model](#model-parameters)               | Settings for the ONNX model used for inference.                                                                                                                                      |
-| mappings      | selective required | Array<[Mapping](#mapping-parameters)\>   | Mapping steps between record fields and the model's input/output names. Steps run in order; each step's outputs are merged into the record before the next step runs.                |
-| mapping       | selective required | [Mapping](#mapping-parameters)   | A single mapping step: the same as `mappings` with one element. Specify either `mapping` or `mappings`.                |
-| filter        | optional | [Filter](../common/filter.md)            | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output).                                                               |
-| preprocesses  | optional | Array<[Select](../common/select.md)\>    | Select functions applied to each record before inference. The computed fields are added to the record and can be referenced by `mappings[].inputs`.                                  |
-| postprocesses | optional | Array<[Select](../common/select.md)\>    | Select functions applied to each record after inference. When specified, the output schema becomes the schema produced by these select functions (only the selected fields remain).  |
-| bufferSize    | optional | Integer                                  | Number of records to buffer before running inference as one batch. Must be 1 or more. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With `bufferSize` greater than 1, array inputs of a dynamic length (token ids, ...) must have the same length in every record of a batch, otherwise the batch fails (`tokenize_encode` gives token ids a common length with `padding` and `maxLength`). |
+| parameter  | optional | type                                  | description |
+|------------|----------|---------------------------------------|-------------|
+| model      | required | [Model](#model-parameters)            | The ONNX model to run. |
+| inputs     | required | Array<[InputField](#inputs)\>         | Select list that builds the model inputs. |
+| outputs    | required | Array<[Select](../common/select.md)\> | Select list that builds the output fields. |
+| filter     | optional | [Filter](../common/filter.md)         | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output). |
+| bufferSize | optional | Integer                               | Number of records to run inference on as one batch. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With overlapping (sliding) windows inference runs once per window. |
 
 ## Model parameters
 
-| parameter     | optional | type   | description                                                                                                                                                                                                                                     |
-|---------------|----------|--------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| path          | required | String | Path of the ONNX model. A GCS object path (`gs://bucket/model.onnx`), a GCS directory path ending with `/` (all files under the directory are downloaded to the worker, keeping the sub directories), a local file path, or a local directory path.                                                      |
-| file          | optional | String | For a directory `path`: the model file relative to the directory (e.g. `onnx/model_q4.onnx`). If omitted, the directory must contain exactly one `.onnx` file.                                                      |
+| parameter     | optional | type   | description |
+|---------------|----------|--------|-------------|
+| path          | required | String | Path of the ONNX model. A GCS object path (`gs://bucket/model.onnx`), a GCS directory path ending with `/` (all files under the directory are downloaded to the worker, keeping the sub directories), a local file path, or a local directory path. |
+| file          | optional | String | For a directory `path`: the model file relative to the directory (e.g. `onnx/model_q4.onnx`). If omitted, the directory must contain exactly one `.onnx` file. |
 | intraOpThreads | optional | Integer | Number of threads one inference uses. Default: `1`: the worker threads share the session and run inferences in parallel, which scales better than giving every inference all the cores. Tune parallelism with the worker thread count (e.g. Dataflow `numberOfWorkerHarnessThreads`). |
 | interOpThreads | optional | Integer | Number of threads that run independent graph operators in parallel (`executionMode: PARALLEL` only). Default: the ONNX Runtime default. |
-| optLevel      | optional | Enum   | ONNX Runtime graph [optimization](https://onnxruntime.ai/docs/performance/model-optimizations/graph-optimizations.html) level. One of `NO_OPT`, `BASIC_OPT`, `EXTENDED_OPT`, `ALL_OPT`. Default: `BASIC_OPT`.                                   |
-| executionMode | optional | Enum   | ONNX Runtime execution mode for running graph operators. One of `SEQUENTIAL`, `PARALLEL`. Default: `SEQUENTIAL`.                                                                                                                                |
+| optLevel      | optional | Enum   | ONNX Runtime graph optimization level. One of `NO_OPT`, `BASIC_OPT`, `EXTENDED_OPT`, `ALL_OPT`. Default: `BASIC_OPT`. |
+| executionMode | optional | Enum   | ONNX Runtime execution mode. One of `SEQUENTIAL`, `PARALLEL`. Default: `SEQUENTIAL`. |
 
-## Mapping parameters
+## inputs
 
-Each element of `mappings` defines one inference step against the model.
+`inputs` is a [select](../common/select.md) list evaluated per record from top to bottom; an item can refer to the fields of the record and to the items above it.
 
-| parameter | optional | type                | description                                                                                                                                                                     |
-|-----------|----------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| inputs    | required | Map<String,String\> | Maps record fields to model inputs. The map **key is the record field name** (input fields or fields computed by `preprocesses`), and the **value is the ONNX model input name**. |
-| outputs   | optional | Map<String,String\> | Maps model outputs to record fields. The map **key is the ONNX model output name**, and the **value is the output field name** added to the record. Only the listed model outputs are requested from the session. If omitted, every model output is added with its own name. |
+- **An item whose `name` is a model input name feeds that model input.** The other items are intermediate values, which are not output.
+- Every model input must be given. A model input that is not given is a configuration error.
 
-Every model input must be given a record field by `inputs`, in every mapping step.
+An item can have these keys besides the select function:
 
-## Output schema
+| key | description |
+|-----|-------------|
+| `pad: 0` | Pads the records of a batch to the longest of each dimension with the value, at the tail. Without `pad`, records of different lengths can not form a batch: they are retried one by one, which works but gives up batching. |
+| `pad: { value: 0, side: left }` | Pads at the head. |
+| `fill: 0` | A tensor of the value, instead of a select function. Its shape comes from the model input: a dynamic dim0 is the batch size, other dynamic dimensions are 0. `shape: [2, 3]` specifies the shape explicitly. |
+| `empty: [0, 512]` | An empty tensor of the shape, instead of a select function, for an input the model takes but this use does not fill. |
 
-The output schema is: input schema fields + fields produced by `preprocesses` + the mapped model output fields (named by `mappings[].outputs`). A field with the name of an earlier one replaces it, as its value does in the record. If `postprocesses` is specified, the output schema is instead the schema produced by the postprocess select functions.
+### Name variables
 
-dim0 of a model output is the batch, and the type of an output field is decided by the rest of the shape:
+A `name` with `%d` (digits) or `%s` (letters, digits and `_`) applies to every model input it matches. A pattern that matches no model input is a configuration error, which catches settings copied from another model.
 
-| model output shape | record field type | example |
+```yaml
+- { name: "past_conv.%d", fill: 0 }            # past_conv.0, past_conv.1, ...
+- { name: "past_key_values.%d.%s", fill: 0 }   # past_key_values.0.key, past_key_values.0.value, ...
+```
+
+### Rank of a value
+
+The rank of a value (from its field type) decides how it becomes the model input:
+
+| rank of the value | model input | use |
+|---|---|---|
+| one less than the model input | The values of the records are stacked on a new dim0: each record is a row of the batch. | `input_ids int64[B, L]` from `array<int64>`; `x float[B]` from a scalar |
+| the same as the model input | The value is the input as it is. `bufferSize` must be 1, and the whole model output is the value of the record. | a table `x float[R, C]` from a matrix |
+
+Other ranks are a configuration error. A `matrix` field is flat in the record and takes its shape from the schema; a shape with one dynamic dimension is restored from the number of values. Values are converted to the element type of the model input.
+
+## outputs
+
+`outputs` is a select list evaluated per record after inference. An item can refer to the fields of the record, the items of `inputs`, the model outputs and the items above it. If a name is in several of them, the model output comes first. A model output name with dots (`present.0.key`) is matched as a whole before it is read as a nested field.
+
+Only the model outputs mentioned in `outputs` are requested from the session, and at least one must be.
+
+The output record is the input record plus the fields of `outputs`; a field with the name of an input field replaces it. Use a later `select` transform to narrow the fields.
+
+dim0 of a model output is the batch (unless no value was stacked), and the type of a model output is decided by the rest of the shape:
+
+| model output shape | field type | example |
 |---|---|---|
 | `[B]` | scalar | a score per record |
 | `[B, n]` | array of n values | an embedding `[B, 768]`; `[B, 1]` is an array of one value |
@@ -83,9 +110,20 @@ dim0 of a model output is the batch, and the type of an output field is decided 
 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
-## Example: text embedding with pre/post-processing
+Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize).
 
-Reads records from BigQuery, computes an embedding for a text field with an ONNX model, keeps only the id and a renamed embedding field, and writes the results to storage.
+## Deprecated parameters
+
+| parameter | how it is read |
+|-----------|----------------|
+| preprocesses | The head of `inputs`. Its fields stay in the output record. |
+| mapping | `inputs: { field: modelInput }` is `{ name: modelInput, field: field }` in `inputs`; `outputs: { modelOutput: field }` is `{ name: field, field: modelOutput }` in `outputs`. Without its `outputs`, every model output is added with its own name. Can not be used with `inputs` / `outputs`. |
+| mappings | The same as `mapping`, and must have one element. |
+| postprocesses | A select list on the output record. Only its fields are output. |
+
+## Example: text embedding
+
+Tokenizes a text field, runs an embedding model on batches of 16 records and truncates the embedding to 256 dimensions.
 
 ```yaml
 sources:
@@ -97,61 +135,58 @@ sources:
 transforms:
   - name: embedding
     module: onnx
-    inputs:
-      - items
+    inputs: [items]
     parameters:
       model:
-        path: gs://my-bucket/models/text-embedding.onnx
-        optLevel: BASIC_OPT
-      preprocesses:
-        - name: text
-          func: concat
-          fields: [title, description]
-          delimiter: " "
-      mappings:
-        - inputs:
-            text: input_text
-          outputs:
-            embedding_output: embedding
-      postprocesses:
-        - name: id
-        - name: embedding
+        path: gs://my-bucket/models/embeddinggemma/
+        file: onnx/model_q4.onnx
+      inputs:
+        - { name: doc, text: "title: ${title} | text: ${description}" }
+        - name: tok
+          func: tokenize_encode
+          tokenizer: huggingface
+          path: gs://my-bucket/models/embeddinggemma/tokenizer.json
+          field: doc
+          maxLength: 2048
+        - { name: input_ids, field: tok.ids, pad: 0 }
+        - { name: attention_mask, field: tok.attentionMask, pad: 0 }
+        - { name: image_features, empty: [0, 512] }
+        - { name: video_features, empty: [0, 512] }
+        - { name: audio_features, empty: [0, 512] }
+      outputs:
+        - { name: embedding, func: vector_normalize, field: sentence_embedding, size: 256 }
+      bufferSize: 16
 
 sinks:
   - name: output
     module: storage
-    inputs:
-      - embedding
+    inputs: [embedding]
     parameters:
       output: "gs://my-bucket/embeddings/"
       format: avro
 ```
 
-## Example: filtered inference with chained mappings
+## Example: classification
 
-Runs two inference steps against the same model: the second mapping gives the output field of the first to the model input. Only records matching the filter are processed.
+Runs a classifier on the numeric features of a record, and adds the probabilities and the most probable label.
 
 ```yaml
 transforms:
-  - name: predict
+  - name: classify
     module: onnx
-    inputs:
-      - events
+    inputs: [features]
     parameters:
       model:
-        path: gs://my-bucket/models/model_dir/
-        executionMode: PARALLEL
+        path: gs://my-bucket/models/classifier.onnx
       filter:
         key: status
         op: "="
         value: "active"
-      mappings:
-        - inputs:
-            feature: input
-          outputs:
-            output: first_pass
-        - inputs:
-            first_pass: input
-          outputs:
-            output: second_pass
+      inputs:
+        - { name: input, field: values }
+      outputs:
+        - { name: probabilities, func: softmax, field: logits }
+        - { name: index, func: argmax, field: probabilities }
+        - { name: label, func: labels, field: index, labels: [negative, neutral, positive] }
+      bufferSize: 32
 ```
