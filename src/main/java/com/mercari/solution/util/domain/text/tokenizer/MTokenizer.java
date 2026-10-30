@@ -14,7 +14,7 @@ public interface MTokenizer {
     List<Schema.Field> getOutputFields();
 
     Map<String, Object> encode(String text);
-    String decode(long[] ids);
+    String decode(long[] ids, boolean skipSpecialTokens);
     List<Map<String, Object>> batchEncode(List<String> text);
     List<String> batchDecode(long[][] ids);
     List<String> tokenize(String text);

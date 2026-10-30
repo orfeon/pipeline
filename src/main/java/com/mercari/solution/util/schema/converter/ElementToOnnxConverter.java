@@ -35,11 +35,16 @@ public class ElementToOnnxConverter {
         final Map<String, OnnxTensor> tensors = new HashMap<>();
         for(final Map.Entry<String, NodeInfo> entry : inputsInfo.entrySet()) {
             final String field = entry.getKey();
-            System.out.println("field: " + field + " , value: " + elements);
             switch (entry.getValue().getInfo()) {
                 case TensorInfo tensorInfo -> {
                     final List<Object> tensorValues = elements.stream()
-                            .map(element -> getValue(tensorInfo, element.get(field)))
+                            .map(element -> {
+                                final Object value = element.get(field);
+                                if(value == null) {
+                                    throw new IllegalArgumentException("onnx model input: " + field + " is not given or null (map a record field to it with mappings[].inputs)");
+                                }
+                                return getValue(tensorInfo, value);
+                            })
                             .collect(Collectors.toList());
                     final OnnxTensor tensor = OnnxRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
                     tensors.put(entry.getKey(), tensor);
@@ -139,7 +144,16 @@ public class ElementToOnnxConverter {
     }
 
     private static Object getValue(final TensorInfo tensorInfo, final Object value) {
+        if(value instanceof List<?> list) {
+            return list.stream().map(v -> getValue(tensorInfo, v)).collect(Collectors.toList());
+        }
         return switch (tensorInfo.type) {
+            case BOOL -> switch (value) {
+                case Boolean b -> b;
+                case Number n -> n.doubleValue() != 0;
+                case String s -> Boolean.parseBoolean(s);
+                default -> throw new IllegalArgumentException("bool value is illegal: " + value);
+            };
             case STRING -> switch (value) {
                 case String s -> s;
                 case ByteBuffer bb -> new String(bb.array(), StandardCharsets.UTF_8);

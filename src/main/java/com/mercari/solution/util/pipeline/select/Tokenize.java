@@ -19,6 +19,7 @@ public class Tokenize implements SelectFunction {
     private final MTokenizer tokenizer;
     private final String field;
     private final String path;
+    private final boolean skipSpecialTokens;
 
     private final List<Schema.Field> inputFields;
     private final Schema.FieldType outputFieldType;
@@ -37,6 +38,7 @@ public class Tokenize implements SelectFunction {
             String field,
             String path,
             MTokenizerConfig config,
+            boolean skipSpecialTokens,
             boolean ignore) {
 
         this.name = name;
@@ -48,10 +50,20 @@ public class Tokenize implements SelectFunction {
         };
         this.field = field;
         this.path = path;
+        this.skipSpecialTokens = skipSpecialTokens;
 
         this.inputFields = new ArrayList<>();
-        this.inputFields.add(Schema.Field.of(field, Schema.FieldType.STRING));
-        this.outputFieldType = Schema.FieldType.element(this.tokenizer.getOutputFields());
+        switch (mode) {
+            case encode -> {
+                this.inputFields.add(Schema.Field.of(field, Schema.FieldType.STRING));
+                this.outputFieldType = Schema.FieldType.element(this.tokenizer.getOutputFields());
+            }
+            case decode -> {
+                this.inputFields.add(Schema.Field.of(field, Schema.FieldType.array(Schema.FieldType.INT64)));
+                this.outputFieldType = Schema.FieldType.STRING;
+            }
+            default -> throw new IllegalArgumentException("Not supported tokenize mode: " + mode);
+        }
         this.ignore = ignore;
     }
 
@@ -66,25 +78,28 @@ public class Tokenize implements SelectFunction {
 
         final MTokenizer.TokenizerName tokenizer;
         if(!jsonObject.has("tokenizer")) {
-            throw new IllegalArgumentException("");
+            throw new IllegalArgumentException("SelectField: " + name + " requires tokenizer parameter");
         }
         tokenizer = MTokenizer.TokenizerName.valueOf(jsonObject.get("tokenizer").getAsString().strip());
 
         final String field;
         if(!jsonObject.has("field")) {
-            throw new IllegalArgumentException("");
+            throw new IllegalArgumentException("SelectField: " + name + " requires field parameter");
         }
         field = jsonObject.get("field").getAsString();
 
         final String path;
         if(!jsonObject.has("path")) {
-            throw new IllegalArgumentException("");
+            throw new IllegalArgumentException("SelectField: " + name + " requires path parameter");
         }
         path = jsonObject.get("path").getAsString();
 
         final MTokenizerConfig config = new Gson().fromJson(jsonObject, MTokenizerConfig.class);
 
-        return new Tokenize(name, mode, tokenizer, field, path, config, ignore);
+        final boolean skipSpecialTokens = jsonObject.has("skipSpecialTokens")
+                && jsonObject.get("skipSpecialTokens").getAsBoolean();
+
+        return new Tokenize(name, mode, tokenizer, field, path, config, skipSpecialTokens, ignore);
     }
 
     @Override
@@ -121,9 +136,18 @@ public class Tokenize implements SelectFunction {
                         .map(tokenizer::encode)
                         .orElse(null);
             case decode -> {
-                //final List<Long> str = input.get(field).toString();
-                //tokenizer.decode(str);
-                yield null;
+                final Object value = ElementSchemaUtil.getValue(input, field);
+                if(value == null) {
+                    yield null;
+                }
+                if(!(value instanceof List<?> list)) {
+                    throw new IllegalArgumentException("SelectField: " + name + " tokenize_decode field: " + field + " must be an array of token ids, but: " + value);
+                }
+                final long[] ids = new long[list.size()];
+                for(int i=0; i<ids.length; i++) {
+                    ids[i] = ((Number) list.get(i)).longValue();
+                }
+                yield tokenizer.decode(ids, skipSpecialTokens);
             }
             default -> throw new IllegalArgumentException();
         };
