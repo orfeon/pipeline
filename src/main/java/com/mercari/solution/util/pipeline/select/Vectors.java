@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 /**
  * Select functions on numeric vectors, typically a model output. A vector is an {@code array} field, a {@code matrix}
@@ -117,7 +118,7 @@ public class Vectors implements SelectFunction {
                 if(!scalar) {
                     requireVector(name, op, inputFieldType, vector);
                 }
-                outputFieldType = scalar ? realType : Schema.FieldType.array(realType);
+                outputFieldType = scalar ? realType.withNullable(true) : Schema.FieldType.array(realType);
             }
             case argmax -> {
                 requireVector(name, op, inputFieldType, vector);
@@ -157,6 +158,11 @@ public class Vectors implements SelectFunction {
                             : new int[]{axisElement.getAsInt()};
                 }
                 outputFieldType = squeezeType(name, inputFieldType, axis);
+                // the dimensions the type fixes to 1: a dynamic one stays whatever its length, so that the value follows the type
+                if(axis == null) {
+                    final List<Integer> shape = squeezeShape(name, inputFieldType);
+                    axis = IntStream.range(0, shape.size()).filter(d -> shape.get(d) == 1).toArray();
+                }
             }
             default -> throw new IllegalArgumentException("Not supported vector func: " + op);
         }
@@ -192,13 +198,24 @@ public class Vectors implements SelectFunction {
         };
     }
 
-    // a dynamic dimension is only known to be 1 when axis says so
-    private static Schema.FieldType squeezeType(final String name, final Schema.FieldType type, final int[] axis) {
-        final List<Integer> shape = switch (type.getType()) {
+    private static List<Integer> squeezeShape(final String name, final Schema.FieldType type) {
+        return switch (type.getType()) {
             case array -> List.of(-1);
             case matrix -> type.getShape();
             default -> throw new IllegalArgumentException("SelectField: " + name + " func: squeeze requires an array or a matrix, but got: " + type);
         };
+    }
+
+    // a dynamic dimension is only known to be 1 when axis says so
+    private static Schema.FieldType squeezeType(final String name, final Schema.FieldType type, final int[] axis) {
+        final List<Integer> shape = squeezeShape(name, type);
+        if(axis != null) {
+            for(final int a : axis) {
+                if(a < -shape.size() || a >= shape.size()) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: squeeze axis: " + a + " is out of shape " + shape);
+                }
+            }
+        }
         final Schema.FieldType valueType = valueType(type);
         final List<Integer> squeezed = new ArrayList<>();
         for(int d=0; d<shape.size(); d++) {
@@ -217,7 +234,7 @@ public class Vectors implements SelectFunction {
             }
         }
         return switch (squeezed.size()) {
-            case 0 -> valueType;
+            case 0 -> valueType.withNullable(true);
             case 1 -> Schema.FieldType.array(valueType);
             default -> Schema.FieldType.matrix(valueType, squeezed);
         };
@@ -418,7 +435,7 @@ public class Vectors implements SelectFunction {
                 final long[] shape = tensor.shape();
                 final List<Long> squeezed = new ArrayList<>();
                 for(int d=0; d<shape.length; d++) {
-                    final boolean removed = axis == null ? shape[d] == 1 : contains(axis, d, shape.length);
+                    final boolean removed = contains(axis, d, shape.length);
                     if(removed && shape[d] != 1) {
                         throw new IllegalArgumentException("SelectField: " + name + " func: squeeze axis: " + d + " has size " + shape[d] + " in: " + tensor);
                     }
@@ -426,7 +443,9 @@ public class Vectors implements SelectFunction {
                         squeezed.add(shape[d]);
                     }
                 }
-                yield tensor.reshaped(squeezed.stream().mapToLong(Long::longValue).toArray());
+                final Tensor reshaped = tensor.reshaped(squeezed.stream().mapToLong(Long::longValue).toArray());
+                // no dimension left: the value itself, as a model output of rank 1 gives, which the next function can tell from a vector
+                yield reshaped.rank() == 0 ? reshaped.get(0) : reshaped;
             }
             // a list is flat: only the type changes, or the list of one value is the value
             case List<?> list -> switch (outputFieldType.getType()) {

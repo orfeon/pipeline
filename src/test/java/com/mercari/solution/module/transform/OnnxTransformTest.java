@@ -832,11 +832,13 @@ public class OnnxTransformTest {
                       outputs:
                         - { name: past_size, field: "out.0" }
                         - { name: filled_output, field: "out.filled" }
+                        - { name: reshaped, func: reshape, field: "out.filled", shape: [1, 2] }
                 """.formatted(OnnxTestModels.configPath(model));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
             for(final MElement row : rows) {
                 Assertions.assertEquals(List.of(7f, 7f), floats(row.getPrimitiveValue("filled_output")));
+                Assertions.assertEquals(List.of(7f, 7f), floats(row.getPrimitiveValue("reshaped")));
             }
             return null;
         });
@@ -898,6 +900,205 @@ public class OnnxTransformTest {
             return null;
         });
         pipeline.run();
+    }
+
+    private static String singleRecordConfig(final Path model, final String record, final String fields, final String inputs, final String outputs) {
+        return """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - %s
+                    schema:
+                      fields:
+                %s
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                %s
+                      outputs:
+                %s
+                """.formatted(record, fields, OnnxTestModels.configPath(model), inputs, outputs);
+    }
+
+    private static final String LINEAR_RECORD = "{ id: 0, x: [1.0, 0.0, 0.0] }";
+    private static final String LINEAR_FIELDS = """
+                        - { name: id, type: int64 }
+                        - { name: x, type: float32, mode: repeated }
+            """;
+    private static final String LINEAR_INPUTS = """
+                        - { name: x }
+            """;
+
+    // [batch, 1] squeezed to a scalar is a record value: sigmoid takes it as a scalar. s = 1
+    @Test
+    public void testSqueezeToScalarThenSigmoid() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("squeeze_sigmoid/model.onnx"), OnnxTestModels.linear());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(singleRecordConfig(model, LINEAR_RECORD, LINEAR_FIELDS, LINEAR_INPUTS, """
+                        - { name: logit, func: squeeze, field: s, axis: 0 }
+                        - { name: prob, func: sigmoid, field: logit }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals("float32", output.getSchema().getField("prob").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(1f, ((Number) row.getPrimitiveValue("logit")).floatValue());
+                Assertions.assertEquals(0.7310586f, ((Number) row.getPrimitiveValue("prob")).floatValue(), 1e-6);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // an item named as the model output replaces it, for the type the items after it see too
+    @Test
+    public void testItemNamedAsModelOutput() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("same_name_item/model.onnx"), OnnxTestModels.linear());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(singleRecordConfig(model, LINEAR_RECORD, LINEAR_FIELDS, LINEAR_INPUTS, """
+                        - { name: s, func: squeeze, field: s, axis: 0 }
+                        - { name: prob, func: sigmoid, field: s }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals("float32", output.getSchema().getField("s").getFieldType().getType().name());
+        Assertions.assertEquals("float32", output.getSchema().getField("prob").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(0.7310586f, ((Number) row.getPrimitiveValue("prob")).floatValue(), 1e-6);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // the graph does not declare the shape of the output: a session infers it, as it did when assembly used one
+    @Test
+    public void testOutputWithoutDeclaredShape() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("undeclared/model.onnx"), OnnxTestModels.undeclaredOutputShape());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(singleRecordConfig(model, "{ x: [1.0, 2.0] }", """
+                        - { name: x, type: float32, mode: repeated }
+                """, LINEAR_INPUTS, """
+                        - { name: y }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals("array", output.getSchema().getField("y").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(1f, 2f), floats(row.getPrimitiveValue("y")));
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // the sequence output is named as a key of a select item, which is no reason to request it
+    @Test
+    public void testOutputThatIsNotATensorIsNotRequested() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("sequence/model.onnx"), OnnxTestModels.sequenceOutput());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(singleRecordConfig(model, "{ x: 1.5 }", """
+                        - { name: x, type: float32 }
+                """, LINEAR_INPUTS, """
+                        - { name: o, field: y }
+                """)));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("o")).floatValue());
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // a mapping reads every value before it writes any: a select list can not, as it is evaluated in order
+    @Test
+    public void testMappingThatReadsWhatItWrites() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("mapping_overlap/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
+        final Exception inputs = Assertions.assertThrows(Exception.class,
+                () -> MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
+                        - inputs: { id: x, x: id }
+                """))));
+        Assertions.assertTrue(rootMessages(inputs).contains("parameters.mapping.inputs"), rootMessages(inputs));
+        final Exception outputs = Assertions.assertThrows(Exception.class,
+                () -> MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
+                        - inputs: { x: x }
+                          outputs: { y: z, z: y }
+                """))));
+        Assertions.assertTrue(rootMessages(outputs).contains("parameters.mapping.outputs"), rootMessages(outputs));
+    }
+
+    // a model output is not written to a field of preprocesses of the same name, unless the mapping says so
+    @Test
+    public void testPreprocessFieldNamedAsModelOutput() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("preprocess_output_name/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { x: 1.5 }
+                    schema:
+                      fields:
+                        - { name: x, type: float32 }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      preprocesses:
+                        - { name: y, value: fixed, type: string }
+                      mapping:
+                        inputs: { x: x }
+                        outputs: { y: z }
+                """.formatted(OnnxTestModels.configPath(model));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals("fixed", row.getPrimitiveValue("y").toString());
+                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("z")).floatValue());
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testConstantShapeRankIsChecked() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("constant_rank/model.onnx"), OnnxTestModels.constants());
+        final Exception e = assemblyFailure(pipeline, model, """
+                        - { name: x, field: text }
+                        - { name: "past.%d", fill: 0 }
+                        - { name: filled, fill: 7, shape: [2] }
+                        - { name: features, empty: [0, 2] }
+                """, """
+                        - { name: o, field: y }
+                """);
+        Assertions.assertTrue(rootMessages(e).contains("filled") && rootMessages(e).contains("has rank"), rootMessages(e));
+    }
+
+    @Test
+    public void testPadOfAValueThatIsNotStacked() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("pad_as_is/model.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT));
+        final Exception e = assemblyFailure(pipeline, model, """
+                        - { name: x, field: text, pad: 0 }
+                """, """
+                        - { name: o, field: y }
+                """);
+        Assertions.assertTrue(rootMessages(e).contains("has pad"), rootMessages(e));
     }
 
     @Test

@@ -98,8 +98,8 @@ public class OnnxTestModels {
     }
 
     /**
-     * The inputs of a text embedding model: {@code input_ids int64[batch, length]}, {@code attention_mask int64[batch, length]}
-     * and {@code image_features float[n, 4]}, which is not used. The output {@code sentence_embedding float[batch, 2]} is
+     * A text embedding model with an input it does not use: {@code input_ids int64[batch, length]}, {@code attention_mask int64[batch, length]}
+     * and {@code image_features float[n, 4]}. The output {@code sentence_embedding float[batch, 2]} is
      * the sum of the attended ids and their number.
      */
     public static byte[] textEmbedding() {
@@ -149,6 +149,26 @@ public class OnnxTestModels {
         return graph.model();
     }
 
+    /** {@code x float[batch, 2]} with the output {@code y = x}, declared without a shape: only a session infers it. */
+    public static byte[] undeclaredOutputShape() {
+        final Graph graph = new Graph("undeclared");
+        graph.input("x", FLOAT, "batch", 2L);
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.outputWithoutShape("y", FLOAT);
+        return graph.model();
+    }
+
+    /** {@code x float[batch]} with {@code y = x} and the sequence output {@code field}, named as a key of a select item. */
+    public static byte[] sequenceOutput() {
+        final Graph graph = new Graph("sequence");
+        graph.input("x", FLOAT, "batch");
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.node("SequenceConstruct", List.of("x"), List.of("field"));
+        graph.output("y", FLOAT, "batch");
+        graph.outputSequence("field", FLOAT);
+        return graph.model();
+    }
+
     public static Path write(final Path path, final byte[] model) {
         try {
             Files.createDirectories(path.getParent());
@@ -182,6 +202,25 @@ public class OnnxTestModels {
 
         void output(final String name, final int elemType, final Object... dims) {
             outputs.add(valueInfo(name, elemType, dims));
+        }
+
+        void outputWithoutShape(final String name, final int elemType) {
+            final byte[] tensorType = message(t -> t.writeInt32(1, elemType));
+            outputs.add(message(out -> {
+                out.writeString(1, name);
+                out.writeByteArray(2, message(t -> t.writeByteArray(1, tensorType)));
+            }));
+        }
+
+        // TypeProto { sequence_type = 4 { elem_type = 1 { tensor_type = 1 { elem_type = 1 }}}}
+        void outputSequence(final String name, final int elemType) {
+            final byte[] tensorType = message(t -> t.writeInt32(1, elemType));
+            final byte[] element = message(t -> t.writeByteArray(1, tensorType));
+            final byte[] sequence = message(s -> s.writeByteArray(1, element));
+            outputs.add(message(out -> {
+                out.writeString(1, name);
+                out.writeByteArray(2, message(t -> t.writeByteArray(4, sequence)));
+            }));
         }
 
         void initializer(final String name, final int dataType, final long[] dims, final Object data) {

@@ -1,6 +1,8 @@
 package com.mercari.solution.util.domain.ml.onnx;
 
+import ai.onnxruntime.NodeInfo;
 import ai.onnxruntime.OnnxJavaType;
+import ai.onnxruntime.TensorInfo;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.WireFormat;
 
@@ -8,17 +10,20 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.util.*;
+import java.util.stream.Stream;
 
 /**
  * The inputs and outputs of an ONNX model, read from the graph of the {@code .onnx} file without creating a session:
  * pipeline assembly needs neither the native runtime nor the weights ({@code *.onnx_data} is never read).
- * Names, types and shapes are those {@code OrtSession.getInputInfo} / {@code getOutputInfo} give.
+ * Names, types and shapes are those {@code OrtSession.getInputInfo} / {@code getOutputInfo} give, as long as the graph
+ * declares them: see {@link #isComplete()}.
  */
 public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo> outputs) implements Serializable {
 
     /**
-     * @param type  element type of a tensor, null for another value (sequence, map, optional, sparse tensor)
-     * @param shape dimensions, -1 for a dynamic one
+     * @param type  element type of a tensor, null for another value (sequence, map, optional, sparse tensor) or a tensor
+     *              of a type that is not supported (complex)
+     * @param shape dimensions, -1 for a dynamic one. Null if the graph does not declare them: {@link #rank()} needs a shape
      */
     public record ValueInfo(String name, OnnxJavaType type, long[] shape) implements Serializable {
 
@@ -34,6 +39,27 @@ public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo
         public String toString() {
             return name + ":" + (isTensor() ? type + Arrays.toString(shape) : "non-tensor");
         }
+    }
+
+    /** Whether every value declares its type and shape. A session infers what is left out, this reader does not. */
+    public boolean isComplete() {
+        return Stream.concat(inputs.values().stream(), outputs.values().stream()).allMatch(info -> info.shape() != null);
+    }
+
+    /** From what a session reports: for a graph that is not {@link #isComplete() complete}. */
+    public static OnnxGraphInfo of(final Map<String, NodeInfo> inputs, final Map<String, NodeInfo> outputs) {
+        return new OnnxGraphInfo(valueInfos(inputs), valueInfos(outputs));
+    }
+
+    private static Map<String, ValueInfo> valueInfos(final Map<String, NodeInfo> nodes) {
+        final Map<String, ValueInfo> infos = new LinkedHashMap<>();
+        for(final Map.Entry<String, NodeInfo> node : nodes.entrySet()) {
+            final String name = node.getKey();
+            infos.put(name, node.getValue().getInfo() instanceof TensorInfo tensor && tensor.type != OnnxJavaType.UNKNOWN
+                    ? new ValueInfo(name, tensor.type, tensor.getShape())
+                    : new ValueInfo(name, null, new long[0]));
+        }
+        return Collections.unmodifiableMap(infos);
     }
 
     // field numbers of onnx.proto
@@ -128,16 +154,20 @@ public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo
         final int limit = input.pushLimit(input.readRawVarint32());
         String name = "";
         OnnxJavaType type = null;
-        long[] shape = new long[0];
+        long[] shape = null;
+        boolean typed = false;
+        boolean tensor = false;
         int tag;
         while((tag = input.readTag()) != 0) {
             switch (WireFormat.getTagFieldNumber(tag)) {
                 case VALUE_INFO_NAME -> name = input.readString();
                 case VALUE_INFO_TYPE -> {
+                    typed = true;
                     final int typeLimit = input.pushLimit(input.readRawVarint32());
                     int typeTag;
                     while((typeTag = input.readTag()) != 0) {
                         if(WireFormat.getTagFieldNumber(typeTag) == TYPE_TENSOR) {
+                            tensor = true;
                             final int tensorLimit = input.pushLimit(input.readRawVarint32());
                             int tensorTag;
                             while((tensorTag = input.readTag()) != 0) {
@@ -158,7 +188,8 @@ public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo
             }
         }
         input.popLimit(limit);
-        return new ValueInfo(name, type, shape);
+        // a value that is not a tensor has no shape to declare
+        return new ValueInfo(name, type, typed && !tensor ? new long[0] : shape);
     }
 
     private static long[] readShape(final CodedInputStream input) throws IOException {
@@ -192,7 +223,7 @@ public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo
         return dim;
     }
 
-    // TensorProto.DataType, mapped as OnnxJavaType.mapFromOnnxTensorType does
+    // TensorProto.DataType, mapped as OnnxJavaType.mapFromOnnxTensorType does; null for what that gives UNKNOWN
     private static OnnxJavaType javaType(final int elemType) {
         return switch (elemType) {
             case 1 -> OnnxJavaType.FLOAT;
@@ -206,7 +237,7 @@ public record OnnxGraphInfo(Map<String, ValueInfo> inputs, Map<String, ValueInfo
             case 10 -> OnnxJavaType.FLOAT16;
             case 11 -> OnnxJavaType.DOUBLE;
             case 16 -> OnnxJavaType.BFLOAT16;
-            default -> OnnxJavaType.UNKNOWN;
+            default -> null;
         };
     }
 

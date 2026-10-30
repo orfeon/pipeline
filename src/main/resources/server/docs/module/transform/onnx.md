@@ -12,7 +12,7 @@ Transform Module that performs inference on input records with a specified [ONNX
 
 Supports:
 
-- **Model loading from GCS or local path** - A single `.onnx` file (`gs://bucket/model.onnx`), or a directory (`gs://bucket/models/xxx/` or a local directory) whose files are downloaded with their layout kept, so that external weight files (`*.onnx_data`) are found next to the model; `model.file` picks the model file inside it. The loaded session is shared by all DoFn instances (and all onnx modules using the same model and session options) in the same worker process (JVM), so one model copy serves multiple threads. Pipeline assembly only reads the graph of the `.onnx` file: no session is created and no weights are read.
+- **Model loading from GCS or local path** - A single `.onnx` file (`gs://bucket/model.onnx`), or a directory (`gs://bucket/models/xxx/` or a local directory) whose files are downloaded with their layout kept, so that external weight files (`*.onnx_data`) are found next to the model; `model.file` picks the model file inside it. The loaded session is shared by all DoFn instances (and all onnx modules using the same model and session options) in the same worker process (JVM), so one model copy serves multiple threads. Pipeline assembly only reads the graph of the `.onnx` file: no session is created and no weights are read, unless the graph leaves out the type or the shape of an input or an output, which only a session can infer.
 - **Select lists** - [`inputs`](#inputs) builds the model inputs with select functions, and [`outputs`](#outputs) builds the output fields from the model outputs.
 - **Padding and constant inputs** - `pad` pads the records of a batch to a common length; `empty` and `fill` give inputs that do not come from the record; `%d` / `%s` in a name match many model inputs.
 - **Filtering** - Optional [Filter](../common/filter.md) condition; records that do not match are dropped before inference.
@@ -117,7 +117,7 @@ Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `
 | parameter | how it is read |
 |-----------|----------------|
 | preprocesses | The head of `inputs`. Its fields stay in the output record. |
-| mapping | `inputs: { field: modelInput }` is `{ name: modelInput, field: field }` in `inputs`; `outputs: { modelOutput: field }` is `{ name: field, field: modelOutput }` in `outputs`. Without its `outputs`, every model output is added with its own name. Can not be used with `inputs` / `outputs`. |
+| mapping | `inputs: { field: modelInput }` is `{ name: modelInput, field: field }` in `inputs`; `outputs: { modelOutput: field }` is `{ name: field, field: modelOutput }` in `outputs`. Without its `outputs`, every model output is added with its own name. A name that one entry reads and another writes is a configuration error. Can not be used with `inputs` / `outputs`. |
 | mappings | The same as `mapping`, and must have one element. |
 | postprocesses | A select list on the output record. Only its fields are output. |
 
@@ -150,9 +150,6 @@ transforms:
           maxLength: 2048
         - { name: input_ids, field: tok.ids, pad: 0 }
         - { name: attention_mask, field: tok.attentionMask, pad: 0 }
-        - { name: image_features, empty: [0, 512] }
-        - { name: video_features, empty: [0, 512] }
-        - { name: audio_features, empty: [0, 512] }
       outputs:
         - { name: embedding, func: vector_normalize, field: sentence_embedding, size: 256 }
       bufferSize: 16

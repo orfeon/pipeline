@@ -3,6 +3,7 @@ package com.mercari.solution.util.domain.math;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 
 public class TensorTest {
@@ -65,6 +66,16 @@ public class TensorTest {
         final Tensor tensor = ints(new long[]{2, 2}, 1, 2, 3, 4);
         final Tensor stacked = Tensor.stack(List.of(tensor.row(1), tensor.row(0)), null, false);
         Assertions.assertEquals(List.of(3, 4, 1, 2), stacked.toList());
+    }
+
+    // an element that is null says so, for every type
+    @Test
+    public void testNullElement() {
+        for(final Tensor.Type type : Tensor.Type.values()) {
+            final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> Tensor.of(type, Arrays.asList("1", null), new long[]{2}), type.name());
+            Assertions.assertTrue(e.getMessage().contains("null"), e.getMessage());
+        }
     }
 
     @Test

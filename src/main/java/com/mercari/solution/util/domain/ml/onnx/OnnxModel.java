@@ -87,8 +87,16 @@ public class OnnxModel implements Serializable {
         return new OnnxModel(config);
     }
 
-    /** The inputs and outputs of the model, without creating a session or reading the weights. */
+    /**
+     * The inputs and outputs of the model, without creating a session or reading the weights, unless the graph leaves out
+     * the type or the shape of a value: only a session infers those.
+     */
     public OnnxGraphInfo readGraphInfo() {
+        final OnnxGraphInfo graph = readDeclaredGraphInfo();
+        return graph.isComplete() ? graph : OnnxGraphInfo.of(getInputInfo(), getOutputInfo());
+    }
+
+    private OnnxGraphInfo readDeclaredGraphInfo() {
         final String path = config.path;
         final String file = config.file;
         try {

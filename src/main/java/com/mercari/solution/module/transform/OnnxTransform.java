@@ -69,6 +69,9 @@ public class OnnxTransform extends Transform {
                 if(inputs != null || outputs != null) {
                     errorMessages.add("parameters.inputs and parameters.outputs must not be specified with parameters.mapping or parameters.mappings");
                 }
+                final MappingConfig config = mapping != null ? mapping : mappings.getFirst();
+                errorMessages.addAll(overlaps("inputs", config.inputs));
+                errorMessages.addAll(overlaps("outputs", config.outputs));
             } else {
                 if(inputs == null || inputs.isEmpty()) {
                     errorMessages.add("parameters.inputs must not be empty");
@@ -85,6 +88,24 @@ public class OnnxTransform extends Transform {
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
+        }
+
+        // a mapping read every value before it wrote any, but a select list is evaluated in order: a name that one entry
+        // reads and another writes would read the value just written, without any error
+        private static List<String> overlaps(final String parameter, final Map<String, String> mapping) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(mapping == null) {
+                return errorMessages;
+            }
+            for(final Map.Entry<String, String> read : mapping.entrySet()) {
+                final String parent = read.getKey().split("\\.", 2)[0];
+                for(final Map.Entry<String, String> written : mapping.entrySet()) {
+                    if(!written.getKey().equals(read.getKey()) && (written.getValue().equals(read.getKey()) || written.getValue().equals(parent))) {
+                        errorMessages.add("parameters.mapping." + parameter + ": " + written.getValue() + " is read by one entry and written by another. Use parameters.inputs and parameters.outputs, which are evaluated in order");
+                    }
+                }
+            }
+            return errorMessages;
         }
 
         public void setDefaults(final OnnxGraphInfo graph) {
@@ -159,7 +180,9 @@ public class OnnxTransform extends Transform {
         final String text = outputs.toString();
         final Set<String> names = new LinkedHashSet<>();
         for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
-            if(Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(output.name()) + "(?![A-Za-z0-9_])").matcher(text).find()) {
+            // only a tensor can be read: a name such as "field" is in the text of every select item, and requesting a value
+            // that is not a tensor would fail every record
+            if(output.isTensor() && Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(output.name()) + "(?![A-Za-z0-9_])").matcher(text).find()) {
                 names.add(output.name());
             }
         }
@@ -441,14 +464,14 @@ public class OnnxTransform extends Transform {
 
         private MElement createOutput(final Buffered buffered, final Map<String, Object> modelOutputs) {
             final Map<String, Object> context = buffered.evaluated;
-            context.putAll(modelOutputs);
-            final Map<String, Object> results = OnnxInputs.apply(outputs, context, buffered.timestamp);
-
             final Map<String, Object> record = new HashMap<>(buffered.values);
+            // before the model outputs: the type of such a field is that of its item, also if a model output has its name
             for(final String field : preprocessFields) {
                 record.put(field, context.get(field));
             }
-            record.putAll(results);
+
+            context.putAll(modelOutputs);
+            record.putAll(OnnxInputs.apply(outputs, context, buffered.timestamp));
             record.replaceAll((name, value) -> Tensor.materialize(value));
 
             final Map<String, Object> values = postprocessors.useSelect()

@@ -250,6 +250,9 @@ public final class Tensor {
     }
 
     private static void set(final Type type, final Object data, final int index, final Object value) {
+        if(value == null) {
+            throw illegal(type, null);
+        }
         switch (type) {
             case FLOAT -> ((float[]) data)[index] = switch (value) {
                 case Number n -> n.floatValue();
@@ -296,7 +299,7 @@ public final class Tensor {
             case STRING -> ((String[]) data)[index] = switch (value) {
                 case String s -> s;
                 case java.nio.ByteBuffer bb -> new String(bb.array(), java.nio.charset.StandardCharsets.UTF_8);
-                default -> value == null ? null : value.toString();
+                default -> value.toString();
             };
         }
     }

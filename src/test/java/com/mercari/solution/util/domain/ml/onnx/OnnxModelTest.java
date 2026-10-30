@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,7 +33,8 @@ public class OnnxModelTest {
                 "float16", OnnxTestModels.cast(OnnxTestModels.FLOAT16),
                 "bfloat16", OnnxTestModels.cast(OnnxTestModels.BFLOAT16),
                 "scalar", OnnxTestModels.scalarOutput(),
-                "double", OnnxTestModels.identity(OnnxTestModels.DOUBLE, "n", 2L));
+                "double", OnnxTestModels.identity(OnnxTestModels.DOUBLE, "n", 2L),
+                "undeclared", OnnxTestModels.undeclaredOutputShape());
         for(final Map.Entry<String, byte[]> entry : models.entrySet()) {
             final Path path = OnnxTestModels.write(dir.resolve(entry.getKey() + ".onnx"), entry.getValue());
             final OnnxModel model = OnnxModel.create(OnnxModel.Config.create(OnnxTestModels.configPath(path)));
@@ -50,6 +52,28 @@ public class OnnxModelTest {
             Assertions.assertEquals(info.type, value.type(), model + "." + entry.getKey());
             Assertions.assertArrayEquals(info.getShape(), value.shape(), model + "." + entry.getKey());
         }
+    }
+
+    // a tensor of a type that is not supported (complex64) is treated as a value that is not a tensor
+    @Test
+    public void testGraphInfoOfNotSupportedType() throws Exception {
+        final OnnxGraphInfo graph = OnnxGraphInfo.read(new ByteArrayInputStream(OnnxTestModels.identity(14, "n")));
+        Assertions.assertFalse(graph.inputs().get("x").isTensor());
+        Assertions.assertFalse(graph.outputs().get("y").isTensor());
+    }
+
+    // a value that is not a tensor has no shape to ask a session for
+    @Test
+    public void testGraphInfoOfSequenceIsComplete() throws Exception {
+        final OnnxGraphInfo graph = OnnxGraphInfo.read(new ByteArrayInputStream(OnnxTestModels.sequenceOutput()));
+        Assertions.assertFalse(graph.outputs().get("field").isTensor());
+        Assertions.assertTrue(graph.isComplete());
+    }
+
+    @Test
+    public void testGraphInfoOfUndeclaredShapeIsNotComplete() throws Exception {
+        final OnnxGraphInfo graph = OnnxGraphInfo.read(new ByteArrayInputStream(OnnxTestModels.undeclaredOutputShape()));
+        Assertions.assertFalse(graph.isComplete());
     }
 
     // the model file of a GCS directory is only found and read: no weights are downloaded

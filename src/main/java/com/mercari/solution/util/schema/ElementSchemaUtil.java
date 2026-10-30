@@ -18,24 +18,26 @@ public class ElementSchemaUtil {
             final String field,
             final List<Schema.Field> inputFields) {
 
+        // an exact name comes first: a field name may contain dots (model outputs such as present.0.key)
         for(final Schema.Field inputField : inputFields) {
             if(field.equals(inputField.getName())) {
                 return inputField;
-            } else if(field.contains(".")) {
-                final String[] fields = field.split("\\.", 2);
-                final Schema.FieldType parentFieldType = getInputFieldType(fields[0], inputFields);
-                return switch (parentFieldType.getType()) {
-                    case json -> Schema.Field.of(fields[fields.length-1], Schema.FieldType.type(Schema.Type.json));
-                    case element -> getInputField(fields[1], parentFieldType.getElementSchema().getFields());
-                    case array -> {
-                        if (!Schema.Type.element.equals(parentFieldType.getArrayValueType().getType())) {
-                            throw new IllegalArgumentException();
-                        }
-                        yield getInputField(fields[1], parentFieldType.getArrayValueType().getElementSchema().getFields());
-                    }
-                    default -> throw new IllegalArgumentException();
-                };
             }
+        }
+        if(field.contains(".")) {
+            final String[] fields = field.split("\\.", 2);
+            final Schema.FieldType parentFieldType = getInputFieldType(fields[0], inputFields);
+            return switch (parentFieldType.getType()) {
+                case json -> Schema.Field.of(fields[fields.length-1], Schema.FieldType.type(Schema.Type.json));
+                case element -> getInputField(fields[1], parentFieldType.getElementSchema().getFields());
+                case array -> {
+                    if (!Schema.Type.element.equals(parentFieldType.getArrayValueType().getType())) {
+                        throw new IllegalArgumentException();
+                    }
+                    yield getInputField(fields[1], parentFieldType.getArrayValueType().getElementSchema().getFields());
+                }
+                default -> throw new IllegalArgumentException();
+            };
         }
         throw new IllegalArgumentException("Not found field: " + field + " in input fields: " + inputFields);
     }
@@ -60,22 +62,20 @@ public class ElementSchemaUtil {
                 return inputField.getFieldType();
             }
         }
-        for(final Schema.Field inputField : inputFields) {
-            if(field.contains(".")) {
-                final String[] fields = field.split("\\.", 2);
-                final Schema.FieldType parentFieldType = getInputFieldType(fields[0], inputFields);
-                return switch (parentFieldType.getType()) {
-                    case json -> Schema.FieldType.type(Schema.Type.json);
-                    case element -> getInputFieldType(fields[1], parentFieldType.getElementSchema().getFields());
-                    case array -> {
-                        if (!Schema.Type.element.equals(parentFieldType.getArrayValueType().getType())) {
-                            throw new IllegalArgumentException();
-                        }
-                        yield getInputFieldType(fields[1], parentFieldType.getArrayValueType().getElementSchema().getFields());
+        if(field.contains(".")) {
+            final String[] fields = field.split("\\.", 2);
+            final Schema.FieldType parentFieldType = getInputFieldType(fields[0], inputFields);
+            return switch (parentFieldType.getType()) {
+                case json -> Schema.FieldType.type(Schema.Type.json);
+                case element -> getInputFieldType(fields[1], parentFieldType.getElementSchema().getFields());
+                case array -> {
+                    if (!Schema.Type.element.equals(parentFieldType.getArrayValueType().getType())) {
+                        throw new IllegalArgumentException();
                     }
-                    default -> throw new IllegalArgumentException();
-                };
-            }
+                    yield getInputFieldType(fields[1], parentFieldType.getArrayValueType().getElementSchema().getFields());
+                }
+                default -> throw new IllegalArgumentException();
+            };
         }
         throw new IllegalArgumentException("Not found field: " + field + " in input fields: " + inputFields);
     }

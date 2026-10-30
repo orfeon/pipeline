@@ -642,7 +642,7 @@ Removes the dimensions of size 1 of an array or a matrix.
 | parameter | optional | type                 | description |
 |-----------|----------|----------------------|-------------|
 | field     | required | String               | Source field. |
-| axis      | optional | Integer or Array     | The dimensions to remove (negative: from the end). A dimension that is not 1 fails. Required to remove a dynamic dimension from the output type: without `axis` only the dimensions fixed to 1 in the schema change the type. |
+| axis      | optional | Integer or Array     | The dimensions to remove (negative: from the end). A dimension that is not 1 fails, as does an axis the value does not have. Required to remove a dynamic dimension: without `axis` only the dimensions fixed to 1 in the schema are removed, so that the value always has the output type. |
 
 ```yaml
 - { name: lastLogits, func: squeeze, field: logits, axis: 0 }

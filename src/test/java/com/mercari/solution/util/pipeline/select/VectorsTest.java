@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.select;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.Tensor;
@@ -140,6 +141,53 @@ public class VectorsTest {
         // or in the schema
         Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"m2\", \"axis\": 0 }"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"text\" }"));
+        // an axis the value does not have
+        Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"m1\", \"axis\": 2 }"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"m1\", \"axis\": -3 }"));
+        Assertions.assertArrayEquals(new long[]{3}, ((Tensor) apply("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"m1\", \"axis\": -2 }", tensor)).shape());
+    }
+
+    // without axis, a dynamic dimension that happens to be 1 stays, as it does in the type
+    @Test
+    public void testSqueezeFollowsTheType() {
+        final Tensor one = Tensor.of(new float[]{1f}, new long[]{1});
+        final String array = "{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"v\" }";
+        Assertions.assertEquals(Schema.Type.array, function(array).getOutputFieldType().getType());
+        Assertions.assertArrayEquals(new long[]{1}, ((Tensor) apply(array, one)).shape());
+        final Tensor row = Tensor.of(new float[]{1f, 2f, 3f}, new long[]{1, 3});
+        Assertions.assertArrayEquals(new long[]{1, 3}, ((Tensor) apply("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"md\" }", row)).shape());
+    }
+
+    // no dimension left: a record value, for the functions that tell a scalar from a vector
+    @Test
+    public void testSqueezeToScalar() {
+        final String json = "{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"v\", \"axis\": 0 }";
+        Assertions.assertEquals(Schema.Type.float32, function(json).getOutputFieldType().getType());
+        Assertions.assertEquals(2f, apply(json, Tensor.of(new float[]{2f}, new long[]{1})));
+        Assertions.assertEquals(2f, apply(json, List.of(2f)));
+    }
+
+    // a NULL field yields NULL: the types of a value without an array around it allow it
+    @Test
+    public void testScalarOutputsAreNullable() {
+        Assertions.assertNotEquals(Boolean.FALSE, function("{ \"name\": \"o\", \"func\": \"sigmoid\", \"field\": \"s\" }").getOutputFieldType().getNullable());
+        final List<Schema.Field> fields = List.of(Schema.Field.of("r", Schema.FieldType.array(Schema.FieldType.FLOAT32.withNullable(false))));
+        final SelectFunction squeeze = SelectFunction.of(new Gson().fromJson("{ \"name\": \"o\", \"func\": \"squeeze\", \"field\": \"r\", \"axis\": 0 }", JsonObject.class), fields);
+        Assertions.assertNotEquals(Boolean.FALSE, squeeze.getOutputFieldType().getNullable());
+    }
+
+    // a later item of a name replaces the earlier one for the type the items after it see, as it does for the value
+    @Test
+    public void testLaterItemReplacesTheType() {
+        final List<SelectFunction> functions = SelectFunction.of(new Gson().fromJson("""
+                [
+                  { "name": "v", "func": "squeeze", "field": "m1" },
+                  { "name": "x", "field": "s" },
+                  { "name": "s", "func": "argmax", "field": "v" },
+                  { "name": "y", "field": "s" }
+                ]""", JsonArray.class), FIELDS);
+        Assertions.assertEquals(Schema.Type.float32, functions.get(1).getOutputFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, functions.get(3).getOutputFieldType().getType());
     }
 
     // a matrix is a vector only with one dimension other than 1

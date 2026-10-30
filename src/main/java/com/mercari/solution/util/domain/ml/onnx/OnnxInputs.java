@@ -110,6 +110,10 @@ public class OnnxInputs implements Serializable {
                 throw new IllegalArgumentException("onnx inputs: " + name + " is given both a value and empty or fill");
             }
             if(constant != null) {
+                if(constant.shape != null && constant.shape.length != info.rank()) {
+                    throw new IllegalArgumentException("onnx inputs: " + name + " has rank " + constant.shape.length
+                            + " in its empty or fill, but the model input is " + info);
+                }
                 modelInputs.add(new ModelInput(info, null, constant, null, 0, false));
             } else if(valueType == null) {
                 missing.add(info.toString());
@@ -118,6 +122,10 @@ public class OnnxInputs implements Serializable {
                 if(rank == info.rank() - 1) {
                     stacked = true;
                 } else if(rank == info.rank()) {
+                    if(pads.containsKey(name)) {
+                        throw new IllegalArgumentException("onnx inputs: " + name + " has pad, but a value of type " + valueType
+                                + " is the model input " + info + " as it is, with no batch to pad");
+                    }
                     asIs = true;
                 } else {
                     throw new IllegalArgumentException("onnx inputs: " + name + " of type " + valueType

@@ -102,6 +102,8 @@ public interface SelectFunction extends Serializable {
                 continue;
             }
             selectFunctions.add(selectFunction);
+            // a later item replaces one of the same name, as its value does when they are evaluated
+            fields.removeIf(field -> field.getName().equals(selectFunction.getName()));
             fields.add(Schema.Field.of(selectFunction.getName(), selectFunction.getOutputFieldType()));
         }
         return selectFunctions;

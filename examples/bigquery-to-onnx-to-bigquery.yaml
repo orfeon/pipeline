@@ -27,9 +27,6 @@ transforms:
           maxLength: 2048
         - { name: input_ids, field: tok.ids, pad: 0 }
         - { name: attention_mask, field: tok.attentionMask, pad: 0 }
-        - { name: image_features, empty: [0, 512] }
-        - { name: video_features, empty: [0, 512] }
-        - { name: audio_features, empty: [0, 512] }
       outputs:
         - { name: Embedding, func: vector_normalize, field: sentence_embedding, size: 256 }
       bufferSize: 16
