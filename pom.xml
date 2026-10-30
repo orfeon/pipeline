@@ -283,7 +283,7 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>com.mercari.solution.server.PipelineMcpStreamableServer</mainClass>
+                  <mainClass>com.mercari.solution.MPipeline</mainClass>
                 </transformer>
               </transformers>
             </configuration>
@@ -394,6 +394,12 @@
         </dependency>
 
         <!-- Server-only (server/** is compiled only in this profile): kept out of the pipeline images. -->
+        <dependency>
+          <groupId>org.eclipse.jetty.ee11</groupId>
+          <artifactId>jetty-ee11-webapp</artifactId>
+          <version>${jetty.version}</version>
+          <scope>provided</scope>
+        </dependency>
         <!-- MCP: mcp-core + the Jackson 2 JSON provider instead of the `mcp` aggregate: the aggregate brings
              mcp-json-jackson3 (Jackson 3 databind), whose schema validator needs jackson-annotations 3.x
              while Beam / GCP pin 2.x (NoSuchFieldError JsonFormat$Shape.POJO at server start). -->
@@ -1084,16 +1090,11 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- Pipeline Server -->
-    <dependency>
-      <groupId>org.eclipse.jetty.ee11</groupId>
-      <artifactId>jetty-ee11-webapp</artifactId>
-      <version>${jetty.version}</version>
-      <scope>provided</scope>
-    </dependency>
-
-    <!-- JSON Schema validation (util/schema/JsonSchemaUtil, used by module/Schema and the server's spec API).
-         Declared directly: it used to arrive only through mcp-json-jackson2, which is server-only now. -->
+    <!-- JSON Schema validation: util/schema/JsonSchemaUtil (compiled in every profile; referenced by
+         module/Schema.validate and server/api/SpecService) imports it. Declared directly: it used to arrive only
+         through mcp-json-jackson2, which is server-only now. In the server profile this direct declaration wins
+         over the version mcp-json-jackson2 asks for: on an mcp.version bump, set json-schema-validator.version to
+         the one the new mcp-json-jackson2 declares (mvn -Pserver dependency:tree). -->
     <!-- https://mvnrepository.com/artifact/com.networknt/json-schema-validator -->
     <dependency>
       <groupId>com.networknt</groupId>
