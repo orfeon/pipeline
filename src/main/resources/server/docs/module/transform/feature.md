@@ -1935,7 +1935,7 @@ for every component; a dot product reproduces the PPMI only over the components 
       - {field: sold, stats: [mean]}
     shrinkage:
       estimator: sequential                       # backoff (chains, default) | sequential (additive / cross, default) | joint (fit.mode static / fold / forward only)
-      weights: varianceComponents                 # fixed: w = n / (n + priorWeight); varianceComponents: λ = σ²/τ² per level (batch method of moments)
+      weights: varianceComponents                 # fixed: w = n / (n + priorWeight); varianceComponents: λ = σ²/τ² per level (method of moments; see the limits for the rows it is estimated from)
       priorWeight: 20                             # fixed pseudo-count, and the fallback when a level has too few keys
       family: gaussian                            # gaussian | betaBinomial | gammaPoisson | dirichletMultinomial; default derived from the stat
       scale: logit                                # identity | logit | log; required when a lattice uses additive
@@ -2040,6 +2040,14 @@ cell the rows are aggregated in.
   over-shrink. It needs one shrunk level and `scale: identity` (error `encoding.shrinkage.fixedLevels`); a seller
   level without between-seller variance is fixed at 0, as under the moment estimator. `weights: fixed` takes
   `priorWeight` as λ on any scale and with any number of shrunk levels.
+  The estimate assumes the sellers are assigned to sessions independently of their effects. When similar sellers
+  meet in the same sessions (sessions formed by level, say), the session effects absorb part of the sellers'
+  spread, `τ²` comes out small and λ large: the sellers are over-shrunk toward their sessions' levels. A synthetic
+  design with strongly assortative sessions gave λ about 24 times the true value. Compare λ with a scale
+  estimated another way before you read the seller effects as abilities.
+  Under `forward` a change point is solved only when a row can read it: one with fewer than `minBlocks` observed
+  blocks at or before it is left out of the fit, so its thin window neither costs a solve nor logs the fallback to
+  `priorWeight`.
 - **Outputs**: `deviations` (`dev<i>` in lattice order: the fixed level's effect, then the shrunk ones),
   `effectiveN` and `variance` of the **first shrunk level** (not the leaf): `effectiveN` = the seller's rows that
   tell it apart once the sessions are taken out — each row counts `1 − 1/n` of a session with `n` rows, a row alone
@@ -3163,8 +3171,13 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
-  per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding); a level whose
-  between-key variance truncates to zero is fully shrunk to its parent (logged at run time).
+  per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding), except in two cases:
+  - Under `fit.mode: forward`, it is estimated per time block from the blocks up to that block.
+  - Under `estimator: joint`, it is estimated inside every solve: the whole input, each fold's, or each forward
+    change point's window.
+
+  The `encoding.shrinkage.weights` info names the case that applies. A level whose between-key variance
+  truncates to zero is fully shrunk to its parent (logged at run time).
 - `atRowCreation` / `event_date THH:MM` availability needs per-row filtering that is not implemented yet.
 - Rows whose key fields contain null bypass keyed evaluation (their keyed features are null).
 - DirectRunner (the `direct` image) is unsuited to keyed stages over coarse or global keys — a

@@ -261,6 +261,16 @@ public final class JointFit implements Serializable {
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel,
                                final boolean mainEffects) {
+        return fit(levels, scale, offset, weights, priorWeight, entries, folds, forward, windowBlocks, fixedLevel, mainEffects, 1);
+    }
+
+    /**
+     * {@link #fit} that leaves out the forward change points no row reads: those with fewer than {@code minBlocks}
+     * observed blocks at or before them ({@link #solutionFor} returns null for every usable block they serve).
+     */
+    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
+                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel,
+                               final boolean mainEffects, final int minBlocks) {
         final List<String> cellKeys = cellKeysOf(levels);
         final Map<String, Cell> total = new HashMap<>();
         final Map<Integer, Map<String, Cell>> foldParts = new HashMap<>();
@@ -324,8 +334,13 @@ public final class JointFit implements Serializable {
                         oldest++;
                     }
                 }
+                // every observed block is a change point, so the usable blocks this one serves (up to the next) see
+                // exactly the `added` observed blocks: below minBlocks no row reads it, and it is not solved (nor shipped)
+                if (added < minBlocks) continue;
                 blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight, fixedLevel));
             }
+            LOG.info("joint fit: {} forward change points solved, {} before minBlocks {} left out", blockSolutions.size(),
+                    changePoints.size() - blockSolutions.size(), minBlocks);
         }
         return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed, fixedLevel, mainEffects);
     }

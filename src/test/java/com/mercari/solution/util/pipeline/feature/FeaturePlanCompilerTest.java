@@ -2009,6 +2009,15 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("seller_id", variance.getCoordinates().get("levelKeys"));
         Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "encoding.shrinkage.joint".equals(m.code())
                 && m.message().contains("Henderson") && m.message().contains("fixed")), plan::describe);
+        // λ is estimated per solve: under forward, per change point over its window - not from the whole batch
+        final java.util.function.Function<FeaturePlan, String> weightsInfo = p -> p.getDiagnostics().getMessages().stream()
+                .filter(m -> "encoding.shrinkage.weights".equals(m.code())).map(Diagnostics.Message::message).findFirst().orElse("");
+        Assertions.assertTrue(weightsInfo.apply(plan).contains("change point"), plan::describe);
+        Assertions.assertTrue(weightsInfo.apply(compile(SOURCES, withEncoding(joint.replace("fit: {mode: forward, blocks: {size: P30D}, window: P365D}", "fit: {mode: static}"))))
+                .contains("whole input"));
+        Assertions.assertTrue(weightsInfo.apply(compile(SOURCES, withEncoding(joint.replace("estimator: joint, ", "estimator: sequential, ")
+                .replace("structure: additive", "structure: flat").replace("fixedLevels: [category], ", "").replace(", variance]", "]"))))
+                .contains("per time block"));
         final FeatureStages.JointSpec spec = FeatureStages.jointSpecs(List.of(composed)).get(0);
         Assertions.assertEquals(0, spec.fixedLevel());
         Assertions.assertTrue(spec.mainEffects(), "structure: additive reaches the cell extraction (JointFit.takesPart)");

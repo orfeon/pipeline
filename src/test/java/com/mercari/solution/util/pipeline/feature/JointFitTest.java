@@ -292,6 +292,18 @@ public class JointFitTest {
         Assertions.assertEquals(0.0, wide.estimate(wide.solutionFor(null, 4L, 1), row("a2", "b1")), 1e-9);
         Assertions.assertNull(wide.solutionFor(null, 5L, 1));
         Assertions.assertNull(wide.solutionFor(null, 4L, 3), "two observed blocks, minBlocks 3");
+        // change points before minBlocks are read by no row: left out of the fit, every read unchanged
+        for (final int w : new int[]{0, 1, 3}) {
+            final JointFit all = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, blocks, 0, true, w, -1, false);
+            final JointFit read = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, blocks, 0, true, w, -1, false, 2);
+            Assertions.assertFalse(read.blocks.containsKey(1L), "window " + w + ": change point 1 sees one observed block");
+            Assertions.assertEquals(all.blocks.size() - 1, read.blocks.size());
+            for (long u = 0; u <= 7; u++) {
+                final JointFit.Solution expected = all.solutionFor(null, u, 2), actual = read.solutionFor(null, u, 2);
+                Assertions.assertEquals(expected == null, actual == null, "window " + w + ", usable " + u);
+                if (expected != null) Assertions.assertEquals(all.estimate(expected, row("a1", "b1")), read.estimate(actual, row("a1", "b1")), 0.0);
+            }
+        }
     }
 
     @Test

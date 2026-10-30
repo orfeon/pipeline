@@ -111,6 +111,26 @@ public final class Shrinkage implements Serializable {
     }
 
     /** Runtime instance rebuilt from a composed column's coordinates. */
+    /**
+     * The info a {@code weights: varianceComponents} keySet gets: the rows each λ is estimated from, which depends on
+     * the estimator and the fit mode — {@code joint} estimates inside every solve (the whole input, a fold's, a forward
+     * change point's window), the per-level estimators once over the batch, or per forward block over the blocks up
+     * to it.
+     */
+    public String lambdaScope(final FeatureSpec.FitMode mode) {
+        final String head = "weights: varianceComponents estimates lambda = sigma^2/tau^2 per level ";
+        if (estimator == Estimator.joint) {
+            return head + switch (mode) {
+                case forward -> "inside every change point's joint solve, from the cells of its window (not from the whole batch)";
+                case fold -> "inside every fold's joint solve, from the other folds' cells";
+                default -> "inside the joint solve, from the whole input";
+            };
+        }
+        return head + (mode == FeatureSpec.FitMode.forward
+                ? "per time block, from the blocks up to it (cumulative: fit.window does not bound it; method of moments)"
+                : "from the whole batch (method of moments); the estimate is not time-expanding (structural, section 6.3)");
+    }
+
     public static Shrinkage of(final Scale scale, final double priorWeight, final boolean leaveNodeOut) {
         return of(scale, priorWeight, leaveNodeOut, null);
     }
@@ -190,11 +210,7 @@ public final class Shrinkage implements Serializable {
             if (w != null) {
                 switch (w) {
                     case "fixed" -> weights = "fixed";
-                    case "varianceComponents" -> {
-                        weights = "varianceComponents";
-                        diagnostics.info("encoding.shrinkage.weights", location,
-                                "weights: varianceComponents estimates lambda = sigma^2/tau^2 per level from the whole batch (method of moments); the estimate is not time-expanding (structural, section 6.3)");
-                    }
+                    case "varianceComponents" -> weights = "varianceComponents";
                     case "heldOut" -> diagnostics.error("encoding.shrinkage.weights", location, "weights: heldOut is not implemented yet");
                     default -> diagnostics.error("encoding.shrinkage.weights", location, "weights must be fixed | varianceComponents | heldOut: " + w);
                 }

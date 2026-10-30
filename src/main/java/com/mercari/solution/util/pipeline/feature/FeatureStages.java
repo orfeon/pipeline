@@ -3357,7 +3357,7 @@ public final class FeatureStages {
             LOG.info("joint {}: solving {} on {} aggregation entries", spec.id(), JointFit.encodeLevels(spec.levels()), entries.size());
             final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.offsetColumn() != null, spec.weights(), spec.priorWeight(), entries,
                     spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks(),
-                    spec.fixedLevel(), spec.mainEffects());
+                    spec.fixedLevel(), spec.mainEffects(), spec.forward() == null ? 1 : spec.forward().minBlocks());
             // fold / forward re-fit every run but write the whole-input solution once (refit: true overwrites)
             if (spec.artifactUri() != null && (spec.refit() || !JointFit.exists(spec.artifactUri(), planHash, spec.id()))) {
                 JointFit.write(spec.artifactUri(), planHash, spec.id(), model);
