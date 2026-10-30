@@ -2029,6 +2029,22 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(0, spec.fixedLevel());
         Assertions.assertTrue(spec.mainEffects(), "structure: additive reaches the cell extraction (JointFit.takesPart)");
         Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
+        // the fit stage fits with the minBlocks the rows read with: change points before it are left out
+        final FeaturePlan late = compile(SOURCES, withEncoding(joint.replace("window: P365D}", "window: P365D, minBlocks: 3}")));
+        Assertions.assertFalse(late.getDiagnostics().hasErrors(), late::describe);
+        final FeatureStages.JointSpec lateSpec = FeatureStages.jointSpecs(List.of(column(late, "enc__category_seller_id__e1__mean"))).get(0);
+        Assertions.assertEquals(3, lateSpec.forward().minBlocks());
+        final List<JointFit.Cell> entries = new ArrayList<>();
+        for (int b = 0; b < 5; b++) {
+            for (final String category : List.of("c1", "c2")) {
+                for (final String seller : List.of("s1", "s2", "s3")) {
+                    final double y = (category.equals("c1") ? 1 : 0) + seller.charAt(1) * 0.1 + b * 0.01;
+                    entries.add(new JointFit.Cell(JointFit.blockEntry(FeatureValues.keyOf(List.of(category, seller)), b), 2, 2 * y, 2 * y * y));
+                }
+            }
+        }
+        Assertions.assertEquals(2L, lateSpec.fit(entries).blocks.firstKey(), "change points 0 and 1 see fewer than 3 observed blocks");
+        Assertions.assertEquals(0L, spec.fit(entries).blocks.firstKey());
         // the fixed level changes the fit: it is in the plan hash
         Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, withEncoding(joint.replace("fixedLevels: [category], ", ""))).getHash());
         // without fixedLevels the leaf (category, first) is effectiveN's level and no column says otherwise

@@ -3197,6 +3197,15 @@ public final class FeatureStages {
             return JointFit.artifactPath(artifactUri, planHash, id);
         }
 
+        /**
+         * The model from the gathered aggregation entries. Forward change points are fitted with the {@code minBlocks}
+         * the apply side reads with ({@link #apply}), so the ones no row reads are left out.
+         */
+        JointFit fit(final Collection<JointFit.Cell> entries) {
+            return JointFit.fit(levels, scale, offsetColumn != null, weights, priorWeight, entries, foldKeys == null ? 0 : folds,
+                    forward != null, forward == null ? 0 : forward.windowBlocks(), fixedLevel, mainEffects, forward == null ? 1 : forward.minBlocks());
+        }
+
         /** fold / forward solutions are always re-fitted: the artifact holds the whole-input solution only. */
         @Override
         public boolean artifactExists(final String planHash) {
@@ -3355,9 +3364,7 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final ArrayList<JointFit.Cell> entries = c.element();
             LOG.info("joint {}: solving {} on {} aggregation entries", spec.id(), JointFit.encodeLevels(spec.levels()), entries.size());
-            final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.offsetColumn() != null, spec.weights(), spec.priorWeight(), entries,
-                    spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks(),
-                    spec.fixedLevel(), spec.mainEffects(), spec.forward() == null ? 1 : spec.forward().minBlocks());
+            final JointFit model = spec.fit(entries);
             // fold / forward re-fit every run but write the whole-input solution once (refit: true overwrites)
             if (spec.artifactUri() != null && (spec.refit() || !JointFit.exists(spec.artifactUri(), planHash, spec.id()))) {
                 JointFit.write(spec.artifactUri(), planHash, spec.id(), model);
