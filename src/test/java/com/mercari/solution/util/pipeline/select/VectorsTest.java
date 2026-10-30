@@ -21,7 +21,8 @@ public class VectorsTest {
             Schema.Field.of("text", Schema.FieldType.STRING),
             Schema.Field.of("m1", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(1, 3))),
             Schema.Field.of("m2", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(2, 3))),
-            Schema.Field.of("md", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(-1, 3))));
+            Schema.Field.of("md", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(-1, 3))),
+            Schema.Field.of("groups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.INT64))));
 
     private static SelectFunction function(final String json) {
         final SelectFunction function = SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS);
@@ -198,6 +199,42 @@ public class VectorsTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"argmax\", \"field\": \"m2\" }"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> function("{ \"name\": \"o\", \"func\": \"softmax\", \"field\": \"s\" }"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> apply("{ \"name\": \"o\", \"func\": \"argmax\", \"field\": \"v\" }", Tensor.of(new float[6], new long[]{2, 3})));
+    }
+
+
+    private static Object groupSoftmax(final Object logits, final Object groups) {
+        final Map<String, Object> input = new HashMap<>();
+        input.put("v", logits);
+        input.put("groups", groups);
+        return function("{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\", \"groups\": \"groups\" }").apply(input, Instant.EPOCH);
+    }
+
+    // the softmax of the largest logit of each group
+    @Test
+    public void testGroupSoftmax() {
+        final List<Float> logits = List.of(9f, 1f, 2f, 0f, 3f);
+        final double high = Math.exp(3) / (Math.exp(3) + Math.exp(2));
+        assertClose(List.of(1 - high, high), groupSoftmax(logits, List.of(List.of(1L, 2L), List.of(3L, 4L))));
+        assertClose(List.of(1 - high, high), groupSoftmax(Tensor.of(new float[]{9, 1, 2, 0, 3}, new long[]{5}), List.of(List.of(1L, 2L), List.of(3L, 4L))));
+        // a Tensor of a dimension of 1 is a vector as well
+        assertClose(List.of(1 - high, high), groupSoftmax(Tensor.of(new float[]{9, 1, 2, 0, 3}, new long[]{1, 5}), List.of(List.of(1L, 2L), List.of(3L, 4L))));
+        Assertions.assertNull(groupSoftmax(null, List.of(List.of(1L))));
+        Assertions.assertNull(groupSoftmax(logits, null));
+    }
+
+    @Test
+    public void testGroupSoftmaxOfIllegalGroups() {
+        final List<Float> logits = List.of(1f, 2f);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of(2L))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of(-1L))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of())));
+        // the type of groups, its absence and the type of the vector are config errors
+        for(final String json : List.of(
+                "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\", \"groups\": \"v\" }",
+                "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\" }",
+                "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"m2\", \"groups\": \"groups\" }")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
+        }
     }
 
 }

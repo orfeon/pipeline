@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  */
 public class OnnxInputs implements Serializable {
 
-    private record Pad(double value, boolean left) implements Serializable {}
+    private record Pad(double value, boolean left, int multiple) implements Serializable {}
 
     /** {@code empty} / {@code fill}: a value for the whole batch. A null shape comes from the model input. */
     private record Constant(long[] shape, double value) implements Serializable {}
@@ -115,6 +115,7 @@ public class OnnxInputs implements Serializable {
                     throw new IllegalArgumentException("onnx inputs: " + name + " has rank " + constant.shape.length
                             + " in its empty or fill, but the model input is " + info);
                 }
+                validateValue(name, "fill", constant.value, info);
                 modelInputs.add(new ModelInput(info, null, constant, null, 0, false));
             } else if(valueType == null) {
                 missing.add(info.toString());
@@ -122,6 +123,7 @@ public class OnnxInputs implements Serializable {
                 final int rank = rank(name, valueType);
                 if(rank == info.rank() - 1) {
                     stacked = true;
+                    validatePad(name, pads.get(name), info);
                 } else if(rank == info.rank()) {
                     if(pads.containsKey(name)) {
                         throw new IllegalArgumentException("onnx inputs: " + name + " has pad, but a value of type " + valueType
@@ -164,12 +166,41 @@ public class OnnxInputs implements Serializable {
         return names;
     }
 
+    private static void validatePad(final String name, final Pad pad, final OnnxGraphInfo.ValueInfo info) {
+        if(pad == null) {
+            return;
+        }
+        validateValue(name, "pad", pad.value, info);
+        if(pad.multiple > 1 && dynamicRowDimensions(info).isEmpty()) {
+            throw new IllegalArgumentException("onnx inputs: " + name + " has pad.multiple, but the model input " + info + " has no dynamic dimension to pad");
+        }
+    }
+
+    // a NaN would silently become 0 in an integer tensor
+    private static void validateValue(final String name, final String key, final double value, final OnnxGraphInfo.ValueInfo info) {
+        final Tensor.Type type = OnnxRuntimeUtil.tensorType(info.type());
+        if(Double.isNaN(value) && type != Tensor.Type.FLOAT && type != Tensor.Type.DOUBLE) {
+            throw new IllegalArgumentException("onnx inputs: " + name + " " + key + " is NaN, but the model input " + info + " is not a float");
+        }
+    }
+
+    private static List<Integer> dynamicRowDimensions(final OnnxGraphInfo.ValueInfo info) {
+        final long[] shape = info.shape();
+        final List<Integer> dimensions = new ArrayList<>();
+        for(int d=1; d<shape.length; d++) {
+            if(shape[d] < 0) {
+                dimensions.add(d - 1);
+            }
+        }
+        return dimensions;
+    }
+
     private static Pad parsePad(final String name, final JsonElement pad) {
         if(pad == null || pad.isJsonNull()) {
             return null;
         }
         if(pad.isJsonPrimitive()) {
-            return new Pad(pad.getAsDouble(), false);
+            return new Pad(pad.getAsDouble(), false, 1);
         }
         final JsonObject params = pad.getAsJsonObject();
         if(!params.has("value")) {
@@ -179,7 +210,11 @@ public class OnnxInputs implements Serializable {
         if(!side.equals("left") && !side.equals("right")) {
             throw new IllegalArgumentException("onnx inputs: " + name + " pad.side must be left or right: " + side);
         }
-        return new Pad(params.get("value").getAsDouble(), side.equals("left"));
+        final int multiple = params.has("multiple") ? params.get("multiple").getAsInt() : 1;
+        if(multiple < 1) {
+            throw new IllegalArgumentException("onnx inputs: " + name + " pad.multiple must be over than zero: " + multiple);
+        }
+        return new Pad(params.get("value").getAsDouble(), side.equals("left"), multiple);
     }
 
     private static Constant parseConstant(final String name, final JsonObject select) {
@@ -294,7 +329,7 @@ public class OnnxInputs implements Serializable {
                     }
                     tensor = input.pad == null
                             ? Tensor.stack(rows, null, false)
-                            : Tensor.stack(rows, input.pad.value, input.pad.left);
+                            : Tensor.stack(rows, input.pad.value, input.pad.left, multiples(input));
                 } else {
                     if(records.size() != 1) {
                         throw new IllegalArgumentException("onnx inputs: " + name + " is the model input as it is, which takes one record at a time, but got " + records.size());
@@ -309,6 +344,16 @@ public class OnnxInputs implements Serializable {
             throw e;
         }
         return tensors;
+    }
+
+    // a fixed dimension of the model input keeps its length
+    private static long[] multiples(final ModelInput input) {
+        final long[] multiples = new long[input.rank];
+        Arrays.fill(multiples, 1L);
+        for(final int dimension : dynamicRowDimensions(input.info)) {
+            multiples[dimension] = input.pad.multiple;
+        }
+        return multiples;
     }
 
     private static long[] constantShape(final ModelInput input, final int batchSize) {

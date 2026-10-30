@@ -70,6 +70,11 @@ public interface SelectFunction extends Serializable {
         argmax,
         topk,
         labels,
+        group_softmax,
+        token_ids,
+        array_zip,
+        timeseries_grid,
+        timeseries_quantiles,
         panic;
 
         public static Func is(String value) {
@@ -196,6 +201,11 @@ public interface SelectFunction extends Serializable {
             case argmax -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.argmax, ignore);
             case topk -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.topk, ignore);
             case labels -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.labels, ignore);
+            case group_softmax -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.group_softmax, ignore);
+            case token_ids -> Tokenize.ofIds(name, jsonObject, ignore);
+            case array_zip -> ArrayZip.of(name, jsonObject, inputFields, ignore);
+            case timeseries_grid -> TimeseriesGrid.of(name, jsonObject, inputFields, ignore);
+            case timeseries_quantiles -> TimeseriesQuantiles.of(name, jsonObject, inputFields, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };

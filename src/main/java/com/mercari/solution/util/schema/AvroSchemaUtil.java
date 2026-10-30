@@ -1831,6 +1831,9 @@ public class AvroSchemaUtil {
                 case RECORD -> ((List<GenericRecord>) fieldValue).stream()
                         .map(AvroSchemaUtil::asPrimitiveMap)
                         .collect(Collectors.toList());
+                case ARRAY -> ((List<Object>) fieldValue).stream()
+                        .map(o -> getAsPrimitive(fieldSchema.getElementType(), o))
+                        .collect(Collectors.toList());
                 default -> throw new IllegalStateException("Not supported primitive type: " + fieldSchema.getElementType());
             };
             case NULL -> null;

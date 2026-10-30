@@ -72,18 +72,27 @@ public final class Tensor {
      * {@code padValue}, at the head if {@code padLeft}; without a {@code padValue} they are an error.
      */
     public static Tensor stack(final List<Tensor> tensors, final Number padValue, final boolean padLeft) {
+        return stack(tensors, padValue, padLeft, null);
+    }
+
+    /** {@link #stack(List, Number, boolean)} with the length of each dimension of a row rounded up to a multiple of {@code multiples}, also for one tensor. */
+    public static Tensor stack(final List<Tensor> tensors, final Number padValue, final boolean padLeft, final long[] multiples) {
         final Tensor first = tensors.getFirst();
         final long[] rowShape = first.shape.clone();
-        boolean padding = false;
         for(final Tensor tensor : tensors) {
             if(tensor.type != first.type || tensor.shape.length != rowShape.length) {
                 throw new IllegalArgumentException("tensors to stack must have the same type and rank: " + first + ", " + tensor);
             }
             for(int d=0; d<rowShape.length; d++) {
-                padding = padding || tensor.shape[d] != rowShape[d];
                 rowShape[d] = Math.max(rowShape[d], tensor.shape[d]);
             }
         }
+        if(multiples != null) {
+            for(int d=0; d<rowShape.length; d++) {
+                rowShape[d] = Math.ceilDiv(rowShape[d], multiples[d]) * multiples[d];
+            }
+        }
+        final boolean padding = tensors.stream().anyMatch(tensor -> !Arrays.equals(tensor.shape, rowShape));
         if(padding && padValue == null) {
             throw new IllegalArgumentException("records in a batch have different shapes: " + tensors.stream().map(t -> Arrays.toString(t.shape)).distinct().toList());
         }

@@ -712,6 +712,105 @@ Gives names to the indices of a model output: an integer index becomes its label
 
 Output type: STRING for an index, array of ELEMENT with `label` (string) and `value` (float32, float64 for float64 values) for a vector.
 
+### group_softmax
+
+Softmax over groups of a vector of logits: the logit of a group is the largest of its ids. For choosing among options that each have several tokens.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field: a vector. |
+| groups    | required | String  | Field with the ids of each group, an array of arrays of integers: typically [`token_ids`](#token_ids). An id out of the vector or an empty group fails. |
+| size      | optional | Integer | Uses only the first `size` values. |
+
+```yaml
+- { name: probabilities, func: group_softmax, field: lastLogits, groups: options }
+```
+
+Output type: array of float32 (float64 for float64 values), one value per group.
+
+### token_ids
+
+A constant: the ids of the given texts, by group, keeping the texts that are one token without special tokens. It is computed once when the worker sets up, which fails if a group has no text of one token.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| tokenizer | required | String | Tokenizer type. Currently: `huggingface`. |
+| path      | required | String | `tokenizer.json`, as `tokenize_encode`. |
+| texts     | required | Array  | The groups: each an array of texts, or a text for a group of one. |
+
+```yaml
+- name: options
+  func: token_ids
+  tokenizer: huggingface
+  path: "gs://my-bucket/models/tokenizer/tokenizer.json"
+  texts:
+    - [" refund", "refund"]
+    - [" other", "other"]
+```
+
+Output type: array of array of INT64. Not every sink can write this type (BigQuery can not): in the `inputs` of an onnx transform it is an intermediate value, which is not output.
+
+### array_zip
+
+Zips array fields of the same length to an array of structs. Arrays of different lengths fail the record, and a null array gives null.
+
+| parameter | optional | type  | description |
+|-----------|----------|-------|-------------|
+| fields    | required | Array | Array fields. An item is a field, whose last path segment names the struct field, or `{ name, field }`. A `matrix` is flat in a record and can not be zipped by row. |
+
+```yaml
+- { name: tokenScores, func: array_zip, fields: [tok.tokens, { name: score, field: scores }] }
+```
+
+Output type: array of ELEMENT with a field per item.
+
+### timeseries_grid
+
+Aligns the points of a series, in any order (such as an `array_agg` result), to a regular grid for a time series model.
+
+- A time is floored to a multiple of `interval` from the epoch, in UTC.
+- The grid ends at the latest point, and has at most `length` values.
+- A time without a value stays on the grid as NaN: closing the gap would shift the times of a forecast. A null or NaN value counts as no value.
+
+| parameter      | optional | type    | description |
+|----------------|----------|---------|-------------|
+| field          | required | String  | Source field: an array of elements. |
+| timestampField | required | String  | Field of the element with the time: `timestamp` or `date`. |
+| valueField     | required | String  | Field of the element with the value: numeric. |
+| interval       | required | String  | The step of the grid: `30s`, `10m`, `1h`, `1d` or ISO-8601 such as `PT1H`. |
+| length         | required | Integer | The largest number of values: the latest ones are kept. |
+| aggregation    | optional | Enum    | For several values in one step: `last` (of the latest time), `mean` or `sum`. Default: `last`. |
+
+```yaml
+- { name: grid, func: timeseries_grid, field: points, timestampField: timestamp, valueField: value, interval: 1h, length: 512 }
+```
+
+Output type: ELEMENT with `values` (array of float64), `timestamps` (array of timestamp), `lastTimestamp` (timestamp) and `observed` (array of boolean: whether the step has a value). Null if the field is null or has no point with a time.
+
+### timeseries_quantiles
+
+Turns a matrix of forecast quantiles to an array of structs, one per step of the forecast.
+
+| parameter | optional | type          | description |
+|-----------|----------|---------------|-------------|
+| field     | required | String        | Source field: a matrix of two dimensions. A dimension that does not fit `levels` fails. |
+| levels    | required | Array<Float\> | The quantile level of each position, between 0 and 1. |
+| axis      | optional | Enum          | The order of the dimensions: `quantile_step` or `step_quantile`. Default: `quantile_step`. |
+| start     | required | String        | Field with the time before the first step, `timestamp` or `date`: typically `lastTimestamp` of [`timeseries_grid`](#timeseries_grid). |
+| interval  | required | String        | The step of the forecast, as in `timeseries_grid`. The first step is one interval after `start`. |
+| select    | optional | Array<Float\> | The levels to output, in this order. Default: all of `levels`. |
+
+```yaml
+- name: forecast
+  func: timeseries_quantiles
+  field: forecasts
+  levels: [0.1, 0.5, 0.9]
+  start: grid.lastTimestamp
+  interval: 1h
+```
+
+Output type: array of ELEMENT with `timestamp` and a field per level, float32 (float64 for float64 values). A level names its field by its decimals, at least two: 0.1 is `q10`, 0.05 is `q05` and 0.975 is `q975`.
+
 ### cosine_similarity
 
 Cosine similarity of two numeric array fields of equal length (embedding similarity). Returns null when either field is null or has zero norm.

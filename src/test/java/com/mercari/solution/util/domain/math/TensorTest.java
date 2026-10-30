@@ -90,4 +90,27 @@ public class TensorTest {
         Assertions.assertEquals(0, Tensor.fill(Tensor.Type.FLOAT, new long[]{2, 0}, 0).size());
     }
 
+
+    // the length of a row is rounded up to a multiple, also of one row and without a difference between the rows
+    @Test
+    public void testStackMultiple() {
+        final Tensor one = Tensor.stack(List.of(Tensor.of(new float[]{1, 2, 3, 4, 5}, new long[]{5})), Float.NaN, true, new long[]{4});
+        Assertions.assertArrayEquals(new long[]{1, 8}, one.shape());
+        Assertions.assertArrayEquals(new float[]{Float.NaN, Float.NaN, Float.NaN, 1, 2, 3, 4, 5}, (float[]) one.data());
+
+        // a length that is a multiple stays
+        final Tensor same = Tensor.stack(List.of(Tensor.of(new float[]{1, 2, 3, 4}, new long[]{4})), Float.NaN, true, new long[]{4});
+        Assertions.assertArrayEquals(new long[]{1, 4}, same.shape());
+
+        // of the longest row
+        final Tensor two = Tensor.stack(List.of(Tensor.of(new float[]{1, 2}, new long[]{2}), Tensor.of(new float[]{3, 4, 5}, new long[]{3})), 0f, false, new long[]{2});
+        Assertions.assertArrayEquals(new long[]{2, 4}, two.shape());
+        Assertions.assertArrayEquals(new float[]{1, 2, 0, 0, 3, 4, 5, 0}, (float[]) two.data());
+
+        // by dimension: 1 keeps the length
+        final Tensor matrix = Tensor.stack(List.of(Tensor.of(new float[]{1, 2, 3}, new long[]{1, 3})), 0f, false, new long[]{1, 2});
+        Assertions.assertArrayEquals(new long[]{1, 1, 4}, matrix.shape());
+        Assertions.assertArrayEquals(new float[]{1, 2, 3, 0}, (float[]) matrix.data());
+    }
+
 }

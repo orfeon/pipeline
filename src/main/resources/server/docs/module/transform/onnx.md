@@ -68,7 +68,8 @@ An item can have these keys besides the select function:
 |-----|-------------|
 | `pad: 0` | Pads the records of a batch to the longest of each dimension with the value, at the tail. Without `pad`, records of different lengths can not form a batch: they are retried one by one, which works but gives up batching. |
 | `pad: { value: 0, side: left }` | Pads at the head. |
-| `fill: 0` | A tensor of the value, instead of a select function. Its shape comes from the model input: a dynamic dim0 is the batch size, other dynamic dimensions are 0. `shape: [2, 3]` specifies the shape explicitly. |
+| `pad: { value: NaN, side: left, multiple: 16 }` | `value` can be `NaN` for a float input (`.nan` in YAML works as well), where a model takes NaN as a missing value. `multiple` rounds the length up to a multiple, also for one record: for a model that only takes such lengths. It applies to the dimensions of the row that are dynamic in the model input; a model input without one is a configuration error. |
+| `fill: 0` | A tensor of the value (`NaN` for a float input only), instead of a select function. Its shape comes from the model input: a dynamic dim0 is the batch size, other dynamic dimensions are 0. `shape: [2, 3]` specifies the shape explicitly. |
 | `empty: [0, 512]` | An empty tensor of the shape, instead of a select function, for an input the model takes but this use does not fill. |
 
 ### Name variables
@@ -118,7 +119,7 @@ dim0 of a model output is the batch if a value was stacked ([Rank of a value](#r
 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
-Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize).
+Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes.
 
 ## Example: text embedding
 
@@ -186,3 +187,76 @@ transforms:
         - { name: label, func: labels, field: index, labels: [negative, neutral, positive] }
       bufferSize: 32
 ```
+
+## Example: choosing among options
+
+Asks a text generation model a question and compares the logits of the tokens that start each option. A model that returns the logits of the last position only, `logits float[B, 1, V]`, gives `[1, V]` for a record. A model split into several `.onnx` files must be merged into one before it is used here: one module runs one model.
+
+```yaml
+transforms:
+  - name: decide
+    module: onnx
+    inputs: [inquiries]
+    parameters:
+      model:
+        path: gs://my-bucket/models/classifier/
+        file: onnx/model_q4.onnx
+      inputs:
+        - name: prompt
+          text: "<|im_start|>user\n${body}\n\nWhich is it? refund / account / other<|im_end|>\n<|im_start|>assistant\n"
+        - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: gs://my-bucket/models/classifier/tokenizer.json, field: prompt, addSpecialTokens: false }
+        - { name: input_ids, field: tok.ids }
+        - { name: attention_mask, field: tok.attentionMask }
+        - { name: "past_conv.%d", fill: 0 }
+        - { name: "past_key_values.%d.%s", fill: 0 }
+        - name: options
+          func: token_ids
+          tokenizer: huggingface
+          path: gs://my-bucket/models/classifier/tokenizer.json
+          texts:
+            - [" refund", "refund"]
+            - [" account", "account"]
+            - [" other", "other"]
+      outputs:
+        - { name: lastLogits, func: squeeze, field: logits, axis: 0 }
+        - { name: probabilities, func: group_softmax, field: lastLogits, groups: options }
+        - { name: index, func: argmax, field: probabilities }
+        - { name: category, func: labels, field: index, labels: [refund, account, other] }
+```
+
+## Example: time series forecast
+
+One record is one series: `aggregation` collects its points, `timeseries_grid` aligns them, and the model gives a quantile forecast of `forecasts float[B, 9, 64]`. The model takes NaN as a missing value and lengths of a multiple of 16.
+
+```yaml
+transforms:
+  - name: series
+    module: aggregation
+    inputs: [sales]
+    parameters:
+      groupFields: [item_id]
+      aggregations:
+        - input: sales
+          fields:
+            - { name: points, op: array_agg, fields: [timestamp, value] }
+  - name: forecast
+    module: onnx
+    inputs: [series]
+    parameters:
+      model:
+        path: gs://my-bucket/models/forecaster/model.onnx
+      inputs:
+        - { name: grid, func: timeseries_grid, field: points, timestampField: timestamp, valueField: value, interval: 1h, length: 512 }
+        - { name: context, field: grid.values, pad: { value: NaN, side: left, multiple: 16 } }
+      outputs:
+        - name: forecast
+          func: timeseries_quantiles
+          field: forecasts
+          levels: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+          start: grid.lastTimestamp
+          interval: 1h
+          select: [0.1, 0.5, 0.9]
+      bufferSize: 32
+```
+
+`forecast` is an array of 64 elements with `timestamp`, `q10`, `q50` and `q90`. Use `flattenField` of a later `select` transform to get a record per step.
