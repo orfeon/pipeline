@@ -2596,6 +2596,11 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(spec.options().variance());
         Assertions.assertFalse(FeatureStages.fmSpecs(List.of(column(plan, "fm_linear"))).get(0).options().variance());
         Assertions.assertTrue(FeatureStages.FM_FIT_ONLY.contains("variance"));
+        // an embedding of no dimension has no column to carry the kind: still warned, not a failure
+        final FeaturePlan empty = compile(SOURCES, withEncoding(FM_BLOCK.replace("{embedding: category, as: cat_emb, dims: 2}",
+                "{embedding: category, as: cat_emb, dims: 0, variance: true}")));
+        Assertions.assertTrue(empty.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("ignored for embedding")), empty::describe);
     }
 
     /**

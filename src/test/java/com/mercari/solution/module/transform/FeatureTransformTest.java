@@ -751,12 +751,13 @@ public class FeatureTransformTest {
         return examples;
     }
 
-    /** The fm outputs of a row against the model it should read (null: every output null). */
+    /** A nullable double column against its expected value (null: the column is null). */
     private static void assertNullable(final Double expected, final MElement row, final String column) {
         if (expected == null) Assertions.assertNull(row.getPrimitiveValue(column), row::toString);
         else Assertions.assertEquals(expected, row.getAsDouble(column), 1e-9 * Math.max(1, Math.abs(expected)), row::toString);
     }
 
+    /** The fm outputs of a row against the model it should read (null: every output null). */
     private static void assertFm(final MElement row, final com.mercari.solution.util.pipeline.feature.Factorization.Model model, final String[] values) {
         if (model == null) {
             Assertions.assertNull(row.getPrimitiveValue("f_fm_linear"), row::toString);
@@ -766,6 +767,8 @@ public class FeatureTransformTest {
             Assertions.assertNull(row.getPrimitiveValue("f_fm_fit_block"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_train_rows"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_linear_var"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_pair_var"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_side_var"), row::toString);
             return;
         }
         // the variances of the readouts, from the precisions the fit kept

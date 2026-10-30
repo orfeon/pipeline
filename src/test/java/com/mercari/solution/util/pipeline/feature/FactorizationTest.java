@@ -884,6 +884,21 @@ public class FactorizationTest {
             Assertions.assertEquals(model.betweenVariance(row, null, new int[]{0}, new int[]{1, 2}), rotated.betweenVariance(row, null, new int[]{0}, new int[]{1, 2}), 1e-9);
             Assertions.assertEquals(model.sumVariance(row, null), rotated.sumVariance(row, null), 1e-9);
         }
+        // a factor that is not identified (no curvature, no ridge) nulls the readouts that read it, and only those
+        final Factorization.Model thin = Factorization.fit(withVariance(fields, false, 2, 40, Factorization.Regularization.uniform(0.5, 3),
+                Factorization.Loss.squared, true), xor(5));
+        final String[] row = {"a1", "b1", "c0"};
+        thin.param(2, "c0")[2 + 3] = 0;
+        Assertions.assertNotNull(thin.betweenVariance(row, null, new int[]{0}, new int[]{1}));
+        Assertions.assertEquals(thin.pairVariance(row, null, 0, 1, false), thin.betweenVariance(row, null, new int[]{0}, new int[]{1}), 1e-12);
+        Assertions.assertNull(thin.betweenVariance(row, null, new int[]{0}, new int[]{1, 2}));
+        Assertions.assertNull(thin.pairVariance(row, null, 0, 2, false));
+        Assertions.assertNull(thin.sumVariance(row, null));
+        // a weight that is not identified does not reach a pair
+        thin.param(2, "c0")[2 + 3] = 1;
+        thin.param(0, "a1")[2 + 2] = 0;
+        Assertions.assertNotNull(thin.pairVariance(row, null, 0, 1, false));
+        Assertions.assertNull(thin.sumVariance(row, null));
         // a fit that keeps no precisions has no variance
         final Factorization.Model plain = Factorization.fit(new Factorization.Options(fields, false, 2, 10, 0.5, 7L), xor(5));
         Assertions.assertNull(plain.pairVariance(new String[]{"a1", "b1", "c0"}, null, 0, 1, false));

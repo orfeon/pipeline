@@ -146,9 +146,9 @@ public final class Factorization {
          */
         public Long changePoint;
         /**
-         * What a precision is divided into to give a posterior variance ({@link #variances}): the mean squared training
-         * residual under squared loss (its curvature counts rows, not information), 1 under logistic and Plackett–Luce
-         * (their curvature is the information); NaN when the fit kept no precisions.
+         * What a precision is divided into to give a posterior variance ({@link #variances}): under squared loss the
+         * residual sum of squares over the residual degrees of freedom (its curvature counts rows, not information), 1
+         * under logistic and Plackett–Luce (their curvature is the information); NaN when the fit kept no precisions.
          */
         public double dispersion = Double.NaN;
 
@@ -248,12 +248,16 @@ public final class Factorization {
         /**
          * The approximate posterior variances {s_w, s_v} of a value's weight and of each coordinate of its factors
          * (dispersion / precision: the diagonal of the information, isotropic over the factor coordinates, so a rotation
-         * of the latent space leaves it unchanged); null for an unknown or missing value or a fit that kept none.
+         * of the latent space leaves it unchanged), NaN for a parameter whose precision is not positive (no curvature and
+         * no ridge: it is not identified); null for an unknown or missing value or a fit that kept none.
          */
         double[] variances(final int f, final String value) {
-            final double[] p = param(f, value);
-            if (p == null || p.length < k + 4 || Double.isNaN(dispersion) || !(p[k + 3] > 0) || !(p[k + 2] > 0)) return null;
-            return new double[]{dispersion / p[k + 2], dispersion / p[k + 3]};
+            return variances(param(f, value));
+        }
+
+        private double[] variances(final double[] p) {
+            if (p == null || p.length < k + 4 || Double.isNaN(dispersion)) return null;
+            return new double[]{p[k + 2] > 0 ? dispersion / p[k + 2] : Double.NaN, p[k + 3] > 0 ? dispersion / p[k + 3] : Double.NaN};
         }
 
         /**
@@ -263,22 +267,21 @@ public final class Factorization {
          * (both shrunk towards 0) from reading as certain. Null where the pair is null or a variance was not kept.
          */
         public Double pairVariance(final String[] values, final double[] x, final int f, final int g, final boolean perUnit) {
-            final String a = perUnit && numeric[f] ? NUMERIC : values[f];
-            final String b = perUnit && numeric[g] ? NUMERIC : values[g];
-            final double[] pa = param(f, a), pb = param(g, b);
-            final double[] sa = variances(f, a), sb = variances(g, b);
-            if (pa == null || pb == null || sa == null || sb == null) return null;
-            final double units = perUnit ? 1d : unit(f, x) * unit(g, x);
-            if (Double.isNaN(units)) return null;
-            final double scaled = r[f][g] * units;
-            return scaled * scaled * (sa[1] * norm2(pb) + sb[1] * norm2(pa) + k * sa[1] * sb[1]);
+            final double[] pa = param(f, perUnit && numeric[f] ? NUMERIC : values[f]);
+            final double[] pb = param(g, perUnit && numeric[g] ? NUMERIC : values[g]);
+            final double[] sa = variances(pa), sb = variances(pb);
+            if (sa == null || sb == null) return null;
+            final double scaled = r[f][g] * (perUnit ? 1d : unit(f, x) * unit(g, x));
+            final double variance = scaled * scaled * (sa[1] * norm2(pb) + sb[1] * norm2(pa) + k * sa[1] * sb[1]);
+            // NaN: a missing numeric value, or a factor that is not identified (its weight's precision is not read here)
+            return Double.isNaN(variance) ? null : variance;
         }
 
         /**
          * The approximate variance of {@link #between}: over the pairs it sums, {@code Σ_f s_f ‖Σ_g r_fg u_f u_g v_g‖²}
          * (the first-order terms, the pairs that share a factor vector added before squaring) plus
          * {@code Σ_{f,g} r_fg² u_f² u_g² k s_f s_g}; the pairs with an unknown value are left out, as from the affinity.
-         * Null when no pair is known or a known value has no variance.
+         * Null when no pair is known, the fit kept no variance or a factor of a known pair is not identified.
          */
         public Double betweenVariance(final String[] values, final double[] x, final int[] left, final int[] right) {
             if (x == null) requireCategorical();
@@ -289,8 +292,8 @@ public final class Factorization {
 
         /**
          * The approximate variance of {@link #predict(String[], double[])} without the bias: the per-value weights'
-         * {@code Σ u_f² s_w} plus the variance of every pair ({@link #betweenVariance}'s form over all of them). Null when a
-         * known value has no variance.
+         * {@code Σ u_f² s_w} plus the variance of every pair ({@link #betweenVariance}'s form over all of them). Null when
+         * the fit kept no variance or a known value's parameter is not identified.
          */
         public Double sumVariance(final String[] values, final double[] x) {
             final boolean[][] pairs = new boolean[fields.size()][fields.size()];
@@ -301,11 +304,14 @@ public final class Factorization {
         private Double pairsVariance(final String[] values, final double[] x, final boolean[][] pairs, final boolean linear) {
             final int F = fields.size();
             final double[] units = new double[F];
-            final double[][] s = new double[F][];
+            // every known value's parameters and variances, looked up once
+            final double[][] p = new double[F][], s = new double[F][];
             for (int f = 0; f < F; f++) {
                 units[f] = unit(f, x);
-                if (param(f, values[f]) == null || Double.isNaN(units[f])) continue;
-                s[f] = variances(f, values[f]);
+                final double[] known = param(f, values[f]);
+                if (known == null || Double.isNaN(units[f])) continue;
+                p[f] = known;
+                s[f] = variances(known);
                 if (s[f] == null) return null;
             }
             double variance = 0;
@@ -314,20 +320,24 @@ public final class Factorization {
                 if (s[f] == null) continue;
                 if (linear) variance += units[f] * units[f] * s[f][0];
                 final double[] gradient = new double[k];
+                boolean paired = false;
                 for (int g = 0; g < F; g++) {
                     if (!pairs[f][g] || s[g] == null) continue;
-                    any = true;
-                    final double[] v = param(g, values[g]);
+                    paired = true;
                     final double scaled = r[f][g] * units[f] * units[g];
-                    for (int d = 0; d < k; d++) gradient[d] += scaled * v[d + 1];
+                    for (int d = 0; d < k; d++) gradient[d] += scaled * p[g][d + 1];
                     // each unordered pair's second-order term once
                     if (g > f) variance += scaled * scaled * k * s[f][1] * s[g][1];
                 }
+                // a value in no known pair of the readout: its factors do not reach it
+                if (!paired) continue;
+                any = true;
                 double norm = 0;
                 for (final double d : gradient) norm += d * d;
                 variance += s[f][1] * norm;
             }
-            return any ? variance : null;
+            // NaN: a parameter the readout reads is not identified
+            return any && !Double.isNaN(variance) ? variance : null;
         }
 
         private double norm2(final double[] p) {
@@ -1184,7 +1194,8 @@ public final class Factorization {
         // wherever the parameters are many, and differently at every forward change point)
         if (options.variance()) {
             if (options.loss() == Loss.squared) {
-                double parameters = contest ? 0 : 1;
+                // the bias (squared loss always fits one)
+                double parameters = 1;
                 for (int f = 0; f < F; f++) {
                     for (int id = 0; id < names.get(f).size(); id++) {
                         final int rows = start[f][id + 1] - start[f][id];
@@ -1338,9 +1349,9 @@ public final class Factorization {
         final double delta(final int[] rows, final int from, final int to, final double[] h, final double theta, final double reg) {
             final double[] gh = derivatives(rows, from, to, h);
             this.curvature = gh[1];
-            final double curvature = gh[1] + reg;
-            if (!(curvature > 0)) return 0;
-            final double step = (gh[0] - reg * theta) / curvature;
+            final double precision = gh[1] + reg;
+            if (!(precision > 0)) return 0;
+            final double step = (gh[0] - reg * theta) / precision;
             return exact() ? step : capped(step);
         }
 
@@ -1733,7 +1744,8 @@ public final class Factorization {
             manifest.addProperty("variant", model.fieldWeighted ? "fwfm" : "fm");
             manifest.addProperty("latentDim", model.k);
             manifest.addProperty("loss", model.loss);
-            if (!Double.isNaN(model.dispersion)) manifest.addProperty("dispersion", model.dispersion);
+            // a diverged fit's +Infinity as a string: JSON has no non-finite number (FitArtifact#lambdaJson)
+            if (!Double.isNaN(model.dispersion)) manifest.add("dispersion", FitArtifact.lambdaJson(model.dispersion));
             // the standardisation of every numeric field: what a serving run's values are scaled by
             final JsonObject numericFields = new JsonObject();
             for (int f = 0; f < model.fields.size(); f++) {
