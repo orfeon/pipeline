@@ -3,7 +3,6 @@ package com.mercari.solution.util.domain.ml.onnx;
 import ai.djl.ndarray.NDArray;
 import ai.onnxruntime.*;
 import com.google.api.services.storage.Storage;
-import com.google.api.services.storage.model.StorageObject;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
@@ -17,36 +16,40 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 public class OnnxModel implements Serializable {
 
     private static final Logger LOG = LoggerFactory.getLogger(OnnxModel.class);
 
-    private static final String ONNX_BASE_DIR = "/onnxruntime/";
-
-    private static final Map<String, OrtSession> sessions = new HashMap<>();
+    // shared by every onnx module in the JVM (OrtSession.run is thread-safe), keyed by Config.sessionKey
+    private static final Map<String, OrtSession> sessions = new ConcurrentHashMap<>();
 
     private final Config config;
 
     public static class Config implements Serializable {
 
         private String path;
+        private String file;
+        private Integer intraOpThreads;
+        private Integer interOpThreads;
         private OrtSession.SessionOptions.OptLevel optLevel;
         private OrtSession.SessionOptions.ExecutionMode executionMode;
         private String configPath;
-        private transient JsonObject schema;
 
         public List<String> validate() {
             final List<String> errorMessages = new ArrayList<>();
             if(this.path == null) {
                 errorMessages.add("onnx model.path must not be null");
-            } else if(!path.startsWith("gs://")) {
-                //errorMessages.add("onnx model.path must start with gs://");
+            } else if(file != null && path.startsWith("gs://") && !path.endsWith("/")) {
+                errorMessages.add("onnx model.file requires model.path to be a directory ending with '/': " + path);
             }
-            if(schema != null) {
-                if(Schema.parse(schema) == null) {
-                    errorMessages.add("onnx model.schema is illegal: " + schema);
-                }
+            if(intraOpThreads != null && intraOpThreads < 1) {
+                errorMessages.add("onnx model.intraOpThreads must be over than zero");
+            }
+            if(interOpThreads != null && interOpThreads < 1) {
+                errorMessages.add("onnx model.interOpThreads must be over than zero");
             }
             return errorMessages;
         }
@@ -58,6 +61,10 @@ public class OnnxModel implements Serializable {
             if(executionMode == null) {
                 executionMode = OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL;
             }
+            // one thread per inference: worker threads share the session and run inferences in parallel
+            if(intraOpThreads == null) {
+                intraOpThreads = 1;
+            }
         }
 
         public static Config create(String path) {
@@ -66,22 +73,11 @@ public class OnnxModel implements Serializable {
             config.setDefaults();
             return config;
         }
-    }
 
-    public static class OnnxSessionOptions implements Serializable {
-
-        private OrtSession.SessionOptions.OptLevel optLevel;
-        private OrtSession.SessionOptions.ExecutionMode executionMode;
-        private OrtLoggingLevel sessionLogLevel;
-        private Boolean cpuArenaAllocator;
-        private Boolean deterministicCompute;
-        private Boolean memoryPatternOptimization;
-        private Boolean disablePerSessionThreads;
-
-    }
-
-    public static class OnnxRunOptions implements Serializable {
-
+        private String sessionKey() {
+            return String.join("|", path, String.valueOf(file), String.valueOf(optLevel), String.valueOf(executionMode),
+                    String.valueOf(intraOpThreads), String.valueOf(interOpThreads));
+        }
     }
 
     private OnnxModel(Config config) {
@@ -90,19 +86,6 @@ public class OnnxModel implements Serializable {
 
     public static OnnxModel create(final Config config) {
         return new OnnxModel(config);
-    }
-
-    public Schema outputSchema() {
-        return Optional
-                .ofNullable(Schema.parse(config.schema))
-                .orElseGet(() -> {
-                    final OrtSession session = getOrCreateSession(config);
-                    try {
-                        return OnnxToElementConverter.convertOutputSchema(session.getOutputInfo(), null);
-                    } catch (OrtException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
     }
 
     public Schema inputSchema() {
@@ -146,9 +129,7 @@ public class OnnxModel implements Serializable {
             final OrtSession.RunOptions runOptions,
             Set<String> requestedOutputs) {
 
-        final OrtSession session = Optional
-                .ofNullable(sessions.get(config.path))
-                .orElseGet(() -> getOrCreateSession(config));
+        final OrtSession session = getOrCreateSession(config);
 
         if(requestedOutputs == null) {
             requestedOutputs = session.getOutputNames();
@@ -162,102 +143,117 @@ public class OnnxModel implements Serializable {
     }
 
     public void close() {
-        closeSession(config.path);
+        closeSession(config.sessionKey());
     }
 
-    synchronized static private OrtSession getOrCreateSession(
-            final Config config) {
-
-        final OrtSession session = sessions.get(config.path);
+    private static OrtSession getOrCreateSession(final Config config) {
+        final OrtSession session = sessions.get(config.sessionKey());
         if(session != null) {
             return session;
         }
-        createSession(config);
-        return sessions.get(config.path);
+        return createSession(config);
     }
 
-    synchronized static private void createSession(
+    synchronized static private OrtSession createSession(
             final Config config) {
 
-        if(sessions.containsKey(config.path)) {
-            LOG.info("setup onnx module: {} skipped creating session", config.path);
-            return;
+        final String key = config.sessionKey();
+        if(sessions.containsKey(key)) {
+            LOG.info("setup onnx module: {} skipped creating session", key);
+            return sessions.get(key);
         }
-
 
         try (final OrtSession.SessionOptions sessionOptions = new OrtSession.SessionOptions()) {
             sessionOptions.setOptimizationLevel(config.optLevel);
             sessionOptions.setExecutionMode(config.executionMode);
+            if(config.intraOpThreads != null) {
+                sessionOptions.setIntraOpNumThreads(config.intraOpThreads);
+            }
+            if(config.interOpThreads != null) {
+                sessionOptions.setInterOpNumThreads(config.interOpThreads);
+            }
             try {
                 sessionOptions.registerCustomOpLibrary(getExtensionsLibraryPath());
             } catch (Throwable e) {
-                LOG.warn("setup onnx module: {} is creating session. skipped to load extensions library", config.path);
+                LOG.warn("setup onnx module: {} is creating session. skipped to load extensions library", key);
             }
 
             final OrtEnvironment environment = OrtEnvironment.getEnvironment();
-            final OrtSession session = loadOnnxFiles(environment, sessionOptions, config.path);
-            sessions.put(config.path, session);
-            LOG.info("setup onnx module: {} created session", config.path);
+            final OrtSession session = loadOnnxFiles(environment, sessionOptions, config.path, config.file);
+            sessions.put(key, session);
+            LOG.info("setup onnx module: {} created session", key);
             LOG.info("onnx model: {}", description(session));
+            return session;
         } catch (final OrtException e) {
             throw new RuntimeException("Failed to create onnxruntime session", e);
         }
     }
 
-    synchronized static private OrtSession loadOnnxFiles(
+    private static OrtSession loadOnnxFiles(
             final OrtEnvironment environment,
             final OrtSession.SessionOptions sessionOptions,
-            final String path) {
+            final String path,
+            final String file) {
 
         try {
             if (path.startsWith("gs://")) {
                 final Storage storage = StorageUtil.storage();
                 if (path.endsWith("/")) {
-                    final String localDirPath = ONNX_BASE_DIR + UUID.randomUUID() + "/";
-                    Files.createDirectories(Path.of(localDirPath));
-                    final List<StorageObject> objects = StorageUtil.listFiles(path);
-                    for (final StorageObject object : objects) {
-                        final String fileName = getFileName(object.getName());
-                        final File file = new File(localDirPath + fileName);
-                        if (!file.createNewFile()) {
-                            throw new IllegalStateException("Failed to create file: " + file);
-                        }
-                        try (final FileOutputStream fos = new FileOutputStream(file);
-                             final BufferedOutputStream bos = new BufferedOutputStream(fos)) {
-
-                            StorageUtil.downloadTo(storage, object, bos);
-                            bos.flush();
-                        }
-                    }
-                    return environment.createSession(localDirPath, sessionOptions);
-                    //Files.deleteIfExists(Path.of(localDirPath));
+                    // a directory keeps its layout so that external data files (*.onnx_data) resolve next to the model
+                    final Path localDir = Files.createTempDirectory("onnxruntime-");
+                    StorageUtil.downloadDirectory(storage, path, localDir, name -> true);
+                    return environment.createSession(resolveModelFile(localDir, file).toString(), sessionOptions);
                 } else {
                     final byte[] bytes = StorageUtil.readBytes(storage, path);
                     return environment.createSession(bytes, sessionOptions);
                 }
+            } else if (Files.isDirectory(Path.of(path))) {
+                return environment.createSession(resolveModelFile(Path.of(path), file).toString(), sessionOptions);
             } else if (Files.exists(Path.of(path))) {
+                if (file != null) {
+                    throw new IllegalArgumentException("onnx model.file requires model.path to be a directory: " + path);
+                }
                 return environment.createSession(path, sessionOptions);
             } else {
-                throw new RuntimeException("onnx file path is illegal: " + path);
+                throw new IllegalArgumentException("onnx file path is illegal: " + path);
             }
         } catch (IOException | OrtException e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Failed to load onnx model: " + path, e);
         }
     }
 
-    synchronized static private void closeSession(final String name) {
-        if(sessions.containsKey(name)) {
-            try(final OrtSession session = sessions.remove(name);) {
-                LOG.info("teardown onnx module: {} closed session", name);
+    /** The model file in a directory: {@code file} relative to it, else the only {@code .onnx} file under it. */
+    static Path resolveModelFile(final Path dir, final String file) throws IOException {
+        if (file != null) {
+            final Path modelFile = dir.resolve(file);
+            if (!Files.isRegularFile(modelFile)) {
+                throw new IllegalArgumentException("onnx model.file: " + file + " is not found in model.path directory");
+            }
+            return modelFile;
+        }
+        final List<Path> candidates;
+        try (final Stream<Path> stream = Files.walk(dir)) {
+            candidates = stream
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(".onnx"))
+                    .sorted()
+                    .toList();
+        }
+        if (candidates.size() != 1) {
+            throw new IllegalArgumentException("onnx model.path directory must contain exactly one .onnx file when model.file is not specified, but found: "
+                    + candidates.stream().map(p -> dir.relativize(p).toString().replace('\\', '/')).toList());
+        }
+        return candidates.getFirst();
+    }
+
+    synchronized static private void closeSession(final String key) {
+        if(sessions.containsKey(key)) {
+            try(final OrtSession session = sessions.remove(key)) {
+                LOG.info("teardown onnx module: {} closed session", key);
             } catch (final OrtException e) {
-                LOG.error("teardown onnx module: {} failed to close session cause: {}", name, e.getMessage());
+                LOG.error("teardown onnx module: {} failed to close session cause: {}", key, e.getMessage());
             }
         }
-    }
-
-    private static String getFileName(String path) {
-        final String[] paths = path.split("/");
-        return paths[paths.length - 1];
     }
 
     public static String description(final OrtSession session) {

@@ -3,7 +3,9 @@
     "dataflow": {
       "maxNumWorkers": 10,
       "workerMachineType": "e2-highmem-8",
-      "experiments": ["use_runner_v2"]
+      "experiments": [
+        "use_runner_v2"
+      ]
     }
   },
   "sources": [
@@ -28,69 +30,94 @@
   ],
   "transforms": [
     {
-      "name": "OnnxInference",
+      "name": "OnnxContent",
       "module": "onnx",
       "inputs": [
-        "BigQueryContentInput",
-        "BigQueryDocInput"
+        "BigQueryContentInput"
       ],
       "parameters": {
-        "bufferSize": 1,
         "model": {
           "path": "gs://example-bucket/onnx/multilingual_v3.onnx",
           "optLevel": "BASIC_OPT",
-          "executionMode": "SEQUENTIAL",
-          "outputSchemaFields": [
-            { "name": "outputs", "type": "float", "mode": "repeated" }
-          ]
+          "executionMode": "SEQUENTIAL"
         },
-        "inferences": [
+        "bufferSize": 1,
+        "mappings": [
           {
-            "input": "BigQueryContentInput",
-            "mappings": [
-              {
-                "inputs": {
-                  "inputs": "Abstract"
-                },
-                "outputs": {
-                  "outputs": "EmbeddingAbstract"
-                }
-              },
-              {
-                "inputs": {
-                  "inputs": "Content"
-                },
-                "outputs": {
-                  "outputs": "EmbeddingContent"
-                }
-              }
-            ],
-            "select": [
-              { "name": "ContentID" },
-              { "name": "Name" },
-              { "name": "Embedding", "field": "EmbeddingContent" },
-              { "name": "EmbeddingAbstract" },
-              { "name": "ProcessedAt", "func": "current_timestamp" }
-            ]
+            "inputs": {
+              "Abstract": "inputs"
+            },
+            "outputs": {
+              "outputs": "EmbeddingAbstract"
+            }
           },
           {
-            "input": "BigQueryDocInput",
-            "mappings": [
-              {
-                "inputs": {
-                  "inputs": "Text"
-                },
-                "outputs": {
-                  "outputs": "EmbeddingText"
-                }
-              }
-            ],
-            "select": [
-              { "name": "DocID" },
-              { "name": "Title" },
-              { "name": "Embedding", "field": "EmbeddingText" },
-              { "name": "ProcessedAt", "func": "current_timestamp" }
-            ]
+            "inputs": {
+              "Content": "inputs"
+            },
+            "outputs": {
+              "outputs": "EmbeddingContent"
+            }
+          }
+        ],
+        "postprocesses": [
+          {
+            "name": "ContentID"
+          },
+          {
+            "name": "Name"
+          },
+          {
+            "name": "Embedding",
+            "field": "EmbeddingContent"
+          },
+          {
+            "name": "EmbeddingAbstract"
+          },
+          {
+            "name": "ProcessedAt",
+            "func": "current_timestamp"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OnnxDoc",
+      "module": "onnx",
+      "inputs": [
+        "BigQueryDocInput"
+      ],
+      "parameters": {
+        "model": {
+          "path": "gs://example-bucket/onnx/multilingual_v3.onnx",
+          "optLevel": "BASIC_OPT",
+          "executionMode": "SEQUENTIAL"
+        },
+        "bufferSize": 1,
+        "mappings": [
+          {
+            "inputs": {
+              "Text": "inputs"
+            },
+            "outputs": {
+              "outputs": "EmbeddingText"
+            }
+          }
+        ],
+        "postprocesses": [
+          {
+            "name": "DocID"
+          },
+          {
+            "name": "Title"
+          },
+          {
+            "name": "Embedding",
+            "field": "EmbeddingText"
+          },
+          {
+            "name": "ProcessedAt",
+            "func": "current_timestamp"
           }
         ]
       }
@@ -100,7 +127,9 @@
     {
       "name": "VectorSearchContentOutput",
       "module": "matchingEngine",
-      "input": "OnnxInference.BigQueryContentInput",
+      "inputs": [
+        "OnnxContent"
+      ],
       "parameters": {
         "projectId": "myproject",
         "region": "us-central1",
@@ -113,7 +142,9 @@
     {
       "name": "VectorSearchAbstractOutput",
       "module": "matchingEngine",
-      "input": "OnnxInference.BigQueryContentInput",
+      "inputs": [
+        "OnnxContent"
+      ],
       "parameters": {
         "projectId": "myproject",
         "region": "us-central1",
@@ -126,7 +157,9 @@
     {
       "name": "VectorSearchDocOutput",
       "module": "matchingEngine",
-      "input": "OnnxInference.BigQueryDocInput",
+      "inputs": [
+        "OnnxDoc"
+      ],
       "parameters": {
         "projectId": "myproject",
         "region": "us-central1",

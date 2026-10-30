@@ -14,8 +14,11 @@ import com.mercari.solution.util.schema.converter.OnnxToElementConverter;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.*;
 import org.checkerframework.checker.nullness.qual.NonNull;
+import org.joda.time.Duration;
+import org.joda.time.Instant;
 
 import java.io.Serializable;
 import java.util.*;
@@ -35,16 +38,19 @@ public class OnnxTransform extends Transform {
         private JsonArray preprocesses;
         private JsonArray postprocesses;
 
-        private List<String> groupFields;
-
         private DataType outputType;
 
-        public void validate(final Map<String, Schema> inputSchemas) {
+        public void validate() {
             final List<String> errorMessages = new ArrayList<>();
             if(model == null) {
                 errorMessages.add("parameters.model must not be null");
             } else {
                 errorMessages.addAll(model.validate());
+            }
+            if(mapping == null && (mappings == null || mappings.isEmpty())) {
+                errorMessages.add("parameters.mappings must not be empty");
+            } else if(mapping != null && mappings != null && !mappings.isEmpty()) {
+                errorMessages.add("parameters.mapping and parameters.mappings must not be specified together");
             }
 
             if(bufferSize != null && bufferSize < 1) {
@@ -58,13 +64,12 @@ public class OnnxTransform extends Transform {
 
         public void setDefaults() {
             model.setDefaults();
-            if(mappings == null) {
-
-            } else {
-
+            if(mappings == null || mappings.isEmpty()) {
+                mappings = new ArrayList<>();
+                mappings.add(mapping);
             }
-            if(this.groupFields == null) {
-                this.groupFields = new ArrayList<>();
+            for(final MappingConfig m : mappings) {
+                m.setDefaults();
             }
 
             if(bufferSize == null) {
@@ -82,13 +87,6 @@ public class OnnxTransform extends Transform {
         private Map<String, String> inputs;
         private Map<String, String> outputs;
 
-        public MappingConfig create(Map<String, String> inputs, Map<String, String> outputs) {
-            final MappingConfig config = new MappingConfig();
-            config.inputs = inputs;
-            config.outputs = outputs;
-            return config;
-        }
-
         public void setDefaults() {
             if(inputs == null) {
                 inputs = new HashMap<>();
@@ -97,22 +95,49 @@ public class OnnxTransform extends Transform {
                 outputs = new HashMap<>();
             }
         }
+
+        // model output names to request; null requests every output of the model
+        private Set<String> requestedOutputs() {
+            return outputs.isEmpty() ? null : outputs.keySet();
+        }
+
+        private String outputFieldName(final String outputName) {
+            return outputs.getOrDefault(outputName, outputName);
+        }
     }
 
     private static Schema mergeSchema(
             final Schema inputSchema,
             final Select preprocesses,
-            final Schema onnxOutputSchema) {
+            final OnnxModel model,
+            final List<MappingConfig> mappings) {
 
-        final Schema.Builder builder = Schema.builder(inputSchema);
-        final Schema selectOutputSchema = Select.createOutputSchema(preprocesses);
-        for(final Schema.Field field : selectOutputSchema.getFields()) {
-            builder.withField(field);
+        // a later field replaces one of the same name, as its value does in the record
+        final Map<String, Schema.Field> fields = new LinkedHashMap<>();
+        for(final Schema.Field field : inputSchema.getFields()) {
+            fields.put(field.getName(), field.copy());
         }
-        for(final Schema.Field field : onnxOutputSchema.getFields()) {
-            builder.withField(field);
+        if(preprocesses.useSelect()) {
+            for(final Schema.Field field : Select.createOutputSchema(preprocesses).getFields()) {
+                fields.put(field.getName(), field);
+            }
         }
-        return builder.withType(DataType.ELEMENT).build();
+        final Map<String, NodeInfo> outputInfo = model.getOutputInfo();
+        for(final MappingConfig mapping : mappings) {
+            final List<String> outputNames = mapping.outputs.isEmpty()
+                    ? new ArrayList<>(outputInfo.keySet()) : new ArrayList<>(mapping.outputs.keySet());
+            final Schema onnxOutputSchema = OnnxToElementConverter.convertOutputSchema(outputInfo, outputNames);
+            for(final Schema.Field field : onnxOutputSchema.getFields()) {
+                final String name = mapping.outputFieldName(field.getName());
+                fields.put(name, Schema.Field.of(name, field.getFieldType()));
+            }
+        }
+        // from the fields only: Schema.builder(inputSchema) would keep the Avro schema of the input (BigQuery, Avro files, ...),
+        // and the records would be written with it, without the added fields
+        return Schema.builder()
+                .withFields(new ArrayList<>(fields.values()))
+                .withType(DataType.ELEMENT)
+                .build();
     }
 
     @NonNull
@@ -122,7 +147,7 @@ public class OnnxTransform extends Transform {
             MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
-        parameters.validate(new HashMap<>()); // TODO
+        parameters.validate();
         parameters.setDefaults();
 
         final PCollection<MElement> input = inputs
@@ -133,9 +158,8 @@ public class OnnxTransform extends Transform {
         final Select preprocessors = Select.of(parameters.preprocesses, inputSchema.getFields());
 
         final OnnxModel model = OnnxModel.create(parameters.model);
-        final Schema onnxOutputSchema = model.outputSchema();
 
-        Schema outputSchema = mergeSchema(inputSchema, preprocessors, onnxOutputSchema);
+        Schema outputSchema = mergeSchema(inputSchema, preprocessors, model, parameters.mappings);
         final Select postprocessors = Select.of(parameters.postprocesses, outputSchema.getFields());
         if(postprocessors.useSelect()) {
             outputSchema = Select.createOutputSchema(postprocessors);
@@ -174,7 +198,15 @@ public class OnnxTransform extends Transform {
         private final TupleTag<BadRecord> failureTag;
         private final boolean failFast;
 
-        private transient List<MElement> buffer;
+        // buffered elements per window: a batch is flushed by the element that fills it, which shares its window
+        private transient Map<BoundedWindow, List<Buffered>> buffers;
+
+        private record Buffered(MElement element, Map<String, Object> values, Instant timestamp) {}
+
+        private interface Emitter {
+            void output(MElement element, Instant timestamp);
+            void failure(BadRecord badRecord, Instant timestamp);
+        }
 
         public InferenceDoFn(
                 final OnnxModel model,
@@ -203,7 +235,7 @@ public class OnnxTransform extends Transform {
 
         @Setup
         public void setup() {
-            this.buffer = new ArrayList<>();
+            this.buffers = new LinkedHashMap<>();
             this.model.setup();
             this.filter.setup();
             this.preprocessors.setup();
@@ -213,102 +245,133 @@ public class OnnxTransform extends Transform {
 
         @StartBundle
         public void startBundle(final StartBundleContext c) {
-            this.buffer.clear();
+            this.buffers.clear();
         }
 
-        /*
         @FinishBundle
         public void finishBundle(final FinishBundleContext c) {
-            if(!buffer.isEmpty()) {
-                inference(buffer);
-                buffer.clear();
+            for(final Map.Entry<BoundedWindow, List<Buffered>> entry : buffers.entrySet()) {
+                final BoundedWindow window = entry.getKey();
+                flush(entry.getValue(), new Emitter() {
+                    @Override
+                    public void output(final MElement element, final Instant timestamp) {
+                        c.output(element, timestamp, window);
+                    }
+                    @Override
+                    public void failure(final BadRecord badRecord, final Instant timestamp) {
+                        c.output(failureTag, badRecord, timestamp, window);
+                    }
+                });
             }
+            buffers.clear();
         }
-         */
+
+        // buffered elements are emitted at their own event time, which may precede the element that flushes the batch
+        @Override
+        public Duration getAllowedTimestampSkew() {
+            return Duration.millis(Long.MAX_VALUE);
+        }
 
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final MElement input = c.element();
             if(input == null) {
                 return;
             }
 
+            final Map<String, Object> values;
             try {
                 if(!filter.filter(input)) {
                     return;
                 }
-
-                buffer.add(input);
-                if(buffer.size() >= bufferSize) {
-                    processBuffer(c);
-                    buffer.clear();
+                values = input.asPrimitiveMap();
+                if(preprocessors.useSelect()) {
+                    values.putAll(preprocessors.select(input, c.timestamp()));
                 }
             } catch (final Throwable e) {
-                final BadRecord badRecord = processError("Failed to inference onnx", input, e, failFast);
+                final BadRecord badRecord = processError("Failed to preprocess onnx input", input, e, failFast);
                 c.output(failureTag, badRecord);
+                return;
+            }
+
+            final List<Buffered> buffer = buffers.computeIfAbsent(window, w -> new ArrayList<>());
+            buffer.add(new Buffered(input, values, c.timestamp()));
+            if(buffer.size() >= bufferSize) {
+                buffers.remove(window);
+                flush(buffer, new Emitter() {
+                    @Override
+                    public void output(final MElement element, final Instant timestamp) {
+                        c.outputWithTimestamp(element, timestamp);
+                    }
+                    @Override
+                    public void failure(final BadRecord badRecord, final Instant timestamp) {
+                        c.outputWithTimestamp(failureTag, badRecord, timestamp);
+                    }
+                });
             }
         }
 
-        private void processBuffer(ProcessContext c) throws OrtException {
-            final List<Map<String,Object>> inputs = new ArrayList<>();
-            for(final MElement element : buffer) {
-                final Map<String,Object> values = element.asPrimitiveMap();
-                final Map<String,Object> values_ = preprocessors.select(element, c.timestamp());
-                values.putAll(values_);
-                inputs.add(values);
+        private void flush(final List<Buffered> buffer, final Emitter emitter) {
+            final List<Map<String, Object>> outputs;
+            try {
+                final List<Map<String, Object>> inputs = new ArrayList<>();
+                for(final Buffered buffered : buffer) {
+                    inputs.add(buffered.values);
+                }
+                outputs = inference(inputs);
+            } catch (final Throwable e) {
+                for(final Buffered buffered : buffer) {
+                    final BadRecord badRecord = processError("Failed to inference onnx", buffered.element, e, failFast);
+                    emitter.failure(badRecord, buffered.timestamp);
+                }
+                return;
             }
-            final List<Map<String,Object>> outputs = inference(inputs);
-            for(Map<String, Object> values : outputs) {
-                values = postprocessors.select(values, c.timestamp());
-                MElement output = MElement.of(values, c.timestamp());
-                output = output.convert(outputSchema.withType(DataType.AVRO));
-                c.output(output);
+
+            for(int i=0; i<buffer.size(); i++) {
+                final Buffered buffered = buffer.get(i);
+                final MElement output;
+                try {
+                    final Map<String, Object> values = postprocessors.select(outputs.get(i), buffered.timestamp);
+                    output = MElement.of(values, buffered.timestamp)
+                            .convert(outputSchema.withType(DataType.AVRO));
+                } catch (final Throwable e) {
+                    final BadRecord badRecord = processError("Failed to postprocess onnx output", buffered.element, e, failFast);
+                    emitter.failure(badRecord, buffered.timestamp);
+                    continue;
+                }
+                // outside the try: an error thrown by a fused downstream step is not a failure of this record
+                emitter.output(output, buffered.timestamp);
             }
         }
 
         private List<Map<String,Object>> inference(final List<Map<String,Object>> inputs) throws OrtException {
             for(final MappingConfig mapping : mappings) {
                 final List<Map<String,Object>> inputValuesList = new ArrayList<>();
-                for(int i=0; i<inputs.size(); i++) {
-                    final Map<String, Object> inputValues = createMap(inputs.get(i), mapping.inputs.keySet());
+                for(final Map<String, Object> input : inputs) {
+                    final Map<String, Object> inputValues = new HashMap<>();
                     for(final Map.Entry<String, String> inputEntry : mapping.inputs.entrySet()) {
-                        inputValues.put(inputEntry.getValue(), inputValues.remove(inputEntry.getKey()));
+                        inputValues.put(inputEntry.getValue(), ElementSchemaUtil.getValue(input, inputEntry.getKey()));
                     }
                     inputValuesList.add(inputValues);
                 }
-                final Map<String, OnnxTensor> values = ElementToOnnxConverter
+                final Map<String, OnnxTensor> tensors = ElementToOnnxConverter
                         .convert_(OrtEnvironment.getEnvironment(), model.getInputInfo(), inputValuesList);
-
-                try(final OrtSession.Result result = model.run(values, null, mapping.outputs.keySet())) {
-                    final List<Map<String,Object>> results = OnnxToElementConverter.convert(result);
+                try(final OrtSession.Result result = model.run(tensors, null, mapping.requestedOutputs())) {
+                    final List<Map<String,Object>> results = OnnxToElementConverter.convert(result, inputs.size());
                     for(int i=0; i<inputs.size(); i++) {
-                        final Map<String,Object> outputValues = results.get(i);
-                        for(final Map.Entry<String, String> outputEntry : mapping.outputs.entrySet()) {
-                            outputValues.put(outputEntry.getValue(), outputValues.remove(outputEntry.getKey()));
+                        for(final Map.Entry<String, Object> outputEntry : results.get(i).entrySet()) {
+                            inputs.get(i).put(mapping.outputFieldName(outputEntry.getKey()), outputEntry.getValue());
                         }
-                        inputs.get(i).putAll(outputValues);
+                    }
+                } finally {
+                    for(final OnnxTensor tensor : tensors.values()) {
+                        tensor.close();
                     }
                 }
             }
             return inputs;
         }
 
-        private static Map<String, Object> createMap(
-                final Map<String, Object> map,
-                final Collection<String> fields) {
-            return updateMap(new HashMap<>(), map, fields);
-        }
-
-        private static Map<String, Object> updateMap(
-                final Map<String, Object> newMap,
-                final Map<String, Object> map,
-                final Collection<String> fields) {
-            for(final String field : fields) {
-                final Object value = ElementSchemaUtil.getValue(map, field);
-                newMap.put(field, value);
-            }
-            return newMap;
-        }
     }
 
 }

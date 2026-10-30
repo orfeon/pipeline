@@ -3,7 +3,6 @@ package com.mercari.solution.util.domain.text.tokenizer;
 import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import com.google.api.services.storage.Storage;
-import com.google.api.services.storage.model.StorageObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
 
@@ -11,12 +10,11 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
 
-    private static final String TOKENIZER_BASE_DIR = "/huggingface-tokenizers/";
-
-    private static final Map<String, HuggingFaceTokenizer> tokenizers = new HashMap<>();
+    private static final Map<String, HuggingFaceTokenizer> tokenizers = new ConcurrentHashMap<>();
 
     private final String path;
     private final String field;
@@ -56,7 +54,7 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
 
     @Override
     public void setup() {
-        getOrLoadTokenizer(tokenizers, path);
+        getOrLoadTokenizer(tokenizers, path, config);
     }
 
     @Override
@@ -70,12 +68,12 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
     }
 
     @Override
-    public String decode(long[] ids) {
+    public String decode(long[] ids, boolean skipSpecialTokens) {
         final HuggingFaceTokenizer tokenizer = getTokenizer();
         if(tokenizer == null) {
             return null;
         }
-        return tokenizer.decode(ids);
+        return tokenizer.decode(ids, skipSpecialTokens);
     }
 
     @Override
@@ -124,98 +122,112 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
 
     private HuggingFaceTokenizer getTokenizer() {
         return Optional
-                .ofNullable(tokenizers.get(path))
-                .orElseGet(() -> getOrLoadTokenizer(tokenizers, path));
+                .ofNullable(tokenizers.get(cacheKey(path, config)))
+                .orElseGet(() -> getOrLoadTokenizer(tokenizers, path, config));
     }
 
-    public synchronized static HuggingFaceTokenizer getOrLoadTokenizer(
-            final Map<String, HuggingFaceTokenizer> tokenizers,
-            final String path) {
+    // the same file loaded with different options is a different tokenizer
+    private static String cacheKey(final String path, final MTokenizerConfig config) {
+        if(config == null) {
+            return path;
+        }
+        return String.join("|", path, String.valueOf(config.addSpecialTokens), String.valueOf(config.truncation),
+                String.valueOf(config.maxLength), String.valueOf(config.padding), String.valueOf(config.stride),
+                String.valueOf(config.withOverflowingTokens));
+    }
 
-        if(tokenizers.containsKey(path)) {
-            final HuggingFaceTokenizer tokenizer = tokenizers.get(path);
-            if(tokenizer != null) {
-                return tokenizer;
-            }
+    public static HuggingFaceTokenizer getOrLoadTokenizer(
+            final Map<String, HuggingFaceTokenizer> tokenizers,
+            final String path,
+            final MTokenizerConfig config) {
+
+        final HuggingFaceTokenizer tokenizer = tokenizers.get(cacheKey(path, config));
+        if(tokenizer != null) {
+            return tokenizer;
         }
         try {
-            loadTokenizer(tokenizers, path);
-            return tokenizers.get(path);
+            return loadTokenizer(tokenizers, path, config);
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Failed to load tokenizer: " + path, e);
         }
     }
 
-    public synchronized static void loadTokenizer(
+    public synchronized static HuggingFaceTokenizer loadTokenizer(
             final Map<String, HuggingFaceTokenizer> tokenizers,
-            final String path) throws IOException {
+            final String path,
+            final MTokenizerConfig config) throws IOException {
 
-        if(tokenizers.containsKey(path)) {
-            return;
+        final String key = cacheKey(path, config);
+        if(tokenizers.containsKey(key)) {
+            return tokenizers.get(key);
         }
 
+        final Path localPath;
         if (path.startsWith("gs://")) {
-            final String localDirPath = TOKENIZER_BASE_DIR + UUID.randomUUID() + "/";
-            Files.createDirectories(Path.of(localDirPath));
-
+            final Path localDirPath = Files.createTempDirectory("huggingface-tokenizers-");
             final Storage storage = StorageUtil.storage();
             if(path.endsWith("/")) {
-                final List<StorageObject> objects = StorageUtil.listFiles(path);
-                for(final StorageObject object : objects) {
-                    final String fileName = getFileName(object.getName());
-                    final File file = new File(localDirPath + fileName);
-                    if(!file.createNewFile()) {
-                        throw new IllegalStateException("Failed to create file: " + file);
-                    }
-                    try (final FileOutputStream fos = new FileOutputStream(file);
-                         final BufferedOutputStream bos = new BufferedOutputStream(fos)) {
-
-                        StorageUtil.downloadTo(storage, object, bos);
-                        bos.flush();
-                    }
-                }
+                StorageUtil.downloadDirectory(storage, path, localDirPath, MHuggingFaceTokenizer::isTokenizerFile);
+                localPath = localDirPath;
             } else if(path.endsWith(".json")) {
-                final String fileName = getFileName(path);
-                final File file = new File(localDirPath + fileName);
-                if(!file.createNewFile()) {
-                    throw new IllegalStateException("Failed to create file: " + file);
+                final Path file = localDirPath.resolve(StorageUtil.getFilename(path));
+                try (final OutputStream os = new BufferedOutputStream(Files.newOutputStream(file))) {
+                    StorageUtil.downloadTo(storage, path, os);
                 }
-                try (final FileOutputStream fos = new FileOutputStream(file);
-                     final BufferedOutputStream bos = new BufferedOutputStream(fos)) {
-
-                    StorageUtil.downloadTo(storage, path, bos);
-                    bos.flush();
-                }
+                localPath = file;
             } else {
-                throw new IllegalArgumentException("");
+                throw new IllegalArgumentException("Tokenizer path must be a directory ending with '/' or a .json file: " + path);
             }
-        } else if (!Files.exists(Path.of(path))) {
+        } else if (Files.exists(Path.of(path))) {
+            localPath = Path.of(path);
+        } else {
             throw new FileNotFoundException("Tokenizer path not found: " + path);
         }
 
         final HuggingFaceTokenizer.Builder builder = HuggingFaceTokenizer
                 .builder()
-                .optTokenizerPath(Path.of(path));
-        /*
-        if(config.truncation != null) {
-            builder.optTruncation(config.truncation);
+                .optTokenizerPath(localPath);
+        if(config != null) {
+            if(config.addSpecialTokens != null) {
+                builder.optAddSpecialTokens(config.addSpecialTokens);
+            }
+            if(config.truncation != null) {
+                builder.optTruncation(config.truncation);
+            }
+            if(config.maxLength != null) {
+                builder.optMaxLength(config.maxLength);
+                // the builder would clamp maxLength to modelMaxLength (512 by default)
+                builder.configure(Map.of("modelMaxLength", config.maxLength));
+            }
+            if(config.padding != null) {
+                // optPadding pads to the longest of a batch, but records are encoded one by one: only maxLength pads them
+                if(config.padding && config.maxLength != null) {
+                    builder.optPadToMaxLength();
+                } else {
+                    builder.optPadding(config.padding);
+                }
+            }
+            if(config.stride != null) {
+                builder.optStride(config.stride);
+            }
+            if(config.withOverflowingTokens != null) {
+                builder.optWithOverflowingTokens(config.withOverflowingTokens);
+            }
         }
-        if(config.maxLength != null) {
-            builder.optMaxLength(config.maxLength);
-        }
-         */
         try {
             final HuggingFaceTokenizer tokenizer = builder.build();
-            tokenizers.put(path, tokenizer);
+            tokenizers.put(key, tokenizer);
+            return tokenizer;
         } catch (IOException e) {
             throw new IllegalArgumentException(e);
         }
 
     }
 
-    public static String getFileName(String path) {
-        final String[] paths = path.split("/");
-        return paths[paths.length - 1];
+    // what the tokenizer reads from a directory (tokenizer.json, vocab.json, merges.txt): not the weights of a directory
+    // shared with the model, nor a file of the same name in a sub directory
+    private static boolean isTokenizerFile(final String name) {
+        return !name.contains("/") && (name.endsWith(".json") || name.endsWith(".txt"));
     }
 
 }

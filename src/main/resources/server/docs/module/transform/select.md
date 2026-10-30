@@ -579,17 +579,24 @@ Encodes text using a tokenizer (HuggingFace).
 |-----------|----------|--------|-------------------------------------------------|
 | tokenizer | required | String | Tokenizer type. Currently: `huggingface`.       |
 | field     | required | String | Source text field.                               |
-| path      | required | String | Path to the tokenizer model.                    |
+| path      | required | String | `tokenizer.json`: a GCS file (`gs://.../tokenizer.json`), a GCS directory ending with `/` that contains it (only the `.json` / `.txt` files directly under it are downloaded), or a local file / directory path. |
+| addSpecialTokens | optional | Boolean | Add the special tokens of the tokenizer post processor (e.g. `[CLS]` / `[SEP]`, `<bos>`). Default: `true`. |
+| truncation | optional | Boolean | Truncate to `maxLength`. Default: `true`: a text is cut at `maxLength`, or at 512 tokens if `maxLength` is not specified. Specify `false` to keep every token. |
+| maxLength | optional | Integer | Maximum number of tokens (with `truncation`), and the length to pad to (with `padding`). |
+| padding | optional | Boolean | With `maxLength`: pad the ids and the attention mask to `maxLength`, so that every record has the same length. Without `maxLength` a record is not padded, as each record is encoded on its own. Default: `false`. |
+| stride | optional | Integer | Stride of the overflowing tokens (with `truncation`). |
 
 ```yaml
 - name: tokens
   func: tokenize_encode
   field: text
   tokenizer: huggingface
-  path: "gs://my-bucket/models/tokenizer"
+  path: "gs://my-bucket/models/tokenizer/"
+  maxLength: 512
+  truncation: true
 ```
 
-Output type: ELEMENT (nested structure with token IDs and attention masks).
+Output type: ELEMENT with `ids` (array<int64>), `attentionMask` (array<int64>) and `tokens` (array<string>). Refer to them as `tokens.ids` / `tokens.attentionMask`.
 
 ### tokenize_decode
 
@@ -598,8 +605,18 @@ Decodes token IDs back to text using a tokenizer.
 | parameter | optional | type   | description                                     |
 |-----------|----------|--------|-------------------------------------------------|
 | tokenizer | required | String | Tokenizer type. Currently: `huggingface`.       |
-| field     | required | String | Source token field.                              |
-| path      | required | String | Path to the tokenizer model.                    |
+| field     | required | String | Source token ids field (array<int64>).          |
+| path      | required | String | `tokenizer.json`, as `tokenize_encode`.         |
+| skipSpecialTokens | optional | Boolean | Drop special tokens (`[CLS]`, `<eos>`, ...) from the text. Default: `false`. |
+
+```yaml
+- name: text
+  func: tokenize_decode
+  field: generated_ids
+  tokenizer: huggingface
+  path: "gs://my-bucket/models/tokenizer/tokenizer.json"
+  skipSpecialTokens: true
+```
 
 Output type: STRING.
 
