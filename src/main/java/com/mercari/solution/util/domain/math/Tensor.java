@@ -276,32 +276,32 @@ public final class Tensor {
                 default -> throw illegal(type, value);
             };
             case INT64 -> ((long[]) data)[index] = switch (value) {
-                case Number n -> n.longValue();
+                case Number n -> finite(type, n).longValue();
                 case Boolean b -> b ? 1L : 0L;
                 case String s -> Long.parseLong(s);
                 default -> throw illegal(type, value);
             };
             case INT32 -> ((int[]) data)[index] = switch (value) {
-                case Number n -> n.intValue();
+                case Number n -> finite(type, n).intValue();
                 case Boolean b -> b ? 1 : 0;
                 case String s -> Integer.parseInt(s);
                 default -> throw illegal(type, value);
             };
             case INT16 -> ((short[]) data)[index] = switch (value) {
-                case Number n -> n.shortValue();
+                case Number n -> finite(type, n).shortValue();
                 case Boolean b -> (short) (b ? 1 : 0);
                 case String s -> Short.parseShort(s);
                 default -> throw illegal(type, value);
             };
             case INT8 -> ((byte[]) data)[index] = switch (value) {
-                case Number n -> n.byteValue();
+                case Number n -> finite(type, n).byteValue();
                 case Boolean b -> (byte) (b ? 1 : 0);
                 case String s -> Byte.parseByte(s);
                 default -> throw illegal(type, value);
             };
             case BOOL -> ((boolean[]) data)[index] = switch (value) {
                 case Boolean b -> b;
-                case Number n -> n.doubleValue() != 0;
+                case Number n -> finite(type, n).doubleValue() != 0;
                 case String s -> Boolean.parseBoolean(s);
                 default -> throw illegal(type, value);
             };
@@ -311,6 +311,14 @@ public final class Tensor {
                 default -> value.toString();
             };
         }
+    }
+
+    // in an integer or a bool tensor a NaN would silently become 0 or true, and an infinity the largest integer
+    private static Number finite(final Type type, final Number value) {
+        if((value instanceof Double || value instanceof Float) && !Double.isFinite(value.doubleValue())) {
+            throw illegal(type, value);
+        }
+        return value;
     }
 
     private static IllegalArgumentException illegal(final Type type, final Object value) {

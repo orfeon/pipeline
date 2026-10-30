@@ -90,6 +90,19 @@ public class TensorTest {
         Assertions.assertEquals(0, Tensor.fill(Tensor.Type.FLOAT, new long[]{2, 0}, 0).size());
     }
 
+    // not 0, true or the largest integer: a float tensor keeps them, the others fail
+    @Test
+    public void testNonFiniteValues() {
+        for(final Number value : List.of(Double.NaN, Float.NaN, Double.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY)) {
+            for(final Tensor.Type type : List.of(Tensor.Type.INT64, Tensor.Type.INT32, Tensor.Type.INT16, Tensor.Type.INT8, Tensor.Type.BOOL)) {
+                Assertions.assertThrows(IllegalArgumentException.class, () -> Tensor.of(type, List.of(value), new long[]{1}), type + " " + value);
+            }
+            Assertions.assertEquals(value.doubleValue(), Tensor.of(Tensor.Type.DOUBLE, List.of(value), new long[]{1}).getDouble(0));
+        }
+        final Tensor floats = Tensor.of(Tensor.Type.FLOAT, List.of(Float.NaN), new long[]{1});
+        Assertions.assertThrows(IllegalArgumentException.class, () -> floats.as(Tensor.Type.INT64));
+    }
+
 
     // the length of a row is rounded up to a multiple, also of one row and without a difference between the rows
     @Test

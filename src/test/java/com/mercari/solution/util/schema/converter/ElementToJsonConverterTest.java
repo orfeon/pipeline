@@ -11,6 +11,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -59,6 +60,16 @@ public class ElementToJsonConverterTest {
 
         final JsonObject jsonObject = ElementToJsonConverter.convert(schema, element.asPrimitiveMap());
         assertEquals("550e8400-e29b-41d4-a716-446655440000", jsonObject.get("uuidField").getAsString());
+    }
+
+    @Test
+    public void testNestedArray() {
+        final Schema schema = Schema
+                .builder()
+                .withField("ids", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.INT64)))
+                .build();
+        final JsonObject jsonObject = ElementToJsonConverter.convert(schema, Map.of("ids", List.of(List.of(1L, 2L), List.of(3L))));
+        assertEquals("[[1,2],[3]]", jsonObject.get("ids").toString());
     }
 
 }

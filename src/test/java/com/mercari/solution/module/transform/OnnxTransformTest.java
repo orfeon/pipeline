@@ -784,6 +784,65 @@ public class OnnxTransformTest {
         Assertions.assertTrue(rootMessages(e).contains("parameters.bufferSize must be 1"), rootMessages(e));
     }
 
+    // a grid with gaps on an integer model input: the record with a gap fails, and does not reach the model as 0
+    @Test
+    public void testNaNOnIntegerInputFailsTheRecord() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("nan_on_int/model.onnx"), OnnxTestModels.identity(OnnxTestModels.INT64, "batch", "length"));
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { item: gap, ts: "2026-01-01T00:00:00Z", value: 1.0 }
+                        - { item: gap, ts: "2026-01-01T02:00:00Z", value: 2.0 }
+                        - { item: full, ts: "2026-01-01T00:00:00Z", value: 1.0 }
+                        - { item: full, ts: "2026-01-01T01:00:00Z", value: 2.0 }
+                    schema:
+                      fields:
+                        - { name: item, type: string }
+                        - { name: ts, type: timestamp }
+                        - { name: value, type: float32 }
+                transforms:
+                  - name: series
+                    module: aggregation
+                    inputs: [create]
+                    parameters:
+                      groupFields: [item]
+                      aggregations:
+                        - input: create
+                          fields:
+                            - { name: points, op: array_agg, fields: [ts, value] }
+                  - name: onnx
+                    module: onnx
+                    inputs: [series]
+                    failFast: false
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: grid, func: timeseries_grid, field: points, timestampField: ts, valueField: value, interval: 1h, length: 8 }
+                        - { name: x, field: grid.values }
+                      outputs:
+                        - { name: y }
+                      bufferSize: 1
+                """.formatted(OnnxTestModels.configPath(model));
+
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final List<String> items = new ArrayList<>();
+            for(final MElement row : rows) {
+                items.add(row.getAsString("item"));
+            }
+            Assertions.assertEquals(List.of("full"), items);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
     private static String padConfig(final Path model, final String pad, final int bufferSize) {
         return """
                 sources:

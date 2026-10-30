@@ -4,6 +4,9 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.TestDatum;
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
@@ -13,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Base64;
+import java.util.List;
 
 public class AvroToJsonConverterTest {
 
@@ -39,6 +43,17 @@ public class AvroToJsonConverterTest {
                 testFlatField(g.getAsJsonObject());
             }
         }
+    }
+
+    @Test
+    public void testNestedArray() {
+        final Schema schema = SchemaBuilder.record("nested").fields()
+                .name("ids").type().array().items().array().items().longType().noDefault()
+                .endRecord();
+        final GenericRecord record = new GenericData.Record(schema);
+        record.put("ids", List.of(List.of(1L, 2L), List.of(3L)));
+        final JsonObject json = new Gson().fromJson(AvroToJsonConverter.convert(record), JsonObject.class);
+        Assertions.assertEquals("[[1,2],[3]]", json.get("ids").toString());
     }
 
     @Test

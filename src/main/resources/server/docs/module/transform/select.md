@@ -748,7 +748,7 @@ A constant: the ids of the given texts, by group, keeping the texts that are one
     - [" other", "other"]
 ```
 
-Output type: array of array of INT64. Not every sink can write this type (BigQuery can not, and JSON output such as `debug` gives an empty array). In a `select` transform it needs the default output type: `outputType: ELEMENT` or `ROW` fails on a record with this value. In the `inputs` of an onnx transform it is an intermediate value, which is not output.
+Output type: array of array of INT64. Not every sink can write this type (BigQuery can not). In a `select` transform it needs the default output type: `outputType: ELEMENT` or `ROW` fails on a record with this value. In the `inputs` of an onnx transform it is an intermediate value, which is not output.
 
 ### array_zip
 
