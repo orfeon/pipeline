@@ -128,6 +128,22 @@ public class OnnxTestModels {
     }
 
     /**
+     * {@code ids float[batch, length]} and {@code features float[n, 2]} with the outputs
+     * {@code pooled = ReduceSum(ids, 1, keepdims) float[batch, 1]} and {@code rows = features float[n, 2]}.
+     */
+    public static byte[] mixed() {
+        final Graph graph = new Graph("mixed");
+        graph.input("ids", FLOAT, "batch", "length");
+        graph.input("features", FLOAT, "n", 2L);
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.node("ReduceSum", List.of("ids", "axes"), List.of("pooled"), "keepdims", 1L);
+        graph.node("Identity", List.of("features"), List.of("rows"));
+        graph.output("pooled", FLOAT, "batch", 1L);
+        graph.output("rows", FLOAT, "n", 2L);
+        return graph.model();
+    }
+
+    /**
      * {@code x float[batch]} with {@code y = x}, {@code past.0 float[batch, length]} with {@code out.0 = past.0},
      * {@code filled float[-, 2]} with {@code out.filled = filled} and {@code features float[n, 2]}, which is not used.
      * {@code default_input} is an initializer listed as an input as well, as in models of an old IR version.

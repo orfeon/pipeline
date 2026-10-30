@@ -58,7 +58,8 @@ public class OnnxToElementConverter {
             final long dim0 = tensor.shape()[0];
             if(dim0 != batchSize) {
                 throw new IllegalStateException("onnx output: " + entry.getKey() + " has dim0 " + dim0
-                        + " but the batch has " + batchSize + " records (outputs without a batch dimension are not supported)");
+                        + " but the batch has " + batchSize + " records: a stacked input makes dim0 of every output the batch."
+                        + " To take the whole output, give every input as it is, at the rank of the model input");
             }
             for(int i=0; i<batchSize; i++) {
                 final Tensor row = tensor.row(i);

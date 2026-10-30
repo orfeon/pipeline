@@ -87,9 +87,17 @@ The rank of a value (from its field type) decides how it becomes the model input
 | rank of the value | model input | use |
 |---|---|---|
 | one less than the model input | The values of the records are stacked on a new dim0: each record is a row of the batch. | `input_ids int64[B, L]` from `array<int64>`; `x float[B]` from a scalar |
-| the same as the model input | The value is the input as it is. `bufferSize` must be 1, and the whole model output is the value of the record. | a table `x float[R, C]` from a matrix |
+| the same as the model input | The value is the input as it is. `bufferSize` must be 1. | a table `x float[R, C]` from a matrix |
 
 Other ranks are a configuration error. A `matrix` field is flat in the record and takes its shape from the schema; a shape with one dynamic dimension is restored from the number of values. Values are converted to the element type of the model input.
+
+What dim0 of the model outputs means follows from these:
+
+| values | model outputs |
+|---|---|
+| all stacked | dim0 is the batch: each record gets its row. |
+| all as they are | The whole output is the value of the record. |
+| both | dim0 is still the batch, which has one record: tokens `input_ids int64[B, L]` stacked next to `image_features float[N, 512]` as it is give `sentence_embedding [1, D]`, an array of D values. An output whose dim0 is not 1 fails the record. To take a whole output, give every value at the rank of its model input. |
 
 ## outputs
 
@@ -99,7 +107,7 @@ Only the model outputs mentioned in `outputs` are requested from the session, an
 
 The output record is the input record plus the fields of `outputs`; a field with the name of an input field replaces it. Use a later `select` transform to narrow the fields.
 
-dim0 of a model output is the batch (unless no value was stacked), and the type of a model output is decided by the rest of the shape:
+dim0 of a model output is the batch if a value was stacked ([Rank of a value](#rank-of-a-value)), and the type of a model output is decided by the rest of the shape:
 
 | model output shape | field type | example |
 |---|---|---|
@@ -111,15 +119,6 @@ dim0 of a model output is the batch (unless no value was stacked), and the type 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
 Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize).
-
-## Deprecated parameters
-
-| parameter | how it is read |
-|-----------|----------------|
-| preprocesses | The head of `inputs`. Its fields stay in the output record. |
-| mapping | `inputs: { field: modelInput }` is `{ name: modelInput, field: field }` in `inputs`; `outputs: { modelOutput: field }` is `{ name: field, field: modelOutput }` in `outputs`. Without its `outputs`, every model output is added with its own name. A name that one entry reads and another writes is a configuration error. Can not be used with `inputs` / `outputs`. |
-| mappings | The same as `mapping`, and must have one element. |
-| postprocesses | A select list on the output record. Only its fields are output. |
 
 ## Example: text embedding
 

@@ -22,7 +22,8 @@ import java.util.regex.Pattern;
  * {@code empty} and {@code fill}, which are taken out before the select functions are built.
  *
  * <p>A value one rank below the model input is stacked on a new dim0, so each record is a row of the batch. A value of
- * the rank of the model input is the input as it is, which takes a batch of one record.
+ * the rank of the model input is the input as it is, which takes a batch of one record. With both, dim0 of the model
+ * outputs is still that batch of one record (text tokens stacked next to {@code image_features [N, 512]}).
  */
 public class OnnxInputs implements Serializable {
 

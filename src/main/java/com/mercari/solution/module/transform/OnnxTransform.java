@@ -3,7 +3,6 @@ package com.mercari.solution.module.transform;
 import ai.onnxruntime.*;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.domain.math.Tensor;
 import com.mercari.solution.util.domain.ml.onnx.OnnxGraphInfo;
@@ -25,7 +24,6 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Serializable;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -44,12 +42,6 @@ public class OnnxTransform extends Transform {
 
         private JsonElement filter;
 
-        // deprecated: preprocesses are the head of inputs, a mapping is converted to inputs and outputs
-        private MappingConfig mapping;
-        private List<MappingConfig> mappings;
-        private JsonArray preprocesses;
-        private JsonArray postprocesses;
-
         private DataType outputType;
 
         public void validate() {
@@ -59,26 +51,11 @@ public class OnnxTransform extends Transform {
             } else {
                 errorMessages.addAll(model.validate());
             }
-            final boolean hasMappings = mappings != null && !mappings.isEmpty();
-            if(mapping != null && hasMappings) {
-                errorMessages.add("parameters.mapping and parameters.mappings must not be specified together");
-            } else if(hasMappings && mappings.size() > 1) {
-                errorMessages.add("parameters.mappings must have one element: a transform runs its model once per record. Chain onnx transforms to run several steps");
+            if(inputs == null || inputs.isEmpty()) {
+                errorMessages.add("parameters.inputs must not be empty");
             }
-            if(mapping != null || hasMappings) {
-                if(inputs != null || outputs != null) {
-                    errorMessages.add("parameters.inputs and parameters.outputs must not be specified with parameters.mapping or parameters.mappings");
-                }
-                final MappingConfig config = mapping != null ? mapping : mappings.getFirst();
-                errorMessages.addAll(overlaps("inputs", config.inputs));
-                errorMessages.addAll(overlaps("outputs", config.outputs));
-            } else {
-                if(inputs == null || inputs.isEmpty()) {
-                    errorMessages.add("parameters.inputs must not be empty");
-                }
-                if(outputs == null || outputs.isEmpty()) {
-                    errorMessages.add("parameters.outputs must not be empty");
-                }
+            if(outputs == null || outputs.isEmpty()) {
+                errorMessages.add("parameters.outputs must not be empty");
             }
 
             if(bufferSize != null && bufferSize < 1) {
@@ -90,51 +67,7 @@ public class OnnxTransform extends Transform {
             }
         }
 
-        // a mapping read every value before it wrote any, but a select list is evaluated in order: a name that one entry
-        // reads and another writes would read the value just written, without any error
-        private static List<String> overlaps(final String parameter, final Map<String, String> mapping) {
-            final List<String> errorMessages = new ArrayList<>();
-            if(mapping == null) {
-                return errorMessages;
-            }
-            for(final Map.Entry<String, String> read : mapping.entrySet()) {
-                final String parent = read.getKey().split("\\.", 2)[0];
-                for(final Map.Entry<String, String> written : mapping.entrySet()) {
-                    if(!written.getKey().equals(read.getKey()) && (written.getValue().equals(read.getKey()) || written.getValue().equals(parent))) {
-                        errorMessages.add("parameters.mapping." + parameter + ": " + written.getValue() + " is read by one entry and written by another. Use parameters.inputs and parameters.outputs, which are evaluated in order");
-                    }
-                }
-            }
-            return errorMessages;
-        }
-
-        public void setDefaults(final OnnxGraphInfo graph) {
-            final MappingConfig mapping = this.mapping != null ? this.mapping
-                    : mappings != null && !mappings.isEmpty() ? mappings.getFirst() : null;
-
-            final JsonArray allInputs = new JsonArray();
-            if(preprocesses != null) {
-                allInputs.addAll(preprocesses);
-            }
-            if(mapping != null) {
-                if(mapping.inputs != null) {
-                    mapping.inputs.forEach((field, modelInput) -> allInputs.add(select(modelInput, field)));
-                }
-                outputs = new JsonArray();
-                if(mapping.outputs == null || mapping.outputs.isEmpty()) {
-                    for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
-                        if(output.isTensor()) {
-                            outputs.add(select(output.name(), null));
-                        }
-                    }
-                } else {
-                    mapping.outputs.forEach((modelOutput, field) -> outputs.add(select(field, modelOutput)));
-                }
-            } else {
-                allInputs.addAll(inputs);
-            }
-            inputs = allInputs;
-
+        public void setDefaults() {
             if(bufferSize == null) {
                 bufferSize = 1;
             }
@@ -142,36 +75,6 @@ public class OnnxTransform extends Transform {
                 outputType = DataType.AVRO;
             }
         }
-
-        private static JsonObject select(final String name, final String field) {
-            final JsonObject select = new JsonObject();
-            select.addProperty("name", name);
-            if(field != null) {
-                select.addProperty("field", field);
-            }
-            return select;
-        }
-
-        // the fields of preprocesses stay in the output records, as they did before they became a part of inputs
-        private List<String> preprocessFields() {
-            final List<String> names = new ArrayList<>();
-            if(preprocesses != null) {
-                for(final JsonElement element : preprocesses) {
-                    final JsonObject select = element.getAsJsonObject();
-                    if(!select.has("ignore") || !select.get("ignore").getAsBoolean()) {
-                        names.add(select.get("name").getAsString());
-                    }
-                }
-            }
-            return names;
-        }
-    }
-
-    public static class MappingConfig implements Serializable {
-
-        private Map<String, String> inputs;
-        private Map<String, String> outputs;
-
     }
 
     // the model outputs named in the outputs select list: naming one that is not used only costs a little more memory,
@@ -194,19 +97,12 @@ public class OnnxTransform extends Transform {
 
     private static Schema createOutputSchema(
             final Schema inputSchema,
-            final OnnxInputs inputs,
-            final List<String> preprocessFields,
             final Select outputs) {
 
         // a later field replaces one of the same name, as its value does in the record
         final Map<String, Schema.Field> fields = new LinkedHashMap<>();
         for(final Schema.Field field : inputSchema.getFields()) {
             fields.put(field.getName(), field.copy());
-        }
-        for(final SelectFunction function : inputs.getSelect().getSelectFunctions()) {
-            if(preprocessFields.contains(function.getName())) {
-                fields.put(function.getName(), Schema.Field.of(function.getName(), function.getOutputFieldType()));
-            }
         }
         for(final SelectFunction function : outputs.getSelectFunctions()) {
             fields.put(function.getName(), Schema.Field.of(function.getName(), function.getOutputFieldType()));
@@ -252,7 +148,7 @@ public class OnnxTransform extends Transform {
 
         final OnnxModel model = OnnxModel.create(parameters.model);
         final OnnxGraphInfo graph = model.readGraphInfo();
-        parameters.setDefaults(graph);
+        parameters.setDefaults();
 
         final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()
@@ -267,12 +163,7 @@ public class OnnxTransform extends Transform {
         final Set<String> requestedOutputs = referencedOutputs(parameters.outputs, graph);
         final Select outputSelect = Select.of(parameters.outputs, outputsContextFields(inputSchema, onnxInputs, graph));
 
-        final List<String> preprocessFields = parameters.preprocessFields();
-        Schema outputSchema = createOutputSchema(inputSchema, onnxInputs, preprocessFields, outputSelect);
-        final Select postprocessors = Select.of(parameters.postprocesses, outputSchema.getFields());
-        if(postprocessors.useSelect()) {
-            outputSchema = Select.createOutputSchema(postprocessors);
-        }
+        final Schema outputSchema = createOutputSchema(inputSchema, outputSelect);
 
         final Filter filter = Filter.of(parameters.filter);
 
@@ -281,7 +172,7 @@ public class OnnxTransform extends Transform {
 
         final PCollectionTuple outputs = input
                 .apply("Inference", ParDo.of(new InferenceDoFn(
-                                model, filter, onnxInputs, outputSelect, preprocessFields, postprocessors,
+                                model, filter, onnxInputs, outputSelect,
                                 requestedOutputs, parameters.bufferSize,
                                 outputSchema, getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -297,8 +188,6 @@ public class OnnxTransform extends Transform {
         private final OnnxModel model;
         private final OnnxInputs inputs;
         private final Select outputs;
-        private final List<String> preprocessFields;
-        private final Select postprocessors;
         private final Set<String> requestedOutputs;
         private final Integer bufferSize;
 
@@ -325,8 +214,6 @@ public class OnnxTransform extends Transform {
                 final Filter filter,
                 final OnnxInputs inputs,
                 final Select outputs,
-                final List<String> preprocessFields,
-                final Select postprocessors,
                 final Set<String> requestedOutputs,
                 final Integer bufferSize,
                 final Schema outputSchema,
@@ -338,8 +225,6 @@ public class OnnxTransform extends Transform {
             this.model = model;
             this.inputs = inputs;
             this.outputs = outputs;
-            this.preprocessFields = preprocessFields;
-            this.postprocessors = postprocessors;
             this.requestedOutputs = requestedOutputs;
             this.bufferSize = bufferSize;
 
@@ -356,7 +241,6 @@ public class OnnxTransform extends Transform {
             this.filter.setup();
             this.inputs.setup();
             this.outputs.setup();
-            this.postprocessors.setup();
             this.outputSchema.setup();
         }
 
@@ -464,19 +348,12 @@ public class OnnxTransform extends Transform {
 
         private MElement createOutput(final Buffered buffered, final Map<String, Object> modelOutputs) {
             final Map<String, Object> context = buffered.evaluated;
-            final Map<String, Object> record = new HashMap<>(buffered.values);
-            // before the model outputs: the type of such a field is that of its item, also if a model output has its name
-            for(final String field : preprocessFields) {
-                record.put(field, context.get(field));
-            }
-
             context.putAll(modelOutputs);
+
+            final Map<String, Object> record = new HashMap<>(buffered.values);
             record.putAll(OnnxInputs.apply(outputs, context, buffered.timestamp));
             record.replaceAll((name, value) -> Tensor.materialize(value));
-
-            final Map<String, Object> values = postprocessors.useSelect()
-                    ? postprocessors.select(record, buffered.timestamp) : record;
-            return MElement.of(values, buffered.timestamp)
+            return MElement.of(record, buffered.timestamp)
                     .convert(outputSchema.withType(DataType.AVRO));
         }
 

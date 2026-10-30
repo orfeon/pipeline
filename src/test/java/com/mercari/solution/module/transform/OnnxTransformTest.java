@@ -57,9 +57,12 @@ public class OnnxTransformTest {
                       model:
                         path: "%s"
                 %s
-                      mappings:
-                        - inputs: { x: x }
-                          outputs: { y: y, s: x_sum, y3: y3 }
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
+                        - { name: y, field: y }
+                        - { name: x_sum, field: s }
+                        - { name: y3, field: y3 }
                       bufferSize: %d
                 """.formatted(elements, modelPath, modelFile == null ? "" : "        file: \"" + modelFile + "\"", bufferSize);
     }
@@ -116,7 +119,7 @@ public class OnnxTransformTest {
     }
 
     // tokenize_encode feeds a model with int64 inputs of a dynamic length; a rank-1 output gives each record a scalar;
-    // tokenize_decode turns the ids back to text; the singular `mapping` is accepted
+    // tokenize_decode turns the ids back to text
     @Test
     public void testTokenizer() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("tokens/model.onnx"), OnnxTestModels.tokens());
@@ -141,13 +144,11 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      preprocesses:
+                      inputs:
                         - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: "%s", field: text }
-                      mapping:
-                        inputs: { tok.ids: ids, tok.attentionMask: attention_mask }
-                        outputs: { total: total, count: count }
-                      postprocesses:
-                        - { name: text }
+                        - { name: ids, field: tok.ids }
+                        - { name: attention_mask, field: tok.attentionMask }
+                      outputs:
                         - { name: total }
                         - { name: count }
                         - { name: decoded, func: tokenize_decode, tokenizer: huggingface, path: "%s", field: tok.ids, skipSpecialTokens: true }
@@ -219,9 +220,10 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      mappings:
-                        - inputs: { x: x }
-                          outputs: { y: y }
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
+                        - { name: y, field: y }
                       bufferSize: %d
                 """.formatted(OnnxTestModels.configPath(model), bufferSize);
 
@@ -274,9 +276,10 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      mappings:
-                        - inputs: { x: x }
-                          outputs: { y: y }
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
+                        - { name: y, field: y }
                       bufferSize: 3
                 """.formatted(Path.of("").toAbsolutePath().relativize(failures).toString().replace('\\', '/'), OnnxTestModels.configPath(model));
 
@@ -319,9 +322,10 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      mappings:
-                        - inputs: { x: x }
-                          outputs: { y: y }
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
+                        - { name: y, field: y }
                 """.formatted(OnnxTestModels.configPath(model));
 
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
@@ -335,7 +339,7 @@ public class OnnxTransformTest {
         pipeline.run();
     }
 
-    private static String castConfig(final Path model, final String valueType, final String value, final String mappings) {
+    private static String castConfig(final Path model, final String valueType, final String value, final String outputs) {
         return """
                 sources:
                   - name: create
@@ -356,21 +360,11 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      mappings:
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
                 %s
-                """.formatted(value, valueType, OnnxTestModels.configPath(model), mappings);
-    }
-
-    // a transform runs its model once per record
-    @Test
-    public void testMappingsMoreThanOne() throws Exception {
-        final Path model = OnnxTestModels.write(BASE_DIR.resolve("mappings_two/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
-        final Exception e = Assertions.assertThrows(Exception.class,
-                () -> MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
-                        - inputs: { x: x }
-                        - inputs: { y: x }
-                """))));
-        Assertions.assertTrue(rootMessages(e).contains("parameters.mappings must have one element"), rootMessages(e));
+                """.formatted(value, valueType, OnnxTestModels.configPath(model), outputs);
     }
 
     // a model output named as an input field replaces it, also in its type
@@ -378,8 +372,7 @@ public class OnnxTransformTest {
     public void testOutputFieldReplacesInputField() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("replaced_input/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
-                        - inputs: { x: x }
-                          outputs: { y: id }
+                        - { name: id, field: y }
                 """)));
         final MCollection output = outputs.get("onnx");
         Assertions.assertEquals(List.of("id", "x"), output.getSchema().getFields().stream().map(Schema.Field::getName).toList());
@@ -397,7 +390,7 @@ public class OnnxTransformTest {
     private void assertCastInput(final int elemType, final String valueType, final String value, final float expected) throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("input_type_" + elemType + "/model.onnx"), OnnxTestModels.cast(elemType));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, valueType, value, """
-                        - inputs: { x: x }
+                        - { name: y, field: y }
                 """)));
         PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
             int count = 0;
@@ -437,7 +430,7 @@ public class OnnxTransformTest {
     public void testScalarOutput() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("scalar_output/model.onnx"), OnnxTestModels.scalarOutput());
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
-                        - inputs: { x: x }
+                        - { name: total, field: total }
                 """)));
         final MCollection output = outputs.get("onnx");
         Assertions.assertEquals("float32", output.getSchema().getField("total").getFieldType().getType().name());
@@ -474,8 +467,10 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      mappings:
-                        - inputs: { x: x }
+                      inputs:
+                        - { name: x, field: x }
+                      outputs:
+                        - { name: y, field: y }
                 """.formatted(OnnxTestModels.configPath(model));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
         final MCollection output = outputs.get("onnx");
@@ -490,9 +485,9 @@ public class OnnxTransformTest {
         pipeline.run();
     }
 
-    // the nested tokenize_encode field stays in the record when there are no postprocesses
+    // an item of inputs is not output, unless outputs says so
     @Test
-    public void testTokenizerWithoutPostprocess() throws Exception {
+    public void testNestedInputItemInOutputs() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("tokens_no_post/model.onnx"), OnnxTestModels.tokens());
         final String tokenizer = OnnxTestModels.configPath(Path.of("src/test/resources/module/transform/onnx/tokenizer.json"));
         final String configYaml = """
@@ -513,10 +508,13 @@ public class OnnxTransformTest {
                     parameters:
                       model:
                         path: "%s"
-                      preprocesses:
+                      inputs:
                         - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: "%s", field: text }
-                      mapping:
-                        inputs: { tok.ids: ids, tok.attentionMask: attention_mask }
+                        - { name: ids, field: tok.ids }
+                        - { name: attention_mask, field: tok.attentionMask }
+                      outputs:
+                        - { name: total }
+                        - { name: tok, field: tok }
                 """.formatted(OnnxTestModels.configPath(model), tokenizer);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
         PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
@@ -786,6 +784,69 @@ public class OnnxTransformTest {
         Assertions.assertTrue(rootMessages(e).contains("parameters.bufferSize must be 1"), rootMessages(e));
     }
 
+    // text tokens stacked next to image features as they are, of any count
+    private static String mixedConfig(final Path model, final String outputs) {
+        return """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: 0, ids: [1.0, 2.0, 3.0], raw: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] }
+                    schema:
+                      fields:
+                        - { name: id, type: int64 }
+                        - { name: ids, type: float32, mode: repeated }
+                        - { name: raw, type: float32, mode: repeated }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: ids, field: ids }
+                        - { name: features, func: reshape, field: raw, shape: [3, 2] }
+                      outputs:
+                %s
+                """.formatted(OnnxTestModels.configPath(model), outputs);
+    }
+
+    // dim0 of the outputs is the batch of the one record, as the tokens were stacked
+    @Test
+    public void testStackedAndWholeInputs() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("mixed/model.onnx"), OnnxTestModels.mixed());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(mixedConfig(model, """
+                        - { name: sum, field: pooled }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals("array", output.getSchema().getField("sum").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(6f), floats(row.getPrimitiveValue("sum")));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // an output whose dim0 is not the batch can not be split, and the error says how to take it
+    @Test
+    public void testStackedAndWholeInputsOutputWithoutBatch() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("mixed_no_batch/model.onnx"), OnnxTestModels.mixed());
+        MPipeline.apply(pipeline, Config.load(mixedConfig(model, """
+                        - { name: all, field: rows }
+                """)));
+        final Exception e = Assertions.assertThrows(Exception.class, () -> pipeline.run().waitUntilFinish());
+        Assertions.assertTrue(rootMessages(e).contains("give every input as it is"), rootMessages(e));
+    }
+
     // a matrix field is flat in the record: its shape comes from the schema, and each record is a row of the batch
     @Test
     public void testMatrixInputIsStacked() throws Exception {
@@ -1019,63 +1080,6 @@ public class OnnxTransformTest {
         pipeline.run();
     }
 
-    // a mapping reads every value before it writes any: a select list can not, as it is evaluated in order
-    @Test
-    public void testMappingThatReadsWhatItWrites() throws Exception {
-        final Path model = OnnxTestModels.write(BASE_DIR.resolve("mapping_overlap/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
-        final Exception inputs = Assertions.assertThrows(Exception.class,
-                () -> MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
-                        - inputs: { id: x, x: id }
-                """))));
-        Assertions.assertTrue(rootMessages(inputs).contains("parameters.mapping.inputs"), rootMessages(inputs));
-        final Exception outputs = Assertions.assertThrows(Exception.class,
-                () -> MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
-                        - inputs: { x: x }
-                          outputs: { y: z, z: y }
-                """))));
-        Assertions.assertTrue(rootMessages(outputs).contains("parameters.mapping.outputs"), rootMessages(outputs));
-    }
-
-    // a model output is not written to a field of preprocesses of the same name, unless the mapping says so
-    @Test
-    public void testPreprocessFieldNamedAsModelOutput() throws Exception {
-        final Path model = OnnxTestModels.write(BASE_DIR.resolve("preprocess_output_name/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
-        final String config = """
-                sources:
-                  - name: create
-                    module: create
-                    parameters:
-                      type: element
-                      elements:
-                        - { x: 1.5 }
-                    schema:
-                      fields:
-                        - { name: x, type: float32 }
-                transforms:
-                  - name: onnx
-                    module: onnx
-                    inputs: [create]
-                    failFast: true
-                    parameters:
-                      model:
-                        path: "%s"
-                      preprocesses:
-                        - { name: y, value: fixed, type: string }
-                      mapping:
-                        inputs: { x: x }
-                        outputs: { y: z }
-                """.formatted(OnnxTestModels.configPath(model));
-        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
-        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
-            for(final MElement row : rows) {
-                Assertions.assertEquals("fixed", row.getPrimitiveValue("y").toString());
-                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("z")).floatValue());
-            }
-            return null;
-        });
-        pipeline.run();
-    }
-
     @Test
     public void testConstantShapeRankIsChecked() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("constant_rank/model.onnx"), OnnxTestModels.constants());
@@ -1102,7 +1106,7 @@ public class OnnxTransformTest {
     }
 
     @Test
-    public void testMappingsRequired() {
+    public void testInputsRequired() {
         final String configYaml = """
                 sources:
                   - name: create
