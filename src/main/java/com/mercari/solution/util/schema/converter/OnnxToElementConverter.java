@@ -99,11 +99,16 @@ public class OnnxToElementConverter {
         final int size = Math.toIntExact(tensor.getInfo().getNumElements());
         final List<Object> values = new ArrayList<>(size);
         switch (tensor.getInfo().type) {
-            case BOOL, INT8 -> {
+            case BOOL -> {
                 final ByteBuffer buffer = tensor.getByteBuffer();
                 for(int i=0; i<size; i++) {
-                    final byte b = buffer.get(i);
-                    values.add(tensor.getInfo().type == OnnxJavaType.BOOL ? (Object) (b != 0) : (Object) (int) b);
+                    values.add(buffer.get(i) != 0);
+                }
+            }
+            case INT8 -> {
+                final ByteBuffer buffer = tensor.getByteBuffer();
+                for(int i=0; i<size; i++) {
+                    values.add((int) buffer.get(i));
                 }
             }
             case UINT8 -> {

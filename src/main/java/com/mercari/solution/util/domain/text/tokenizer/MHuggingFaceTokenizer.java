@@ -3,7 +3,6 @@ package com.mercari.solution.util.domain.text.tokenizer;
 import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import com.google.api.services.storage.Storage;
-import com.google.api.services.storage.model.StorageObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
 
@@ -168,18 +167,10 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
             final Path localDirPath = Files.createTempDirectory("huggingface-tokenizers-");
             final Storage storage = StorageUtil.storage();
             if(path.endsWith("/")) {
-                for(final StorageObject object : StorageUtil.listFiles(path)) {
-                    if(object.getName().endsWith("/")) {
-                        continue;
-                    }
-                    final Path file = localDirPath.resolve(getFileName(object.getName()));
-                    try (final OutputStream os = new BufferedOutputStream(Files.newOutputStream(file))) {
-                        StorageUtil.downloadTo(storage, object, os);
-                    }
-                }
+                StorageUtil.downloadDirectory(storage, path, localDirPath, MHuggingFaceTokenizer::isTokenizerFile);
                 localPath = localDirPath;
             } else if(path.endsWith(".json")) {
-                final Path file = localDirPath.resolve(getFileName(path));
+                final Path file = localDirPath.resolve(StorageUtil.getFilename(path));
                 try (final OutputStream os = new BufferedOutputStream(Files.newOutputStream(file))) {
                     StorageUtil.downloadTo(storage, path, os);
                 }
@@ -205,9 +196,16 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
             }
             if(config.maxLength != null) {
                 builder.optMaxLength(config.maxLength);
+                // the builder would clamp maxLength to modelMaxLength (512 by default)
+                builder.configure(Map.of("modelMaxLength", config.maxLength));
             }
             if(config.padding != null) {
-                builder.optPadding(config.padding);
+                // optPadding pads to the longest of a batch, but records are encoded one by one: only maxLength pads them
+                if(config.padding && config.maxLength != null) {
+                    builder.optPadToMaxLength();
+                } else {
+                    builder.optPadding(config.padding);
+                }
             }
             if(config.stride != null) {
                 builder.optStride(config.stride);
@@ -226,9 +224,10 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
 
     }
 
-    public static String getFileName(String path) {
-        final String[] paths = path.split("/");
-        return paths[paths.length - 1];
+    // what the tokenizer reads from a directory (tokenizer.json, vocab.json, merges.txt): not the weights of a directory
+    // shared with the model, nor a file of the same name in a sub directory
+    private static boolean isTokenizerFile(final String name) {
+        return !name.contains("/") && (name.endsWith(".json") || name.endsWith(".txt"));
     }
 
 }

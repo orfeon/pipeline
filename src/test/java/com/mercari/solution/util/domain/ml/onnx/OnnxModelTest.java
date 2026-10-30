@@ -1,12 +1,48 @@
 package com.mercari.solution.util.domain.ml.onnx;
 
+import ai.onnxruntime.OnnxTensor;
+import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.TensorInfo;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 public class OnnxModelTest {
+
+    // a batch for ids int64[batch, length], with the given number of ids in each record
+    private static List<Object> batch(final int... lengths) {
+        final List<Object> records = new ArrayList<>();
+        for(final int length : lengths) {
+            final List<Object> ids = new ArrayList<>();
+            for(int i=0; i<length; i++) {
+                ids.add((long) i);
+            }
+            records.add(ids);
+        }
+        return records;
+    }
+
+    @Test
+    public void testConvertTensorChecksEveryRecordLength(@TempDir final Path dir) throws Exception {
+        final Path path = OnnxTestModels.write(dir.resolve("tokens.onnx"), OnnxTestModels.tokens());
+        final OnnxModel model = OnnxModel.create(OnnxModel.Config.create(OnnxTestModels.configPath(path)));
+        final TensorInfo ids = (TensorInfo) model.getInputInfo().get("ids").getInfo();
+        final OrtEnvironment environment = OrtEnvironment.getEnvironment();
+
+        try(final OnnxTensor tensor = OnnxRuntimeUtil.convertTensor(environment, ids, batch(3, 3, 3))) {
+            Assertions.assertArrayEquals(new long[]{3, 3}, tensor.getInfo().getShape());
+        }
+        // the total is the same as a [3, 3] tensor: comparing only the total would misalign the rows
+        final IllegalArgumentException compensating = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> OnnxRuntimeUtil.convertTensor(environment, ids, batch(3, 2, 4)));
+        Assertions.assertTrue(compensating.getMessage().contains("same length"), compensating.getMessage());
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> OnnxRuntimeUtil.convertTensor(environment, ids, batch(3, 2)));
+    }
 
     @Test
     public void testResolveModelFile(@TempDir final Path dir) throws Exception {

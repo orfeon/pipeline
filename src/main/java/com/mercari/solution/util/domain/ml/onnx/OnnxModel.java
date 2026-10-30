@@ -3,7 +3,6 @@ package com.mercari.solution.util.domain.ml.onnx;
 import ai.djl.ndarray.NDArray;
 import ai.onnxruntime.*;
 import com.google.api.services.storage.Storage;
-import com.google.api.services.storage.model.StorageObject;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
@@ -38,7 +37,6 @@ public class OnnxModel implements Serializable {
         private OrtSession.SessionOptions.OptLevel optLevel;
         private OrtSession.SessionOptions.ExecutionMode executionMode;
         private String configPath;
-        private transient JsonObject schema;
 
         public List<String> validate() {
             final List<String> errorMessages = new ArrayList<>();
@@ -52,11 +50,6 @@ public class OnnxModel implements Serializable {
             }
             if(interOpThreads != null && interOpThreads < 1) {
                 errorMessages.add("onnx model.interOpThreads must be over than zero");
-            }
-            if(schema != null) {
-                if(Schema.parse(schema) == null) {
-                    errorMessages.add("onnx model.schema is illegal: " + schema);
-                }
             }
             return errorMessages;
         }
@@ -93,19 +86,6 @@ public class OnnxModel implements Serializable {
 
     public static OnnxModel create(final Config config) {
         return new OnnxModel(config);
-    }
-
-    public Schema outputSchema() {
-        return Optional
-                .ofNullable(Schema.parse(config.schema))
-                .orElseGet(() -> {
-                    final OrtSession session = getOrCreateSession(config);
-                    try {
-                        return OnnxToElementConverter.convertOutputSchema(session.getOutputInfo(), null);
-                    } catch (OrtException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
     }
 
     public Schema inputSchema() {
@@ -221,17 +201,7 @@ public class OnnxModel implements Serializable {
                 if (path.endsWith("/")) {
                     // a directory keeps its layout so that external data files (*.onnx_data) resolve next to the model
                     final Path localDir = Files.createTempDirectory("onnxruntime-");
-                    final String prefix = StorageUtil.parseGcsPath(path)[1];
-                    for (final StorageObject object : StorageUtil.listFiles(path)) {
-                        if (object.getName().endsWith("/")) {
-                            continue;
-                        }
-                        final Path localFile = localDir.resolve(object.getName().substring(prefix.length()));
-                        Files.createDirectories(localFile.getParent());
-                        try (final OutputStream os = new BufferedOutputStream(Files.newOutputStream(localFile))) {
-                            StorageUtil.downloadTo(storage, object, os);
-                        }
-                    }
+                    StorageUtil.downloadDirectory(storage, path, localDir, name -> true);
                     return environment.createSession(resolveModelFile(localDir, file).toString(), sessionOptions);
                 } else {
                     final byte[] bytes = StorageUtil.readBytes(storage, path);

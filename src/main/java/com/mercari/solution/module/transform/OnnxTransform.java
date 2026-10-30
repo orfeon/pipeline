@@ -112,10 +112,14 @@ public class OnnxTransform extends Transform {
             final OnnxModel model,
             final List<MappingConfig> mappings) {
 
-        final Schema.Builder builder = Schema.builder(inputSchema);
+        // a later field replaces one of the same name, as its value does in the record
+        final Map<String, Schema.Field> fields = new LinkedHashMap<>();
+        for(final Schema.Field field : inputSchema.getFields()) {
+            fields.put(field.getName(), field.copy());
+        }
         if(preprocesses.useSelect()) {
             for(final Schema.Field field : Select.createOutputSchema(preprocesses).getFields()) {
-                builder.withField(field);
+                fields.put(field.getName(), field);
             }
         }
         final Map<String, NodeInfo> outputInfo = model.getOutputInfo();
@@ -124,10 +128,16 @@ public class OnnxTransform extends Transform {
                     ? new ArrayList<>(outputInfo.keySet()) : new ArrayList<>(mapping.outputs.keySet());
             final Schema onnxOutputSchema = OnnxToElementConverter.convertOutputSchema(outputInfo, outputNames);
             for(final Schema.Field field : onnxOutputSchema.getFields()) {
-                builder.withField(mapping.outputFieldName(field.getName()), field.getFieldType());
+                final String name = mapping.outputFieldName(field.getName());
+                fields.put(name, Schema.Field.of(name, field.getFieldType()));
             }
         }
-        return builder.withType(DataType.ELEMENT).build();
+        // from the fields only: Schema.builder(inputSchema) would keep the Avro schema of the input (BigQuery, Avro files, ...),
+        // and the records would be written with it, without the added fields
+        return Schema.builder()
+                .withFields(new ArrayList<>(fields.values()))
+                .withType(DataType.ELEMENT)
+                .build();
     }
 
     @NonNull
@@ -191,11 +201,11 @@ public class OnnxTransform extends Transform {
         // buffered elements per window: a batch is flushed by the element that fills it, which shares its window
         private transient Map<BoundedWindow, List<Buffered>> buffers;
 
-        private record Buffered(MElement element, Map<String, Object> values, Instant timestamp, BoundedWindow window) {}
+        private record Buffered(MElement element, Map<String, Object> values, Instant timestamp) {}
 
         private interface Emitter {
-            void output(MElement element, Instant timestamp, BoundedWindow window);
-            void failure(BadRecord badRecord, Instant timestamp, BoundedWindow window);
+            void output(MElement element, Instant timestamp);
+            void failure(BadRecord badRecord, Instant timestamp);
         }
 
         public InferenceDoFn(
@@ -240,18 +250,18 @@ public class OnnxTransform extends Transform {
 
         @FinishBundle
         public void finishBundle(final FinishBundleContext c) {
-            final Emitter emitter = new Emitter() {
-                @Override
-                public void output(final MElement element, final Instant timestamp, final BoundedWindow window) {
-                    c.output(element, timestamp, window);
-                }
-                @Override
-                public void failure(final BadRecord badRecord, final Instant timestamp, final BoundedWindow window) {
-                    c.output(failureTag, badRecord, timestamp, window);
-                }
-            };
-            for(final List<Buffered> buffer : buffers.values()) {
-                flush(buffer, emitter);
+            for(final Map.Entry<BoundedWindow, List<Buffered>> entry : buffers.entrySet()) {
+                final BoundedWindow window = entry.getKey();
+                flush(entry.getValue(), new Emitter() {
+                    @Override
+                    public void output(final MElement element, final Instant timestamp) {
+                        c.output(element, timestamp, window);
+                    }
+                    @Override
+                    public void failure(final BadRecord badRecord, final Instant timestamp) {
+                        c.output(failureTag, badRecord, timestamp, window);
+                    }
+                });
             }
             buffers.clear();
         }
@@ -275,7 +285,9 @@ public class OnnxTransform extends Transform {
                     return;
                 }
                 values = input.asPrimitiveMap();
-                values.putAll(preprocessors.select(input, c.timestamp()));
+                if(preprocessors.useSelect()) {
+                    values.putAll(preprocessors.select(input, c.timestamp()));
+                }
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to preprocess onnx input", input, e, failFast);
                 c.output(failureTag, badRecord);
@@ -283,16 +295,16 @@ public class OnnxTransform extends Transform {
             }
 
             final List<Buffered> buffer = buffers.computeIfAbsent(window, w -> new ArrayList<>());
-            buffer.add(new Buffered(input, values, c.timestamp(), window));
+            buffer.add(new Buffered(input, values, c.timestamp()));
             if(buffer.size() >= bufferSize) {
                 buffers.remove(window);
                 flush(buffer, new Emitter() {
                     @Override
-                    public void output(final MElement element, final Instant timestamp, final BoundedWindow w) {
+                    public void output(final MElement element, final Instant timestamp) {
                         c.outputWithTimestamp(element, timestamp);
                     }
                     @Override
-                    public void failure(final BadRecord badRecord, final Instant timestamp, final BoundedWindow w) {
+                    public void failure(final BadRecord badRecord, final Instant timestamp) {
                         c.outputWithTimestamp(failureTag, badRecord, timestamp);
                     }
                 });
@@ -300,9 +312,6 @@ public class OnnxTransform extends Transform {
         }
 
         private void flush(final List<Buffered> buffer, final Emitter emitter) {
-            if(buffer.isEmpty()) {
-                return;
-            }
             final List<Map<String, Object>> outputs;
             try {
                 final List<Map<String, Object>> inputs = new ArrayList<>();
@@ -313,22 +322,25 @@ public class OnnxTransform extends Transform {
             } catch (final Throwable e) {
                 for(final Buffered buffered : buffer) {
                     final BadRecord badRecord = processError("Failed to inference onnx", buffered.element, e, failFast);
-                    emitter.failure(badRecord, buffered.timestamp, buffered.window);
+                    emitter.failure(badRecord, buffered.timestamp);
                 }
                 return;
             }
 
             for(int i=0; i<buffer.size(); i++) {
                 final Buffered buffered = buffer.get(i);
+                final MElement output;
                 try {
                     final Map<String, Object> values = postprocessors.select(outputs.get(i), buffered.timestamp);
-                    final MElement output = MElement.of(values, buffered.timestamp)
+                    output = MElement.of(values, buffered.timestamp)
                             .convert(outputSchema.withType(DataType.AVRO));
-                    emitter.output(output, buffered.timestamp, buffered.window);
                 } catch (final Throwable e) {
                     final BadRecord badRecord = processError("Failed to postprocess onnx output", buffered.element, e, failFast);
-                    emitter.failure(badRecord, buffered.timestamp, buffered.window);
+                    emitter.failure(badRecord, buffered.timestamp);
+                    continue;
                 }
+                // outside the try: an error thrown by a fused downstream step is not a failure of this record
+                emitter.output(output, buffered.timestamp);
             }
         }
 

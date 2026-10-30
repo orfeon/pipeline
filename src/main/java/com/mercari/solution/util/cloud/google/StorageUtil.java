@@ -28,7 +28,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Predicate;
 
 public class StorageUtil {
 
@@ -183,6 +186,10 @@ public class StorageUtil {
     }
 
     public static List<StorageObject> listFiles(final String bucket, final String object, final String matchGlob) {
+        return listFiles(storage(), bucket, object, matchGlob);
+    }
+
+    public static List<StorageObject> listFiles(final Storage storage, final String bucket, final String object, final String matchGlob) {
         final String prefix;
         if(object.endsWith("*")) {
             prefix = object.replace("*", "");
@@ -190,7 +197,6 @@ public class StorageUtil {
             prefix = object;
         }
         try {
-            final Storage storage = storage();
             final List<StorageObject> objects = new ArrayList<>();
             String pageToken = null;
             do {
@@ -346,6 +352,39 @@ public class StorageUtil {
             storage.objects().get(object.getBucket(), object.getName()).executeMediaAndDownloadTo(os);
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Downloads the objects under the directory {@code gcsPath} (ending with '/') to {@code localDir}, keeping the sub
+     * directory layout. {@code filter} selects the objects by their path relative to the directory.
+     */
+    public static void downloadDirectory(
+            final Storage storage,
+            final String gcsPath,
+            final Path localDir,
+            final Predicate<String> filter) throws IOException {
+
+        final String[] paths = parseGcsPath(gcsPath);
+        final Path root = localDir.toAbsolutePath().normalize();
+        for(final StorageObject object : listFiles(storage, paths[0], paths[1], null)) {
+            // a name ending with '/' is a placeholder of a directory
+            if(object.getName().endsWith("/")) {
+                continue;
+            }
+            final String name = object.getName().substring(paths[1].length());
+            if(!filter.test(name)) {
+                continue;
+            }
+            // object names are free text: "a/../../b" must not write outside of the directory
+            final Path localFile = root.resolve(name).normalize();
+            if(!localFile.startsWith(root)) {
+                throw new IllegalArgumentException("object: " + object.getName() + " is outside of the directory: " + gcsPath);
+            }
+            Files.createDirectories(localFile.getParent());
+            try(final OutputStream os = new BufferedOutputStream(Files.newOutputStream(localFile))) {
+                downloadTo(storage, object, os);
+            }
         }
     }
 

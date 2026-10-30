@@ -3,10 +3,14 @@ package com.mercari.solution.util.pipeline.select;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
+import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class TokenizeTest {
 
@@ -18,8 +22,42 @@ public class TokenizeTest {
         return new Gson().fromJson(text, JsonObject.class);
     }
 
-    // NOTE: actual tokenization requires a HuggingFace tokenizer model file (DJL native libs),
-    // so only parameter validation is tested here.
+    // ids and the sum of the attention mask of a text of the given number of words (2 special tokens are added by default)
+    private static List<Integer> encode(final String options, final int words) {
+        final String path = Path.of("src/test/resources/module/transform/onnx/tokenizer.json").toAbsolutePath().toString().replace('\\', '/');
+        final Tokenize tokenize = Tokenize.of("t",
+                json("{ \"tokenizer\": \"huggingface\", \"field\": \"textField\", \"path\": \"" + path + "\"" + options + " }"),
+                inputFields(), true, false);
+        tokenize.setup();
+        final Map<?, ?> encoded = (Map<?, ?>) tokenize.apply(new HashMap<>(Map.of("textField", "hello ".repeat(words))), Instant.now());
+        final int ids = ((List<?>) encoded.get("ids")).size();
+        final int attended = ((List<?>) encoded.get("attentionMask")).stream().mapToInt(v -> ((Number) v).intValue()).sum();
+        return List.of(ids, attended);
+    }
+
+    @Test
+    public void testTruncation() {
+        // on by default, at 512 tokens
+        Assertions.assertEquals(List.of(512, 512), encode("", 600));
+        Assertions.assertEquals(List.of(602, 602), encode(", \"truncation\": false", 600));
+        Assertions.assertEquals(List.of(8, 8), encode(", \"truncation\": true, \"maxLength\": 8", 600));
+        // maxLength is not clamped to the default 512
+        Assertions.assertEquals(List.of(602, 602), encode(", \"truncation\": true, \"maxLength\": 1000", 600));
+        Assertions.assertEquals(List.of(700, 700), encode(", \"truncation\": true, \"maxLength\": 700", 800));
+    }
+
+    @Test
+    public void testPadding() {
+        // records are encoded one by one: only maxLength gives them a common length
+        Assertions.assertEquals(List.of(16, 5), encode(", \"padding\": true, \"truncation\": true, \"maxLength\": 16", 3));
+        Assertions.assertEquals(List.of(5, 5), encode(", \"padding\": true", 3));
+        Assertions.assertEquals(List.of(5, 5), encode(", \"padding\": false, \"maxLength\": 16", 3));
+    }
+
+    @Test
+    public void testAddSpecialTokens() {
+        Assertions.assertEquals(List.of(3, 3), encode(", \"addSpecialTokens\": false", 3));
+    }
 
     @Test
     public void testValidation() {

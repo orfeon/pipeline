@@ -1,6 +1,7 @@
 package com.mercari.solution.util.domain.ml.onnx;
 
 import ai.onnxruntime.*;
+import ai.onnxruntime.platform.Fp16Conversions;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.values.KV;
@@ -68,16 +69,9 @@ public class OnnxRuntimeUtil {
             throws OrtException {
 
         final long[] shape = convertShape(tensorInfo, values);
+        checkShape(values, shape, 0);
 
         final List<Object> flattenValues = flatten(values, shape.length);
-        long size = 1;
-        for(final long dim : shape) {
-            size *= dim;
-        }
-        if(flattenValues.size() != size) {
-            throw new IllegalArgumentException("values for tensor shape " + Arrays.toString(shape) + " must have " + size
-                    + " elements, but got " + flattenValues.size() + " (records in a batch must have arrays of the same length)");
-        }
         return switch (tensorInfo.type) {
             case STRING -> {
                 final String[] stringValues = new String[flattenValues.size()];
@@ -93,12 +87,12 @@ public class OnnxRuntimeUtil {
                 }
                 yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(boolValues), shape, OnnxJavaType.BOOL);
             }
-            case INT8 -> {
+            case INT8, UINT8 -> {
                 final byte[] byteValues = new byte[flattenValues.size()];
                 for (int i = 0; i < flattenValues.size(); i++) {
                     byteValues[i] = ((Number) flattenValues.get(i)).byteValue();
                 }
-                yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(byteValues), shape);
+                yield OnnxTensor.createTensor(environment, ByteBuffer.wrap(byteValues), shape, tensorInfo.type);
             }
             case INT16 -> {
                 final short[] shortValues = new short[flattenValues.size()];
@@ -121,12 +115,17 @@ public class OnnxRuntimeUtil {
                 }
                 yield OnnxTensor.createTensor(environment, LongBuffer.wrap(longValues), shape);
             }
-            case FLOAT16, FLOAT -> {
+            case FLOAT, FLOAT16, BFLOAT16 -> {
                 final float[] floatValues = new float[flattenValues.size()];
                 for (int i = 0; i < flattenValues.size(); i++) {
                     floatValues[i] = ((Number) flattenValues.get(i)).floatValue();
                 }
-                yield OnnxTensor.createTensor(environment, FloatBuffer.wrap(floatValues), shape);
+                final FloatBuffer buffer = FloatBuffer.wrap(floatValues);
+                yield switch (tensorInfo.type) {
+                    case FLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToFp16Buffer(buffer), shape, tensorInfo.type);
+                    case BFLOAT16 -> OnnxTensor.createTensor(environment, Fp16Conversions.convertFloatBufferToBf16Buffer(buffer), shape, tensorInfo.type);
+                    default -> OnnxTensor.createTensor(environment, buffer, shape);
+                };
             }
             case DOUBLE -> {
                 final double[] doubleValues = new double[flattenValues.size()];
@@ -137,6 +136,26 @@ public class OnnxRuntimeUtil {
             }
             default -> throw new IllegalArgumentException("Not supported tensor type: " + tensorInfo.type);
         };
+    }
+
+    // every level must match the shape: comparing only the total count would let arrays of compensating lengths through
+    // (3, 2 and 4 values for a [3, 3] tensor) and silently misalign the rows
+    private static void checkShape(final List<?> values, final long[] shape, final int dim) {
+        final long expected = shape.length == 0 ? 1 : shape[dim];
+        if(values.size() != expected) {
+            throw new IllegalArgumentException("values for tensor shape " + Arrays.toString(shape) + " must have " + expected
+                    + " elements at dimension " + dim + ", but got " + values.size() + " (records in a batch must have arrays of the same length)");
+        }
+        if(dim + 1 >= shape.length) {
+            return;
+        }
+        for(final Object value : values) {
+            if(!(value instanceof List<?> list)) {
+                throw new IllegalArgumentException("value for tensor shape " + Arrays.toString(shape) + " at dimension " + (dim + 1)
+                        + " must be an array, but: " + value);
+            }
+            checkShape(list, shape, dim + 1);
+        }
     }
 
     public static List<?> convertMatrix(final OnnxValue onnxValue) throws OrtException {

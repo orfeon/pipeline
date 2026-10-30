@@ -18,7 +18,14 @@ public class OnnxTestModels {
 
     // TensorProto.DataType
     public static final int FLOAT = 1;
+    public static final int UINT8 = 2;
+    public static final int INT8 = 3;
+    public static final int INT16 = 5;
     public static final int INT64 = 7;
+    public static final int BOOL = 9;
+    public static final int FLOAT16 = 10;
+    public static final int DOUBLE = 11;
+    public static final int BFLOAT16 = 16;
 
     private static final int IR_VERSION = 8;
     private static final int OPSET = 13;
@@ -62,6 +69,34 @@ public class OnnxTestModels {
         return graph.model();
     }
 
+    /** {@code x <elemType>[batch]} with the output {@code y = Cast(x, float) float[batch]}. */
+    public static byte[] cast(final int elemType) {
+        final Graph graph = new Graph("cast");
+        graph.input("x", elemType, "batch");
+        graph.node("Cast", List.of("x"), List.of("y"), "to", (long) FLOAT);
+        graph.output("y", FLOAT, "batch");
+        return graph.model();
+    }
+
+    /** {@code x float[batch]} with the rank-0 output {@code total = ReduceSum(x) float[]}: no batch dimension. */
+    public static byte[] scalarOutput() {
+        final Graph graph = new Graph("scalar");
+        graph.input("x", FLOAT, "batch");
+        graph.node("ReduceSum", List.of("x"), List.of("total"), "keepdims", 0L);
+        graph.output("total", FLOAT);
+        return graph.model();
+    }
+
+    /** {@code x float[batch, length]} with the output {@code y = Reshape(x, [0, -1, 2]) float[batch, half, 2]}. */
+    public static byte[] dynamicMatrix() {
+        final Graph graph = new Graph("dynamic_matrix");
+        graph.input("x", FLOAT, "batch", "length");
+        graph.initializer("shape", INT64, new long[]{3}, new long[]{0, -1, 2});
+        graph.node("Reshape", List.of("x", "shape"), List.of("y"));
+        graph.output("y", FLOAT, "batch", "half", 2L);
+        return graph.model();
+    }
+
     public static Path write(final Path path, final byte[] model) {
         try {
             Files.createDirectories(path.getParent());
@@ -72,7 +107,7 @@ public class OnnxTestModels {
         }
     }
 
-    /** ModelProto path for configs: forward slashes, also on Windows. */
+    /** A path for configs: forward slashes, also on Windows. */
     public static String configPath(final Path path) {
         return path.toAbsolutePath().toString().replace('\\', '/');
     }
@@ -104,8 +139,8 @@ public class OnnxTestModels {
                 }
                 out.writeInt32(2, dataType);
                 switch (data) {
-                    case float[] values -> out.writeByteArray(4, packed(o -> { for(final float v : values) o.writeFloatNoTag(v); }));
-                    case long[] values -> out.writeByteArray(7, packed(o -> { for(final long v : values) o.writeInt64NoTag(v); }));
+                    case float[] values -> out.writeByteArray(4, message(o -> { for(final float v : values) o.writeFloatNoTag(v); }));
+                    case long[] values -> out.writeByteArray(7, message(o -> { for(final long v : values) o.writeInt64NoTag(v); }));
                     default -> throw new IllegalArgumentException("not supported initializer data: " + data);
                 }
                 out.writeString(8, name);
@@ -196,10 +231,6 @@ public class OnnxTestModels {
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    private static byte[] packed(final Writer writer) {
-        return message(writer);
     }
 
 }

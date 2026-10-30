@@ -2,17 +2,20 @@ package com.mercari.solution.module.transform;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
-import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
+import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.ml.onnx.OnnxTestModels;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.stream.Stream;
 
 public class OnnxTransformTest {
 
@@ -239,6 +242,305 @@ public class OnnxTransformTest {
         pipeline.run();
     }
 
+    // every record of a failing batch reaches the failure output, whatever the bundles are: all the records fail here
+    @Test
+    public void testFailureRoutesEveryRecordOfBatch(@TempDir final Path tempDir) throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("failure_routing/model.onnx"), OnnxTestModels.linear());
+        final Path failures = tempDir.resolve("failures");
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: 10, x: [1.0, 2.0] }
+                        - { id: 11, x: [3.0, 4.0] }
+                        - { id: 12, x: [5.0, 6.0] }
+                    schema:
+                      fields:
+                        - { name: id, type: int64 }
+                        - { name: x, type: float32, mode: repeated }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: false
+                    failureSinks:
+                      - name: dead_letter
+                        module: storage
+                        parameters:
+                          output: "%s/failed"
+                          format: json
+                          suffix: ".json"
+                          numShards: 1
+                    parameters:
+                      model:
+                        path: "%s"
+                      mappings:
+                        - inputs: { x: x }
+                          outputs: { y: y }
+                      bufferSize: 3
+                """.formatted(Path.of("").toAbsolutePath().relativize(failures).toString().replace('\\', '/'), OnnxTestModels.configPath(model));
+
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
+        PAssert.that(outputs.get("onnx").getCollection()).empty();
+        pipeline.run().waitUntilFinish();
+
+        final List<String> lines = new ArrayList<>();
+        try(final Stream<Path> files = Files.walk(failures)) {
+            for(final Path file : files.filter(Files::isRegularFile).toList()) {
+                lines.addAll(Files.readAllLines(file));
+            }
+        }
+        Assertions.assertEquals(3, lines.size(), lines.toString());
+        final String written = String.join("\n", lines);
+        for(final String value : List.of("[1.0,2.0]", "[3.0,4.0]", "[5.0,6.0]")) {
+            Assertions.assertTrue(written.contains(value), value + " in " + written);
+        }
+    }
+
+    // an input with an Avro schema (BigQuery, Avro files, ...): the records are written with the added fields, too
+    @Test
+    public void testInputWithAvroSchema() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("avro_input/model.onnx"), OnnxTestModels.linear());
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: 0, x: [1.0, 0.0, 0.0] }
+                    schema:
+                      avro:
+                        json: '{"type":"record","name":"root","fields":[{"name":"id","type":"long"},{"name":"x","type":{"type":"array","items":"float"}}]}'
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    parameters:
+                      model:
+                        path: "%s"
+                      mappings:
+                        - inputs: { x: x }
+                          outputs: { y: y }
+                """.formatted(OnnxTestModels.configPath(model));
+
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(1.5f, 1.5f), floats(row.getPrimitiveValue("y")));
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    private static String castConfig(final Path model, final String valueType, final String value, final String mappings) {
+        return """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: 0, x: %s }
+                    schema:
+                      fields:
+                        - { name: id, type: int64 }
+                        - { name: x, type: %s }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      mappings:
+                %s
+                """.formatted(value, valueType, OnnxTestModels.configPath(model), mappings);
+    }
+
+    // a later step writes the field of an earlier step: the schema has it once, and the record the last value
+    @Test
+    public void testOutputFieldRepeatedInSteps() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("repeated_output/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
+                        - inputs: { x: x }
+                        - inputs: { y: x }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals(List.of("id", "x", "y"), output.getSchema().getFields().stream().map(Schema.Field::getName).toList());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("y")).floatValue());
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // a model output named as an input field replaces it, also in its type
+    @Test
+    public void testOutputFieldReplacesInputField() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("replaced_input/model.onnx"), OnnxTestModels.cast(OnnxTestModels.FLOAT));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
+                        - inputs: { x: x }
+                          outputs: { y: id }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals(List.of("id", "x"), output.getSchema().getFields().stream().map(Schema.Field::getName).toList());
+        Assertions.assertEquals("float32", output.getSchema().getField("id").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("id")).floatValue());
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    private void assertCastInput(final int elemType, final String valueType, final String value, final float expected) throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("input_type_" + elemType + "/model.onnx"), OnnxTestModels.cast(elemType));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, valueType, value, """
+                        - inputs: { x: x }
+                """)));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                Assertions.assertEquals(expected, ((Number) row.getPrimitiveValue("y")).floatValue());
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testUint8Input() throws Exception {
+        assertCastInput(OnnxTestModels.UINT8, "int32", "200", 200f);
+    }
+
+    @Test
+    public void testBoolInput() throws Exception {
+        assertCastInput(OnnxTestModels.BOOL, "boolean", "true", 1f);
+    }
+
+    @Test
+    public void testFloat16Input() throws Exception {
+        assertCastInput(OnnxTestModels.FLOAT16, "float32", "1.5", 1.5f);
+    }
+
+    @Test
+    public void testBFloat16Input() throws Exception {
+        assertCastInput(OnnxTestModels.BFLOAT16, "float32", "1.5", 1.5f);
+    }
+
+    // [] is broadcast to every record of the batch, without the batch dimension
+    @Test
+    public void testScalarOutput() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("scalar_output/model.onnx"), OnnxTestModels.scalarOutput());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(castConfig(model, "float32", "1.5", """
+                        - inputs: { x: x }
+                """)));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals("float32", output.getSchema().getField("total").getFieldType().getType().name());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(1.5f, ((Number) row.getPrimitiveValue("total")).floatValue());
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // [batch, dynamic, 2]: a matrix whose dynamic dimension is -1 in the shape; the values stay flat row-major
+    @Test
+    public void testMatrixOutputWithDynamicDimension() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("dynamic_matrix/model.onnx"), OnnxTestModels.dynamicMatrix());
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: 0, x: [1.0, 2.0, 3.0, 4.0] }
+                    schema:
+                      fields:
+                        - { name: id, type: int64 }
+                        - { name: x, type: float32, mode: repeated }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    parameters:
+                      model:
+                        path: "%s"
+                      mappings:
+                        - inputs: { x: x }
+                """.formatted(OnnxTestModels.configPath(model));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
+        final MCollection output = outputs.get("onnx");
+        Assertions.assertEquals(List.of(-1, 2), output.getSchema().getField("y").getFieldType().getShape());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(1f, 2f, 3f, 4f), floats(row.getPrimitiveValue("y")));
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // the nested tokenize_encode field stays in the record when there are no postprocesses
+    @Test
+    public void testTokenizerWithoutPostprocess() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("tokens_no_post/model.onnx"), OnnxTestModels.tokens());
+        final String tokenizer = OnnxTestModels.configPath(Path.of("src/test/resources/module/transform/onnx/tokenizer.json"));
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { text: "Hello world" }
+                    schema:
+                      fields:
+                        - { name: text, type: string }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    parameters:
+                      model:
+                        path: "%s"
+                      preprocesses:
+                        - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: "%s", field: text }
+                      mapping:
+                        inputs: { tok.ids: ids, tok.attentionMask: attention_mask }
+                """.formatted(OnnxTestModels.configPath(model), tokenizer);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configYaml));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(10f, ((Number) row.getPrimitiveValue("total")).floatValue());
+                Assertions.assertEquals(List.of(1L, 3L, 4L, 2L), ((Map<?, ?>) row.getPrimitiveValue("tok")).get("ids"));
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
     @Test
     public void testMappingsRequired() {
         final String configYaml = """
@@ -268,7 +570,7 @@ public class OnnxTransformTest {
     private static String rootMessages(Throwable e) {
         final StringBuilder messages = new StringBuilder();
         while(e != null) {
-            if(e instanceof IllegalModuleException || e.getMessage() != null) {
+            if(e.getMessage() != null) {
                 messages.append(e.getMessage()).append('\n');
             }
             e = e.getCause();

@@ -44,7 +44,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 | filter        | optional | [Filter](../common/filter.md)            | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output).                                                               |
 | preprocesses  | optional | Array<[Select](../common/select.md)\>    | Select functions applied to each record before inference. The computed fields are added to the record and can be referenced by `mappings[].inputs`.                                  |
 | postprocesses | optional | Array<[Select](../common/select.md)\>    | Select functions applied to each record after inference. When specified, the output schema becomes the schema produced by these select functions (only the selected fields remain).  |
-| bufferSize    | optional | Integer                                  | Number of records to buffer before running inference as one batch. Must be 1 or more. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With `bufferSize` greater than 1, array inputs of a dynamic length (token ids, ...) must have the same length in every record of a batch (padding is not supported yet). |
+| bufferSize    | optional | Integer                                  | Number of records to buffer before running inference as one batch. Must be 1 or more. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With `bufferSize` greater than 1, array inputs of a dynamic length (token ids, ...) must have the same length in every record of a batch, otherwise the batch fails (`tokenize_encode` gives token ids a common length with `padding` and `maxLength`). |
 
 ## Model parameters
 
@@ -66,11 +66,11 @@ Each element of `mappings` defines one inference step against the model.
 | inputs    | required | Map<String,String\> | Maps record fields to model inputs. The map **key is the record field name** (input fields or fields computed by `preprocesses`), and the **value is the ONNX model input name**. |
 | outputs   | optional | Map<String,String\> | Maps model outputs to record fields. The map **key is the ONNX model output name**, and the **value is the output field name** added to the record. Only the listed model outputs are requested from the session. If omitted, every model output is added with its own name. |
 
-Every model input must be given a record field by `inputs`.
+Every model input must be given a record field by `inputs`, in every mapping step.
 
 ## Output schema
 
-The output schema is: input schema fields + fields produced by `preprocesses` + the mapped model output fields (named by `mappings[].outputs`). If `postprocesses` is specified, the output schema is instead the schema produced by the postprocess select functions.
+The output schema is: input schema fields + fields produced by `preprocesses` + the mapped model output fields (named by `mappings[].outputs`). A field with the name of an earlier one replaces it, as its value does in the record. If `postprocesses` is specified, the output schema is instead the schema produced by the postprocess select functions.
 
 dim0 of a model output is the batch, and the type of an output field is decided by the rest of the shape:
 
@@ -129,7 +129,7 @@ sinks:
 
 ## Example: filtered inference with chained mappings
 
-Runs two inference steps against the same model: the second mapping consumes the output field of the first. Only records matching the filter are processed.
+Runs two inference steps against the same model: the second mapping gives the output field of the first to the model input. Only records matching the filter are processed.
 
 ```yaml
 transforms:
@@ -147,12 +147,11 @@ transforms:
         value: "active"
       mappings:
         - inputs:
-            feature_a: input_a
-            feature_b: input_b
+            feature: input
           outputs:
-            score: raw_score
+            output: first_pass
         - inputs:
-            raw_score: input_score
+            first_pass: input
           outputs:
-            label: predicted_label
+            output: second_pass
 ```
