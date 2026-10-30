@@ -21,6 +21,7 @@ public class OnnxTestModels {
     public static final int UINT8 = 2;
     public static final int INT8 = 3;
     public static final int INT16 = 5;
+    public static final int INT32 = 6;
     public static final int INT64 = 7;
     public static final int BOOL = 9;
     public static final int FLOAT16 = 10;
@@ -166,6 +167,28 @@ public class OnnxTestModels {
         graph.node("Identity", List.of("context"), List.of("seen"));
         graph.output("seen", FLOAT, "batch", "length");
         graph.output("forecasts", FLOAT, "batch", 3L, 4L);
+        return graph.model();
+    }
+
+    /**
+     * A model of the shape of a tabular model that learns in context: {@code x float[rows, columns]} with the context rows
+     * first, {@code y_context [context]} and {@code categorical_mask bool[columns]}. The output is
+     * {@code logits = ReduceSum(query rows of x, 1, keepdims) weights float[query, width]}.
+     */
+    public static byte[] tabular(final int targetType, final float... weights) {
+        final Graph graph = new Graph("tabular");
+        graph.input("x", FLOAT, "rows", "columns");
+        graph.input("y_context", targetType, "context");
+        graph.input("categorical_mask", BOOL, "columns");
+        graph.initializer("end", INT64, new long[]{1}, new long[]{Long.MAX_VALUE});
+        graph.initializer("rowAxis", INT64, new long[]{1}, new long[]{0});
+        graph.initializer("columnAxis", INT64, new long[]{1}, new long[]{1});
+        graph.initializer("weights", FLOAT, new long[]{1, weights.length}, weights);
+        graph.node("Shape", List.of("y_context"), List.of("start"));
+        graph.node("Slice", List.of("x", "start", "end", "rowAxis"), List.of("query"));
+        graph.node("ReduceSum", List.of("query", "columnAxis"), List.of("sum"), "keepdims", 1L);
+        graph.node("MatMul", List.of("sum", "weights"), List.of("logits"));
+        graph.output("logits", FLOAT, "query", (long) weights.length);
         return graph.model();
     }
 

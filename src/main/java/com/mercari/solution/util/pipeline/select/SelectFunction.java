@@ -29,6 +29,11 @@ public interface SelectFunction extends Serializable {
         return false;
     }
 
+    // inside the onnx transform: whether this result of the function leaves nothing to ask the model for the record
+    default boolean skipsModel(final Object result) {
+        return false;
+    }
+
     enum Func implements Serializable {
         pass,
         cast,
@@ -75,6 +80,8 @@ public interface SelectFunction extends Serializable {
         array_zip,
         timeseries_grid,
         timeseries_quantiles,
+        tabular_encode,
+        tabular_decode,
         panic;
 
         public static Func is(String value) {
@@ -206,6 +213,8 @@ public interface SelectFunction extends Serializable {
             case array_zip -> ArrayZip.of(name, jsonObject, inputFields, ignore);
             case timeseries_grid -> TimeseriesGrid.of(name, jsonObject, inputFields, ignore);
             case timeseries_quantiles -> TimeseriesQuantiles.of(name, jsonObject, inputFields, ignore);
+            case tabular_encode -> TabularEncode.of(name, jsonObject, inputFields, ignore);
+            case tabular_decode -> TabularDecode.of(name, jsonObject, inputFields, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };

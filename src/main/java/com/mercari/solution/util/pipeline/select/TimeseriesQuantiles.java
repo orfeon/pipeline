@@ -85,14 +85,14 @@ public class TimeseriesQuantiles implements SelectFunction {
         }
 
         final Axis axis = jsonObject.has("axis") ? Axis.valueOf(jsonObject.get("axis").getAsString()) : Axis.quantile_step;
-        final List<String> levelTexts = levels(name, "levels", jsonObject.get("levels"));
+        final List<String> levelTexts = levels(name, "timeseries_quantiles", "levels", jsonObject.get("levels"));
         final int declared = type.getShape().get(axis == Axis.quantile_step ? 0 : 1);
         if(declared > 0 && declared != levelTexts.size()) {
             throw new IllegalArgumentException("SelectField: " + name + " func: timeseries_quantiles has " + levelTexts.size()
                     + " levels, but field: " + field + " of shape " + type.getShape() + " and axis " + axis + " has " + declared);
         }
 
-        final List<String> selected = jsonObject.has("select") ? levels(name, "select", jsonObject.get("select")) : levelTexts;
+        final List<String> selected = jsonObject.has("select") ? levels(name, "timeseries_quantiles", "select", jsonObject.get("select")) : levelTexts;
         final boolean outputDouble = type.getMatrixValueType().getType() == Schema.Type.float64;
         final Schema.FieldType realType = (outputDouble ? Schema.FieldType.FLOAT64 : Schema.FieldType.FLOAT32).withNullable(false);
         final List<Quantile> quantiles = new ArrayList<>();
@@ -122,27 +122,27 @@ public class TimeseriesQuantiles implements SelectFunction {
     }
 
     // canonical decimal texts: the same level is the same text however it was written
-    private static List<String> levels(final String name, final String parameter, final JsonElement element) {
+    static List<String> levels(final String name, final String func, final String parameter, final JsonElement element) {
         if(!element.isJsonArray() || element.getAsJsonArray().isEmpty()) {
-            throw new IllegalArgumentException("SelectField: " + name + " func: timeseries_quantiles " + parameter + " must be an array of levels: " + element);
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + func + " " + parameter + " must be an array of levels: " + element);
         }
         final JsonArray array = element.getAsJsonArray();
         final List<String> levels = new ArrayList<>();
         for(final JsonElement level : array) {
             final BigDecimal value = new BigDecimal(level.getAsString());
             if(value.signum() <= 0 || value.compareTo(BigDecimal.ONE) >= 0) {
-                throw new IllegalArgumentException("SelectField: " + name + " func: timeseries_quantiles " + parameter + " must be between 0 and 1: " + level);
+                throw new IllegalArgumentException("SelectField: " + name + " func: " + func + " " + parameter + " must be between 0 and 1: " + level);
             }
             final String text = value.stripTrailingZeros().toPlainString();
             if(levels.contains(text)) {
-                throw new IllegalArgumentException("SelectField: " + name + " func: timeseries_quantiles " + parameter + " has " + text + " more than once");
+                throw new IllegalArgumentException("SelectField: " + name + " func: " + func + " " + parameter + " has " + text + " more than once");
             }
             levels.add(text);
         }
         return levels;
     }
 
-    private static String quantileName(final String level) {
+    static String quantileName(final String level) {
         final String decimals = level.substring(level.indexOf('.') + 1);
         return "q" + (decimals.length() < 2 ? decimals + "0" : decimals);
     }

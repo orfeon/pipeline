@@ -119,7 +119,7 @@ dim0 of a model output is the batch if a value was stacked ([Rank of a value](#r
 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
-Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes.
+Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes. For a tabular model that learns in context: [`tabular_encode` and `tabular_decode`](select.md#tabular_encode).
 
 ## Example: text embedding
 
@@ -262,3 +262,49 @@ transforms:
 A NaN or an infinity fails the record if the model input is an integer or a bool: a grid with gaps needs a float model input.
 
 `forecast` is an array of 64 elements with `timestamp`, `q10`, `q50` and `q90`. Use `flattenField: forecast` of a later `select` transform to get a record per step: that transform also requires a `select` list, of the fields to keep, which has to name `forecast`.
+
+## Example: predicting rows from the other rows of a group
+
+[Kumo Tabular](https://huggingface.co/nvidia/Kumo-Tabular) predicts rows from labeled rows given along with them, without training: `onnx-community/kumo-tabular-small-classifier-ONNX` and `onnx-community/kumo-tabular-small-regressor-ONNX`. One group of rows is one inference.
+
+```yaml
+transforms:
+  - name: groups
+    module: aggregation
+    inputs: [listings]
+    parameters:
+      groupFields: [category_id]
+      aggregations:
+        - input: listings
+          fields:
+            - { name: rows, op: array_agg, fields: [item_id, price, brand, condition, label] }
+  - name: kumo
+    module: onnx
+    inputs: [groups]
+    parameters:
+      model:
+        path: gs://my-bucket/models/kumo-tabular-small-classifier-ONNX/
+        file: onnx/model.onnx
+      inputs:
+        - name: tab
+          func: tabular_encode
+          preset: kumo
+          task: classification
+          field: rows
+          key: item_id
+          target: label
+          numerical: [price]
+          categorical: [brand, condition]
+          maxContextRows: 2000
+        - { name: x, field: tab.x }
+        - { name: y_context, field: tab.yContext }
+        - { name: categorical_mask, field: tab.categoricalMask }
+      outputs:
+        - { name: predictions, func: tabular_decode, preset: kumo, field: logits, encoded: tab }
+```
+
+- A row with a `label` is context, and a row without one is predicted.
+- `predictions` is an array with `key`, `prediction` and `probabilities`. For a record per row, use a later `select` transform with `flattenField: predictions` and a `select` list that names `predictions`.
+- A group without a row to predict gives an empty `predictions` without running the model. A group that has no context row, more than 10 classes, or no column left after the constant ones are removed fails by itself.
+- The time and the memory grow quickly with the number of rows of a group: `maxContextRows` bounds the context, but all the rows to predict go to the model. Split a group with too many of them before this transform.
+- For a regression, use the regressor model with `task: regression`, and `quantiles` in `tabular_decode`.

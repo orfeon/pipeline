@@ -843,6 +843,127 @@ public class OnnxTransformTest {
         pipeline.run();
     }
 
+    private static String tabularConfig(final Path model, final String elements, final String tab, final String decode) {
+        return """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                %s
+                    schema:
+                      fields:
+                        - { name: g, type: string }
+                        - { name: id, type: int64 }
+                        - { name: price, type: float64 }
+                        - { name: brand, type: string }
+                        - { name: label, type: string }
+                        - { name: amount, type: float64 }
+                transforms:
+                  - name: groups
+                    module: aggregation
+                    inputs: [create]
+                    parameters:
+                      groupFields: [g]
+                      aggregations:
+                        - input: create
+                          fields:
+                            - { name: rows, op: array_agg, fields: [id, price, brand, label, amount] }
+                  - name: onnx
+                    module: onnx
+                    inputs: [groups]
+                    failFast: false
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: tab, func: tabular_encode, preset: kumo, field: rows, key: id, numerical: [price], categorical: [brand], maxContextRows: 100, %s }
+                        - { name: x, field: tab.x }
+                        - { name: y_context, field: tab.yContext }
+                        - { name: categorical_mask, field: tab.categoricalMask }
+                      outputs:
+                        - { name: predictions, func: tabular_decode, preset: kumo, field: logits, encoded: tab%s }
+                        - { name: raw, field: logits }
+                """.formatted(elements.indent(8), OnnxTestModels.configPath(model), tab, decode);
+    }
+
+    // a group is one inference: a group without a row to predict does not ask the model, and one without context fails by itself
+    @Test
+    public void testTabularClassification() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("tabular_classification/model.onnx"),
+                OnnxTestModels.tabular(OnnxTestModels.INT32, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9));
+        final String elements = """
+                        - { g: a, id: 5, price: -100.0, brand: p }
+                        - { g: a, id: 2, price: 2.0, brand: q, label: "yes" }
+                        - { g: a, id: 1, price: 1.0, brand: p, label: "no" }
+                        - { g: a, id: 4, price: 100.0, brand: q }
+                        - { g: a, id: 3, price: 3.0, brand: p, label: "yes" }
+                        - { g: b, id: 1, price: 1.0, brand: p, label: "no" }
+                        - { g: b, id: 2, price: 2.0, brand: q, label: "yes" }
+                        - { g: c, id: 1, price: 1.0, brand: p }""";
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(tabularConfig(model, elements, "task: classification, target: label", "")));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> groups = new HashMap<>();
+            for(final MElement row : rows) {
+                groups.put(row.getAsString("g"), row);
+            }
+            Assertions.assertEquals(Set.of("a", "b"), groups.keySet());
+
+            final List<?> predictions = (List<?>) groups.get("a").getPrimitiveValue("predictions");
+            Assertions.assertEquals(2, predictions.size());
+            final Map<?, ?> high = (Map<?, ?>) predictions.get(0);
+            final Map<?, ?> low = (Map<?, ?>) predictions.get(1);
+            Assertions.assertEquals(4L, ((Number) high.get("key")).longValue());
+            Assertions.assertEquals("yes", high.get("prediction").toString());
+            Assertions.assertEquals(5L, ((Number) low.get("key")).longValue());
+            Assertions.assertEquals("no", low.get("prediction").toString());
+            final List<?> probabilities = (List<?>) high.get("probabilities");
+            Assertions.assertEquals("no", ((Map<?, ?>) probabilities.get(0)).get("label").toString());
+            double sum = 0;
+            for(final Object item : probabilities) {
+                sum += ((Number) ((Map<?, ?>) item).get("probability")).doubleValue();
+            }
+            Assertions.assertEquals(1d, sum, 1e-6);
+
+            Assertions.assertEquals(List.of(), groups.get("b").getPrimitiveValue("predictions"));
+            Assertions.assertNull(groups.get("b").getPrimitiveValue("raw"), "the model did not run");
+            Assertions.assertNotNull(groups.get("a").getPrimitiveValue("raw"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testTabularRegression() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("tabular_regression/model.onnx"),
+                OnnxTestModels.tabular(OnnxTestModels.FLOAT, 3, 2, 1));
+        final String elements = """
+                        - { g: a, id: 1, price: 1.0, brand: p, amount: 10.0 }
+                        - { g: a, id: 2, price: 2.0, brand: q, amount: 30.0 }
+                        - { g: a, id: 3, price: 100.0, brand: p }""";
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(tabularConfig(model, elements,
+                "task: regression, target: amount", ", quantiles: [0.25, 0.5, 0.75]")));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final MElement row = rows.iterator().next();
+            final Map<?, ?> prediction = (Map<?, ?>) ((List<?>) row.getPrimitiveValue("predictions")).getFirst();
+            Assertions.assertEquals(3L, ((Number) prediction.get("key")).longValue());
+            final double q25 = ((Number) prediction.get("q25")).doubleValue();
+            final double q50 = ((Number) prediction.get("q50")).doubleValue();
+            final double q75 = ((Number) prediction.get("q75")).doubleValue();
+            // the model gives them in descending order: 3s, 2s and s, around the mean of the target with its deviation as the unit
+            Assertions.assertTrue(q25 < q50 && q50 < q75, q25 + " " + q50 + " " + q75);
+            Assertions.assertEquals((q75 - 20d) / 3, (q25 - 20d), 1e-3, "the scale of the target");
+            Assertions.assertEquals(q50, ((Number) prediction.get("prediction")).doubleValue(), 1e-6);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
     private static String padConfig(final Path model, final String pad, final int bufferSize) {
         return """
                 sources:
