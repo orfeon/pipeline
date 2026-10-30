@@ -96,6 +96,11 @@ final class FactorizationCoders {
             data.writeBoolean(m.changePoint != null);
             if (m.changePoint != null) data.writeLong(m.changePoint);
             data.writeDouble(m.dispersion);
+            data.writeBoolean(m.linearRidge != null && m.factorRidge != null);
+            if (m.linearRidge != null && m.factorRidge != null) {
+                writeDoubles(m.linearRidge, out);
+                writeDoubles(m.factorRidge, out);
+            }
             // the fit's report (the artifact manifest of a fold run's whole-input model is written after this coder)
             final Factorization.FitReport r = m.report;
             data.writeBoolean(r != null);
@@ -142,6 +147,10 @@ final class FactorizationCoders {
             m.rows = VarInt.decodeLong(in);
             if (data.readBoolean()) m.changePoint = data.readLong();
             m.dispersion = data.readDouble();
+            if (data.readBoolean()) {
+                m.linearRidge = readDoubles(in);
+                m.factorRidge = readDoubles(in);
+            }
             if (data.readBoolean()) {
                 final int rows = VarInt.decodeInt(in);
                 final int epochs = VarInt.decodeInt(in);

@@ -1235,10 +1235,17 @@ How it is computed:
 - The variance reaches the readout through its inner products, to first order (the delta method) and to second order.
   A pair of two values with variances `s_f`, `s_g` reads `r² u_f² u_g² (s_f ‖v_g‖² + s_g ‖v_f‖² + k s_f s_g)`. The
   second-order term keeps a pair of two thinly supported values, both shrunk towards 0, from reading as certain.
-- `between` adds up the pairs whose values are both known, with each factor vector's gradient summed over its pairs
-  before squaring. `sum` adds the weights' `u² s_w` and every pair. The bias `w0` is left out.
+- `between` adds up its pairs, with each factor vector's gradient summed over its pairs before squaring. `sum` adds
+  the weights' `u² s_w` and every pair. The bias `w0` is left out.
+- A value the fit never saw (an entity without history) reads its factors' prior mean, 0, in the readout. In the
+  variance it reads its prior variance `dispersion / λ`, `λ` being its field's declared ridge. So it counts its own
+  uncertainty instead of dropping out of the sum, where it would read as more certain than a value seen once.
+  - Under `regScale: perRow` a value without rows has no ridge, so its variance is null.
+  - A missing (null) value takes no part, as in the readout.
+- The first-order terms of the other values grow with the factors they multiply, so the variance is not ordered by
+  support alone. It is where the thin values sit near 0, as the ridge leaves them. Read it next to `count`.
 - The variance does not change under a rotation of the latent space, so the alignment of refits does not move it.
-- It is null where the readout is null.
+- It is null where the readout is null: a `between` with no pair of two known values, a `pair` with an unknown value.
 
 What it leaves out:
 - the correlations between parameters, including the uncertainty of the other values' factors, which a value's own
@@ -1253,7 +1260,8 @@ the matching ridge, the measurements were:
 
 Cost and storage:
 - The fit keeps two precisions per value, so the model and its artifact grow by 2 numbers per value (`precision` in
-  the Avro records; `dispersion` in the manifest and the `__global` record).
+  the Avro records). It also keeps the dispersion (in the manifest and the `__global` record) and the per-field ridges
+  an unknown value reads (`__ridge` records).
 - Keeping them costs no extra pass.
 - An artifact written without them reads null variances.
 - Info `factorization.outputs.variance`. On `embedding`, `count`, `fitBlock` or `trainRows`, `variance` is ignored

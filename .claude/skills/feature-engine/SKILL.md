@@ -154,9 +154,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   precision `H + λ` of every value's weight and factors from the last epoch's steps (`Objective.curvature`; the factors'
   averaged over k, so they do not change under rotation). It appends them to the parameter array as `[.., n, π_w, π_v]`
   (length k + 4) and sets `Model.dispersion`: under squared loss SSE over (n − Σ H / (H + λ)), floored at n / 10, and 1
-  for a likelihood loss. `pairVariance` / `betweenVariance` / `sumVariance` carry those through the inner products to first and
-  second order. The precisions ride in the `precision` field of the Avro records (`__global`: the dispersion) and the
-  dispersion in `ModelCoder`. Measured on synthetic FMs, the variances rank the squared errors (Spearman 0.2–0.4) but are not
+  for a likelihood loss. It also keeps `Model.linearRidge` / `factorRidge`, the per-field ridge of a value without rows (+∞ for
+  unfitted weights, NaN under perRow). `pairVariance` / `betweenVariance` / `sumVariance` carry those through the inner products
+  to first and second order. An unknown categorical value enters `pairsVariance` at factors 0 with variance dispersion / ridge
+  (`priorVariances`). The readout's own null condition (a known pair) gates the result. The precisions ride in the `precision`
+  field of the Avro records (`__global`: the dispersion; `__ridge` per field: the two ridges), and all of it rides in
+  `ModelCoder`. Measured on synthetic FMs, the variances rank the squared errors (Spearman 0.2–0.4) but are not
   calibrated (z sd 0.9–2.1). A per-value k × k block and a propagation of the partners' uncertainty ranked no better, so
   do not add them without a measurement that does;
   forward models are NOT a side input: `serveForward` joins each change point's models with the rows keyed by the change point

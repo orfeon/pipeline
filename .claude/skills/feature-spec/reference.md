@@ -279,8 +279,10 @@ starts); `trainRows` = that model's training rows (null for an artifact written 
 `variance: true` (pair / between / sum) adds `<name>_var`. It is the approximate posterior variance: each value's
 factors are independent isotropic Gaussians with variance dispersion / (H + λ), carried through the inner products to
 first and second order. The dispersion is the residual variance under squared loss and 1 otherwise. Use it as a
-ranking of support, not as a calibrated interval: it leaves out the correlations between parameters. It is null where
-the readout is null.
+ranking of support, not as a calibrated interval: it leaves out the correlations between parameters. A value the fit
+never saw reads its prior variance dispersion / λ (the field's declared ridge; null under `regScale: perRow`), so an
+entity without history counts its own uncertainty. It is null where the readout is null. A `pair` names two different
+fields.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
 rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
 (independent of the row's value). `between` sums the cross-side pairs whose both values are known (disjoint sides,

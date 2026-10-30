@@ -151,6 +151,13 @@ public final class Factorization {
          * under logistic and Plackett–Luce (their curvature is the information); NaN when the fit kept no precisions.
          */
         public double dispersion = Double.NaN;
+        /**
+         * Per field, the ridge of a value's weight and of its factors that a value the fit never saw would get — its prior
+         * precision, so {@code dispersion / λ} is the prior variance an unknown value reads ({@link #betweenVariance},
+         * {@link #sumVariance}). +∞ for weights that are not fitted (held at 0), NaN under {@code regScale: perRow} (a
+         * value without rows has no ridge); null when the fit kept no precisions.
+         */
+        public double[] linearRidge, factorRidge;
 
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
@@ -280,8 +287,11 @@ public final class Factorization {
         /**
          * The approximate variance of {@link #between}: over the pairs it sums, {@code Σ_f s_f ‖Σ_g r_fg u_f u_g v_g‖²}
          * (the first-order terms, the pairs that share a factor vector added before squaring) plus
-         * {@code Σ_{f,g} r_fg² u_f² u_g² k s_f s_g}; the pairs with an unknown value are left out, as from the affinity.
-         * Null when no pair is known, the fit kept no variance or a factor of a known pair is not identified.
+         * {@code Σ_{f,g} r_fg² u_f² u_g² k s_f s_g}. A value the fit never saw contributes 0 to the affinity — its factors'
+         * prior mean — and its prior variance {@code dispersion / λ} to this one, so an entity without history reads a
+         * larger variance than one seen once ({@link #factorRidge}). Null where the affinity is null (no pair with both
+         * values known), the fit kept no variance, or a factor the readout reads is not identified (an unknown value's
+         * ridge 0, or {@code regScale: perRow}).
          */
         public Double betweenVariance(final String[] values, final double[] x, final int[] left, final int[] right) {
             if (x == null) requireCategorical();
@@ -292,8 +302,9 @@ public final class Factorization {
 
         /**
          * The approximate variance of {@link #predict(String[], double[])} without the bias: the per-value weights'
-         * {@code Σ u_f² s_w} plus the variance of every pair ({@link #betweenVariance}'s form over all of them). Null when
-         * the fit kept no variance or a known value's parameter is not identified.
+         * {@code Σ u_f² s_w} plus the variance of every pair ({@link #betweenVariance}'s form over all of them), a value the
+         * fit never saw at its prior variance. Null when the fit kept no variance or a parameter the sum reads is not
+         * identified.
          */
         public Double sumVariance(final String[] values, final double[] x) {
             final boolean[][] pairs = new boolean[fields.size()][fields.size()];
@@ -304,16 +315,30 @@ public final class Factorization {
         private Double pairsVariance(final String[] values, final double[] x, final boolean[][] pairs, final boolean linear) {
             final int F = fields.size();
             final double[] units = new double[F];
-            // every known value's parameters and variances, looked up once
+            // every present value's parameters and variances, looked up once: a known value's fitted ones, an unknown
+            // categorical value's prior (factors 0, variance dispersion / λ); a missing value takes no part
             final double[][] p = new double[F][], s = new double[F][];
+            final boolean[] known = new boolean[F];
             for (int f = 0; f < F; f++) {
                 units[f] = unit(f, x);
-                final double[] known = param(f, values[f]);
-                if (known == null || Double.isNaN(units[f])) continue;
-                p[f] = known;
-                s[f] = variances(known);
+                if (values[f] == null || Double.isNaN(units[f])) continue;
+                final double[] fitted = param(f, values[f]);
+                if (fitted != null) {
+                    known[f] = true;
+                    p[f] = fitted;
+                    s[f] = variances(fitted);
+                } else if (!numeric[f]) {
+                    p[f] = new double[k + 1];
+                    s[f] = priorVariances(f);
+                } else {
+                    continue;
+                }
                 if (s[f] == null) return null;
             }
+            // the readout's own condition: a between with no pair of two known values is null
+            boolean readable = linear;
+            for (int f = 0; f < F && !readable; f++) for (int g = 0; g < F; g++) readable |= pairs[f][g] && known[f] && known[g];
+            if (!readable) return null;
             double variance = 0;
             boolean any = linear;
             for (int f = 0; f < F; f++) {
@@ -338,6 +363,12 @@ public final class Factorization {
             }
             // NaN: a parameter the readout reads is not identified
             return any && !Double.isNaN(variance) ? variance : null;
+        }
+
+        /** The prior variances {s_w, s_v} of a value of field {@code f} the fit never saw; null when the fit kept none. */
+        private double[] priorVariances(final int f) {
+            if (linearRidge == null || factorRidge == null || Double.isNaN(dispersion)) return null;
+            return new double[]{linearRidge[f] > 0 ? dispersion / linearRidge[f] : Double.NaN, factorRidge[f] > 0 ? dispersion / factorRidge[f] : Double.NaN};
         }
 
         private double norm2(final double[] p) {
@@ -407,6 +438,8 @@ public final class Factorization {
             rotated.rows = rows;
             rotated.changePoint = changePoint;
             rotated.dispersion = dispersion;
+            rotated.linearRidge = linearRidge;
+            rotated.factorRidge = factorRidge;
             System.arraycopy(mean, 0, rotated.mean, 0, mean.length);
             System.arraycopy(scale, 0, rotated.scale, 0, scale.length);
             for (int f = 0; f < fields.size(); f++) {
@@ -1208,6 +1241,15 @@ public final class Factorization {
                 model.dispersion = 1d;
             }
         }
+        if (options.variance()) {
+            // the ridge a value without rows would get: its prior precision (none under perRow, which scales it by the rows)
+            model.linearRidge = new double[F];
+            model.factorRidge = new double[F];
+            for (int f = 0; f < F; f++) {
+                model.linearRidge[f] = !options.linear() ? Double.POSITIVE_INFINITY : reg.perRow() ? Double.NaN : reg.linear()[f];
+                model.factorRidge[f] = reg.perRow() ? Double.NaN : reg.factors()[f];
+            }
+        }
         model.w0 = w0;
         model.loss = options.loss().name();
         System.arraycopy(mean, 0, model.mean, 0, F);
@@ -1729,6 +1771,12 @@ public final class Factorization {
                         writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L, 0, 1, null));
                     }
                 }
+                // per field, the ridges an unknown value's prior variance reads (kept with the precisions)
+                if (model.linearRidge != null && model.factorRidge != null) {
+                    for (int f = 0; f < model.fields.size(); f++) {
+                        writer.append(record("__ridge", model.fields.get(f), 0, new double[0], 0L, 0, 1, new double[]{model.linearRidge[f], model.factorRidge[f]}));
+                    }
+                }
                 for (int f = 0; f < model.fields.size(); f++) {
                     final List<String> values = new ArrayList<>(model.params.get(f).keySet());
                     Collections.sort(values);
@@ -1824,6 +1872,18 @@ public final class Factorization {
                     model.w0 = w;
                     model.rows = (Long) record.get("n");
                     if (precision != null && precision.remaining() >= 8) model.dispersion = precision.getDouble();
+                } else if ("__ridge".equals(field)) {
+                    final int f = fields.indexOf(value);
+                    if (f >= 0 && precision != null && precision.remaining() >= 16) {
+                        if (model.linearRidge == null) {
+                            model.linearRidge = new double[fields.size()];
+                            model.factorRidge = new double[fields.size()];
+                            Arrays.fill(model.linearRidge, Double.NaN);
+                            Arrays.fill(model.factorRidge, Double.NaN);
+                        }
+                        model.linearRidge[f] = precision.getDouble();
+                        model.factorRidge[f] = precision.getDouble();
+                    }
                 } else if ("__r".equals(field)) {
                     final int sep = value.indexOf(SEPARATOR);
                     final int f = fields.indexOf(value.substring(0, sep));

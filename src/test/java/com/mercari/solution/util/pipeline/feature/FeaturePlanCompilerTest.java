@@ -2596,6 +2596,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(spec.options().variance());
         Assertions.assertFalse(FeatureStages.fmSpecs(List.of(column(plan, "fm_linear"))).get(0).options().variance());
         Assertions.assertTrue(FeatureStages.FM_FIT_ONLY.contains("variance"));
+        // a pair of a field with itself is no term of the model
+        final FeaturePlan self = compile(SOURCES, withEncoding(FM_BLOCK.replace("{pair: [seller_id, category]", "{pair: [seller_id, seller_id]")));
+        Assertions.assertTrue(self.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.level() == Diagnostics.Level.error && m.message().contains("two different fields")), self::describe);
         // an embedding of no dimension has no column to carry the kind: still warned, not a failure
         final FeaturePlan empty = compile(SOURCES, withEncoding(FM_BLOCK.replace("{embedding: category, as: cat_emb, dims: 2}",
                 "{embedding: category, as: cat_emb, dims: 0, variance: true}")));

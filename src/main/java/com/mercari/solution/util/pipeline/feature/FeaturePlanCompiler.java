@@ -5021,8 +5021,9 @@ public final class FeaturePlanCompiler {
             final List<OutputColumn> cols = new ArrayList<>();
             switch (out.kind) {
                 case "pair" -> {
-                    if (out.pair.size() != 2 || !def.fields.containsAll(out.pair)) {
-                        diagnostics.error("factorization.outputs", loc, "pair must name two of the block's fields: " + out.pair);
+                    if (out.pair.size() != 2 || !def.fields.containsAll(out.pair) || out.pair.get(0).equals(out.pair.get(1))) {
+                        diagnostics.error("factorization.outputs", loc, "pair must name two different fields of the block (the model has no"
+                                + " pair of a field with itself): " + out.pair);
                         continue;
                     }
                     final String name = out.as != null ? out.as : def.name + "_" + out.pair.get(0) + "_" + out.pair.get(1);

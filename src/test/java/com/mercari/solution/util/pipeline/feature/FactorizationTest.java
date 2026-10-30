@@ -844,8 +844,10 @@ public class FactorizationTest {
         final String[] row = {"a1", "b2"};
         final double expected = model.dispersion / model.param(0, "a1")[4] + model.dispersion / model.param(1, "b2")[4];
         Assertions.assertEquals(expected, model.sumVariance(row, null), 1e-6 * expected);
-        // the unknown value adds nothing, as it adds nothing to the sum
-        Assertions.assertEquals(model.dispersion / model.param(1, "b2")[4], model.sumVariance(new String[]{"a9", "b2"}, null), 1e-6 * expected);
+        // an unknown value adds nothing to the sum (its weight's prior mean) and its prior variance dispersion / λ to this
+        final double unknown = model.dispersion / model.param(1, "b2")[4] + model.dispersion / linear[0];
+        Assertions.assertEquals(unknown, model.sumVariance(new String[]{"a9", "b2"}, null), 1e-6 * unknown);
+        Assertions.assertArrayEquals(linear, model.linearRidge, 0d);
     }
 
     /**
@@ -901,8 +903,49 @@ public class FactorizationTest {
         Assertions.assertNull(thin.sumVariance(row, null));
         // a fit that keeps no precisions has no variance
         final Factorization.Model plain = Factorization.fit(new Factorization.Options(fields, false, 2, 10, 0.5, 7L), xor(5));
+        Assertions.assertNull(plain.factorRidge);
         Assertions.assertNull(plain.pairVariance(new String[]{"a1", "b1", "c0"}, null, 0, 1, false));
         Assertions.assertNull(plain.sumVariance(new String[]{"a1", "b1", "c0"}, null));
+    }
+
+    /**
+     * A value the fit never saw reads 0 in the affinity (its factors' prior mean) and its prior variance in the variance,
+     * so an entity without history counts its own uncertainty instead of dropping out of the sum (which read it as more
+     * certain than a value seen once). The first-order terms of the other values grow with the factors they multiply,
+     * so the variance is not ordered by support alone: it is where thin values sit near 0, as the ridge leaves them. Under
+     * regScale perRow an unseen value has no ridge (it scales with the rows): its variance is null; a missing value takes
+     * no part, as in the affinity.
+     */
+    @Test
+    public void testUnknownValueReadsItsPriorVariance() {
+        final List<String> fields = List.of("a", "b", "c");
+        final List<Factorization.Example> examples = new ArrayList<>(xor(5));
+        examples.add(new Factorization.Example(new String[]{"a3", "b1", "c0"}, 1));
+        final Factorization.Model model = Factorization.fit(withVariance(fields, false, 2, 40, Factorization.Regularization.uniform(0.5, 3),
+                Factorization.Loss.squared, true), examples);
+        // the entity a and its attribute b on one side, the context c on the other: an unknown a still reads through b
+        final int[] left = {0, 1}, right = {2};
+        final double never = model.betweenVariance(new String[]{"a9", "b1", "c0"}, null, left, right);
+        final double dropped = model.betweenVariance(new String[]{null, "b1", "c0"}, null, left, right);
+        Assertions.assertTrue(never > dropped, "the unknown entity's own uncertainty is counted: " + never + " > " + dropped);
+        // the unknown value: factors 0, variance dispersion / λ per coordinate
+        final double[] b = model.param(1, "b1"), c = model.param(2, "c0");
+        final double prior = model.dispersion / 0.5, sb = model.dispersion / b[5], sc = model.dispersion / c[5];
+        final double expected = prior * norm(c) + sb * norm(c) + sc * norm(b) + 2 * sc * (prior + sb);
+        Assertions.assertEquals(expected, never, 1e-12 * expected);
+        Assertions.assertNotNull(model.between(new String[]{"a9", "b1", "c0"}, null, left, right));
+        // no pair of two known values: null, as the affinity
+        Assertions.assertNull(model.between(new String[]{"a9", "b1", "c0"}, null, new int[]{0}, new int[]{1, 2}));
+        Assertions.assertNull(model.betweenVariance(new String[]{"a9", "b1", "c0"}, null, new int[]{0}, new int[]{1, 2}));
+        // a missing value takes no part
+        Assertions.assertEquals(model.betweenVariance(new String[]{null, "b1", "c0"}, null, new int[]{1}, right),
+                model.betweenVariance(new String[]{null, "b1", "c0"}, null, left, right), 1e-15);
+        // perRow: no prior ridge for a value without rows
+        final Factorization.Model perRow = Factorization.fit(new Factorization.Options(fields, false, 2, 40,
+                new Factorization.Regularization(0.5, new double[]{0.5, 0.5, 0.5}, new double[]{0.5, 0.5, 0.5}, 0.5, true), 7L,
+                Factorization.Loss.squared, 0, false, true, null, 0, "test", true), examples);
+        Assertions.assertNotNull(perRow.betweenVariance(new String[]{"a1", "b1", "c0"}, null, left, right));
+        Assertions.assertNull(perRow.betweenVariance(new String[]{"a9", "b1", "c0"}, null, left, right));
     }
 
     /** The precisions and the dispersion ride in the artifact; an artifact without them reads no variance. */
@@ -915,6 +958,10 @@ public class FactorizationTest {
         Factorization.write(dir, "hash1", "fm", model);
         final Factorization.Model loaded = Factorization.read(dir, "hash1", "fm", fields, true, 3);
         Assertions.assertEquals(model.dispersion, loaded.dispersion, 0d);
+        Assertions.assertArrayEquals(model.linearRidge, loaded.linearRidge, 0d);
+        Assertions.assertArrayEquals(model.factorRidge, loaded.factorRidge, 0d);
+        Assertions.assertEquals(model.betweenVariance(new String[]{"a9", "b1", "c0"}, null, new int[]{0, 1}, new int[]{2}),
+                loaded.betweenVariance(new String[]{"a9", "b1", "c0"}, null, new int[]{0, 1}, new int[]{2}), 0d, "an unknown value's prior variance");
         for (final Factorization.Example e : xor(1)) {
             Assertions.assertEquals(model.pairVariance(e.values(), null, 0, 1, false), loaded.pairVariance(e.values(), null, 0, 1, false), 0d);
             Assertions.assertEquals(model.sumVariance(e.values(), null), loaded.sumVariance(e.values(), null), 0d);

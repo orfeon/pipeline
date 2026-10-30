@@ -54,6 +54,8 @@ public class FactorizationServeTest {
         Assertions.assertEquals(expected.rows, actual.rows);
         Assertions.assertEquals(expected.changePoint, actual.changePoint);
         Assertions.assertEquals(expected.dispersion, actual.dispersion, 0d);
+        Assertions.assertArrayEquals(expected.linearRidge, actual.linearRidge, 0d);
+        Assertions.assertArrayEquals(expected.factorRidge, actual.factorRidge, 0d);
         // the report as the manifest has it: everything but the wall time of the fit
         Assertions.assertEquals(expected.report == null ? null : expected.report.toJson(), actual.report == null ? null : actual.report.toJson());
         for (int f = 0; f < expected.fields.size(); f++) {
