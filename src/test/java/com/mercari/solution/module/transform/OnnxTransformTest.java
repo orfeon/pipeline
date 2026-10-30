@@ -863,7 +863,8 @@ public class OnnxTransformTest {
         for(final Map.Entry<String, String> entry : List.of(
                 Map.entry(padConfig(floats, "{ value: 0, multiple: 0 }", 1), "pad.multiple must be over than zero"),
                 Map.entry(padConfig(fixed, "{ value: 0, multiple: 4 }", 1), "no dynamic dimension"),
-                Map.entry(padConfig(ints, "NaN", 1), "is NaN"))) {
+                Map.entry(padConfig(ints, "NaN", 1), "is NaN"),
+                Map.entry(padConfig(ints, ".inf", 1), "is Infinity"))) {
             final Exception e = Assertions.assertThrows(Exception.class, () -> MPipeline.apply(pipeline, Config.load(entry.getKey())), entry.getValue());
             Assertions.assertTrue(rootMessages(e).contains(entry.getValue()), rootMessages(e));
         }

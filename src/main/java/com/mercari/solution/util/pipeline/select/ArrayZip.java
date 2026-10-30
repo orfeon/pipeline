@@ -47,7 +47,8 @@ public class ArrayZip implements SelectFunction {
             throw new IllegalArgumentException("SelectField: " + name + " func: array_zip requires fields parameter");
         }
         final List<Input> inputs = new ArrayList<>();
-        final List<Schema.Field> parents = new ArrayList<>();
+        // by name: fields of one parent such as tok.ids and tok.tokens read it once
+        final Map<String, Schema.Field> parents = new LinkedHashMap<>();
         final Map<String, Schema.Field> structFields = new LinkedHashMap<>();
         for(final JsonElement element : jsonObject.getAsJsonArray("fields")) {
             final Input input = parseInput(name, element);
@@ -60,10 +61,10 @@ public class ArrayZip implements SelectFunction {
             }
             inputs.add(input);
             final String parent = ElementSchemaUtil.getInputFieldName(input.field, inputFields);
-            parents.add(Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
+            parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
         }
         final Schema.FieldType outputFieldType = Schema.FieldType.array(Schema.FieldType.element(new ArrayList<>(structFields.values())));
-        return new ArrayZip(name, inputs, parents, outputFieldType, ignore);
+        return new ArrayZip(name, inputs, new ArrayList<>(parents.values()), outputFieldType, ignore);
     }
 
     private static Input parseInput(final String name, final JsonElement element) {

@@ -176,11 +176,11 @@ public class OnnxInputs implements Serializable {
         }
     }
 
-    // a NaN would silently become 0 in an integer tensor
+    // in an integer tensor a NaN would silently become 0, and an infinity the largest integer
     private static void validateValue(final String name, final String key, final double value, final OnnxGraphInfo.ValueInfo info) {
         final Tensor.Type type = OnnxRuntimeUtil.tensorType(info.type());
-        if(Double.isNaN(value) && type != Tensor.Type.FLOAT && type != Tensor.Type.DOUBLE) {
-            throw new IllegalArgumentException("onnx inputs: " + name + " " + key + " is NaN, but the model input " + info + " is not a float");
+        if(!Double.isFinite(value) && type != Tensor.Type.FLOAT && type != Tensor.Type.DOUBLE) {
+            throw new IllegalArgumentException("onnx inputs: " + name + " " + key + " is " + value + ", but the model input " + info + " is not a float");
         }
     }
 

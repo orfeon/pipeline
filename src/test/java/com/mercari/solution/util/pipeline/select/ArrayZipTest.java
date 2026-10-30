@@ -52,6 +52,10 @@ public class ArrayZipTest {
         final SelectFunction named = function("[\"a\", { \"name\": \"c\", \"field\": \"nested.a\" }]");
         Assertions.assertEquals(List.of(Map.of("a", 2L, "c", 1f)), named.apply(input, Instant.EPOCH));
         Assertions.assertEquals(List.of("a", "nested"), named.getInputFields().stream().map(Schema.Field::getName).toList());
+
+        // fields of one parent read it once
+        final SelectFunction sameParent = function("[\"nested.a\", { \"name\": \"c\", \"field\": \"nested.a\" }]");
+        Assertions.assertEquals(List.of("nested"), sameParent.getInputFields().stream().map(Schema.Field::getName).toList());
     }
 
     @Test

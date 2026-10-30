@@ -259,4 +259,4 @@ transforms:
       bufferSize: 32
 ```
 
-`forecast` is an array of 64 elements with `timestamp`, `q10`, `q50` and `q90`. Use `flattenField` of a later `select` transform to get a record per step.
+`forecast` is an array of 64 elements with `timestamp`, `q10`, `q50` and `q90`. Use `flattenField: forecast` of a later `select` transform to get a record per step: that transform also requires a `select` list, of the fields to keep, which has to name `forecast`.

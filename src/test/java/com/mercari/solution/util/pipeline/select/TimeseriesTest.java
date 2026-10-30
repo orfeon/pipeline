@@ -19,7 +19,10 @@ public class TimeseriesTest {
                     Schema.Field.of("ts", Schema.FieldType.TIMESTAMP),
                     Schema.Field.of("day", Schema.FieldType.DATE),
                     Schema.Field.of("v", Schema.FieldType.FLOAT32),
-                    Schema.Field.of("label", Schema.FieldType.STRING))))),
+                    Schema.Field.of("label", Schema.FieldType.STRING),
+                    Schema.Field.of("meta", Schema.FieldType.element(List.of(
+                            Schema.Field.of("at", Schema.FieldType.TIMESTAMP),
+                            Schema.Field.of("value", Schema.FieldType.FLOAT64)))))))),
             Schema.Field.of("text", Schema.FieldType.STRING),
             Schema.Field.of("start", Schema.FieldType.TIMESTAMP),
             Schema.Field.of("startDay", Schema.FieldType.DATE),
@@ -103,6 +106,19 @@ public class TimeseriesTest {
         Assertions.assertEquals(Arrays.asList(2d, Double.NaN), grid.get("values"));
         Assertions.assertEquals(List.of(true, false), grid.get("observed"));
         Assertions.assertEquals(2 * HOUR, grid.get("lastTimestamp"));
+    }
+
+    // a nested path is read as its type was looked up: not a grid of NaN or nothing
+    @Test
+    public void testGridOfNestedFields() {
+        final String json = "{ \"name\": \"g\", \"func\": \"timeseries_grid\", \"field\": \"points\", \"timestampField\": \"meta.at\", \"valueField\": \"meta.value\", \"interval\": \"1h\", \"length\": 5 }";
+        final Map<String, Object> input = new HashMap<>();
+        input.put("points", List.of(
+                Map.of("meta", Map.of("at", 3 * HOUR, "value", 1d)),
+                Map.of("meta", Map.of("at", 5 * HOUR, "value", 2d))));
+        final Map<?, ?> grid = (Map<?, ?>) function(json).apply(input, Instant.EPOCH);
+        Assertions.assertEquals(Arrays.asList(1d, Double.NaN, 2d), grid.get("values"));
+        Assertions.assertEquals(5 * HOUR, grid.get("lastTimestamp"));
     }
 
     @Test

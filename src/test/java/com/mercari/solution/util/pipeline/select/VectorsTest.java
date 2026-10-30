@@ -22,7 +22,8 @@ public class VectorsTest {
             Schema.Field.of("m1", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(1, 3))),
             Schema.Field.of("m2", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(2, 3))),
             Schema.Field.of("md", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(-1, 3))),
-            Schema.Field.of("groups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.INT64))));
+            Schema.Field.of("groups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.INT64))),
+            Schema.Field.of("floatGroups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))));
 
     private static SelectFunction function(final String json) {
         final SelectFunction function = SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS);
@@ -228,9 +229,11 @@ public class VectorsTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of(2L))));
         Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of(-1L))));
         Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(List.of())));
-        // the type of groups, its absence and the type of the vector are config errors
+        Assertions.assertThrows(IllegalArgumentException.class, () -> groupSoftmax(logits, List.of(Arrays.asList(1L, null))));
+        // the type of groups, its absence and the type of the vector are config errors: an id is an integer
         for(final String json : List.of(
                 "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\", \"groups\": \"v\" }",
+                "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\", \"groups\": \"floatGroups\" }",
                 "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\" }",
                 "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"m2\", \"groups\": \"groups\" }")) {
             Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);

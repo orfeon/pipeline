@@ -232,7 +232,8 @@ public class TimeseriesGrid implements SelectFunction {
         if(!(point instanceof Map<?, ?> map)) {
             throw new IllegalArgumentException("SelectField: " + this.name + " func: timeseries_grid field: " + field + " must be an array of elements, but got: " + point);
         }
-        return map.get(name);
+        // a nested path, as the type of the field was looked up
+        return ElementSchemaUtil.getValue(map, name);
     }
 
 }

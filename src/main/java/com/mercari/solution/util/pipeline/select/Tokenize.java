@@ -161,6 +161,12 @@ public class Tokenize implements SelectFunction {
         return outputFieldType;
     }
 
+    // token_ids reads no field: it must not turn the Tensors of the values before it into lists
+    @Override
+    public boolean acceptsTensor() {
+        return mode == Mode.ids;
+    }
+
     @Override
     public void setup() {
         this.tokenizer.setup();

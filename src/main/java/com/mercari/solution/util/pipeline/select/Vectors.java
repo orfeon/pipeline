@@ -71,6 +71,7 @@ public class Vectors implements SelectFunction {
             final Schema.FieldType inputFieldType,
             final boolean outputDouble,
             final Schema.Field inputField,
+            final Schema.Field groupsField,
             final Schema.FieldType outputFieldType,
             final boolean ignore) {
 
@@ -86,6 +87,9 @@ public class Vectors implements SelectFunction {
         this.outputDouble = outputDouble;
         this.inputFields = new ArrayList<>();
         this.inputFields.add(inputField);
+        if(groupsField != null) {
+            this.inputFields.add(groupsField);
+        }
         this.outputFieldType = outputFieldType;
         this.ignore = ignore;
     }
@@ -179,8 +183,8 @@ public class Vectors implements SelectFunction {
                 groups = jsonObject.get("groups").getAsString();
                 final Schema.FieldType groupsType = ElementSchemaUtil.getInputFieldType(groups, inputFields);
                 if(groupsType.getType() != Schema.Type.array || groupsType.getArrayValueType().getType() != Schema.Type.array
-                        || !isNumeric(groupsType.getArrayValueType().getArrayValueType())) {
-                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax groups: " + groups + " must be an array of arrays of ids, but got: " + groupsType);
+                        || !isInteger(groupsType.getArrayValueType().getArrayValueType())) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax groups: " + groups + " must be an array of arrays of integer ids, but got: " + groupsType);
                 }
                 final String groupsFieldName = ElementSchemaUtil.getInputFieldName(groups, inputFields);
                 groupsField = Schema.Field.of(groupsFieldName, ElementSchemaUtil.getInputFieldType(groupsFieldName, inputFields));
@@ -188,11 +192,7 @@ public class Vectors implements SelectFunction {
             }
             default -> throw new IllegalArgumentException("Not supported vector func: " + op);
         }
-        final Vectors vectors = new Vectors(name, op, field, size, k, axis, labels, groups, inputFieldType, outputDouble, inputField, outputFieldType, ignore);
-        if(groupsField != null) {
-            vectors.inputFields.add(groupsField);
-        }
-        return vectors;
+        return new Vectors(name, op, field, size, k, axis, labels, groups, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
     }
 
     private static void requireVector(final String name, final Op op, final Schema.FieldType type, final boolean vector) {
@@ -204,6 +204,13 @@ public class Vectors implements SelectFunction {
     static boolean isNumeric(final Schema.FieldType type) {
         return switch (type.getType()) {
             case int8, int16, int32, int64, float16, float32, float64 -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isInteger(final Schema.FieldType type) {
+        return switch (type.getType()) {
+            case int8, int16, int32, int64 -> true;
             default -> false;
         };
     }
@@ -359,7 +366,10 @@ public class Vectors implements SelectFunction {
             }
             maxima[g] = Double.NEGATIVE_INFINITY;
             for(final Object id : ids) {
-                final long index = ((Number) id).longValue();
+                if(!(id instanceof Number number)) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax group " + g + " must be an array of ids, but got: " + ids);
+                }
+                final long index = number.longValue();
                 if(index < 0 || index >= logits.length) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax id: " + index + " is out of a vector of length " + logits.length);
                 }

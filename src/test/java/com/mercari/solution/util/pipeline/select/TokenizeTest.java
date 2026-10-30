@@ -89,6 +89,8 @@ public class TokenizeTest {
         Assertions.assertEquals("array", function.getOutputFieldType().getType().name());
         Assertions.assertEquals("array", function.getOutputFieldType().getArrayValueType().getType().name());
         Assertions.assertEquals(List.of(), function.getInputFields());
+        // it reads no field, so it must not turn the Tensors before it in an onnx transform into lists
+        Assertions.assertTrue(function.acceptsTensor());
         function.setup();
         Assertions.assertEquals(List.of(List.of(3L, 4L), List.of(5L), List.of(6L)), function.apply(new HashMap<>(), Instant.now()));
     }
