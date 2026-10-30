@@ -261,6 +261,18 @@ public final class JointFit implements Serializable {
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel,
                                final boolean mainEffects) {
+        return fit(levels, scale, offset, weights, priorWeight, entries, folds, forward, windowBlocks, fixedLevel, mainEffects, 1);
+    }
+
+    /**
+     * {@link #fit} that leaves out the forward change points no row reads: those with fewer than {@code minBlocks}
+     * observed blocks at or before them ({@link #solutionFor} returns null for every usable block they serve). The
+     * model does not record it: read it with the same {@code minBlocks} (or a larger one) — a smaller one would read
+     * null where the full fit has a solution.
+     */
+    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
+                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks, final int fixedLevel,
+                               final boolean mainEffects, final int minBlocks) {
         final List<String> cellKeys = cellKeysOf(levels);
         final Map<String, Cell> total = new HashMap<>();
         final Map<Integer, Map<String, Cell>> foldParts = new HashMap<>();
@@ -304,8 +316,7 @@ public final class JointFit implements Serializable {
             // the cells a usable block U reads are those of the blocks in (U − W, U] (W = 0: every block ≤ U), the
             // same window the encoding path applies per row; that set changes only when a block enters (at its
             // own index) or leaves (at index + W), so one solve per change point serves every U by floor lookup
-            final TreeSet<Long> changePoints = new TreeSet<>(observed);
-            if (windowBlocks > 0) for (final long block : observed) changePoints.add(block + windowBlocks);
+            final TreeSet<Long> changePoints = BlockSeries.changePoints(observed, windowBlocks);
             final Map<String, Cell> window = new HashMap<>();
             final List<Long> order = new ArrayList<>(observed);
             int added = 0, oldest = 0; // blocks merged so far / the oldest block still inside the window
@@ -324,8 +335,13 @@ public final class JointFit implements Serializable {
                         oldest++;
                     }
                 }
+                // every observed block is a change point, so the usable blocks this one serves (up to the next) see
+                // exactly the `added` observed blocks: below minBlocks no row reads it, and it is not solved (nor shipped)
+                if (added < minBlocks) continue;
                 blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight, fixedLevel));
             }
+            LOG.info("joint fit: {} forward change points solved, {} before minBlocks {} left out", blockSolutions.size(),
+                    changePoints.size() - blockSolutions.size(), minBlocks);
         }
         return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed, fixedLevel, mainEffects);
     }
@@ -890,7 +906,7 @@ public final class JointFit implements Serializable {
         if (blocks != null) {
             if (usableBlock == null) return null;
             final Map.Entry<Long, Solution> floor = blocks.floorEntry(usableBlock);
-            if (floor == null || observedBlocks.headSet(usableBlock, true).size() < minBlocks) return null;
+            if (floor == null || !BlockSeries.reached(observedBlocks, usableBlock, minBlocks)) return null;
             return floor.getValue().isEmpty() ? null : floor.getValue();
         }
         return total;

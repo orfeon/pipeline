@@ -558,6 +558,12 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   information in rows + λ, `σ² / effectiveN` (the diagonal approximation, within 0.6% of `(S⁻¹)_hh` there). Solver
   measurements on that design: Gauss–Seidel 40–120 sweeps at λ 1–4, ~850 at λ 0.1 and 450–1100 for the
   unpenalised fit; PCG 11–35 iterations; a sparse direct solve of the Schur complement (1.2M non-zeros) 16–43 s.
+  Henderson III assumes the assignment to fixed contexts is independent of the shrunk effects. Under assortative
+  assignment the fixed level absorbs part of τ², so λ comes out large (×24 on a synthetic design). The docs say so.
+  A forward fit skips the change points no row reads: `JointFit.fit(..., minBlocks)` leaves out those with fewer
+  than `minBlocks` observed blocks (`added`), the same test `solutionFor` applies. A production table of 1.04M cells /
+  293 change points fitted in 90 s, CG never stopped short, and the only Henderson fallback was on the first
+  change point, before `minBlocks`.
   The Gauss–Seidel path of a lattice without a fixed level is untouched. `structure: additive` (compiler) is the
   main-effects-only lattice for it; under `joint` an `additive` entry expands every key without single-key keySets.
   **Lookups** (`KeySet.lookups` → `FeaturePlanCompiler.jointLookups`): `joint` columns of `kind: lookup` with the
