@@ -238,6 +238,11 @@ public class AvroToJsonConverter {
                         .map(o -> (GenericRecord)o)
                         .map(AvroToJsonConverter::convertObject)
                         .forEach(array::add);
+            case ARRAY ->
+                arrayValue.stream()
+                        .map(v -> (List<?>) v)
+                        .map(v -> convertArray(elementSchema.getElementType(), v))
+                        .forEach(array::add);
         }
         return array;
     }

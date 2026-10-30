@@ -128,6 +128,48 @@ public class OnnxTestModels {
     }
 
     /**
+     * A model that decides by the logits of a token: {@code input_ids int64[batch, length]}, {@code attention_mask int64[batch, length]}
+     * and {@code past_conv.0 float[batch, 2, n]}, which is not used. The output {@code logits float[batch, 1, 7]} is
+     * [0, 0, 0, 1, 2, 3, -1] times the sum of the attended ids.
+     */
+    public static byte[] decision() {
+        final Graph graph = new Graph("decision");
+        graph.input("input_ids", INT64, "batch", "length");
+        graph.input("attention_mask", INT64, "batch", "length");
+        graph.input("past_conv.0", FLOAT, "batch", 2L, "n");
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.initializer("base", FLOAT, new long[]{7}, new float[]{0, 0, 0, 1, 2, 3, -1});
+        graph.node("Mul", List.of("input_ids", "attention_mask"), List.of("masked"));
+        graph.node("Cast", List.of("masked"), List.of("masked_float"), "to", (long) FLOAT);
+        graph.node("ReduceSum", List.of("masked_float", "axes"), List.of("sum"), "keepdims", 1L);
+        graph.node("Unsqueeze", List.of("sum", "axes"), List.of("expanded"));
+        graph.node("Mul", List.of("expanded", "base"), List.of("logits"));
+        graph.output("logits", FLOAT, "batch", 1L, 7L);
+        return graph.model();
+    }
+
+    /**
+     * A forecaster that takes NaN as missing: {@code context float[batch, length]} with the outputs {@code seen = context} and
+     * {@code forecasts float[batch, 3, 4]}: the sum of the values that are not NaN times [[1, 2, 3, 4], [10, 20, 30, 40], [100, 200, 300, 400]].
+     */
+    public static byte[] forecaster() {
+        final Graph graph = new Graph("forecaster");
+        graph.input("context", FLOAT, "batch", "length");
+        graph.initializer("zero", FLOAT, new long[0], new float[]{0});
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.initializer("base", FLOAT, new long[]{3, 4}, new float[]{1, 2, 3, 4, 10, 20, 30, 40, 100, 200, 300, 400});
+        graph.node("IsNaN", List.of("context"), List.of("missing"));
+        graph.node("Where", List.of("missing", "zero", "context"), List.of("filled"));
+        graph.node("ReduceSum", List.of("filled", "axes"), List.of("sum"), "keepdims", 1L);
+        graph.node("Unsqueeze", List.of("sum", "axes"), List.of("expanded"));
+        graph.node("Mul", List.of("expanded", "base"), List.of("forecasts"));
+        graph.node("Identity", List.of("context"), List.of("seen"));
+        graph.output("seen", FLOAT, "batch", "length");
+        graph.output("forecasts", FLOAT, "batch", 3L, 4L);
+        return graph.model();
+    }
+
+    /**
      * {@code ids float[batch, length]} and {@code features float[n, 2]} with the outputs
      * {@code pooled = ReduceSum(ids, 1, keepdims) float[batch, 1]} and {@code rows = features float[n, 2]}.
      */

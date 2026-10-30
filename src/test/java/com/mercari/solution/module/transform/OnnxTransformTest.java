@@ -784,6 +784,324 @@ public class OnnxTransformTest {
         Assertions.assertTrue(rootMessages(e).contains("parameters.bufferSize must be 1"), rootMessages(e));
     }
 
+    // a grid with gaps on an integer model input: the record with a gap fails, and does not reach the model as 0
+    @Test
+    public void testNaNOnIntegerInputFailsTheRecord() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("nan_on_int/model.onnx"), OnnxTestModels.identity(OnnxTestModels.INT64, "batch", "length"));
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { item: gap, ts: "2026-01-01T00:00:00Z", value: 1.0 }
+                        - { item: gap, ts: "2026-01-01T02:00:00Z", value: 2.0 }
+                        - { item: full, ts: "2026-01-01T00:00:00Z", value: 1.0 }
+                        - { item: full, ts: "2026-01-01T01:00:00Z", value: 2.0 }
+                    schema:
+                      fields:
+                        - { name: item, type: string }
+                        - { name: ts, type: timestamp }
+                        - { name: value, type: float32 }
+                transforms:
+                  - name: series
+                    module: aggregation
+                    inputs: [create]
+                    parameters:
+                      groupFields: [item]
+                      aggregations:
+                        - input: create
+                          fields:
+                            - { name: points, op: array_agg, fields: [ts, value] }
+                  - name: onnx
+                    module: onnx
+                    inputs: [series]
+                    failFast: false
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: grid, func: timeseries_grid, field: points, timestampField: ts, valueField: value, interval: 1h, length: 8 }
+                        - { name: x, field: grid.values }
+                      outputs:
+                        - { name: y }
+                      bufferSize: 1
+                """.formatted(OnnxTestModels.configPath(model));
+
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final List<String> items = new ArrayList<>();
+            for(final MElement row : rows) {
+                items.add(row.getAsString("item"));
+            }
+            Assertions.assertEquals(List.of("full"), items);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    private static String padConfig(final Path model, final String pad, final int bufferSize) {
+        return """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { x: [1.0, 2.0, 3.0, 4.0, 5.0] }
+                    schema:
+                      fields:
+                        - { name: x, type: float32, mode: repeated }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: x, field: x, pad: %s }
+                      outputs:
+                        - { name: y }
+                      bufferSize: %d
+                """.formatted(OnnxTestModels.configPath(model), pad, bufferSize);
+    }
+
+    private void assertPaddedWithNaN(final String name, final String pad) throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve(name + "/model.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", "length"));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(padConfig(model, pad, 1)));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(Float.NaN, Float.NaN, Float.NaN, 1f, 2f, 3f, 4f, 5f), floats(row.getPrimitiveValue("y")));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // multiple also applies to one record, and NaN is written as yaml gives it
+    @Test
+    public void testPadMultipleWithNaN() throws Exception {
+        assertPaddedWithNaN("pad_nan", "{ value: NaN, side: left, multiple: 4 }");
+    }
+
+    @Test
+    public void testPadMultipleWithYamlNaN() throws Exception {
+        assertPaddedWithNaN("pad_yaml_nan", "{ value: .nan, side: left, multiple: 4 }");
+    }
+
+    // a fixed dimension of the model input keeps its length
+    @Test
+    public void testPadMultipleOnDynamicDimensions() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("pad_dynamic/model.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", 2L, "n"));
+        final String config = wholeConfig(model, 1)
+                .replace("{ name: x, func: reshape, field: raw, shape: [3, 2] }", "{ name: x, func: reshape, field: raw, shape: [2, 3], pad: { value: 0, multiple: 4 } }");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        Assertions.assertEquals(List.of(2, -1), outputs.get("onnx").getSchema().getField("y").getFieldType().getShape());
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            for(final MElement row : rows) {
+                Assertions.assertEquals(List.of(1f, 2f, 3f, 0f, 4f, 5f, 6f, 0f), floats(row.getPrimitiveValue("y")));
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testPadConfigErrors() throws Exception {
+        final Path floats = OnnxTestModels.write(BASE_DIR.resolve("pad_errors_float/model.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", "length"));
+        final Path fixed = OnnxTestModels.write(BASE_DIR.resolve("pad_errors_fixed/model.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", 5L));
+        final Path ints = OnnxTestModels.write(BASE_DIR.resolve("pad_errors_int/model.onnx"), OnnxTestModels.identity(OnnxTestModels.INT64, "batch", "length"));
+        for(final Map.Entry<String, String> entry : List.of(
+                Map.entry(padConfig(floats, "{ value: 0, multiple: 0 }", 1), "pad.multiple must be over than zero"),
+                Map.entry(padConfig(fixed, "{ value: 0, multiple: 4 }", 1), "no dynamic dimension"),
+                Map.entry(padConfig(ints, "NaN", 1), "is NaN"),
+                Map.entry(padConfig(ints, ".inf", 1), "is Infinity"))) {
+            final Exception e = Assertions.assertThrows(Exception.class, () -> MPipeline.apply(pipeline, Config.load(entry.getKey())), entry.getValue());
+            Assertions.assertTrue(rootMessages(e).contains(entry.getValue()), rootMessages(e));
+        }
+    }
+
+    // choosing among options by the logits of their tokens
+    @Test
+    public void testDecision() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("decision/model.onnx"), OnnxTestModels.decision());
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { text: "hello" }
+                        - { text: "onnx pipeline" }
+                    schema:
+                      fields:
+                        - { name: text, type: string }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: "%s", field: text, addSpecialTokens: false }
+                        - { name: input_ids, field: tok.ids }
+                        - { name: attention_mask, field: tok.attentionMask }
+                        - { name: "past_conv.%%d", fill: 0 }
+                      outputs:
+                        - name: options
+                          func: token_ids
+                          tokenizer: huggingface
+                          path: "%s"
+                          texts:
+                            - ["hello", "hello world"]
+                            - ["world", "onnx"]
+                            - ["pipeline"]
+                        - { name: last, func: squeeze, field: logits }
+                        - { name: probabilities, func: group_softmax, field: last, groups: options }
+                        - { name: best, func: argmax, field: probabilities }
+                        - { name: category, func: labels, field: best, labels: [a, b, c] }
+                """.formatted(OnnxTestModels.configPath(model), TOKENIZER, TOKENIZER);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byText = new HashMap<>();
+            for(final MElement row : rows) {
+                byText.put(row.getPrimitiveValue("text").toString(), row);
+            }
+            Assertions.assertEquals(2, byText.size());
+            // hello = id 3: logits 3 * [0, 0, 0, 1, 2, 3, -1], groups: 3, then 4 and 5, then 6
+            assertClose(softmax(3, 9, -3), byText.get("hello").getPrimitiveValue("probabilities"));
+            Assertions.assertEquals("b", byText.get("hello").getPrimitiveValue("category").toString());
+            // onnx pipeline = ids 5 and 6: logits 11 * the same
+            assertClose(softmax(11, 33, -11), byText.get("onnx pipeline").getPrimitiveValue("probabilities"));
+            // a constant of nested arrays goes through the record
+            Assertions.assertEquals(List.of(List.of(3L), List.of(4L, 5L), List.of(6L)), byText.get("hello").getPrimitiveValue("options"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    private static List<Double> softmax(final double... logits) {
+        final double sum = Arrays.stream(logits).map(Math::exp).sum();
+        return Arrays.stream(logits).map(logit -> Math.exp(logit) / sum).boxed().toList();
+    }
+
+    private static void assertClose(final List<Double> expected, final Object actual) {
+        final List<?> values = (List<?>) actual;
+        Assertions.assertEquals(expected.size(), values.size());
+        for(int i=0; i<values.size(); i++) {
+            Assertions.assertEquals(expected.get(i), ((Number) values.get(i)).doubleValue(), 1e-5);
+        }
+    }
+
+    // from the records of the series through aggregation, the grid and the padding to a forecast with its times
+    @Test
+    public void testForecast() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("forecast/model.onnx"), OnnxTestModels.forecaster());
+        final StringBuilder elements = new StringBuilder();
+        // series a: 00:00, 01:00 and 03:00, out of order
+        for(final int[] point : List.of(new int[]{3, 4}, new int[]{0, 1}, new int[]{1, 2})) {
+            elements.append("                - { item: a, ts: \"2026-01-01T%02d:00:00Z\", value: %d.0 }\n".formatted(point[0], point[1]));
+        }
+        // series b: hours 0 to 24 with their hour as the value, of which the grid keeps the latest 17
+        for(int hour=0; hour<24; hour++) {
+            elements.append("                - { item: b, ts: \"2026-01-01T%02d:00:00Z\", value: %d.0 }\n".formatted(hour, hour));
+        }
+        elements.append("                - { item: b, ts: \"2026-01-02T00:00:00Z\", value: 24.0 }\n");
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                %s
+                    schema:
+                      fields:
+                        - { name: item, type: string }
+                        - { name: ts, type: timestamp }
+                        - { name: value, type: float32 }
+                transforms:
+                  - name: series
+                    module: aggregation
+                    inputs: [create]
+                    parameters:
+                      groupFields: [item]
+                      aggregations:
+                        - input: create
+                          fields:
+                            - { name: points, op: array_agg, fields: [ts, value] }
+                  - name: onnx
+                    module: onnx
+                    inputs: [series]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: grid, func: timeseries_grid, field: points, timestampField: ts, valueField: value, interval: 1h, length: 17 }
+                        - { name: context, field: grid.values, pad: { value: NaN, side: left, multiple: 16 } }
+                      outputs:
+                        - { name: seen }
+                        - { name: observed, field: grid.observed }
+                        - name: forecast
+                          func: timeseries_quantiles
+                          field: forecasts
+                          levels: [0.1, 0.5, 0.9]
+                          start: grid.lastTimestamp
+                          interval: 1h
+                          select: [0.1, 0.9]
+                      bufferSize: 2
+                """.formatted(elements.toString().stripTrailing(), OnnxTestModels.configPath(model));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        final Schema.FieldType forecastType = outputs.get("onnx").getSchema().getField("forecast").getFieldType();
+        Assertions.assertEquals(List.of("timestamp", "q10", "q90"), forecastType.getArrayValueType().getElementSchema().getFields().stream().map(Schema.Field::getName).toList());
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byItem = new HashMap<>();
+            for(final MElement row : rows) {
+                byItem.put(row.getPrimitiveValue("item").toString(), row);
+            }
+            Assertions.assertEquals(2, byItem.size());
+
+            // 4 values on the grid: padded on the left, to 16 alone or 32 next to b
+            final List<Float> seen = floats(byItem.get("a").getPrimitiveValue("seen"));
+            Assertions.assertEquals(0, seen.size() % 16, seen.toString());
+            Assertions.assertEquals(List.of(1f, 2f, Float.NaN, 4f), seen.subList(seen.size() - 4, seen.size()));
+            Assertions.assertTrue(seen.subList(0, seen.size() - 4).stream().allMatch(value -> value.isNaN()), seen.toString());
+            Assertions.assertEquals(List.of(true, true, false, true), byItem.get("a").getPrimitiveValue("observed"));
+            assertForecast(byItem.get("a"), 7f, java.time.Instant.parse("2026-01-01T03:00:00Z"));
+
+            // 17 values: hours 8 to 24
+            final List<Float> seenB = floats(byItem.get("b").getPrimitiveValue("seen"));
+            Assertions.assertEquals(32, seenB.size());
+            Assertions.assertEquals(8f, seenB.get(15));
+            assertForecast(byItem.get("b"), 272f, java.time.Instant.parse("2026-01-02T00:00:00Z"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    private static void assertForecast(final MElement row, final float sum, final java.time.Instant last) {
+        final List<?> forecast = (List<?>) row.getPrimitiveValue("forecast");
+        Assertions.assertEquals(4, forecast.size());
+        for(int step=0; step<4; step++) {
+            final Map<?, ?> values = (Map<?, ?>) forecast.get(step);
+            Assertions.assertEquals((step + 1) * sum, ((Number) values.get("q10")).floatValue());
+            Assertions.assertEquals((step + 1) * 100 * sum, ((Number) values.get("q90")).floatValue());
+            Assertions.assertEquals(last.plusSeconds(3600L * (step + 1)).toEpochMilli() * 1000L, ((Number) values.get("timestamp")).longValue());
+        }
+    }
+
     // text tokens stacked next to image features as they are, of any count
     private static String mixedConfig(final Path model, final String outputs) {
         return """

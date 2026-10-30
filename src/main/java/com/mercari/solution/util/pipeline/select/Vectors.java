@@ -26,7 +26,8 @@ import java.util.stream.IntStream;
  * { "name": "prob",      "func": "sigmoid",          "field": "logit" },
  * { "name": "best",      "func": "argmax",           "field": "probs" },
  * { "name": "top",       "func": "topk",             "field": "probs", "k": 5 },
- * { "name": "scores",    "func": "labels",           "field": "probs", "labels": ["a", "b"] }
+ * { "name": "scores",    "func": "labels",           "field": "probs", "labels": ["a", "b"] },
+ * { "name": "choices",   "func": "group_softmax",    "field": "logits", "groups": "options" }
  * }</pre>
  */
 public class Vectors implements SelectFunction {
@@ -38,7 +39,8 @@ public class Vectors implements SelectFunction {
         sigmoid,
         argmax,
         topk,
-        labels
+        labels,
+        group_softmax
     }
 
     private final String name;
@@ -48,6 +50,7 @@ public class Vectors implements SelectFunction {
     private final Integer k;
     private final int[] axis;
     private final List<String> labels;
+    private final String groups;
 
     private final Schema.FieldType inputFieldType;
     private final boolean outputDouble;
@@ -64,9 +67,11 @@ public class Vectors implements SelectFunction {
             final Integer k,
             final int[] axis,
             final List<String> labels,
+            final String groups,
             final Schema.FieldType inputFieldType,
             final boolean outputDouble,
             final Schema.Field inputField,
+            final Schema.Field groupsField,
             final Schema.FieldType outputFieldType,
             final boolean ignore) {
 
@@ -77,10 +82,14 @@ public class Vectors implements SelectFunction {
         this.k = k;
         this.axis = axis;
         this.labels = labels;
+        this.groups = groups;
         this.inputFieldType = inputFieldType;
         this.outputDouble = outputDouble;
         this.inputFields = new ArrayList<>();
         this.inputFields.add(inputField);
+        if(groupsField != null) {
+            this.inputFields.add(groupsField);
+        }
         this.outputFieldType = outputFieldType;
         this.ignore = ignore;
     }
@@ -108,6 +117,8 @@ public class Vectors implements SelectFunction {
 
         int[] axis = null;
         List<String> labels = null;
+        String groups = null;
+        Schema.Field groupsField = null;
         final Schema.FieldType outputFieldType;
         switch (op) {
             case vector_normalize, softmax -> {
@@ -164,9 +175,24 @@ public class Vectors implements SelectFunction {
                     axis = IntStream.range(0, shape.size()).filter(d -> shape.get(d) == 1).toArray();
                 }
             }
+            case group_softmax -> {
+                requireVector(name, op, inputFieldType, vector);
+                if(!jsonObject.has("groups")) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax requires groups parameter");
+                }
+                groups = jsonObject.get("groups").getAsString();
+                final Schema.FieldType groupsType = ElementSchemaUtil.getInputFieldType(groups, inputFields);
+                if(groupsType.getType() != Schema.Type.array || groupsType.getArrayValueType().getType() != Schema.Type.array
+                        || !isInteger(groupsType.getArrayValueType().getArrayValueType())) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax groups: " + groups + " must be an array of arrays of integer ids, but got: " + groupsType);
+                }
+                final String groupsFieldName = ElementSchemaUtil.getInputFieldName(groups, inputFields);
+                groupsField = Schema.Field.of(groupsFieldName, ElementSchemaUtil.getInputFieldType(groupsFieldName, inputFields));
+                outputFieldType = Schema.FieldType.array(realType);
+            }
             default -> throw new IllegalArgumentException("Not supported vector func: " + op);
         }
-        return new Vectors(name, op, field, size, k, axis, labels, inputFieldType, outputDouble, inputField, outputFieldType, ignore);
+        return new Vectors(name, op, field, size, k, axis, labels, groups, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
     }
 
     private static void requireVector(final String name, final Op op, final Schema.FieldType type, final boolean vector) {
@@ -175,9 +201,16 @@ public class Vectors implements SelectFunction {
         }
     }
 
-    private static boolean isNumeric(final Schema.FieldType type) {
+    static boolean isNumeric(final Schema.FieldType type) {
         return switch (type.getType()) {
             case int8, int16, int32, int64, float16, float32, float64 -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isInteger(final Schema.FieldType type) {
+        return switch (type.getType()) {
+            case int8, int16, int32, int64 -> true;
             default -> false;
         };
     }
@@ -314,7 +347,36 @@ public class Vectors implements SelectFunction {
                 yield labeled(vector(value));
             }
             case squeeze -> squeeze(value);
+            case group_softmax -> {
+                final Object ids = ElementSchemaUtil.getValue(input, groups);
+                yield ids == null ? null : values(softmax(groupMaxima(vector(value), ids)));
+            }
         };
+    }
+
+    // the logit of a group is that of its most likely token
+    private double[] groupMaxima(final double[] logits, final Object groups) {
+        if(!(groups instanceof List<?> list)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax groups must be an array of arrays of ids, but got: " + groups);
+        }
+        final double[] maxima = new double[list.size()];
+        for(int g=0; g<maxima.length; g++) {
+            if(!(list.get(g) instanceof List<?> ids) || ids.isEmpty()) {
+                throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax group " + g + " must be an array of ids, but got: " + list.get(g));
+            }
+            maxima[g] = Double.NEGATIVE_INFINITY;
+            for(final Object id : ids) {
+                if(!(id instanceof Number number)) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax group " + g + " must be an array of ids, but got: " + ids);
+                }
+                final long index = number.longValue();
+                if(index < 0 || index >= logits.length) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax id: " + index + " is out of a vector of length " + logits.length);
+                }
+                maxima[g] = Math.max(maxima[g], logits[(int) index]);
+            }
+        }
+        return maxima;
     }
 
     private double[] vector(final Object value) {

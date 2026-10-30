@@ -76,4 +76,38 @@ public class TokenizeTest {
                         inputFields(), true, false));
     }
 
+
+    private static SelectFunction tokenIds(final String texts) {
+        final String path = Path.of("src/test/resources/module/transform/onnx/tokenizer.json").toAbsolutePath().toString().replace('\\', '/');
+        return SelectFunction.of(json("{ \"name\": \"o\", \"func\": \"token_ids\", \"tokenizer\": \"huggingface\", \"path\": \"" + path + "\", \"texts\": " + texts + " }"), inputFields());
+    }
+
+    // only the texts of one token count, without special tokens, and no id comes twice in a group
+    @Test
+    public void testTokenIds() {
+        final SelectFunction function = tokenIds("[[\" hello\", \"hello\", \"hello world\", \"world\"], [\"onnx\"], \"pipeline\"]");
+        Assertions.assertEquals("array", function.getOutputFieldType().getType().name());
+        Assertions.assertEquals("array", function.getOutputFieldType().getArrayValueType().getType().name());
+        Assertions.assertEquals(List.of(), function.getInputFields());
+        // it reads no field, so it must not turn the Tensors before it in an onnx transform into lists
+        Assertions.assertTrue(function.acceptsTensor());
+        function.setup();
+        Assertions.assertEquals(List.of(List.of(3L, 4L), List.of(5L), List.of(6L)), function.apply(new HashMap<>(), Instant.now()));
+    }
+
+    @Test
+    public void testTokenIdsGroupWithoutOneToken() {
+        final SelectFunction function = tokenIds("[[\"hello\"], [\"hello world\", \"onnx pipeline\"]]");
+        final Exception e = Assertions.assertThrows(IllegalArgumentException.class, function::setup);
+        Assertions.assertTrue(e.getMessage().contains("hello world"), e.getMessage());
+    }
+
+    @Test
+    public void testTokenIdsValidation() {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> tokenIds("[]"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> tokenIds("\"hello\""));
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"name\": \"o\", \"func\": \"token_ids\", \"tokenizer\": \"huggingface\", \"texts\": [\"a\"] }"), inputFields()));
+    }
+
 }

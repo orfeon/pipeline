@@ -243,6 +243,11 @@ public class ElementToJsonConverter {
                     .map(v -> (Integer) v)
                     .map(m -> arrayValueType.getSymbols().get(m))
                     .forEach(array::add);
+            case array -> arrayValue.stream()
+                    .filter(Objects::nonNull)
+                    .map(v -> (Collection<?>) v)
+                    .map(v -> convertArray(arrayValueType.getArrayValueType(), v))
+                    .forEach(array::add);
         }
         return array;
     }
