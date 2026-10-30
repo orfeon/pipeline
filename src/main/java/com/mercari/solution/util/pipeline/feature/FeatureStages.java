@@ -1517,7 +1517,13 @@ public final class FeatureStages {
                   boolean descending, int top, boolean linear, List<String> scales,
                   List<OutputColumn> columns) implements StaticFitBlock<Factorization.Fits> {
         Factorization.Options options() {
-            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales, tol, block);
+            return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed, loss, top, descending, linear, scales, tol, block, variance());
+        }
+
+        /** Whether a column reads a variance: the fits then keep every value's precisions. */
+        boolean variance() {
+            for (final OutputColumn c : columns) if ("true".equals(c.getCoordinates().get("variance"))) return true;
+            return false;
         }
 
         /** The indices of a comma-separated list of the block's fields. */
@@ -1704,10 +1710,12 @@ public final class FeatureStages {
             for (final OutputColumn col : columns) {
                 Object v = null;
                 if (model != null) {
+                    final boolean variance = "true".equals(col.getCoordinates().get("variance"));
                     switch (col.getCoordinates().get("kind")) {
                         case "pair" -> {
                             final int[] pair = indices(col.getCoordinates().get("pair"));
-                            v = model.pair(x, numericValues, pair[0], pair[1], "true".equals(col.getCoordinates().get("perUnit")));
+                            final boolean perUnit = "true".equals(col.getCoordinates().get("perUnit"));
+                            v = variance ? model.pairVariance(x, numericValues, pair[0], pair[1], perUnit) : model.pair(x, numericValues, pair[0], pair[1], perUnit);
                         }
                         case "embedding" -> {
                             final int f = fields.indexOf(col.getCoordinates().get("field"));
@@ -1715,11 +1723,14 @@ public final class FeatureStages {
                             final double[] e = model.embedding(x, f, d + 1);
                             v = e == null || e.length <= d ? null : e[d];
                         }
-                        case "between" -> v = model.between(x, numericValues, indices(col.getCoordinates().get("left")), indices(col.getCoordinates().get("right")));
+                        case "between" -> {
+                            final int[] left = indices(col.getCoordinates().get("left")), right = indices(col.getCoordinates().get("right"));
+                            v = variance ? model.betweenVariance(x, numericValues, left, right) : model.between(x, numericValues, left, right);
+                        }
                         case "count" -> v = model.count(x, fields.indexOf(col.getCoordinates().get("field")));
                         case "fitBlock" -> v = model.changePoint;
                         case "trainRows" -> v = model.rows > 0 ? model.rows : null; // 0 = an artifact written without the count
-                        default -> v = model.predict(x, numericValues);
+                        default -> v = variance ? model.sumVariance(x, numericValues) : model.predict(x, numericValues);
                     }
                 }
                 values.put(col.getCanonicalName(), v);
@@ -1737,7 +1748,7 @@ public final class FeatureStages {
     }
 
     /** The factorization coordinates of the fit itself or of one output column: no part of a block's examples ({@link FmSpec#exampleSet}). */
-    static final Set<String> FM_FIT_ONLY = Set.of("kind", "pair", "perUnit", "field", "dim", "left", "right",
+    static final Set<String> FM_FIT_ONLY = Set.of("kind", "pair", "perUnit", "field", "dim", "left", "right", "variance",
             "variant", "latentDim", "epochs", "tol", "reg", "regBias", "regLinear", "regFactors", "regPairWeights", "regScale",
             "seed", "linear", "order", "top", "minRows", "align", "artifactUri", "refit", "warmStart", "warmEpochs");
 

@@ -119,7 +119,12 @@ public final class Factorization {
         public final boolean fieldWeighted;
         public final int k;
         public double w0;
-        /** field index → value → [w, v_1 .. v_k, n] (n = the training examples with the value) */
+        /**
+         * field index → value → [w, v_1 .. v_k, n] (n = the training examples with the value), followed — when the fit
+         * kept them ({@link Options#variance}) — by the posterior precisions of the value's parameters [π_w, π_v]: the
+         * curvature of the loss along the parameter at the last epoch plus its ridge, {@code H + λ}, the factors' averaged
+         * over their k coordinates ({@link #variances}).
+         */
         public final List<Map<String, double[]>> params;
         /** pair weights r[f][g] (symmetric; 1 for fm) */
         public final double[][] r;
@@ -140,6 +145,19 @@ public final class Factorization {
          * it carries that change point too; nothing reads it there, and an artifact does not keep it.
          */
         public Long changePoint;
+        /**
+         * What a precision is divided into to give a posterior variance ({@link #variances}): under squared loss the
+         * residual sum of squares over the residual degrees of freedom (its curvature counts rows, not information), 1
+         * under logistic and Plackett–Luce (their curvature is the information); NaN when the fit kept no precisions.
+         */
+        public double dispersion = Double.NaN;
+        /**
+         * Per field, the ridge of a value's weight and of its factors that a value the fit never saw would get — its prior
+         * precision, so {@code dispersion / λ} is the prior variance an unknown value reads ({@link #betweenVariance},
+         * {@link #sumVariance}). +∞ for weights that are not fitted (held at 0), NaN under {@code regScale: perRow} (a
+         * value without rows has no ridge); null when the fit kept no precisions.
+         */
+        public double[] linearRidge, factorRidge;
 
         Model(final List<String> fields, final boolean[] numeric, final boolean fieldWeighted, final int k) {
             this.fields = fields;
@@ -234,6 +252,131 @@ public final class Factorization {
             return p == null ? 0L : (long) p[k + 1];
         }
 
+        /**
+         * The approximate posterior variances {s_w, s_v} of a value's weight and of each coordinate of its factors
+         * (dispersion / precision: the diagonal of the information, isotropic over the factor coordinates, so a rotation
+         * of the latent space leaves it unchanged), NaN for a parameter whose precision is not positive (no curvature and
+         * no ridge: it is not identified); null for an unknown or missing value or a fit that kept none.
+         */
+        double[] variances(final int f, final String value) {
+            return variances(param(f, value));
+        }
+
+        private double[] variances(final double[] p) {
+            if (p == null || p.length < k + 4 || Double.isNaN(dispersion)) return null;
+            return new double[]{p[k + 2] > 0 ? dispersion / p[k + 2] : Double.NaN, p[k + 3] > 0 ? dispersion / p[k + 3] : Double.NaN};
+        }
+
+        /**
+         * The approximate variance of {@link #pair(String[], double[], int, int, boolean)}: the two factor vectors read as
+         * independent isotropic Gaussians around their fitted values, {@code r² u_f² u_g² (s_f ‖v_g‖² + s_g ‖v_f‖² + k s_f s_g)}
+         * — the delta method's first-order terms and the second-order one that keeps a pair of two thinly supported values
+         * (both shrunk towards 0) from reading as certain. Null where the pair is null or a variance was not kept.
+         */
+        public Double pairVariance(final String[] values, final double[] x, final int f, final int g, final boolean perUnit) {
+            final double[] pa = param(f, perUnit && numeric[f] ? NUMERIC : values[f]);
+            final double[] pb = param(g, perUnit && numeric[g] ? NUMERIC : values[g]);
+            final double[] sa = variances(pa), sb = variances(pb);
+            if (sa == null || sb == null) return null;
+            final double scaled = r[f][g] * (perUnit ? 1d : unit(f, x) * unit(g, x));
+            final double variance = scaled * scaled * (sa[1] * norm2(pb) + sb[1] * norm2(pa) + k * sa[1] * sb[1]);
+            // NaN: a missing numeric value, or a factor that is not identified (its weight's precision is not read here)
+            return Double.isNaN(variance) ? null : variance;
+        }
+
+        /**
+         * The approximate variance of {@link #between}: over the pairs it sums, {@code Σ_f s_f ‖Σ_g r_fg u_f u_g v_g‖²}
+         * (the first-order terms, the pairs that share a factor vector added before squaring) plus
+         * {@code Σ_{f,g} r_fg² u_f² u_g² k s_f s_g}. A value the fit never saw contributes 0 to the affinity — its factors'
+         * prior mean — and its prior variance {@code dispersion / λ} to this one, so an entity without history reads a
+         * larger variance than one seen once ({@link #factorRidge}). Null where the affinity is null (no pair with both
+         * values known), the fit kept no variance, or a factor the readout reads is not identified (an unknown value's
+         * ridge 0, or {@code regScale: perRow}).
+         */
+        public Double betweenVariance(final String[] values, final double[] x, final int[] left, final int[] right) {
+            if (x == null) requireCategorical();
+            final boolean[][] pairs = new boolean[fields.size()][fields.size()];
+            for (final int f : left) for (final int g : right) if (f != g) pairs[f][g] = pairs[g][f] = true;
+            return pairsVariance(values, x, pairs, false);
+        }
+
+        /**
+         * The approximate variance of {@link #predict(String[], double[])} without the bias: the per-value weights'
+         * {@code Σ u_f² s_w} plus the variance of every pair ({@link #betweenVariance}'s form over all of them), a value the
+         * fit never saw at its prior variance. Null when the fit kept no variance or a parameter the sum reads is not
+         * identified.
+         */
+        public Double sumVariance(final String[] values, final double[] x) {
+            final boolean[][] pairs = new boolean[fields.size()][fields.size()];
+            for (int f = 0; f < fields.size(); f++) for (int g = 0; g < fields.size(); g++) pairs[f][g] = f != g;
+            return pairsVariance(values, x, pairs, true);
+        }
+
+        private Double pairsVariance(final String[] values, final double[] x, final boolean[][] pairs, final boolean linear) {
+            final int F = fields.size();
+            final double[] units = new double[F];
+            // every present value's parameters and variances, looked up once: a known value's fitted ones, an unknown
+            // categorical value's prior (factors 0, variance dispersion / λ); a missing value takes no part
+            final double[][] p = new double[F][], s = new double[F][];
+            final boolean[] known = new boolean[F];
+            for (int f = 0; f < F; f++) {
+                units[f] = unit(f, x);
+                if (values[f] == null || Double.isNaN(units[f])) continue;
+                final double[] fitted = param(f, values[f]);
+                if (fitted != null) {
+                    known[f] = true;
+                    p[f] = fitted;
+                    s[f] = variances(fitted);
+                } else if (!numeric[f]) {
+                    p[f] = new double[k + 1];
+                    s[f] = priorVariances(f);
+                } else {
+                    continue;
+                }
+                if (s[f] == null) return null;
+            }
+            // the readout's own condition: a between with no pair of two known values is null
+            boolean readable = linear;
+            for (int f = 0; f < F && !readable; f++) for (int g = 0; g < F; g++) readable |= pairs[f][g] && known[f] && known[g];
+            if (!readable) return null;
+            double variance = 0;
+            boolean any = linear;
+            for (int f = 0; f < F; f++) {
+                if (s[f] == null) continue;
+                if (linear) variance += units[f] * units[f] * s[f][0];
+                final double[] gradient = new double[k];
+                boolean paired = false;
+                for (int g = 0; g < F; g++) {
+                    if (!pairs[f][g] || s[g] == null) continue;
+                    paired = true;
+                    final double scaled = r[f][g] * units[f] * units[g];
+                    for (int d = 0; d < k; d++) gradient[d] += scaled * p[g][d + 1];
+                    // each unordered pair's second-order term once
+                    if (g > f) variance += scaled * scaled * k * s[f][1] * s[g][1];
+                }
+                // a value in no known pair of the readout: its factors do not reach it
+                if (!paired) continue;
+                any = true;
+                double norm = 0;
+                for (final double d : gradient) norm += d * d;
+                variance += s[f][1] * norm;
+            }
+            // NaN: a parameter the readout reads is not identified
+            return any && !Double.isNaN(variance) ? variance : null;
+        }
+
+        /** The prior variances {s_w, s_v} of a value of field {@code f} the fit never saw; null when the fit kept none. */
+        private double[] priorVariances(final int f) {
+            if (linearRidge == null || factorRidge == null || Double.isNaN(dispersion)) return null;
+            return new double[]{linearRidge[f] > 0 ? dispersion / linearRidge[f] : Double.NaN, factorRidge[f] > 0 ? dispersion / factorRidge[f] : Double.NaN};
+        }
+
+        private double norm2(final double[] p) {
+            double norm = 0;
+            for (int d = 1; d <= k; d++) norm += p[d] * p[d];
+            return norm;
+        }
+
         /** Full linear predictor (without the offset) over categorical fields ({@link #pair(String[], int, int)}). */
         public double predict(final String[] values) {
             requireCategorical();
@@ -294,6 +437,9 @@ public final class Factorization {
             rotated.report = report;
             rotated.rows = rows;
             rotated.changePoint = changePoint;
+            rotated.dispersion = dispersion;
+            rotated.linearRidge = linearRidge;
+            rotated.factorRidge = factorRidge;
             System.arraycopy(mean, 0, rotated.mean, 0, mean.length);
             System.arraycopy(scale, 0, rotated.scale, 0, scale.length);
             for (int f = 0; f < fields.size(); f++) {
@@ -322,12 +468,20 @@ public final class Factorization {
      * @param tol        stop a fit once an epoch moves the penalised objective by less than this fraction ({@code als.tol};
      *                   0 = run every epoch); {@code epochs} is then the cap
      * @param label      the block, for the fit log (null: none)
+     * @param variance   keep every value's posterior precisions for the variance readouts ({@link Model#variances})
      */
     public record Options(List<String> fields, boolean fieldWeighted, int latentDim, int epochs, Regularization reg, long seed,
                           Loss loss, int top, boolean descending, boolean linear, List<String> scales,
-                          double tol, String label) implements Serializable {
+                          double tol, String label, boolean variance) implements Serializable {
         public Options {
             Objects.requireNonNull(reg, "reg");
+        }
+
+        /** No precisions kept. */
+        public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final Regularization reg, final long seed,
+                       final Loss loss, final int top, final boolean descending, final boolean linear, final List<String> scales,
+                       final double tol, final String label) {
+            this(fields, fieldWeighted, latentDim, epochs, reg, seed, loss, top, descending, linear, scales, tol, label, false);
         }
 
         public Options(final List<String> fields, final boolean fieldWeighted, final int latentDim, final int epochs, final double reg, final long seed) {
@@ -965,6 +1119,17 @@ public final class Factorization {
         }
         final Objective objective = Objective.of(options, examples, s);
         final Regularization reg = options.reg();
+        // the precision H + λ of every value's weight and factors, rewritten by every epoch's steps (the last one stays)
+        final double[][] linearPrecision = options.variance() ? new double[F][] : null;
+        final double[][] factorPrecision = options.variance() ? new double[F][] : null;
+        if (options.variance()) {
+            for (int f = 0; f < F; f++) {
+                linearPrecision[f] = new double[names.get(f).size()];
+                // a weight that is not fitted is held at 0: certain
+                if (!options.linear()) Arrays.fill(linearPrecision[f], Double.POSITIVE_INFINITY);
+                factorPrecision[f] = new double[names.get(f).size()];
+            }
+        }
         int longest = 0;
         for (int f = 0; f < F; f++) for (int id = 0; id + 1 < start[f].length; id++) longest = Math.max(longest, start[f][id + 1] - start[f][id]);
         final double[] h = new double[Math.max(longest, n)];
@@ -994,7 +1159,9 @@ public final class Factorization {
                     for (int id = 0; id + 1 < start[f].length; id++) {
                         final int from = start[f][id], to = start[f][id + 1];
                         for (int j = from; j < to; j++) h[j - from] = multiplier(u, members[f][j] * F + f);
-                        final double delta = objective.delta(members[f], from, to, h, w[f][id], reg.of(reg.linear()[f], to - from));
+                        final double ridge = reg.of(reg.linear()[f], to - from);
+                        final double delta = objective.delta(members[f], from, to, h, w[f][id], ridge);
+                        if (linearPrecision != null) linearPrecision[f][id] = objective.curvature + ridge;
                         objective.shift(members[f], from, to, h, delta);
                         w[f][id] += delta;
                     }
@@ -1004,6 +1171,8 @@ public final class Factorization {
             for (int f = 0; f < F; f++) {
                 for (int id = 0; id + 1 < start[f].length; id++) {
                     final int from = start[f][id], to = start[f][id + 1];
+                    final double ridge = reg.of(reg.factors()[f], to - from);
+                    double curvature = 0;
                     for (int d = 0; d < k; d++) {
                         final double p = v[f][id * k + d];
                         for (int j = from; j < to; j++) {
@@ -1011,11 +1180,13 @@ public final class Factorization {
                             final double own = multiplier(u, i * F + f);
                             h[j - from] = own * (fm ? q[i * k + d] - p * own : slope(r, v, u, idx, i, F, f, d, k));
                         }
-                        final double delta = objective.delta(members[f], from, to, h, p, reg.of(reg.factors()[f], to - from));
+                        final double delta = objective.delta(members[f], from, to, h, p, ridge);
+                        curvature += objective.curvature;
                         objective.shift(members[f], from, to, h, delta);
                         if (fm) for (int j = from; j < to; j++) q[members[f][j] * k + d] += delta * multiplier(u, members[f][j] * F + f);
                         v[f][id * k + d] = p + delta;
                     }
+                    if (factorPrecision != null) factorPrecision[f][id] = curvature / k + ridge;
                 }
             }
             // field-pair weights (fwfm): ŷ is linear in r_fg with slope ⟨v_f, v_g⟩
@@ -1049,16 +1220,50 @@ public final class Factorization {
         }
 
         final Model model = new Model(options.fields(), numeric, options.fieldWeighted(), k);
+        // the scores are the fit's own here (the report below spends them): the squared loss's dispersion is its residual
+        // sum of squares over the residual degrees of freedom — n less the effective parameters Σ H / (H + λ), the k
+        // coordinates of a value's factors counted at their averaged precision — floored at a tenth of the rows: a fit
+        // close to one parameter per row leaves its own residuals too small to read the noise from (as SSE / n does
+        // wherever the parameters are many, and differently at every forward change point)
+        if (options.variance()) {
+            if (options.loss() == Loss.squared) {
+                // the bias (squared loss always fits one)
+                double parameters = 1;
+                for (int f = 0; f < F; f++) {
+                    for (int id = 0; id < names.get(f).size(); id++) {
+                        final int rows = start[f][id + 1] - start[f][id];
+                        if (options.linear()) parameters += effective(reg.of(reg.linear()[f], rows), linearPrecision[f][id]);
+                        parameters += k * effective(reg.of(reg.factors()[f], rows), factorPrecision[f][id]);
+                    }
+                }
+                model.dispersion = -2 * objective.logLikelihood() / Math.max(n - parameters, Math.max(1, n / 10d));
+            } else {
+                model.dispersion = 1d;
+            }
+        }
+        if (options.variance()) {
+            // the ridge a value without rows would get: its prior precision (none under perRow, which scales it by the rows)
+            model.linearRidge = new double[F];
+            model.factorRidge = new double[F];
+            for (int f = 0; f < F; f++) {
+                model.linearRidge[f] = !options.linear() ? Double.POSITIVE_INFINITY : reg.perRow() ? Double.NaN : reg.linear()[f];
+                model.factorRidge[f] = reg.perRow() ? Double.NaN : reg.factors()[f];
+            }
+        }
         model.w0 = w0;
         model.loss = options.loss().name();
         System.arraycopy(mean, 0, model.mean, 0, F);
         System.arraycopy(scale, 0, model.scale, 0, F);
         for (int f = 0; f < F; f++) {
             for (int id = 0; id < names.get(f).size(); id++) {
-                final double[] p = new double[k + 2];
+                final double[] p = new double[options.variance() ? k + 4 : k + 2];
                 p[0] = w[f][id];
                 System.arraycopy(v[f], id * k, p, 1, k);
                 p[k + 1] = start[f][id + 1] - start[f][id];
+                if (options.variance()) {
+                    p[k + 2] = linearPrecision[f][id];
+                    p[k + 3] = factorPrecision[f][id];
+                }
                 model.params.get(f).put(names.get(f).get(id), p);
             }
             if (!fm) System.arraycopy(r[f], 0, model.r[f], 0, F);
@@ -1067,6 +1272,11 @@ public final class Factorization {
         model.report = report(options, examples, objective, objectiveStart, previous, lastChange, ran, converged, w, v, k, contest,
                 (System.nanoTime() - started) / 1_000_000L);
         return model;
+    }
+
+    /** The effective parameters of one coordinate, {@code H / (H + λ)} given its ridge and precision {@code H + λ} (0 with neither). */
+    private static double effective(final double ridge, final double precision) {
+        return precision > 0 ? 1 - ridge / precision : 0;
     }
 
     /** ½ Σ λ θ² over every fitted parameter (the ridge part of the objective). */
@@ -1158,6 +1368,8 @@ public final class Factorization {
      */
     abstract static class Objective {
         final double[] s;
+        /** The curvature H of the loss along the parameter of the last {@link #delta} (the ridge not included). */
+        double curvature;
 
         Objective(final double[] s) {
             this.s = s;
@@ -1178,9 +1390,10 @@ public final class Factorization {
          */
         final double delta(final int[] rows, final int from, final int to, final double[] h, final double theta, final double reg) {
             final double[] gh = derivatives(rows, from, to, h);
-            final double curvature = gh[1] + reg;
-            if (!(curvature > 0)) return 0;
-            final double step = (gh[0] - reg * theta) / curvature;
+            this.curvature = gh[1];
+            final double precision = gh[1] + reg;
+            if (!(precision > 0)) return 0;
+            final double step = (gh[0] - reg * theta) / precision;
             return exact() ? step : capped(step);
         }
 
@@ -1530,7 +1743,8 @@ public final class Factorization {
                {"name": "v", "type": "bytes"},
                {"name": "n", "type": "long", "default": 0},
                {"name": "mean", "type": "double", "default": 0},
-               {"name": "scale", "type": "double", "default": 1}
+               {"name": "scale", "type": "double", "default": 1},
+               {"name": "precision", "type": ["null", "bytes"], "default": null}
              ]}
             """);
 
@@ -1549,10 +1763,18 @@ public final class Factorization {
             try (final DataFileWriter<GenericRecord> writer = new DataFileWriter<>(new GenericDatumWriter<>(SCHEMA))) {
                 writer.create(SCHEMA, bytes);
                 // n of the global record: the training rows of the fit
-                writer.append(record("__global", "", model.w0, new double[0], model.rows, 0, 1));
+                // precision of the global record: the dispersion of the variance readouts (absent when the fit kept none)
+                writer.append(record("__global", "", model.w0, new double[0], model.rows, 0, 1,
+                        Double.isNaN(model.dispersion) ? null : new double[]{model.dispersion}));
                 for (int f = 0; f < model.fields.size(); f++) {
                     for (int g = f + 1; g < model.fields.size(); g++) {
-                        writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L, 0, 1));
+                        writer.append(record("__r", model.fields.get(f) + SEPARATOR + model.fields.get(g), model.r[f][g], new double[0], 0L, 0, 1, null));
+                    }
+                }
+                // per field, the ridges an unknown value's prior variance reads (kept with the precisions)
+                if (model.linearRidge != null && model.factorRidge != null) {
+                    for (int f = 0; f < model.fields.size(); f++) {
+                        writer.append(record("__ridge", model.fields.get(f), 0, new double[0], 0L, 0, 1, new double[]{model.linearRidge[f], model.factorRidge[f]}));
                     }
                 }
                 for (int f = 0; f < model.fields.size(); f++) {
@@ -1561,7 +1783,7 @@ public final class Factorization {
                     for (final String value : values) {
                         final double[] p = model.params.get(f).get(value);
                         writer.append(record(model.fields.get(f), value, p[0], Arrays.copyOfRange(p, 1, model.k + 1), (long) p[model.k + 1],
-                                model.mean[f], model.scale[f]));
+                                model.mean[f], model.scale[f], p.length >= model.k + 4 ? Arrays.copyOfRange(p, model.k + 2, model.k + 4) : null));
                     }
                 }
             }
@@ -1570,6 +1792,8 @@ public final class Factorization {
             manifest.addProperty("variant", model.fieldWeighted ? "fwfm" : "fm");
             manifest.addProperty("latentDim", model.k);
             manifest.addProperty("loss", model.loss);
+            // a diverged fit's +Infinity as a string: JSON has no non-finite number (FitArtifact#lambdaJson)
+            if (!Double.isNaN(model.dispersion)) manifest.add("dispersion", FitArtifact.lambdaJson(model.dispersion));
             // the standardisation of every numeric field: what a serving run's values are scaled by
             final JsonObject numericFields = new JsonObject();
             for (int f = 0; f < model.fields.size(); f++) {
@@ -1604,20 +1828,25 @@ public final class Factorization {
     }
 
     private static GenericRecord record(final String field, final String value, final double w, final double[] v, final long n,
-                                        final double mean, final double scale) {
+                                        final double mean, final double scale, final double[] precision) {
         final GenericRecord record = new GenericData.Record(SCHEMA);
         record.put("field", field);
         record.put("value", value);
         record.put("w", w);
         // latent vector as big-endian doubles: array<double> round-trips with float precision on this Avro version
-        final java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(8 * v.length);
-        for (final double d : v) buffer.putDouble(d);
-        buffer.flip();
-        record.put("v", buffer);
+        record.put("v", doubles(v));
         record.put("n", n);
         record.put("mean", mean);
         record.put("scale", scale);
+        record.put("precision", precision == null ? null : doubles(precision));
         return record;
+    }
+
+    private static java.nio.ByteBuffer doubles(final double[] values) {
+        final java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(8 * values.length);
+        for (final double d : values) buffer.putDouble(d);
+        buffer.flip();
+        return buffer;
     }
 
     /** Reads an artifact of categorical fields. */
@@ -1638,9 +1867,23 @@ public final class Factorization {
                 final String field = record.get("field").toString();
                 final String value = record.get("value").toString();
                 final double w = (Double) record.get("w");
+                final java.nio.ByteBuffer precision = (java.nio.ByteBuffer) record.get("precision");
                 if ("__global".equals(field)) {
                     model.w0 = w;
                     model.rows = (Long) record.get("n");
+                    if (precision != null && precision.remaining() >= 8) model.dispersion = precision.getDouble();
+                } else if ("__ridge".equals(field)) {
+                    final int f = fields.indexOf(value);
+                    if (f >= 0 && precision != null && precision.remaining() >= 16) {
+                        if (model.linearRidge == null) {
+                            model.linearRidge = new double[fields.size()];
+                            model.factorRidge = new double[fields.size()];
+                            Arrays.fill(model.linearRidge, Double.NaN);
+                            Arrays.fill(model.factorRidge, Double.NaN);
+                        }
+                        model.linearRidge[f] = precision.getDouble();
+                        model.factorRidge[f] = precision.getDouble();
+                    }
                 } else if ("__r".equals(field)) {
                     final int sep = value.indexOf(SEPARATOR);
                     final int f = fields.indexOf(value.substring(0, sep));
@@ -1653,10 +1896,15 @@ public final class Factorization {
                     final int f = fields.indexOf(field);
                     if (f < 0) continue;
                     final java.nio.ByteBuffer v = (java.nio.ByteBuffer) record.get("v");
-                    final double[] p = new double[k + 2];
+                    final boolean kept = precision != null && precision.remaining() >= 16;
+                    final double[] p = new double[kept ? k + 4 : k + 2];
                     p[0] = w;
                     for (int d = 0; d < k && v.remaining() >= 8; d++) p[d + 1] = v.getDouble();
                     p[k + 1] = (Long) record.get("n");
+                    if (kept) {
+                        p[k + 2] = precision.getDouble();
+                        p[k + 3] = precision.getDouble();
+                    }
                     model.params.get(f).put(value, p);
                     if (numeric[f]) {
                         model.mean[f] = (Double) record.get("mean");

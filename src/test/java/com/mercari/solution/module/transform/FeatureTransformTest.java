@@ -710,7 +710,9 @@ public class FeatureTransformTest {
 
     private static final List<String> FM_FIELDS = List.of("seller_id", "category", "condition_grade");
     private static final com.mercari.solution.util.pipeline.feature.Factorization.Options FM_OPTIONS =
-            new com.mercari.solution.util.pipeline.feature.Factorization.Options(FM_FIELDS, false, 2, 20, 0.1, 1L);
+            new com.mercari.solution.util.pipeline.feature.Factorization.Options(FM_FIELDS, false, 2, 20,
+                    com.mercari.solution.util.pipeline.feature.Factorization.Regularization.uniform(0.1, 3), 1L,
+                    com.mercari.solution.util.pipeline.feature.Factorization.Loss.squared, 0, false, true, null, 0, null, true);
 
     private static String fmConfig(final String fit) {
         final String fm = """
@@ -723,10 +725,10 @@ public class FeatureTransformTest {
                       fit: %s
                       als: {epochs: 20, reg: 0.1, seed: 1}
                       outputs:
-                        - {pair: [seller_id, category], as: fm_pair}
+                        - {pair: [seller_id, category], as: fm_pair, variance: true}
                         - {count: seller_id, as: fm_seller_rows}
-                        - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side}
-                        - {sum: true, as: fm_linear}
+                        - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side, variance: true}
+                        - {sum: true, as: fm_linear, variance: true}
                         - {fitBlock: true, as: fm_fit_block}
                         - {trainRows: true, as: fm_train_rows}
                 """.formatted(fit);
@@ -749,6 +751,12 @@ public class FeatureTransformTest {
         return examples;
     }
 
+    /** A nullable double column against its expected value (null: the column is null). */
+    private static void assertNullable(final Double expected, final MElement row, final String column) {
+        if (expected == null) Assertions.assertNull(row.getPrimitiveValue(column), row::toString);
+        else Assertions.assertEquals(expected, row.getAsDouble(column), 1e-9 * Math.max(1, Math.abs(expected)), row::toString);
+    }
+
     /** The fm outputs of a row against the model it should read (null: every output null). */
     private static void assertFm(final MElement row, final com.mercari.solution.util.pipeline.feature.Factorization.Model model, final String[] values) {
         if (model == null) {
@@ -758,8 +766,16 @@ public class FeatureTransformTest {
             Assertions.assertNull(row.getPrimitiveValue("f_fm_side"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_fit_block"), row::toString);
             Assertions.assertNull(row.getPrimitiveValue("f_fm_train_rows"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_linear_var"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_pair_var"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_fm_side_var"), row::toString);
             return;
         }
+        // the variances of the readouts, from the precisions the fit kept
+        assertNullable(model.pairVariance(values, null, 0, 1, false), row, "f_fm_pair_var");
+        assertNullable(model.betweenVariance(values, null, new int[]{0, 1}, new int[]{2}), row, "f_fm_side_var");
+        assertNullable(model.sumVariance(values, null), row, "f_fm_linear_var");
+        Assertions.assertTrue(row.getAsDouble("f_fm_linear_var") > 0, row::toString);
         // the geometry of the fit the row reads: its forward change point (null otherwise) and its training rows
         Assertions.assertEquals(model.changePoint, (Long) row.getPrimitiveValue("f_fm_fit_block"), row::toString);
         Assertions.assertEquals(model.rows, ((Number) row.getPrimitiveValue("f_fm_train_rows")).longValue(), row::toString);

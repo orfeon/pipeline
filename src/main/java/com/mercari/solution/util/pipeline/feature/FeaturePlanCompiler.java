@@ -5021,8 +5021,9 @@ public final class FeaturePlanCompiler {
             final List<OutputColumn> cols = new ArrayList<>();
             switch (out.kind) {
                 case "pair" -> {
-                    if (out.pair.size() != 2 || !def.fields.containsAll(out.pair)) {
-                        diagnostics.error("factorization.outputs", loc, "pair must name two of the block's fields: " + out.pair);
+                    if (out.pair.size() != 2 || !def.fields.containsAll(out.pair) || out.pair.get(0).equals(out.pair.get(1))) {
+                        diagnostics.error("factorization.outputs", loc, "pair must name two different fields of the block (the model has no"
+                                + " pair of a field with itself): " + out.pair);
                         continue;
                     }
                     final String name = out.as != null ? out.as : def.name + "_" + out.pair.get(0) + "_" + out.pair.get(1);
@@ -5106,6 +5107,29 @@ public final class FeaturePlanCompiler {
                     final OutputColumn c = newColumn(def.name, Scope.population, "fm", out.as != null ? out.as : def.name + "_sum", Schema.FieldType.FLOAT64, computeAt);
                     c.coordinates.put("kind", "sum");
                     cols.add(c);
+                }
+            }
+            if (out.variance) {
+                // the parsed kind (never null; an embedding of dims <= 0 has no column to read one from): a pair / between
+                // / sum that reaches here has its one column
+                final String kind = out.kind;
+                if (List.of("pair", "between", "sum").contains(kind)) {
+                    // the readout's approximate posterior variance, next to it: the same coordinates and variance=true
+                    final OutputColumn base = cols.get(0);
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", base.canonicalName + "_var", Schema.FieldType.FLOAT64, computeAt);
+                    c.coordinates.putAll(base.coordinates);
+                    c.coordinates.put("variance", "true");
+                    cols.add(c);
+                    if (hintedBlocks.add(def.name + "#fmVariance")) {
+                        diagnostics.info("factorization.outputs.variance", loc, "variance reads the approximate posterior variance of the readout:"
+                                + " every value's factors as independent isotropic Gaussians around their fit, variance = dispersion / (H + lambda) per"
+                                + " coordinate (H the curvature of the loss along it at the last epoch, lambda its ridge; dispersion "
+                                + (loss == Factorization.Loss.squared ? "the residual sum of squares over the residual degrees of freedom" : "1, the curvature being the information")
+                                + "), carried through the inner products to first and second order. It leaves out the correlations between parameters"
+                                + " and the uncertainty of the ridge itself: read it as a ranking of how firmly a readout is supported, not as a calibrated interval");
+                    }
+                } else {
+                    diagnostics.warning("factorization.outputs", loc, "variance applies to pair / between / sum outputs and is ignored for " + kind);
                 }
             }
             for (final OutputColumn c : cols) {

@@ -271,11 +271,18 @@ taken out, + λ; `σ² / neff`).
 `variant: fm | fwfm`, `fields: [≥ 2: categorical, or {field, numeric: true, scale: zscore | none}; either as {field, ...}
 may add reg: <n> | {linear, factors}]`, `latentDim` (default 8), `task: {target | expr, offset}`, `als: {epochs, warmEpochs, reg,
 regScale, tol, seed}`, `outputs: [{pair: [a, b], as,
-perUnit}, {between: {left: [...], right: [...]}, as}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as},
+perUnit, variance}, {between: {left: [...], right: [...]}, as, variance}, {embedding: <categorical field>, as, dims}, {count: <field>, as}, {sum: true, as, variance},
 {fitBlock: true, as}, {trainRows: true, as}]`, `fit: {artifact}`. `fitBlock` (forward only, else null + warning) = the
 change point (time block index) of the model the row reads — it read blocks up to it, so `fitBlock <
 block(eventTime + predictAt − lag)` audits the fit / apply split (`week` blocks = floor(days since epoch / 7), Thursday
 starts); `trainRows` = that model's training rows (null for an artifact written without the count). One kind per output object.
+`variance: true` (pair / between / sum) adds `<name>_var`. It is the approximate posterior variance: each value's
+factors are independent isotropic Gaussians with variance dispersion / (H + λ), carried through the inner products to
+first and second order. The dispersion is the residual variance under squared loss and 1 otherwise. Use it as a
+ranking of support, not as a calibrated interval: it leaves out the correlations between parameters. A value the fit
+never saw reads its prior variance dispersion / λ (the field's declared ridge; null under `regScale: perRow`), so an
+entity without history counts its own uncertainty. It is null where the readout is null. A `pair` names two different
+fields.
 Unknown values → null. A numeric field has one vector scaled by its standardised value (mean / sd of the training
 rows, stored in the artifact); a missing value contributes nothing; `perUnit: true` reads a pair with it as the slope
 (independent of the row's value). `between` sums the cross-side pairs whose both values are known (disjoint sides,

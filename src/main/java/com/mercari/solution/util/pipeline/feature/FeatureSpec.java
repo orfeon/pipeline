@@ -318,6 +318,8 @@ public class FeatureSpec implements Serializable {
         public List<String> right = new ArrayList<>();
         public Integer dims;
         public String as;
+        /** pair / between / sum: also emit the readout's approximate posterior variance as {@code <name>_var}. */
+        public boolean variance;
     }
 
     /**
@@ -1375,6 +1377,7 @@ public class FeatureSpec implements Serializable {
         for (final JsonObject out : "copula".equals(def.type) ? List.<JsonObject>of() : objects(o, "outputs")) {
             final FmOutput fm = new FmOutput();
             fm.as = Json.string(out, "as");
+            fm.variance = Json.bool(out, "variance", false);
             final List<String> kinds = new ArrayList<>();
             // in the order the kind is chosen below; the flags count when true
             for (final String key : List.of("pair", "embedding", "between", "count")) if (out.has(key)) kinds.add(key);
