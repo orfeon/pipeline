@@ -54,6 +54,11 @@ public class Pass implements SelectFunction {
     }
 
     @Override
+    public boolean acceptsTensor() {
+        return true;
+    }
+
+    @Override
     public void setup() {
 
     }

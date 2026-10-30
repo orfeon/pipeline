@@ -38,7 +38,7 @@ Try to find and arrange a configuration file that is similar to the data process
     * [Attribution: latency tail (p99) regression localization](bigquery-to-attribution-latency-to-bigquery.yaml)
     * [Attribution: metric-tree (why) decomposition with a causal edge](bigquery-to-attribution-metric-tree-to-bigquery.yaml)
     * [BeamSQL: Join BigQuery and Spanner table](beamsql-join-bigquery-and-spanner-to-spanner.json)
-    * [Onnx batch inference](bigquery-to-onnx-to-vectorsearch.json)
+    * [Onnx batch inference: text embedding](bigquery-to-onnx-to-bigquery.yaml)
     * [AutoML(Vertex AI endpoints) batch prediction](bigquery-to-automl-to-spanner.json)
     * [Solr index from PDF files](bigquery-pdf-to-localsolr.json)
     * [Tokenize](bigquery-to-tokenize-to-bigquery.json)

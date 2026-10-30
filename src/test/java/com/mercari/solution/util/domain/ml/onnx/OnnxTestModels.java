@@ -97,6 +97,94 @@ public class OnnxTestModels {
         return graph.model();
     }
 
+    /**
+     * A text embedding model with an input it does not use: {@code input_ids int64[batch, length]}, {@code attention_mask int64[batch, length]}
+     * and {@code image_features float[n, 4]}. The output {@code sentence_embedding float[batch, 2]} is
+     * the sum of the attended ids and their number.
+     */
+    public static byte[] textEmbedding() {
+        final Graph graph = new Graph("text_embedding");
+        graph.input("input_ids", INT64, "batch", "length");
+        graph.input("attention_mask", INT64, "batch", "length");
+        graph.input("image_features", FLOAT, "n", 4L);
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.node("Cast", List.of("input_ids"), List.of("ids_float"), "to", (long) FLOAT);
+        graph.node("Cast", List.of("attention_mask"), List.of("mask_float"), "to", (long) FLOAT);
+        graph.node("Mul", List.of("ids_float", "mask_float"), List.of("masked"));
+        graph.node("ReduceSum", List.of("masked", "axes"), List.of("sum"), "keepdims", 1L);
+        graph.node("ReduceSum", List.of("mask_float", "axes"), List.of("count"), "keepdims", 1L);
+        graph.node("Concat", List.of("sum", "count"), List.of("sentence_embedding"), "axis", 1L);
+        graph.output("sentence_embedding", FLOAT, "batch", 2L);
+        return graph.model();
+    }
+
+    /** {@code x <elemType>[dims...]} with the output {@code y = x}. */
+    public static byte[] identity(final int elemType, final Object... dims) {
+        final Graph graph = new Graph("identity");
+        graph.input("x", elemType, dims);
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.output("y", elemType, dims);
+        return graph.model();
+    }
+
+    /**
+     * {@code ids float[batch, length]} and {@code features float[n, 2]} with the outputs
+     * {@code pooled = ReduceSum(ids, 1, keepdims) float[batch, 1]} and {@code rows = features float[n, 2]}.
+     */
+    public static byte[] mixed() {
+        final Graph graph = new Graph("mixed");
+        graph.input("ids", FLOAT, "batch", "length");
+        graph.input("features", FLOAT, "n", 2L);
+        graph.initializer("axes", INT64, new long[]{1}, new long[]{1});
+        graph.node("ReduceSum", List.of("ids", "axes"), List.of("pooled"), "keepdims", 1L);
+        graph.node("Identity", List.of("features"), List.of("rows"));
+        graph.output("pooled", FLOAT, "batch", 1L);
+        graph.output("rows", FLOAT, "n", 2L);
+        return graph.model();
+    }
+
+    /**
+     * {@code x float[batch]} with {@code y = x}, {@code past.0 float[batch, length]} with {@code out.0 = past.0},
+     * {@code filled float[-, 2]} with {@code out.filled = filled} and {@code features float[n, 2]}, which is not used.
+     * {@code default_input} is an initializer listed as an input as well, as in models of an old IR version.
+     */
+    public static byte[] constants() {
+        final Graph graph = new Graph("constants");
+        graph.input("x", FLOAT, "batch");
+        graph.input("past.0", FLOAT, "batch", "length");
+        graph.input("filled", FLOAT, "batch", 2L);
+        graph.input("features", FLOAT, "n", 2L);
+        graph.input("default_input", FLOAT, 1L);
+        graph.initializer("default_input", FLOAT, new long[]{1}, new float[]{1});
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.node("Identity", List.of("past.0"), List.of("out.0"));
+        graph.node("Identity", List.of("filled"), List.of("out.filled"));
+        graph.output("y", FLOAT, "batch");
+        graph.output("out.0", FLOAT, "batch", "length");
+        graph.output("out.filled", FLOAT, "batch", 2L);
+        return graph.model();
+    }
+
+    /** {@code x float[batch, 2]} with the output {@code y = x}, declared without a shape: only a session infers it. */
+    public static byte[] undeclaredOutputShape() {
+        final Graph graph = new Graph("undeclared");
+        graph.input("x", FLOAT, "batch", 2L);
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.outputWithoutShape("y", FLOAT);
+        return graph.model();
+    }
+
+    /** {@code x float[batch]} with {@code y = x} and the sequence output {@code field}, named as a key of a select item. */
+    public static byte[] sequenceOutput() {
+        final Graph graph = new Graph("sequence");
+        graph.input("x", FLOAT, "batch");
+        graph.node("Identity", List.of("x"), List.of("y"));
+        graph.node("SequenceConstruct", List.of("x"), List.of("field"));
+        graph.output("y", FLOAT, "batch");
+        graph.outputSequence("field", FLOAT);
+        return graph.model();
+    }
+
     public static Path write(final Path path, final byte[] model) {
         try {
             Files.createDirectories(path.getParent());
@@ -130,6 +218,25 @@ public class OnnxTestModels {
 
         void output(final String name, final int elemType, final Object... dims) {
             outputs.add(valueInfo(name, elemType, dims));
+        }
+
+        void outputWithoutShape(final String name, final int elemType) {
+            final byte[] tensorType = message(t -> t.writeInt32(1, elemType));
+            outputs.add(message(out -> {
+                out.writeString(1, name);
+                out.writeByteArray(2, message(t -> t.writeByteArray(1, tensorType)));
+            }));
+        }
+
+        // TypeProto { sequence_type = 4 { elem_type = 1 { tensor_type = 1 { elem_type = 1 }}}}
+        void outputSequence(final String name, final int elemType) {
+            final byte[] tensorType = message(t -> t.writeInt32(1, elemType));
+            final byte[] element = message(t -> t.writeByteArray(1, tensorType));
+            final byte[] sequence = message(s -> s.writeByteArray(1, element));
+            outputs.add(message(out -> {
+                out.writeString(1, name);
+                out.writeByteArray(2, message(t -> t.writeByteArray(4, sequence)));
+            }));
         }
 
         void initializer(final String name, final int dataType, final long[] dims, final Object data) {

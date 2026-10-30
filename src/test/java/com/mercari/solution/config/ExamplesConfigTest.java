@@ -33,7 +33,6 @@ public class ExamplesConfigTest {
     private static final java.util.Set<String> LEGACY = java.util.Set.of(
             "bigquery-to-automl-to-spanner.json",
             "bigquery-to-bandit-to-bigquery.json",
-            "bigquery-to-onnx-to-vectorsearch.json",
             "bigquery-to-parquet.json",
             "bigquery-to-text.json",
             "bigquery-to-tokenize-to-bigquery.json",

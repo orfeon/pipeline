@@ -36,14 +36,8 @@ public class Rename implements SelectFunction {
             throw new IllegalArgumentException("SelectField: " + name + " requires field parameter");
         }
 
-        final String inputFieldName;
         final String field = jsonObject.get("field").getAsString();
-        if(field.contains(".")) {
-            final String[] fields = field.split("\\.", 2);
-            inputFieldName = fields[0];
-        } else {
-            inputFieldName = field;
-        }
+        final String inputFieldName = ElementSchemaUtil.getInputFieldName(field, inputFields);
         final Schema.FieldType inputFieldType = ElementSchemaUtil.getInputFieldType(inputFieldName, inputFields);
         final Schema.Field inputField = Schema.Field.of(inputFieldName, inputFieldType);
 
@@ -70,6 +64,11 @@ public class Rename implements SelectFunction {
     @Override
     public Schema.FieldType getOutputFieldType() {
         return outputFieldType;
+    }
+
+    @Override
+    public boolean acceptsTensor() {
+        return true;
     }
 
     @Override

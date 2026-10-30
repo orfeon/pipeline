@@ -1,0 +1,41 @@
+# Text embedding with an ONNX model. The directory holds the model file with its external weights (*.onnx_data)
+# and tokenizer.json. Which inputs and outputs to write depends on the model: this is embeddinggemma.
+sources:
+  - name: Documents
+    module: bigquery
+    parameters:
+      query: "SELECT DocID, Title, Text FROM `mydataset.docs`"
+      queryLocation: US
+      queryTempDataset: temp
+
+transforms:
+  - name: Embedding
+    module: onnx
+    inputs: [Documents]
+    parameters:
+      model:
+        path: gs://example-bucket/models/embeddinggemma/
+        file: onnx/model_q4.onnx
+      inputs:
+        - name: doc
+          text: "title: ${Title} | text: ${Text}"
+        - name: tok
+          func: tokenize_encode
+          tokenizer: huggingface
+          path: gs://example-bucket/models/embeddinggemma/tokenizer.json
+          field: doc
+          maxLength: 2048
+        - { name: input_ids, field: tok.ids, pad: 0 }
+        - { name: attention_mask, field: tok.attentionMask, pad: 0 }
+      outputs:
+        - { name: Embedding, func: vector_normalize, field: sentence_embedding, size: 256 }
+      bufferSize: 16
+
+sinks:
+  - name: Embeddings
+    module: bigquery
+    inputs: [Embedding]
+    parameters:
+      table: "myproject:mydataset.doc_embeddings"
+      writeDisposition: WRITE_TRUNCATE
+      createDisposition: CREATE_IF_NEEDED

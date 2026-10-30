@@ -3,10 +3,9 @@ package com.mercari.solution.util.domain.ml.onnx;
 import ai.djl.ndarray.NDArray;
 import ai.onnxruntime.*;
 import com.google.api.services.storage.Storage;
+import com.google.api.services.storage.model.StorageObject;
 import com.google.gson.JsonObject;
-import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
-import com.mercari.solution.util.schema.converter.OnnxToElementConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,12 +87,58 @@ public class OnnxModel implements Serializable {
         return new OnnxModel(config);
     }
 
-    public Schema inputSchema() {
-        final OrtSession session = getOrCreateSession(config);
+    /**
+     * The inputs and outputs of the model, without creating a session or reading the weights, unless the graph leaves out
+     * the type or the shape of a value: only a session infers those.
+     */
+    public OnnxGraphInfo readGraphInfo() {
+        final OnnxGraphInfo graph = readDeclaredGraphInfo();
+        return graph.isComplete() ? graph : OnnxGraphInfo.of(getInputInfo(), getOutputInfo());
+    }
+
+    private OnnxGraphInfo readDeclaredGraphInfo() {
+        final String path = config.path;
+        final String file = config.file;
         try {
-            return OnnxToElementConverter.convertOutputSchema(session.getInputInfo(), null);
-        } catch (OrtException e) {
-            throw new RuntimeException(e);
+            if (path.startsWith("gs://")) {
+                return readGraphInfo(StorageUtil.storage(), path, file);
+            }
+            final Path localPath = Path.of(path);
+            final Path modelFile;
+            if (Files.isDirectory(localPath)) {
+                modelFile = resolveModelFile(localPath, file);
+            } else if (Files.exists(localPath)) {
+                if (file != null) {
+                    throw new IllegalArgumentException("onnx model.file requires model.path to be a directory: " + path);
+                }
+                modelFile = localPath;
+            } else {
+                throw new IllegalArgumentException("onnx file path is illegal: " + path);
+            }
+            try (final InputStream stream = new BufferedInputStream(Files.newInputStream(modelFile))) {
+                return OnnxGraphInfo.read(stream);
+            }
+        } catch (final IOException e) {
+            throw new IllegalArgumentException("Failed to read onnx model: " + path, e);
+        }
+    }
+
+    static OnnxGraphInfo readGraphInfo(final Storage storage, final String path, final String file) throws IOException {
+        final String modelPath;
+        if (path.endsWith("/")) {
+            final String[] paths = StorageUtil.parseGcsPath(path);
+            final List<String> names = new ArrayList<>();
+            for (final StorageObject object : StorageUtil.listFiles(storage, paths[0], paths[1], null)) {
+                if (!object.getName().endsWith("/")) {
+                    names.add(object.getName().substring(paths[1].length()));
+                }
+            }
+            modelPath = path + selectModelFile(names, file);
+        } else {
+            modelPath = path;
+        }
+        try (final InputStream stream = new BufferedInputStream(StorageUtil.readStream(storage, modelPath))) {
+            return OnnxGraphInfo.read(stream);
         }
     }
 
@@ -224,24 +269,26 @@ public class OnnxModel implements Serializable {
 
     /** The model file in a directory: {@code file} relative to it, else the only {@code .onnx} file under it. */
     static Path resolveModelFile(final Path dir, final String file) throws IOException {
-        if (file != null) {
-            final Path modelFile = dir.resolve(file);
-            if (!Files.isRegularFile(modelFile)) {
-                throw new IllegalArgumentException("onnx model.file: " + file + " is not found in model.path directory");
-            }
-            return modelFile;
-        }
-        final List<Path> candidates;
+        final List<String> names;
         try (final Stream<Path> stream = Files.walk(dir)) {
-            candidates = stream
+            names = stream
                     .filter(Files::isRegularFile)
-                    .filter(p -> p.getFileName().toString().endsWith(".onnx"))
-                    .sorted()
+                    .map(p -> dir.relativize(p).toString().replace('\\', '/'))
                     .toList();
         }
+        return dir.resolve(selectModelFile(names, file));
+    }
+
+    private static String selectModelFile(final List<String> names, final String file) {
+        if (file != null) {
+            if (!names.contains(file)) {
+                throw new IllegalArgumentException("onnx model.file: " + file + " is not found in model.path directory");
+            }
+            return file;
+        }
+        final List<String> candidates = names.stream().filter(name -> name.endsWith(".onnx")).sorted().toList();
         if (candidates.size() != 1) {
-            throw new IllegalArgumentException("onnx model.path directory must contain exactly one .onnx file when model.file is not specified, but found: "
-                    + candidates.stream().map(p -> dir.relativize(p).toString().replace('\\', '/')).toList());
+            throw new IllegalArgumentException("onnx model.path directory must contain exactly one .onnx file when model.file is not specified, but found: " + candidates);
         }
         return candidates.getFirst();
     }

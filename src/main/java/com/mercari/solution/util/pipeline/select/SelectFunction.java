@@ -24,6 +24,11 @@ public interface SelectFunction extends Serializable {
     Schema.FieldType getOutputFieldType();
     boolean ignore();
 
+    // inside the onnx transform: whether a field value may be a Tensor; otherwise it is given as a record value (a list)
+    default boolean acceptsTensor() {
+        return false;
+    }
+
     enum Func implements Serializable {
         pass,
         cast,
@@ -58,6 +63,13 @@ public interface SelectFunction extends Serializable {
         matrix_solve,
         mahalanobis,
         poly_fit,
+        vector_normalize,
+        squeeze,
+        softmax,
+        sigmoid,
+        argmax,
+        topk,
+        labels,
         panic;
 
         public static Func is(String value) {
@@ -90,6 +102,8 @@ public interface SelectFunction extends Serializable {
                 continue;
             }
             selectFunctions.add(selectFunction);
+            // a later item replaces one of the same name, as its value does when they are evaluated
+            fields.removeIf(field -> field.getName().equals(selectFunction.getName()));
             fields.add(Schema.Field.of(selectFunction.getName(), selectFunction.getOutputFieldType()));
         }
         return selectFunctions;
@@ -175,6 +189,13 @@ public interface SelectFunction extends Serializable {
             case matrix_solve -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.matrix_solve, ignore);
             case mahalanobis -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.mahalanobis, ignore);
             case poly_fit -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.poly_fit, ignore);
+            case vector_normalize -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.vector_normalize, ignore);
+            case squeeze -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.squeeze, ignore);
+            case softmax -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.softmax, ignore);
+            case sigmoid -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.sigmoid, ignore);
+            case argmax -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.argmax, ignore);
+            case topk -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.topk, ignore);
+            case labels -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.labels, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };
