@@ -3171,10 +3171,11 @@ would make the columns' availability depend on the neighbourhood of each row, wh
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
-  per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding), except in two cases:
+  per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding), except in three cases:
   - Under `fit.mode: forward`, it is estimated per time block from the blocks up to that block.
-  - Under `estimator: joint`, it is estimated inside every solve: the whole input, each fold's, or each forward
-    change point's window.
+  - Under `fit.fold: {by: time, until: …}`, it is estimated from the training period, the blocks up to `until`.
+  - Under `estimator: joint`, it is estimated inside every solve: the whole input, each fold's out-of-fold
+    cells, or each forward change point's window.
 
   The `encoding.shrinkage.weights` info names the case that applies. A level whose between-key variance
   truncates to zero is fully shrunk to its parent (logged at run time).

@@ -110,14 +110,16 @@ public final class Shrinkage implements Serializable {
         this.family = family;
     }
 
-    /** Runtime instance rebuilt from a composed column's coordinates. */
     /**
      * The info a {@code weights: varianceComponents} keySet gets: the rows each λ is estimated from, which depends on
      * the estimator and the fit mode — {@code joint} estimates inside every solve (the whole input, a fold's, a forward
-     * change point's window), the per-level estimators once over the batch, or per forward block over the blocks up
-     * to it.
+     * change point's window), the per-level estimators once over the batch, over the training period of a time fold
+     * with {@code fit.fold.until}, or per forward block over the blocks up to it.
+     *
+     * @param trainingPeriod {@code fit.mode: fold} with {@code fit.fold.by: time} and {@code fit.fold.until}: the
+     *                       per-level λ comes from the blocks up to the until block, not from the whole batch
      */
-    public String lambdaScope(final FeatureSpec.FitMode mode) {
+    public String lambdaScope(final FeatureSpec.FitMode mode, final boolean trainingPeriod) {
         final String head = "weights: varianceComponents estimates lambda = sigma^2/tau^2 per level ";
         if (estimator == Estimator.joint) {
             return head + switch (mode) {
@@ -126,11 +128,16 @@ public final class Shrinkage implements Serializable {
                 default -> "inside the joint solve, from the whole input";
             };
         }
-        return head + (mode == FeatureSpec.FitMode.forward
-                ? "per time block, from the blocks up to it (cumulative: fit.window does not bound it; method of moments)"
-                : "from the whole batch (method of moments); the estimate is not time-expanding (structural, section 6.3)");
+        if (mode == FeatureSpec.FitMode.forward) {
+            return head + "per time block, from the blocks up to it (cumulative: fit.window does not bound it; method of moments)";
+        }
+        if (mode == FeatureSpec.FitMode.fold && trainingPeriod) {
+            return head + "from the training period, the blocks up to fit.fold.until (method of moments; the later rows shrink with the same lambda), not from the whole batch";
+        }
+        return head + "from the whole batch (method of moments); the estimate is not time-expanding (structural, section 6.3)";
     }
 
+    /** Runtime instance rebuilt from a composed column's coordinates. */
     public static Shrinkage of(final Scale scale, final double priorWeight, final boolean leaveNodeOut) {
         return of(scale, priorWeight, leaveNodeOut, null);
     }

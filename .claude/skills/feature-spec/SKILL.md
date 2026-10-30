@@ -235,10 +235,11 @@ sequence ops never see the current row.
   `fit.mode: forward` (leak-free, `blocks: {size: P90D}` default) / `static` / `fold` for that block — a
   modeling change, see the model note in step 0.
 - `weights: varianceComponents` estimates the pseudo-counts from the whole batch (a hyper-parameter,
-  not time-expanding), except in two cases. Under `fit.mode: forward` they are estimated per block, from the
-  blocks up to it. Under `estimator: joint` they are estimated inside every solve, over a forward change
-  point's window. The validator's info names the case that applies. `fixed` + `priorWeight` is the fully
-  expanding alternative.
+  not time-expanding), except in three cases. Under `fit.mode: forward` they are estimated per block, from the
+  blocks up to it. Under `fit.fold: {by: time, until: …}` they are estimated from the training period, the
+  blocks up to `until`. Under `estimator: joint` they are estimated inside every solve: over the whole input,
+  each fold's out-of-fold cells, or a forward change point's window. The validator's info names the case that
+  applies. `fixed` + `priorWeight` is the fully expanding alternative.
 - `fit.mode: fold` with keys derived from past outcomes requires `fit.groupBy: <entity>`.
 - **A static fit whose output keys another block deepens the DAG.** A `discretize` (or any static
   block) must finish before the keyed stage that reads its column, so "fit wave → encoding keyed on the

@@ -5339,7 +5339,9 @@ public final class FeaturePlanCompiler {
                 continue;
             }
             final Shrinkage shrinkage = Shrinkage.parse(defShrinkage, defSmoothing, parseJsonObject(ks.shrinkageJson), diagnostics, loc);
-            if ("varianceComponents".equals(shrinkage.weights)) diagnostics.info("encoding.shrinkage.weights", loc, shrinkage.lambdaScope(mode));
+            if ("varianceComponents".equals(shrinkage.weights)) {
+                diagnostics.info("encoding.shrinkage.weights", loc, shrinkage.lambdaScope(mode, fitSpec.isTimeFold() && fitSpec.untilMillis != null));
+            }
             final List<List<String>> levels = new ArrayList<>();
             levels.add(ks.keys);
             int additiveAt = -1;
