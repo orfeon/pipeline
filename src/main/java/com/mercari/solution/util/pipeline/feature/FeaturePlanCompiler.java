@@ -5108,6 +5108,27 @@ public final class FeaturePlanCompiler {
                     cols.add(c);
                 }
             }
+            if (out.variance) {
+                final String kind = cols.isEmpty() ? null : cols.get(0).coordinates.get("kind");
+                if (List.of("pair", "between", "sum").contains(kind)) {
+                    // the readout's approximate posterior variance, next to it: the same coordinates and variance=true
+                    final OutputColumn base = cols.get(0);
+                    final OutputColumn c = newColumn(def.name, Scope.population, "fm", base.canonicalName + "_var", Schema.FieldType.FLOAT64, computeAt);
+                    c.coordinates.putAll(base.coordinates);
+                    c.coordinates.put("variance", "true");
+                    cols.add(c);
+                    if (hintedBlocks.add(def.name + "#fmVariance")) {
+                        diagnostics.info("factorization.outputs.variance", loc, "variance reads the approximate posterior variance of the readout:"
+                                + " every value's factors as independent isotropic Gaussians around their fit, variance = dispersion / (H + lambda) per"
+                                + " coordinate (H the curvature of the loss along it at the last epoch, lambda its ridge; dispersion "
+                                + (loss == Factorization.Loss.squared ? "the mean squared training residual" : "1, the curvature being the information")
+                                + "), carried through the inner products to first and second order. It leaves out the correlations between parameters"
+                                + " and the uncertainty of the ridge itself: read it as a ranking of how firmly a readout is supported, not as a calibrated interval");
+                    }
+                } else if (kind != null) {
+                    diagnostics.warning("factorization.outputs", loc, "variance applies to pair / between / sum outputs and is ignored for " + kind);
+                }
+            }
             for (final OutputColumn c : cols) {
                 c.fitted = true;
                 c.coordinates.put("fit", mode.token());

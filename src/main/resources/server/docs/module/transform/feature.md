@@ -1089,6 +1089,7 @@ is a fold:
       - {pair: [seller_id, start_price], as: seller_price, perUnit: true}   # a numeric pair per unit: the seller's price slope
       - {between: {left: [seller_id, category], right: [condition_grade]}, as: seller_side_grade}   # Σ of the cross-side pairs
       - {count: seller_id, as: seller_rows}                    # training rows with the row's seller (int64)
+      - {between: {left: [seller_id], right: [category]}, as: seller_cat, variance: true}   # + seller_cat_var (below)
       - {sum: true, as: fm_linear}                             # w0 + Σ w + Σ pairs (without the offset)
       - {fitBlock: true, as: fm_fit_block}                     # forward: the change point of the model the row reads (int64)
       - {trainRows: true, as: fm_train_rows}                   # the training rows of that model (int64)
@@ -1218,6 +1219,45 @@ name is `<name>_between`, so give a second one an `as`). Put an entity and its a
 on one side — `left: [seller_id, category]` — and a value the fit never saw drops out while the attributes still
 speak for it: the affinity of a new seller is read through its category instead of being null as its `pair` is. Null
 only when no cross-side pair is known. Use `count` next to it to tell how much of a side was known.
+
+**Variance (`variance: true` on `pair` / `between` / `sum`).** Adds a `<name>_var` column holding the approximate
+posterior variance of the readout. Use it to tell a firmly supported readout from a thin one, for example a `between`
+read mostly through the attributes of a new entity.
+
+How it is computed:
+- Every value's factors are read as independent Gaussians around their fitted values. The variance per coordinate is
+  `dispersion / (H + λ)`, the same in every coordinate:
+  - `H` is the curvature of the loss along the coordinate at the last epoch, averaged over the `k` coordinates.
+  - `λ` is the ridge.
+  - The dispersion is the residual sum of squares over the residual degrees of freedom under `squared` loss. Those
+    degrees of freedom are the rows less the effective parameters `Σ H / (H + λ)`, floored at a tenth of the rows. Under
+    `logistic` and `plackettLuce` / `softmax` the dispersion is 1, because the curvature is already the information.
+- The variance reaches the readout through its inner products, to first order (the delta method) and to second order.
+  A pair of two values with variances `s_f`, `s_g` reads `r² u_f² u_g² (s_f ‖v_g‖² + s_g ‖v_f‖² + k s_f s_g)`. The
+  second-order term keeps a pair of two thinly supported values, both shrunk towards 0, from reading as certain.
+- `between` adds up the pairs whose values are both known, with each factor vector's gradient summed over its pairs
+  before squaring. `sum` adds the weights' `u² s_w` and every pair. The bias `w0` is left out.
+- The variance does not change under a rotation of the latent space, so the alignment of refits does not move it.
+- It is null where the readout is null.
+
+What it leaves out:
+- the correlations between parameters, including the uncertainty of the other values' factors, which a value's own
+  variance is conditional on;
+- the uncertainty of the ridge.
+
+Read it as a ranking of support, not as a calibrated interval. On a synthetic FM drawn from its own prior and fitted at
+the matching ridge, the measurements were:
+- `(estimate − truth) / sd` had a standard deviation of 0.9–2.1 across sparse and dense designs.
+- The rank correlation with the squared error was 0.2–0.4. A per-value k × k block and a propagation of the other
+  values' uncertainty did not rank better.
+
+Cost and storage:
+- The fit keeps two precisions per value, so the model and its artifact grow by 2 numbers per value (`precision` in
+  the Avro records; `dispersion` in the manifest and the `__global` record).
+- Keeping them costs no extra pass.
+- An artifact written without them reads null variances.
+- Info `factorization.outputs.variance`. On `embedding`, `count`, `fitBlock` or `trainRows`, `variance` is ignored
+  with a warning (`factorization.outputs`).
 
 **Numeric fields** — `{field: <name>, numeric: true, scale: zscore | none}` (a numeric type; an integer field is
 categorical unless declared so). A numeric field has **one** parameter set `(w, v)` instead of one per value, multiplied

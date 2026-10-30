@@ -149,7 +149,16 @@ reads what the compile layer wrote into each column's `coordinates`.
   coordinates `sqrt(|λ|) · v` by decreasing |λ|, vocabulary capped by co-occurrence mass; `<block>.spectral.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`; `Fits` = whole-input + fold / forward models, `Model.count` the per-value training rows, `Model.rows` the fit's training rows — stored as the `__global`
   record's `n`, 0 = unknown for an older artifact, read out as `trainRows` (null when 0) — and `Model.changePoint` the forward change
-  point, set in `forward()` after `alignTo` and read out as `fitBlock`;
+  point, set in `forward()` after `alignTo` and read out as `fitBlock`. Variance readouts (`variance: true` → `<name>_var`, coordinate
+  `variance`, in `FM_FIT_ONLY`) are switched on by `Options.variance` (from `FmSpec.variance()`). With it, `train` records the
+  precision `H + λ` of every value's weight and factors from the last epoch's steps (`Objective.curvature`; the factors'
+  averaged over k, so they do not change under rotation). It appends them to the parameter array as `[.., n, π_w, π_v]`
+  (length k + 4) and sets `Model.dispersion`: under squared loss SSE over (n − Σ H / (H + λ)), floored at n / 10, and 1
+  for a likelihood loss. `pairVariance` / `betweenVariance` / `sumVariance` carry those through the inner products to first and
+  second order. The precisions ride in the `precision` field of the Avro records (`__global`: the dispersion) and the
+  dispersion in `ModelCoder`. Measured on synthetic FMs, the variances rank the squared errors (Spearman 0.2–0.4) but are not
+  calibrated (z sd 0.9–2.1). A per-value k × k block and a propagation of the partners' uncertainty ranked no better, so
+  do not add them without a measurement that does;
   forward models are NOT a side input: `serveForward` joins each change point's models with the rows keyed by the change point
   they read, `FitApplyDoFn` skips the block (`blockServed`); a windowed input or a non-default trigger falls back to the
   side input. The forward blocks of a stage fit in ONE step, a `GroupByKey` on (set, slot) — each block its own gather of

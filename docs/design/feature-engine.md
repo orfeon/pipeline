@@ -686,7 +686,9 @@ ALS, `pair` / `embedding` / `count` / `sum` outputs, r-matrix lineage; `static` 
 refits) / `fold` (one fit per fold, in parallel), refits aligned by Procrustes; `task.loss` squared / logistic /
 plackettLuce (contest = context group × event time, Breslow ties, the last place no choice, top-k) by coordinate Newton — exact ALS under
 squared; numeric fields: one parameter set scaled by the per-fit standardised value, `perUnit` pair slopes; `between`
-side affinities that read through an unseen value's attributes), `type: discretize` (`method: quantile`),
+side affinities that read through an unseen value's attributes; `variance: true` on pair / between / sum: the
+diagonal isotropic posterior variance `dispersion / (H + λ)` carried through the inner products, a ranking of support
+rather than a calibrated interval), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 `type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
 `type: copula` (Gaussian or t copula: expanded quantile-transform marginals, the shrunk correlation of their normal scores),

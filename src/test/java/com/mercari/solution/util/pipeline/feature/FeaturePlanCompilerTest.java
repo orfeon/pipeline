@@ -2568,6 +2568,37 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * {@code variance: true} on pair / between / sum adds a {@code <name>_var} column with the readout's coordinates and
+     * {@code variance=true} (a fit-only coordinate: it splits no example set); elsewhere it is warned as ignored.
+     */
+    @Test
+    public void testFactorizationVariance() {
+        final String variance = FM_BLOCK.replace("      - {sum: true, as: fm_linear}", "      - {sum: true, as: fm_linear, variance: true}\n"
+                + "          - {between: {left: [seller_id, category], right: [condition_grade]}, as: fm_side, variance: true}\n"
+                + "          - {count: seller_id, as: fm_rows, variance: true}");
+        Assertions.assertTrue(variance.contains("variance: true"), variance);
+        final FeaturePlan plan = compile(SOURCES, withEncoding(variance));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn sum = column(plan, "fm_linear_var");
+        Assertions.assertEquals("sum", sum.getCoordinates().get("kind"));
+        Assertions.assertEquals("true", sum.getCoordinates().get("variance"));
+        Assertions.assertEquals(Schema.Type.float64, sum.getFieldType().getType());
+        final OutputColumn side = column(plan, "fm_side_var");
+        Assertions.assertEquals("between", side.getCoordinates().get("kind"));
+        Assertions.assertEquals(column(plan, "fm_side").getCoordinates().get("left"), side.getCoordinates().get("left"));
+        Assertions.assertNull(column(plan, "fm_side").getCoordinates().get("variance"));
+        Assertions.assertNull(plan.getColumn("fm_rows_var"));
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> "factorization.outputs".equals(m.code()) && m.message().contains("ignored for count")), plan::describe);
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> "factorization.outputs.variance".equals(m.code())).count(), plan::describe);
+        // the fit keeps the precisions; the variance coordinate is the readout's, not the examples'
+        final FeatureStages.FmSpec spec = FeatureStages.fmSpecs(List.of(sum)).get(0);
+        Assertions.assertTrue(spec.options().variance());
+        Assertions.assertFalse(FeatureStages.fmSpecs(List.of(column(plan, "fm_linear"))).get(0).options().variance());
+        Assertions.assertTrue(FeatureStages.FM_FIT_ONLY.contains("variance"));
+    }
+
+    /**
      * factorization als.tol: a coordinate when declared, a range check, and under forward the warm start's epoch cap
      * defaults to the whole epochs (a warm start only shortens a fit that stops at convergence).
      */

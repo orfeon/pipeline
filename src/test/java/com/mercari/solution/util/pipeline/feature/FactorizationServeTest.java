@@ -53,6 +53,7 @@ public class FactorizationServeTest {
         Assertions.assertArrayEquals(expected.scale, actual.scale, 0d);
         Assertions.assertEquals(expected.rows, actual.rows);
         Assertions.assertEquals(expected.changePoint, actual.changePoint);
+        Assertions.assertEquals(expected.dispersion, actual.dispersion, 0d);
         // the report as the manifest has it: everything but the wall time of the fit
         Assertions.assertEquals(expected.report == null ? null : expected.report.toJson(), actual.report == null ? null : actual.report.toJson());
         for (int f = 0; f < expected.fields.size(); f++) {
@@ -87,6 +88,13 @@ public class FactorizationServeTest {
         final List<Factorization.Example> examples = examples(400, 3);
         final Factorization.Model model = Factorization.fit(OPTIONS, examples);
         assertSameModel(model, roundTrip(FactorizationCoders.ModelCoder.of(), model));
+        // the precisions behind the variance readouts ride with the parameters, the dispersion beside them
+        final Factorization.Options variance = new Factorization.Options(OPTIONS.fields(), OPTIONS.fieldWeighted(), OPTIONS.latentDim(), OPTIONS.epochs(),
+                OPTIONS.reg(), OPTIONS.seed(), OPTIONS.loss(), OPTIONS.top(), OPTIONS.descending(), OPTIONS.linear(), OPTIONS.scales(), OPTIONS.tol(),
+                OPTIONS.label(), true);
+        final Factorization.Model withVariance = Factorization.fit(variance, examples);
+        Assertions.assertFalse(Double.isNaN(withVariance.dispersion));
+        assertSameModel(withVariance, roundTrip(FactorizationCoders.ModelCoder.of(), withVariance));
 
         final Factorization.Fits forward = Factorization.fitAll(OPTIONS, examples,
                 new Factorization.Plan(0, true, 1, 0, Alignment.PROCRUSTES, true, 4));
