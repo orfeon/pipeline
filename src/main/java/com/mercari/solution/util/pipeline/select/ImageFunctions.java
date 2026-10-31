@@ -117,7 +117,7 @@ public class ImageFunctions implements SelectFunction {
         }
 
         final Map<String, Schema.Field> parents = new LinkedHashMap<>();
-        putParent(parents, field, inputFields);
+        ArrayFunctions.putParent(parents, field, inputFields);
 
         final Options options = parseOptions(name, jsonObject, op, type, inputFields, parents);
         return new ImageFunctions(name, op, field, options, new ArrayList<>(parents.values()), outputType(op, type), ignore);
@@ -139,12 +139,13 @@ public class ImageFunctions implements SelectFunction {
         final Integer height = positive(name, op, json, "height");
         final Integer longSide = positive(name, op, json, "longSide");
         final Integer shortSide = positive(name, op, json, "shortSide");
-        final ImageTensors.Interpolation interpolation = json.has("interpolation")
-                ? ImageTensors.Interpolation.valueOf(json.get("interpolation").getAsString()) : ImageTensors.Interpolation.auto;
+        final ImageTensors.Interpolation interpolation = parseInterpolation(name, op, json);
         final Integer multiple = positive(name, op, json, "multiple");
         final float value = json.has("value") ? json.get("value").getAsFloat() : op == Op.image_crop ? 255f : 0f;
-        final Integer minWidth = positive(name, op, json, "minWidth");
-        final Integer maxWidth = positive(name, op, json, "maxWidth");
+        final Integer minWidthParameter = positive(name, op, json, "minWidth");
+        final Integer maxWidthParameter = positive(name, op, json, "maxWidth");
+        final int minWidth = minWidthParameter == null ? 8 : minWidthParameter;
+        final int maxWidth = maxWidthParameter == null ? 4096 : maxWidthParameter;
         final double padX = json.has("padX") ? json.get("padX").getAsDouble() : 0d;
         final double padY = json.has("padY") ? json.get("padY").getAsDouble() : 0d;
         final boolean invertDark = json.has("invertDark") && json.get("invertDark").getAsBoolean();
@@ -183,6 +184,9 @@ public class ImageFunctions implements SelectFunction {
                 if(height == null) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: image_crop requires height");
                 }
+                if(minWidth > maxWidth) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: image_crop minWidth: " + minWidth + " must not be over maxWidth: " + maxWidth);
+                }
                 if(!json.has("boxes")) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: image_crop requires boxes parameter");
                 }
@@ -199,24 +203,54 @@ public class ImageFunctions implements SelectFunction {
                 if(invertDark && type.getShape().size() != 2) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: image_crop invertDark requires a gray image of [H, W], but got: " + type);
                 }
-                putParent(parents, boxes, inputFields);
+                ArrayFunctions.putParent(parents, boxes, inputFields);
             }
+            case image_tensor -> validateChannels(name, type, mean, std);
             case text_line_boxes -> {
                 if(!json.has("imageField") || longSide == null) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes requires imageField and longSide, the image before it was resized and the long side it was resized to");
                 }
                 imageField = json.get("imageField").getAsString();
                 requireMatrix(name, op, imageField, ElementSchemaUtil.getInputFieldType(imageField, inputFields), 2, 3);
-                putParent(parents, imageField, inputFields);
+                ArrayFunctions.putParent(parents, imageField, inputFields);
             }
             default -> {}
         }
         return new Options(maxPixels, width, height, longSide, shortSide, interpolation,
                 multiple == null ? 1 : multiple, value, boxes, padX, padY,
-                minWidth == null ? 8 : minWidth, maxWidth == null ? 4096 : maxWidth, invertDark,
+                minWidth, maxWidth, invertDark,
                 scale, invert, mean, std, channelFirst, threshold, connectivity,
                 minArea == null ? (op == Op.text_line_boxes ? 2 : 1) : minArea,
                 stride == null ? 2 : stride, xShrink, imageField);
+    }
+
+    private static ImageTensors.Interpolation parseInterpolation(final String name, final Op op, final JsonObject json) {
+        if(!json.has("interpolation")) {
+            return ImageTensors.Interpolation.auto;
+        }
+        final String interpolation = json.get("interpolation").getAsString();
+        try {
+            return ImageTensors.Interpolation.valueOf(interpolation);
+        } catch (final IllegalArgumentException e) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " interpolation must be one of " + Arrays.toString(ImageTensors.Interpolation.values()) + ": " + interpolation);
+        }
+    }
+
+    // here as far as the channels are known, rather than on every record. Those of a decoded image are only known then
+    private static void validateChannels(final String name, final Schema.FieldType type, final float[] mean, final float[] std) {
+        final int channels = type.getShape().size() == 2 ? 1 : type.getShape().get(2);
+        for(final float[] values : new float[][]{mean, std}) {
+            if(values != null && values.length != 1 && channels > 0 && values.length != channels) {
+                throw new IllegalArgumentException("SelectField: " + name + " func: image_tensor mean and std must have one value or one per channel, but got " + values.length + " for: " + type);
+            }
+        }
+        if(std != null) {
+            for(final float value : std) {
+                if(value == 0f) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: image_tensor std must not be zero");
+                }
+            }
+        }
     }
 
     private static boolean parseLayout(final String name, final String layout) {
@@ -261,11 +295,10 @@ public class ImageFunctions implements SelectFunction {
         if(type.getType() != Schema.Type.matrix || Arrays.stream(ranks).noneMatch(rank -> rank == type.getShape().size())) {
             throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " field: " + field + " must be a matrix of rank " + Arrays.toString(ranks) + ", but got: " + type);
         }
-    }
-
-    private static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
-        final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
-        parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
+        // a boolean mask of a model would otherwise fail every record
+        if(!Vectors.isNumeric(type.getMatrixValueType())) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " field: " + field + " must be a matrix of numbers, but got values of type: " + type.getMatrixValueType().getType());
+        }
     }
 
     private static Schema.FieldType outputType(final Op op, final Schema.FieldType type) {
@@ -442,11 +475,7 @@ public class ImageFunctions implements SelectFunction {
 
     private byte[] bytes(final Object value) {
         return switch (value) {
-            case ByteBuffer buffer -> {
-                final byte[] bytes = new byte[buffer.remaining()];
-                buffer.duplicate().get(bytes);
-                yield bytes;
-            }
+            case ByteBuffer buffer -> ElementSchemaUtil.toBytes(buffer);
             case byte[] bytes -> bytes;
             default -> throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " field: " + field + " must be bytes, but got: " + value.getClass());
         };

@@ -22,6 +22,7 @@ public class CtcDecodeTest {
     private static final List<Schema.Field> FIELDS = List.of(
             Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64)),
             Schema.Field.of("conf", Schema.FieldType.array(Schema.FieldType.FLOAT32)),
+            Schema.Field.of("names", Schema.FieldType.array(Schema.FieldType.STRING)),
             Schema.Field.of("length", Schema.FieldType.INT64),
             Schema.Field.of("name", Schema.FieldType.STRING));
 
@@ -115,16 +116,24 @@ public class CtcDecodeTest {
         final Path meta = dir.resolve("meta.json");
         // a vocabulary as a string in a file of many things, as meta.json of indra-ocr has them
         Files.writeString(meta, "{ \"det_long_side\": 1024, \"vocab\": \"{\\\"blank\\\": 0, \\\"chars\\\": [\\\"a\\\", \\\"b\\\"]}\", \"other\": { \"chars\": [\"c\"], \"blank\": 1 } }", StandardCharsets.UTF_8);
-        final String path = meta.toString().replace('\\', '/');
+        final String path = meta.toUri().toString();
         Assertions.assertEquals("ab", apply(decode("{ field: ids, path: \"%s\", key: vocab }".formatted(path)), values(List.of(1L, 2L), null, null)).get("text"));
         Assertions.assertEquals("c", apply(decode("{ field: ids, path: \"%s\", key: other }".formatted(path)), values(List.of(0L, 1L), null, null)).get("text"), "the blank of the file");
 
         final Path tokens = dir.resolve("tokens.json");
         Files.writeString(tokens, "[\"x\", \"y\"]", StandardCharsets.UTF_8);
-        Assertions.assertEquals("y", apply(decode("{ field: ids, path: \"%s\" }".formatted(tokens.toString().replace('\\', '/'))), values(List.of(2L), null, null)).get("text"));
+        final JsonObject tokensConfig = JsonParser.parseString("{ field: ids, path: \"%s\" }".formatted(tokens.toUri())).getAsJsonObject();
+        final CtcDecode function = CtcDecode.of("read", tokensConfig, FIELDS, false);
+        Assertions.assertEquals("y", apply(function, values(List.of(2L), null, null)).get("text"));
 
         final Exception missing = Assertions.assertThrows(IllegalArgumentException.class, () -> decode("{ field: ids, path: \"%s\", key: nothing }".formatted(path)));
         Assertions.assertTrue(missing.getMessage().contains("nothing"), missing.getMessage());
+
+        // the file is read when the function is built, and not again on a worker
+        Files.delete(tokens);
+        function.setup();
+        Assertions.assertEquals("y", apply(function, values(List.of(2L), null, null)).get("text"));
+        Assertions.assertThrows(RuntimeException.class, () -> CtcDecode.of("read", tokensConfig, FIELDS, false));
     }
 
     @Test
@@ -136,16 +145,18 @@ public class CtcDecodeTest {
 
     @Test
     public void testConfigErrors() {
-        for(final Map.Entry<String, String> error : Map.of(
-                "{ tokens: [a] }", "requires field",
-                "{ field: ids }", "either path or tokens",
-                "{ field: ids, tokens: [a], path: x }", "either path or tokens",
-                "{ field: name, tokens: [a] }", "must be an array",
-                "{ field: ids, confField: name, tokens: [a] }", "must be an array",
-                "{ field: ids, lengthField: name, tokens: [a] }", "must be a number",
-                "{ field: ids, tokens: [a], minConf: 0.5 }", "requires confField",
-                "{ field: ids, tokens: [a], normalize: nfc }", "normalize must be one of",
-                "{ field: ids, tokens: [] }", "tokens must be an array").entrySet()) {
+        for(final Map.Entry<String, String> error : Map.ofEntries(
+                Map.entry("{ tokens: [a] }", "requires field"),
+                Map.entry("{ field: ids }", "either path or tokens"),
+                Map.entry("{ field: ids, tokens: [a], path: x }", "either path or tokens"),
+                Map.entry("{ field: name, tokens: [a] }", "must be an array"),
+                Map.entry("{ field: names, tokens: [a] }", "must be an array of numbers"),
+                Map.entry("{ field: ids, confField: name, tokens: [a] }", "must be an array"),
+                Map.entry("{ field: ids, lengthField: name, tokens: [a] }", "must be a number"),
+                Map.entry("{ field: ids, tokens: [a], minConf: 0.5 }", "requires confField"),
+                Map.entry("{ field: ids, tokens: [a], normalize: nfc }", "normalize must be one of"),
+                Map.entry("{ field: ids, tokens: [a], blank: -1 }", "blank must not be negative"),
+                Map.entry("{ field: ids, tokens: [] }", "tokens must be an array")).entrySet()) {
             final Exception e = Assertions.assertThrows(IllegalArgumentException.class, () -> decode(error.getKey()), error.getKey());
             Assertions.assertTrue(e.getMessage().contains(error.getValue()), e.getMessage());
         }

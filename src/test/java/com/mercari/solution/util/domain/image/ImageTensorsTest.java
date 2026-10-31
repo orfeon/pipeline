@@ -79,6 +79,35 @@ public class ImageTensorsTest {
     }
 
     @Test
+    public void testOtherTypesKeepTheirType() {
+        // floats of 64 bits are floats: not rounded to integers, as the output of a model can have values below 1
+        final Tensor real = Tensor.of(new double[]{0.25d, 0.75d, 0.5d, 0.5d}, new long[]{2, 2});
+        final Tensor resized = ImageTensors.resize(real, 1, 1, ImageTensors.Interpolation.area);
+        Assertions.assertEquals(Tensor.Type.DOUBLE, resized.type());
+        Assertions.assertEquals(0.5d, (double) resized.get(0), 1e-6);
+        final Tensor padded = ImageTensors.pad(real, 2, 3, 1, 0.5f);
+        Assertions.assertEquals(Tensor.Type.DOUBLE, padded.type());
+        Assertions.assertEquals(List.of(0.25d, 0.75d, 0.5d, 0.5d, 0.5d, 0.5d), values(padded));
+        final Tensor gray = ImageTensors.gray(Tensor.of(new double[]{0.5d, 0.5d, 0.5d}, new long[]{1, 1, 3}));
+        Assertions.assertEquals(Tensor.Type.DOUBLE, gray.type());
+        Assertions.assertEquals(0.5d, (double) gray.get(0), 1e-6);
+
+        // integers are of a pixel, in their own type: a record field of int64 holds a long
+        final Tensor longs = ImageTensors.resize(Tensor.of(new long[]{0L, 100L}, new long[]{1, 2}), 1, 1, ImageTensors.Interpolation.area);
+        Assertions.assertEquals(Tensor.Type.INT64, longs.type());
+        Assertions.assertEquals(List.of(50L), values(longs));
+        final Tensor ints = ImageTensors.gray(Tensor.of(new int[]{255, 0, 0}, new long[]{1, 1, 3}));
+        Assertions.assertEquals(Tensor.Type.INT32, ints.type());
+        Assertions.assertEquals(List.of(76), values(ints));
+    }
+
+    @Test
+    public void testGrayOfARowOfABatch() {
+        final Tensor batch = Tensor.of(new short[]{9, 9, 9, 255, 0, 0}, new long[]{2, 1, 1, 3});
+        Assertions.assertEquals(List.of(76), values(ImageTensors.gray(batch.row(1))));
+    }
+
+    @Test
     public void testFittedSize() {
         Assertions.assertArrayEquals(new int[]{512, 1024}, ImageTensors.fittedSize(1000, 2000, 1024, null));
         Assertions.assertArrayEquals(new int[]{1024, 2048}, ImageTensors.fittedSize(1000, 2000, null, 1024));
@@ -153,6 +182,11 @@ public class ImageTensorsTest {
         final Tensor decoded = ImageTensors.decode(ImageTensors.encode(fill(40, 60, 9)), 100);
         // 2400 pixels for at most 100: a step of 5
         Assertions.assertArrayEquals(new long[]{8, 12, 1}, decoded.shape());
+
+        // a step of 10 from the square root would leave 100 of them: the single row stays whatever the step
+        final Tensor thin = ImageTensors.decode(ImageTensors.encode(fill(1, 1000, 9)), 10);
+        Assertions.assertArrayEquals(new long[]{1, 10, 1}, thin.shape());
+        Assertions.assertArrayEquals(new long[]{1, 1, 1}, ImageTensors.decode(ImageTensors.encode(fill(1, 1000, 9)), 1).shape());
     }
 
     @Test

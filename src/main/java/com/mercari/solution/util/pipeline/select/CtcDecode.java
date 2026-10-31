@@ -5,15 +5,11 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.math.Tensor;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.joda.time.Instant;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.text.Normalizer;
 import java.util.*;
 
@@ -22,7 +18,8 @@ import java.util.*;
  * are turned to text with a vocabulary. {@code conf} is the mean probability of the classes left.
  *
  * <p>The vocabulary is {@code tokens} or a JSON file in {@code path}: an array of tokens, or {@code {"blank": 0, "chars": [...]}},
- * under {@code key} if given, where a string is parsed as JSON in turn. The tokens do not include the blank.
+ * under {@code key} if given, where a string is parsed as JSON in turn. The tokens do not include the blank. The file is read
+ * when the pipeline is built: a wrong path or key is a configuration error, rather than a failure of every worker.
  *
  * <pre>{@code
  * { "name": "read", "func": "ctc_decode", "field": "ids", "confField": "conf", "lengthField": "lengths",
@@ -35,10 +32,8 @@ public class CtcDecode implements SelectFunction {
     private final String field;
     private final String confField;
     private final String lengthField;
-    private final String path;
-    private final String key;
-    private final List<String> configTokens;
-    private final Integer configBlank;
+    private final List<String> tokens;
+    private final int blank;
     private final Normalizer.Form normalize;
     private final double minConf;
 
@@ -46,18 +41,14 @@ public class CtcDecode implements SelectFunction {
     private final Schema.FieldType outputFieldType;
     private final boolean ignore;
 
-    private transient List<String> tokens;
-    private transient int blank;
+    private record Vocabulary(List<String> tokens, int blank) {}
 
     private CtcDecode(
             final String name,
             final String field,
             final String confField,
             final String lengthField,
-            final String path,
-            final String key,
-            final List<String> configTokens,
-            final Integer configBlank,
+            final Vocabulary vocabulary,
             final Normalizer.Form normalize,
             final double minConf,
             final List<Schema.Field> inputFields,
@@ -68,10 +59,8 @@ public class CtcDecode implements SelectFunction {
         this.field = field;
         this.confField = confField;
         this.lengthField = lengthField;
-        this.path = path;
-        this.key = key;
-        this.configTokens = configTokens;
-        this.configBlank = configBlank;
+        this.tokens = vocabulary.tokens;
+        this.blank = vocabulary.blank;
         this.normalize = normalize;
         this.minConf = minConf;
         this.inputFields = inputFields;
@@ -89,12 +78,12 @@ public class CtcDecode implements SelectFunction {
         final String field = jsonObject.get("field").getAsString();
         requireArray(name, field, inputFields);
         final Map<String, Schema.Field> parents = new LinkedHashMap<>();
-        putParent(parents, field, inputFields);
+        ArrayFunctions.putParent(parents, field, inputFields);
 
         final String confField = jsonObject.has("confField") ? jsonObject.get("confField").getAsString() : null;
         if(confField != null) {
             requireArray(name, confField, inputFields);
-            putParent(parents, confField, inputFields);
+            ArrayFunctions.putParent(parents, confField, inputFields);
         }
         final String lengthField = jsonObject.has("lengthField") ? jsonObject.get("lengthField").getAsString() : null;
         if(lengthField != null) {
@@ -102,7 +91,7 @@ public class CtcDecode implements SelectFunction {
             if(!Vectors.isNumeric(type)) {
                 throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode lengthField: " + lengthField + " must be a number, but got: " + type);
             }
-            putParent(parents, lengthField, inputFields);
+            ArrayFunctions.putParent(parents, lengthField, inputFields);
         }
         final double minConf = jsonObject.has("minConf") ? jsonObject.get("minConf").getAsDouble() : 0d;
         if(minConf > 0 && confField == null) {
@@ -114,30 +103,32 @@ public class CtcDecode implements SelectFunction {
         } catch (final IllegalArgumentException e) {
             throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode normalize must be one of " + Arrays.toString(Normalizer.Form.values()) + ": " + jsonObject.get("normalize"));
         }
-        final List<String> tokens = jsonObject.has("tokens") ? tokens(name, jsonObject.get("tokens")) : null;
         final Integer blank = jsonObject.has("blank") ? Integer.valueOf(jsonObject.get("blank").getAsInt()) : null;
-        if(blank != null && blank < 0) {
-            throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode blank must not be negative: " + blank);
+        final Vocabulary vocabulary = jsonObject.has("tokens")
+                ? new Vocabulary(tokens(name, jsonObject.get("tokens")), blank == null ? 0 : blank)
+                : readVocabulary(name, jsonObject.get("path").getAsString(), jsonObject.has("key") ? jsonObject.get("key").getAsString() : null, blank);
+        if(vocabulary.blank < 0) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode blank must not be negative: " + vocabulary.blank);
         }
         final Schema.FieldType outputType = Schema.FieldType.element(List.of(
                 Schema.Field.of("text", Schema.FieldType.STRING),
                 Schema.Field.of("conf", Schema.FieldType.FLOAT32)));
-        return new CtcDecode(name, field, confField, lengthField,
-                jsonObject.has("path") ? jsonObject.get("path").getAsString() : null,
-                jsonObject.has("key") ? jsonObject.get("key").getAsString() : null,
-                tokens, blank, normalize, minConf, new ArrayList<>(parents.values()), outputType, ignore);
+        return new CtcDecode(name, field, confField, lengthField, vocabulary, normalize, minConf, new ArrayList<>(parents.values()), outputType, ignore);
     }
 
     private static void requireArray(final String name, final String field, final List<Schema.Field> inputFields) {
         final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        if(type.getType() != Schema.Type.array && type.getType() != Schema.Type.matrix) {
+        final Schema.FieldType valueType = switch (type.getType()) {
+            case array -> type.getArrayValueType();
+            case matrix -> type.getMatrixValueType();
+            default -> null;
+        };
+        if(valueType == null) {
             throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode field: " + field + " must be an array, but got: " + type);
         }
-    }
-
-    private static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
-        final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
-        parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
+        if(!Vectors.isNumeric(valueType)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode field: " + field + " must be an array of numbers, but got: " + type);
+        }
     }
 
     private static List<String> tokens(final String name, final JsonElement element) {
@@ -179,12 +170,12 @@ public class CtcDecode implements SelectFunction {
 
     @Override
     public void setup() {
-        this.blank = configBlank == null ? 0 : configBlank;
-        if(configTokens != null) {
-            this.tokens = configTokens;
-            return;
-        }
-        JsonElement element = JsonParser.parseString(read());
+
+    }
+
+    private static Vocabulary readVocabulary(final String name, final String path, final String key, final Integer configBlank) {
+        int blank = configBlank == null ? 0 : configBlank;
+        JsonElement element = JsonParser.parseString(ResourceUtil.readString(path));
         if(key != null) {
             if(!element.isJsonObject() || !element.getAsJsonObject().has(key)) {
                 throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode key: " + key + " is not in " + path);
@@ -200,22 +191,11 @@ public class CtcDecode implements SelectFunction {
                 throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode vocabulary of " + path + " must have chars");
             }
             if(configBlank == null && vocabulary.has("blank")) {
-                this.blank = vocabulary.get("blank").getAsInt();
+                blank = vocabulary.get("blank").getAsInt();
             }
             element = vocabulary.get("chars");
         }
-        this.tokens = tokens(name, element);
-    }
-
-    private String read() {
-        if(path.startsWith("gs://")) {
-            return StorageUtil.readString(path);
-        }
-        try {
-            return Files.readString(Path.of(path), StandardCharsets.UTF_8);
-        } catch (final IOException e) {
-            throw new IllegalArgumentException("SelectField: " + name + " func: ctc_decode failed to read: " + path, e);
-        }
+        return new Vocabulary(tokens(name, element), blank);
     }
 
     @Override

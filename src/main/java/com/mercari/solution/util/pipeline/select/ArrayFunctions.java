@@ -168,7 +168,7 @@ public class ArrayFunctions implements SelectFunction {
                 Schema.FieldType.array(Schema.FieldType.INT64.withNullable(false)), ignore);
     }
 
-    private static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
+    static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
         final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
         parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
     }

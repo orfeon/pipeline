@@ -955,14 +955,14 @@ Output type: array of ELEMENT, one per row to predict.
 
 ### image_decode
 
-Image functions work in the `inputs` and `outputs` of the [onnx transform](onnx.md), where an image is a tensor of `[H, W]` or `[H, W, C]`, with values from 0 to 255 unless it is made of floats. A record does not hold one: an image leaves as bytes, with [`image_encode`](#image_encode) or [`image_crop`](#image_crop). In other modules they are a configuration error. A null field gives null.
+Image functions work in the `inputs` and `outputs` of the [onnx transform](onnx.md), where an image is a tensor of `[H, W]` or `[H, W, C]`, with values from 0 to 255 unless it is made of floats. An image leaves as bytes, with [`image_encode`](#image_encode) or [`image_crop`](#image_crop): an image left as an item of `outputs` goes to the record as a flat array of every value, without its shape. In other modules, or inside another function such as `struct`, they are a configuration error. A null field gives null.
 
 `image_decode` reads an image from bytes: PNG, JPEG, BMP, GIF or TIFF, with what Java reads. A grayscale image gives one channel with the values of the file, and the others three in RGB; an alpha channel is dropped. For a file of several images, only the first. The rotation of the EXIF of a JPEG is not applied, and a CMYK JPEG fails its record.
 
 | parameter | optional | type   | description |
 |-----------|----------|--------|-------------|
 | field     | required | String | Source field: bytes. |
-| maxPixels | optional | Long   | An image of more pixels is read with rows and columns skipped, at the same step. Default: 40000000. |
+| maxPixels | optional | Long   | An image of more pixels is read with rows and columns skipped, at the same step, down to this many at most. Default: 40000000. |
 
 ```yaml
 - { name: decoded, func: image_decode, field: content }
@@ -1026,7 +1026,7 @@ The float values a model takes: `value * scale`, then `1 - value` if `invert`, t
 | field     | required | String                  | Source field: an image. |
 | scale     | optional | Float                   | Default: 1 / 255. |
 | invert    | optional | Boolean                 | For ink on paper: dark text gives values near 1. Default: `false`. |
-| mean, std | optional | Float or Array<Float\> | One value, or one per channel. |
+| mean, std | optional | Float or Array<Float\> | One value, or one per channel. A grayscale file has one channel when it is decoded: three values fail its record. |
 | layout    | optional | Enum                    | `chw` or `hwc`. An image of `[H, W]` gets a channel. Default: `chw`. |
 
 ```yaml
@@ -1100,7 +1100,7 @@ Greedy CTC decoding of the best class of each step: consecutive repeats and the 
 | confField   | optional  | String         | An array of the probability of that class. |
 | lengthField | optional  | String         | The number of steps to read, for a batch padded to the longest. |
 | tokens      | selective | Array<String\> | The vocabulary, without the blank. |
-| path        | selective | String         | A JSON file, local or `gs://`, of an array of tokens or of `{"blank": 0, "chars": [...]}`. |
+| path        | selective | String         | A JSON file, local, `gs://` or `s3://`, of an array of tokens or of `{"blank": 0, "chars": [...]}`. It is read when the pipeline is built. |
 | key         | optional  | String         | The key of the vocabulary in the file. A string there is parsed as JSON in turn. |
 | blank       | optional  | Integer        | The class of the blank. Default: that of the file, or 0. |
 | normalize   | optional  | Enum           | `NFC`, `NFD`, `NFKC` or `NFKD`. |

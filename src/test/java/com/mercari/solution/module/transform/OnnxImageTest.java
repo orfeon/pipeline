@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.Serializable;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -152,6 +153,40 @@ public class OnnxImageTest implements Serializable {
         pipeline.run();
     }
 
+    // the vocabulary travels in the function: it is read when the pipeline is built
+    @Test
+    public void testCtcDecodeOfAVocabularyFileInASelect() throws Exception {
+        Files.createDirectories(DIR);
+        final Path vocabulary = Files.writeString(DIR.resolve("vocabulary.json"), "{ \"blank\": 2, \"chars\": [\"a\", \"b\"] }");
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { id: a, ids: [0, 2, 1] }
+                    schema:
+                      fields:
+                        - { name: id, type: string }
+                        - { name: ids, type: int64, mode: repeated }
+                transforms:
+                  - name: read
+                    module: select
+                    inputs: [create]
+                    parameters:
+                      select:
+                        - { name: read, func: ctc_decode, field: ids, path: "%s" }
+                        - { name: text, field: read.text }
+                """.formatted(vocabulary.toUri());
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("read").getCollection()).satisfies(rows -> {
+            Assertions.assertEquals("ab", rows.iterator().next().getAsString("text"));
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testOnlyInTheOnnxTransform() {
         final String config = """
@@ -176,15 +211,24 @@ public class OnnxImageTest implements Serializable {
                 """;
         final Exception e = Assertions.assertThrows(Exception.class,
                 () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config)));
+        final String messages = messages(e);
+        Assertions.assertTrue(messages.contains("only works in the inputs and the outputs of the onnx transform"), messages);
+    }
+
+    private static String messages(final Throwable throwable) {
         final StringBuilder messages = new StringBuilder();
-        for(Throwable t = e; t != null; t = t.getCause()) {
+        for(Throwable t = throwable; t != null; t = t.getCause()) {
             messages.append(t.getMessage()).append('\n');
         }
-        Assertions.assertTrue(messages.toString().contains("only works in the inputs and the outputs of the onnx transform"), messages.toString());
+        return messages.toString();
     }
 
     private static void assertConfigError(final String inputs, final String message) {
         final Path model = OnnxTestModels.write(DIR.resolve("error.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", 1L, "height", "width"));
+        assertConfigError(model, inputs, "- { name: output, field: y }", message);
+    }
+
+    private static void assertConfigError(final Path model, final String inputs, final String outputs, final String message) {
         final String config = """
                 sources:
                   - name: create
@@ -207,15 +251,12 @@ public class OnnxImageTest implements Serializable {
                       inputs:
                 %s
                       outputs:
-                        - { name: output, field: y }
-                """.formatted(OnnxTestModels.configPath(model), inputs.indent(8));
+                %s
+                """.formatted(OnnxTestModels.configPath(model), inputs.indent(8), outputs.indent(8));
         final Exception e = Assertions.assertThrows(Exception.class,
                 () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config)), message);
-        final StringBuilder messages = new StringBuilder();
-        for(Throwable t = e; t != null; t = t.getCause()) {
-            messages.append(t.getMessage()).append('\n');
-        }
-        Assertions.assertTrue(messages.toString().contains(message), message + ": " + messages);
+        final String messages = messages(e);
+        Assertions.assertTrue(messages.contains(message), message + ": " + messages);
     }
 
     @Test
@@ -231,20 +272,41 @@ public class OnnxImageTest implements Serializable {
         cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 8, shortSide: 8 }", "requires one of longSide");
         cases.put(decoded + "- { name: r, func: image_resize, field: i, width: 8 }", "both of width and height");
         cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 0 }", "longSide must be over than zero");
-        cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 8, interpolation: cubic }", "cubic");
+        cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 8, interpolation: cubic }", "SelectField: r func: image_resize interpolation must be one of");
         cases.put(decoded + "- { name: p, func: image_pad, field: i }", "requires multiple, width or height");
         cases.put(decoded + "- { name: t, func: image_tensor, field: i, layout: nchw }", "layout must be chw or hwc");
         cases.put(decoded + "- { name: t, func: image_tensor, field: i, mean: [] }", "mean must be a number");
+        cases.put(gray + "- { name: t, func: image_tensor, field: g, mean: [0.4, 0.5, 0.6] }", "one value or one per channel");
+        cases.put(decoded + "- { name: t, func: image_tensor, field: i, std: [0.2, 0] }", "std must not be zero");
         cases.put(decoded + "- { name: c, func: connected_components, field: i }", "must be a matrix of rank [2]");
         cases.put(gray + "- { name: c, func: connected_components, field: g, connectivity: 6 }", "connectivity must be 4 or 8");
         cases.put(decoded + "- { name: c, func: image_crop, field: i, height: 8 }", "requires boxes");
         cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id }", "requires height");
         cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id, height: 8 }", "must be an array of x0");
+        cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id, height: 8, minWidth: 100, maxWidth: 50 }", "must not be over maxWidth");
         cases.put(gray + "- { name: b, func: text_line_boxes, field: i, imageField: g }", "requires imageField and longSide");
         cases.put(gray + "- { name: b, func: text_line_boxes, field: g, imageField: g, longSide: 8 }", "must be a matrix of rank [3]");
         for(final Map.Entry<String, String> entry : cases.entrySet()) {
             assertConfigError(entry.getKey(), entry.getValue());
         }
+    }
+
+    @Test
+    public void testAMaskOfBooleansIsAConfigError() {
+        final Path model = OnnxTestModels.write(DIR.resolve("mask.onnx"), OnnxTestModels.identity(OnnxTestModels.BOOL, "batch", "height", "width"));
+        assertConfigError(model,
+                "- { name: i, func: image_decode, field: content }\n- { name: x, func: image_gray, field: i }\n",
+                "- { name: c, func: connected_components, field: y }\n",
+                "must be a matrix of numbers");
+    }
+
+    @Test
+    public void testNotInsideAnotherFunction() {
+        final Path model = OnnxTestModels.write(DIR.resolve("struct.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "batch", 1L, "height", "width"));
+        assertConfigError(model,
+                "- { name: i, func: image_decode, field: content }\n- { name: g, func: image_gray, field: i }\n- { name: x, func: image_tensor, field: g }\n",
+                "- { name: output, field: y }\n- { name: s, fields: [{ name: size, func: image_size, field: g }] }\n",
+                "not inside another function");
     }
 
 }

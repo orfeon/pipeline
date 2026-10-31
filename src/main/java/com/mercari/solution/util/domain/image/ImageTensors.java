@@ -21,9 +21,10 @@ import java.util.Iterator;
 import java.util.List;
 
 /**
- * Images as Tensors, in pure Java. An image is {@code [H, W]} or {@code [H, W, C]}: of int16 with values from 0 to 255, which
- * is what decoding gives and what resizing rounds to, or of float32 with any values. {@link #resize} follows the rules of
- * cv2.resize for the size of the cells and the rounding, without its fixed point arithmetic: its values can differ by 1.
+ * Images as Tensors, in pure Java. An image is {@code [H, W]} or {@code [H, W, C]}: of integers from 0 to 255, which is what
+ * decoding gives (int16) and what resizing rounds to, or of floats with any values. A result keeps the type of its image.
+ * {@link #resize} follows the rules of cv2.resize for the size of the cells and the rounding, without its fixed point
+ * arithmetic: its values can differ by 1.
  *
  * <p>{@link #cropLine}, {@link #isDark} and {@link #textLines} are ported from {@code indra_ocr/rec_preproc.py} and
  * {@code indra_ocr/det_post.py} of datalab-to/indra (Apache-2.0), changed to work on Tensors.
@@ -65,10 +66,11 @@ public final class ImageTensors {
             final ImageReader reader = readers.next();
             try {
                 reader.setInput(stream, true, true);
-                final long pixels = (long) reader.getWidth(0) * reader.getHeight(0);
+                final int width = reader.getWidth(0);
+                final int height = reader.getHeight(0);
                 final ImageReadParam param = reader.getDefaultReadParam();
-                if(pixels > maxPixels) {
-                    final int step = (int) Math.ceil(Math.sqrt((double) pixels / maxPixels));
+                if((long) width * height > maxPixels) {
+                    final int step = skipStep(width, height, maxPixels);
                     param.setSourceSubsampling(step, step, 0, 0);
                 }
                 return fromImage(reader.read(0, param));
@@ -78,6 +80,15 @@ public final class ImageTensors {
         } catch (final IOException e) {
             throw new IllegalArgumentException("Failed to read an image of " + bytes.length + " bytes", e);
         }
+    }
+
+    // the square root is not enough for a long and thin image: a side shorter than the step still keeps one row or column
+    private static int skipStep(final int width, final int height, final long maxPixels) {
+        int step = (int) Math.ceil(Math.sqrt((double) width * height / maxPixels));
+        while(step < Math.max(width, height) && (long) Math.ceilDiv(width, step) * Math.ceilDiv(height, step) > maxPixels) {
+            step++;
+        }
+        return step;
     }
 
     private static Tensor fromImage(final BufferedImage image) {
@@ -157,19 +168,24 @@ public final class ImageTensors {
         }
         final int size = height(image) * width(image);
         final long[] shape = {height(image), width(image)};
-        final float[] values = floats(image);
-        if(image.type() == Tensor.Type.FLOAT) {
+        if(image.type() == Tensor.Type.FLOAT || image.type() == Tensor.Type.DOUBLE) {
+            final float[] values = floats(image);
             final float[] gray = new float[size];
             for(int i=0; i<size; i++) {
                 gray[i] = 0.299f * values[i * 3] + 0.587f * values[i * 3 + 1] + 0.114f * values[i * 3 + 2];
             }
-            return Tensor.of(gray, shape);
+            return withType(image, gray, shape);
         }
+        // from the values as they are: a page of floats would take twice the memory of the page
+        final Tensor pixels = image.as(Tensor.Type.INT16);
+        final short[] values = (short[]) pixels.data();
+        final int offset = pixels.offset();
         final short[] gray = new short[size];
         for(int i=0; i<size; i++) {
-            gray[i] = (short) (((int) values[i * 3] * GRAY_R + (int) values[i * 3 + 1] * GRAY_G + (int) values[i * 3 + 2] * GRAY_B + (1 << (GRAY_SHIFT - 1))) >> GRAY_SHIFT);
+            final int p = offset + i * 3;
+            gray[i] = (short) ((values[p] * GRAY_R + values[p + 1] * GRAY_G + values[p + 2] * GRAY_B + (1 << (GRAY_SHIFT - 1))) >> GRAY_SHIFT);
         }
-        return Tensor.of(gray, shape);
+        return Tensor.of(gray, shape).as(image.type());
     }
 
     /** The size that fits a long side or a short side, rounding as Python does: {@code [height, width]}. */
@@ -647,14 +663,14 @@ public final class ImageTensors {
 
     // of the type of the image: integers are rounded as cv2 does, half to even, and limited to the range of a pixel
     private static Tensor withType(final Tensor image, final float[] values, final long[] shape) {
-        if(image.type() == Tensor.Type.FLOAT) {
-            return Tensor.of(values, shape);
+        if(image.type() == Tensor.Type.FLOAT || image.type() == Tensor.Type.DOUBLE) {
+            return Tensor.of(values, shape).as(image.type());
         }
         final short[] data = new short[values.length];
         for(int i=0; i<values.length; i++) {
             data[i] = (short) limit(values[i]);
         }
-        return Tensor.of(data, shape);
+        return Tensor.of(data, shape).as(image.type());
     }
 
     private static int limit(final float value) {

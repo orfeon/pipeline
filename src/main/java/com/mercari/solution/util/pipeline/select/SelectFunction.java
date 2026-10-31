@@ -278,7 +278,7 @@ public interface SelectFunction extends Serializable {
                 continue;
             }
             if(selectFunction.onnxOnly()) {
-                throw new IllegalArgumentException("SelectField: " + selectFunction.getName() + " only works in the inputs and the outputs of the onnx transform");
+                throw new IllegalArgumentException("SelectField: " + selectFunction.getName() + " only works in the inputs and the outputs of the onnx transform, not inside another function");
             }
             final Schema.FieldType selectOutputFieldType = selectFunction.getOutputFieldType();
             Schema.Field field = Schema.Field.of(selectFunction.getName(), selectOutputFieldType);

@@ -51,11 +51,11 @@ public class OnnxIndraModelTest implements Serializable {
                       inputs:
                 %s
                       outputs:
-                        - { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: "%s/meta.json", key: %s, normalize: NFC, minConf: 0.5 }
+                        - { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: "%s", key: %s, normalize: NFC, minConf: 0.5 }
                         - { name: text, field: read.text }
                         - { name: confidence, field: read.conf }
                 """.formatted(group, group, dir, base ? "rec.onnx" : "rec_" + group + ".onnx",
-                ink(base ? "line.tall" : "line.band"), dir, base ? "vocab" : "vocab_" + group);
+                ink(base ? "line.tall" : "line.band"), Path.of(dir, "meta.json").toUri(), base ? "vocab" : "vocab_" + group);
     }
 
     private static String config(final String dir, final byte[] image) {
