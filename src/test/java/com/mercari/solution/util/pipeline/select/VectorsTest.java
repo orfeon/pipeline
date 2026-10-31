@@ -226,6 +226,18 @@ public class VectorsTest {
         Assertions.assertNull(groupSoftmax(logits, null));
     }
 
+    // the logits of the groups divided, which keeps the order of the groups
+    @Test
+    public void testGroupSoftmaxTemperature() {
+        final Map<String, Object> input = new HashMap<>();
+        input.put("v", List.of(9f, 1f, 2f, 0f, 3f));
+        input.put("groups", List.of(List.of(1L, 2L), List.of(3L, 4L)));
+        final String json = "{ \"name\": \"o\", \"func\": \"group_softmax\", \"field\": \"v\", \"groups\": \"groups\", \"temperature\": 2 }";
+        final double high = Math.exp(1.5) / (Math.exp(1.5) + Math.exp(1));
+        assertClose(List.of(1 - high, high), function(json).apply(input, Instant.EPOCH));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> function(json.replace("\"temperature\": 2", "\"temperature\": 0")));
+    }
+
     @Test
     public void testGroupSoftmaxOfIllegalGroups() {
         final List<Float> logits = List.of(1f, 2f);

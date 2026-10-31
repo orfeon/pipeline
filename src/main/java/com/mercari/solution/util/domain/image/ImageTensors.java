@@ -25,7 +25,7 @@ import java.util.List;
  * Images as Tensors, in pure Java. An image is {@code [H, W]} or {@code [H, W, C]}: of integers from 0 to 255, which is what
  * decoding gives (int16) and what resizing rounds to, or of floats with any values. A result keeps the type of its image.
  * {@link #resize} follows the rules of cv2.resize for the size of the cells and the rounding, without its fixed point
- * arithmetic: its values can differ by 1.
+ * arithmetic: its values can differ by 1. Its bicubic follows those of Pillow: its values can differ by 1, and rarely by 2.
  *
  * <p>{@link #cropLine}, {@link #isDark} and {@link #textLines} are ported from {@code indra_ocr/rec_preproc.py} and
  * {@code indra_ocr/det_post.py} of datalab-to/indra (Apache-2.0), changed to work on Tensors.
@@ -36,7 +36,8 @@ public final class ImageTensors {
         /** area when both dimensions shrink, or else linear. */
         auto,
         area,
-        linear
+        linear,
+        bicubic
     }
 
     /** A connected component: its bounding box and its number of pixels. */
@@ -225,6 +226,31 @@ public final class ImageTensors {
         return new int[]{(int) Math.max(1, Math.rint(height * scale)), (int) Math.max(1, Math.rint(width * scale))};
     }
 
+    /**
+     * The size with both sides multiples of {@code multiple}, each the nearest one and at least one, rounding as Python does: {@code [height, width]}.
+     * A size out of the range of pixels is scaled towards it, keeping the ratio as closely as the multiples allow. It can stay
+     * out of a range narrower than a step of the multiples, or when a side keeps its one multiple.
+     */
+    public static int[] multipleSize(final int height, final int width, final int multiple, final long minPixels, final long maxPixels) {
+        final int newHeight = Math.max(1, (int) Math.rint((double) height / multiple)) * multiple;
+        final int newWidth = Math.max(1, (int) Math.rint((double) width / multiple)) * multiple;
+        final long pixels = (long) height * width;
+        final long newPixels = (long) newHeight * newWidth;
+        if(newPixels > maxPixels) {
+            final double beta = Math.sqrt((double) pixels / maxPixels);
+            return new int[]{
+                    Math.max(multiple, (int) Math.floor(height / beta / multiple) * multiple),
+                    Math.max(multiple, (int) Math.floor(width / beta / multiple) * multiple)};
+        }
+        if(newPixels < minPixels) {
+            final double beta = Math.sqrt((double) minPixels / pixels);
+            return new int[]{
+                    (int) Math.ceil(height * beta / multiple) * multiple,
+                    (int) Math.ceil(width * beta / multiple) * multiple};
+        }
+        return new int[]{newHeight, newWidth};
+    }
+
     /** An image of the given size. An image of that size is returned as it is. */
     public static Tensor resize(final Tensor image, final int newHeight, final int newWidth, final Interpolation interpolation) {
         final int height = height(image);
@@ -234,9 +260,8 @@ public final class ImageTensors {
         }
         final int channels = channels(image);
         final boolean shrinks = newHeight <= height && newWidth <= width;
-        final Interpolation used = interpolation == Interpolation.auto ? (shrinks ? Interpolation.area : Interpolation.linear) : interpolation;
-        final Weights rows = used == Interpolation.area && shrinks ? Weights.area(height, newHeight) : Weights.linear(height, newHeight, used == Interpolation.area);
-        final Weights columns = used == Interpolation.area && shrinks ? Weights.area(width, newWidth) : Weights.linear(width, newWidth, used == Interpolation.area);
+        final Weights rows = Weights.of(interpolation, shrinks, height, newHeight);
+        final Weights columns = Weights.of(interpolation, shrinks, width, newWidth);
 
         final float[] source = floats(image);
         final float[] horizontal = new float[height * newWidth * channels];
@@ -253,6 +278,11 @@ public final class ImageTensors {
                 }
             }
         }
+        // as Pillow does for integers, which is what keeps the values near an edge, where a cubic goes out of the range
+        final boolean pixels = interpolation == Interpolation.bicubic && image.type() != Tensor.Type.FLOAT && image.type() != Tensor.Type.DOUBLE;
+        if(pixels) {
+            roundHalfUp(horizontal);
+        }
         final int rowSize = newWidth * channels;
         final float[] resized = new float[newHeight * rowSize];
         for(int y=0; y<newHeight; y++) {
@@ -264,6 +294,9 @@ public final class ImageTensors {
                     resized[to + i] += horizontal[from + i] * weight;
                 }
             }
+        }
+        if(pixels) {
+            roundHalfUp(resized);
         }
         return withType(image, resized, shape(image, newHeight, newWidth));
     }
@@ -285,6 +318,57 @@ public final class ImageTensors {
             System.arraycopy(source, y * width * channels, padded, y * newWidth * channels, width * channels);
         }
         return withType(image, padded, shape(image, newHeight, newWidth));
+    }
+
+    /**
+     * The patches of the values of a model {@code [C, H, W]}, for a vision encoder that merges neighbouring patches: of
+     * {@code [H / (patch * merge), W / (patch * merge), merge, merge, C * temporal * patch * patch]}, or
+     * {@code [H / patch * W / patch, C * temporal * patch * patch]} if {@code flat}. The patches of a merge are next to each other in
+     * both. Each patch has the image {@code temporal} times, as the frames of a video that does not change.
+     */
+    public static Tensor patches(final Tensor image, final int patchSize, final int mergeSize, final int temporalSize, final boolean flat) {
+        if(image.rank() != 3) {
+            throw new IllegalArgumentException("Patches require an image of [C, H, W], but got: " + image);
+        }
+        final int channels = Math.toIntExact(image.shape()[0]);
+        final int height = Math.toIntExact(image.shape()[1]);
+        final int width = Math.toIntExact(image.shape()[2]);
+        final int cell = patchSize * mergeSize;
+        if(height % cell != 0 || width % cell != 0) {
+            throw new IllegalArgumentException("Patches of " + patchSize + " merged by " + mergeSize + " require a height and a width of multiples of " + cell
+                    + " (image_resize with multiple), but got: " + image);
+        }
+        final int rows = height / cell;
+        final int columns = width / cell;
+        final int patchValues = Math.multiplyExact(Math.multiplyExact(channels, temporalSize), patchSize * patchSize);
+        final int count = Math.multiplyExact(Math.multiplyExact(rows, columns), mergeSize * mergeSize);
+        // only read, and an image of a model takes much memory: floats would copy all of it for each record
+        final float[] source = image.data() instanceof float[] data ? data : floats(image);
+        final int offset = source == image.data() ? image.offset() : 0;
+        final float[] patches = new float[Math.multiplyExact(count, patchValues)];
+        int to = 0;
+        for(int row=0; row<rows; row++) {
+            for(int column=0; column<columns; column++) {
+                for(int mergeRow=0; mergeRow<mergeSize; mergeRow++) {
+                    for(int mergeColumn=0; mergeColumn<mergeSize; mergeColumn++) {
+                        final int top = (row * mergeSize + mergeRow) * patchSize;
+                        final int left = (column * mergeSize + mergeColumn) * patchSize;
+                        for(int channel=0; channel<channels; channel++) {
+                            for(int frame=0; frame<temporalSize; frame++) {
+                                for(int y=0; y<patchSize; y++) {
+                                    System.arraycopy(source, offset + (channel * height + top + y) * width + left, patches, to, patchSize);
+                                    to += patchSize;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        final long[] shape = flat
+                ? new long[]{count, patchValues}
+                : new long[]{rows, columns, mergeSize, mergeSize, patchValues};
+        return withType(image, patches, shape);
     }
 
     /**
@@ -585,6 +669,59 @@ public final class ImageTensors {
     // which source values make each value of a dimension, in the order of cv2's tables
     private record Weights(int[] starts, int[] indices, float[] weights) {
 
+        static Weights of(final Interpolation interpolation, final boolean shrinks, final int size, final int newSize) {
+            return switch (interpolation) {
+                // a dimension that does not change has no pass in Pillow: here the weights of 0 would still read the rows next to it
+                case bicubic -> size == newSize ? linear(size, newSize, false) : bicubic(size, newSize);
+                case auto -> shrinks ? area(size, newSize) : linear(size, newSize, false);
+                case area -> shrinks ? area(size, newSize) : linear(size, newSize, true);
+                case linear -> linear(size, newSize, false);
+            };
+        }
+
+        // as Pillow does: a cubic of a = -0.5, whose support grows with the cell when shrinking, so that every old value counts
+        static Weights bicubic(final int size, final int newSize) {
+            final double scale = (double) size / newSize;
+            final double filterScale = Math.max(scale, 1d);
+            final double support = 2d * filterScale;
+            final List<int[]> indices = new ArrayList<>(newSize);
+            final List<float[]> weights = new ArrayList<>(newSize);
+            int total = 0;
+            for(int d=0; d<newSize; d++) {
+                final double center = (d + 0.5) * scale;
+                final int first = Math.max(0, (int) (center - support + 0.5));
+                final int last = Math.min(size, (int) (center + support + 0.5));
+                final int[] index = new int[last - first];
+                final double[] values = new double[last - first];
+                double sum = 0d;
+                for(int s=first; s<last; s++) {
+                    index[s - first] = s;
+                    values[s - first] = cubic((s - center + 0.5) / filterScale);
+                    sum += values[s - first];
+                }
+                final float[] weight = new float[values.length];
+                for(int i=0; i<values.length; i++) {
+                    weight[i] = (float) (values[i] / sum);
+                }
+                indices.add(index);
+                weights.add(weight);
+                total += index.length;
+            }
+            return flatten(indices, weights, total);
+        }
+
+        private static double cubic(final double x) {
+            final double a = -0.5d;
+            final double abs = Math.abs(x);
+            if(abs < 1d) {
+                return ((a + 2d) * abs - (a + 3d)) * abs * abs + 1d;
+            }
+            if(abs < 2d) {
+                return (((abs - 5d) * abs + 8d) * abs - 4d) * a;
+            }
+            return 0d;
+        }
+
         // the overlap of the cell of a new value with the old ones
         static Weights area(final int size, final int newSize) {
             final double scale = 1d / ((double) newSize / size);
@@ -700,6 +837,12 @@ public final class ImageTensors {
             data[i] = (short) limit(values[i]);
         }
         return Tensor.of(data, shape).as(image.type());
+    }
+
+    private static void roundHalfUp(final float[] values) {
+        for(int i=0; i<values.length; i++) {
+            values[i] = (float) Math.max(0d, Math.min(MAX_VALUE, Math.floor(values[i] + 0.5d)));
+        }
     }
 
     private static int limit(final float value) {

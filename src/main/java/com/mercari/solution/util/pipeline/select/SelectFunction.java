@@ -104,6 +104,7 @@ public interface SelectFunction extends Serializable {
         image_pad,
         image_crop,
         image_tensor,
+        image_patches,
         image_size,
         connected_components,
         text_line_boxes,
@@ -253,6 +254,7 @@ public interface SelectFunction extends Serializable {
             case image_pad -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_pad, ignore);
             case image_crop -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_crop, ignore);
             case image_tensor -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_tensor, ignore);
+            case image_patches -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_patches, ignore);
             case image_size -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_size, ignore);
             case connected_components -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.connected_components, ignore);
             case text_line_boxes -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.text_line_boxes, ignore);

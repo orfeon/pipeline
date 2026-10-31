@@ -23,6 +23,7 @@ import java.util.*;
  * { "name": "small",  "func": "image_resize", "field": "gray", "longSide": 1024 },
  * { "name": "padded", "func": "image_pad",    "field": "small", "multiple": 32, "value": 255 },
  * { "name": "x",      "func": "image_tensor", "field": "padded", "invert": true },
+ * { "name": "cells",  "func": "image_patches", "field": "x", "patchSize": 16, "mergeSize": 2, "temporalSize": 2 },
  * { "name": "boxes",  "func": "text_line_boxes", "field": "output", "imageField": "gray", "resizedField": "small", "stride": 2, "xShrink": 0.15 },
  * { "name": "lines",  "func": "image_crop",   "field": "gray", "boxes": "boxes", "height": 32, "invertDark": true }
  * }</pre>
@@ -37,6 +38,7 @@ public class ImageFunctions implements SelectFunction {
         image_pad,
         image_crop,
         image_tensor,
+        image_patches,
         image_size,
         connected_components,
         text_line_boxes
@@ -46,6 +48,7 @@ public class ImageFunctions implements SelectFunction {
 
     private record Options(
             long maxPixels,
+            long minPixels,
             Integer channels,
             Integer width,
             Integer height,
@@ -65,6 +68,10 @@ public class ImageFunctions implements SelectFunction {
             float[] mean,
             float[] std,
             boolean channelFirst,
+            int patchSize,
+            int mergeSize,
+            int temporalSize,
+            boolean flat,
             double threshold,
             int connectivity,
             int minArea,
@@ -114,6 +121,12 @@ public class ImageFunctions implements SelectFunction {
             requireMatrix(name, op, field, type, 3);
         } else if(op == Op.connected_components) {
             requireMatrix(name, op, field, type, 2);
+        } else if(op == Op.image_patches) {
+            requireMatrix(name, op, field, type, 3);
+            // a decoded image has three dimensions as well, but of [H, W, C]
+            if(type.getMatrixValueType().getType() != Schema.Type.float32 && type.getMatrixValueType().getType() != Schema.Type.float64) {
+                throw new IllegalArgumentException("SelectField: " + name + " func: image_patches field: " + field + " must be the values of image_tensor, but got: " + type);
+            }
         } else {
             requireMatrix(name, op, field, type, 2, 3);
         }
@@ -133,9 +146,13 @@ public class ImageFunctions implements SelectFunction {
             final List<Schema.Field> inputFields,
             final Map<String, Schema.Field> parents) {
 
-        final long maxPixels = json.has("maxPixels") ? json.get("maxPixels").getAsLong() : DEFAULT_MAX_PIXELS;
+        final long maxPixels = json.has("maxPixels") ? json.get("maxPixels").getAsLong() : op == Op.image_resize ? Long.MAX_VALUE : DEFAULT_MAX_PIXELS;
         if(maxPixels < 1) {
             throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " maxPixels must be over than zero: " + maxPixels);
+        }
+        final long minPixels = json.has("minPixels") ? json.get("minPixels").getAsLong() : 1L;
+        if(minPixels < 1) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " minPixels must be over than zero: " + minPixels);
         }
         final Integer channels = positive(name, op, json, "channels");
         if(channels != null && channels != 1 && channels != 3) {
@@ -160,6 +177,10 @@ public class ImageFunctions implements SelectFunction {
         final float[] mean = floats(name, json, "mean");
         final float[] std = floats(name, json, "std");
         final boolean channelFirst = !json.has("layout") || parseLayout(name, json.get("layout").getAsString());
+        final Integer patchSize = positive(name, op, json, "patchSize");
+        final Integer mergeSize = positive(name, op, json, "mergeSize");
+        final Integer temporalSize = positive(name, op, json, "temporalSize");
+        final boolean flat = json.has("flat") && json.get("flat").getAsBoolean();
         final double threshold = json.has("threshold") ? json.get("threshold").getAsDouble() : 0.5d;
         final int connectivity = json.has("connectivity") ? json.get("connectivity").getAsInt() : 8;
         if(connectivity != 4 && connectivity != 8) {
@@ -174,9 +195,13 @@ public class ImageFunctions implements SelectFunction {
         String resizedField = null;
         switch (op) {
             case image_resize -> {
-                final int sizes = (longSide != null ? 1 : 0) + (shortSide != null ? 1 : 0) + (width != null || height != null ? 1 : 0);
+                final boolean pixels = multiple != null || json.has("minPixels") || json.has("maxPixels");
+                final int sizes = (longSide != null ? 1 : 0) + (shortSide != null ? 1 : 0) + (width != null || height != null ? 1 : 0) + (pixels ? 1 : 0);
                 if(sizes != 1) {
-                    throw new IllegalArgumentException("SelectField: " + name + " func: image_resize requires one of longSide, shortSide, or width and height");
+                    throw new IllegalArgumentException("SelectField: " + name + " func: image_resize requires one of longSide, shortSide, width and height, or multiple, minPixels and maxPixels");
+                }
+                if(minPixels > maxPixels) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: image_resize minPixels: " + minPixels + " must not be over maxPixels: " + maxPixels);
                 }
                 if((width == null) != (height == null)) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: image_resize requires both of width and height");
@@ -213,6 +238,11 @@ public class ImageFunctions implements SelectFunction {
                 ArrayFunctions.putParent(parents, boxes, inputFields);
             }
             case image_tensor -> validateChannels(name, type, mean, std);
+            case image_patches -> {
+                if(patchSize == null) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: image_patches requires patchSize");
+                }
+            }
             case text_line_boxes -> {
                 if(!json.has("imageField") || !json.has("resizedField")) {
                     throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes requires imageField and resizedField, the image before and after it was resized");
@@ -233,10 +263,12 @@ public class ImageFunctions implements SelectFunction {
             }
             default -> {}
         }
-        return new Options(maxPixels, channels, width, height, longSide, shortSide, interpolation,
+        return new Options(maxPixels, minPixels, channels, width, height, longSide, shortSide, interpolation,
                 multiple == null ? 1 : multiple, value, boxes, padX, padY,
                 minWidth, maxWidth, invertDark,
-                scale, invert, mean, std, channelFirst, threshold, connectivity,
+                scale, invert, mean, std, channelFirst,
+                patchSize == null ? 1 : patchSize, mergeSize == null ? 1 : mergeSize, temporalSize == null ? 1 : temporalSize, flat,
+                threshold, connectivity,
                 minArea == null ? 1 : minArea,
                 stride == null ? 1 : stride, xShrink, imageField, resizedField);
     }
@@ -327,6 +359,7 @@ public class ImageFunctions implements SelectFunction {
             case image_resize, image_pad -> Schema.FieldType.matrix(type.getMatrixValueType(), dynamicShape(type));
             case image_crop -> Schema.FieldType.array(Schema.FieldType.BYTES.withNullable(false));
             case image_tensor -> Schema.FieldType.matrix(Schema.FieldType.FLOAT32.withNullable(false), List.of(-1, -1, -1));
+            case image_patches -> Schema.FieldType.matrix(type.getMatrixValueType(), options.flat ? List.of(-1, -1) : List.of(-1, -1, options.mergeSize, options.mergeSize, -1));
             case image_size -> Schema.FieldType.element(List.of(
                     Schema.Field.of("height", Schema.FieldType.INT64),
                     Schema.Field.of("width", Schema.FieldType.INT64)));
@@ -407,6 +440,7 @@ public class ImageFunctions implements SelectFunction {
                     options.multiple, options.value);
             case image_crop -> crop(tensor(field, value), ElementSchemaUtil.getValue(input, options.boxes));
             case image_tensor -> ImageTensors.toModel(tensor(field, value), options.scale, options.invert, options.mean, options.std, options.channelFirst);
+            case image_patches -> ImageTensors.patches(tensor(field, value), options.patchSize, options.mergeSize, options.temporalSize, options.flat);
             case image_size -> {
                 final Tensor image = tensor(field, value);
                 final Map<String, Object> size = new HashMap<>();
@@ -423,7 +457,11 @@ public class ImageFunctions implements SelectFunction {
         if(options.width != null) {
             return ImageTensors.resize(image, options.height, options.width, options.interpolation);
         }
-        final int[] size = ImageTensors.fittedSize(ImageTensors.height(image), ImageTensors.width(image), options.longSide, options.shortSide);
+        final int height = ImageTensors.height(image);
+        final int width = ImageTensors.width(image);
+        final int[] size = options.longSide == null && options.shortSide == null
+                ? ImageTensors.multipleSize(height, width, options.multiple, options.minPixels, options.maxPixels)
+                : ImageTensors.fittedSize(height, width, options.longSide, options.shortSide);
         return ImageTensors.resize(image, size[0], size[1], options.interpolation);
     }
 

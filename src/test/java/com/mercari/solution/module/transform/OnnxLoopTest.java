@@ -237,6 +237,30 @@ public class OnnxLoopTest implements Serializable {
         pipeline.run();
     }
 
+    // from the second run on: without a cache from the last run the cache only has the tokens of the run
+    @Test
+    public void testConstantsInNext() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("constants/model.onnx"), OnnxTestModels.generator(OnnxTestModels.FLOAT));
+        final String loop = loop("""
+                          "past.0": { empty: [1, 0, 1] }
+                          attention_mask: { fill: 1, shape: [1, 4] }
+                          token: { func: argmax, field: logits, position: last }
+                          generated: { func: array_append, field: generated, valueField: token }
+                          input_ids: { func: array, fields: [token] }
+                          position_ids: { func: range, field: input_ids }
+            """, "{ key: token, op: in, value: [7, 9] }", 20);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config(model, loop, OUTPUTS, 1)));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final MElement a = byId(rows).get("a");
+            Assertions.assertEquals(List.of(4L, 5L, 6L, 7L), longs(a.getPrimitiveValue("generated")));
+            Assertions.assertEquals(List.of(6f), floats(a.getPrimitiveValue("cache")));
+            Assertions.assertEquals(4L, ((Number) a.getPrimitiveValue("mask")).longValue());
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testConfigErrors() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("errors/model.onnx"), OnnxTestModels.generator(OnnxTestModels.FLOAT));
@@ -274,6 +298,33 @@ public class OnnxLoopTest implements Serializable {
         cases.put("takes a value of rank 1", loop(NEXT.replace("{ func: array, fields: [token] }", "{ field: token }"), until, 1));
         cases.put("is given both", loop(NEXT + """
                           "past.0": { func: range, field: ids }
+            """, until, 1));
+        cases.put("it is not a model input: [", loop(NEXT + """
+                          other: { empty: [0] }
+            """, until, 1));
+        cases.put("is given both a model output and empty or fill", loop(NEXT + """
+                          "past.0": { fill: 0 }
+            """, until, 1));
+        cases.put("onnx loop.next: past.0 has rank 2 in its empty or fill", loop("""
+                          "past.0": { empty: [0, 1] }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
+        cases.put("onnx loop.next: past.0 empty or fill can not be used with a select function", loop("""
+                          "past.0": { fill: 0, field: ids }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
+        cases.put("onnx loop.next: past.0 empty shape must have a dimension of 0", loop("""
+                          "past.0": { empty: [1, 1, 1] }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
+        // here, rather than in the second run of every record
+        cases.put("onnx loop.next: past.0 has shape [1, 0, 2] in its empty or fill", loop("""
+                          "past.0": { empty: [1, 0, 2] }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
+        cases.put("onnx loop.next: attention_mask fill is NaN", loop("""
+                          attention_mask: { fill: NaN, shape: [1, 4] }
+                          token: { func: argmax, field: logits, position: last }
             """, until, 1));
         cases.put("logits is an array or a matrix", loop(NEXT, "{ key: logits, op: in, value: [7] }", 1));
         cases.put("generated is an array or a matrix", loop(NEXT, "{ key: generated, op: in, value: [7] }", 1));

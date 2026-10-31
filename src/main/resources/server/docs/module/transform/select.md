@@ -723,6 +723,7 @@ Softmax over groups of a vector of logits: the logit of a group is the largest o
 | field     | required | String  | Source field: a vector. |
 | groups    | required | String  | Field with the ids of each group, an array of arrays of integers: typically [`token_ids`](#token_ids). An id out of the vector or an empty group fails. |
 | size      | optional | Integer | Uses only the first `size` values. |
+| temperature | optional | Double | Divides the logit of each group before the softmax, for the probabilities of a model calibrated by a temperature. It does not change which group is the largest. Default: 1. |
 
 ```yaml
 - { name: probabilities, func: group_softmax, field: lastLogits, groups: options }
@@ -987,7 +988,7 @@ An image of `[H, W]`. Three channels become 0.299 R + 0.587 G + 0.114 B, as Open
 
 ### image_resize
 
-An image of another size, following the cells and the rounding of OpenCV's `resize`, without its fixed point arithmetic: a value can differ by 1.
+An image of another size, following the cells and the rounding of OpenCV's `resize`, without its fixed point arithmetic: a value can differ by 1. `bicubic` follows Pillow, where a value can differ by 1 and rarely by 2, and limits integers to the range of a pixel after each pass.
 
 | parameter     | optional  | type    | description |
 |---------------|-----------|---------|-------------|
@@ -995,10 +996,12 @@ An image of another size, following the cells and the rounding of OpenCV's `resi
 | longSide      | selective | Integer | Keeps the ratio. A length is rounded as Python does, half to even. |
 | shortSide     | selective | Integer | Keeps the ratio. |
 | width, height | selective | Integer | Both of them, for a given size. |
-| interpolation | optional  | Enum    | `auto`, which is `area` when no dimension grows and `linear` otherwise, `area` or `linear`. Default: `auto`. |
+| multiple, minPixels, maxPixels | selective | Integer, Long, Long | Any of them, for what a vision encoder takes: each side the nearest multiple of `multiple` (default: 1), half to even and at least one, then scaled with the ratio kept, as closely as the multiples allow, if the pixels are out of the range. It can stay out of a range narrower than a step of the multiples, or when a side keeps its one multiple. |
+| interpolation | optional  | Enum    | `auto`, which is `area` when no dimension grows and `linear` otherwise, `area`, `linear` or `bicubic`. Default: `auto`. |
 
 ```yaml
 - { name: small, func: image_resize, field: page, longSide: 1024 }
+- { name: resized, func: image_resize, field: decoded, multiple: 32, minPixels: 65536, maxPixels: 1638400, interpolation: bicubic }
 ```
 
 ### image_pad
@@ -1033,6 +1036,24 @@ The float values a model takes: `value * scale`, then `1 - value` if `invert`, t
 ```yaml
 - { name: x, func: image_tensor, field: padded, invert: true }
 - { name: pixel_values, func: image_tensor, field: decoded, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225] }
+```
+
+### image_patches
+
+The patches of the values of [`image_tensor`](#image_tensor) in `chw`, for a vision encoder that merges neighbouring patches. The height and the width must be multiples of `patchSize * mergeSize`, which [`image_resize`](#image_resize) with `multiple` gives: another size fails the record.
+
+| parameter    | optional | type    | description |
+|--------------|----------|---------|-------------|
+| field        | required | String  | Source field: the values of an image `[C, H, W]`. |
+| patchSize    | required | Integer | The side of a patch. |
+| mergeSize    | optional | Integer | The side of a square of patches that the encoder merges. Default: 1. |
+| temporalSize | optional | Integer | How many times a patch has the image, as the frames of a video that does not change. Default: 1. |
+| flat         | optional | Boolean | Gives `[H / patchSize * W / patchSize, D]` instead. Default: `false`. |
+
+Output: a matrix of `[H / (patchSize * mergeSize), W / (patchSize * mergeSize), mergeSize, mergeSize, D]`, with `D = C * temporalSize * patchSize * patchSize`. The patches of a merge are next to each other, from left to right and then down, and a patch has its values by channel, by frame and by row.
+
+```yaml
+- { name: pixel_values, func: image_patches, field: values, patchSize: 16, mergeSize: 2, temporalSize: 2 }
 ```
 
 ### image_size
