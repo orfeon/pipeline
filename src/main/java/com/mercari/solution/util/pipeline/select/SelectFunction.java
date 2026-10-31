@@ -29,6 +29,11 @@ public interface SelectFunction extends Serializable {
         return false;
     }
 
+    // whether it only works where Tensors live, the inputs and the outputs of the onnx transform
+    default boolean onnxOnly() {
+        return false;
+    }
+
     // inside the onnx transform: whether a result of the function can leave nothing to ask the model for a record
     default boolean canSkipModel() {
         return false;
@@ -92,6 +97,17 @@ public interface SelectFunction extends Serializable {
         timeseries_quantiles,
         tabular_encode,
         tabular_decode,
+        image_decode,
+        image_encode,
+        image_gray,
+        image_resize,
+        image_pad,
+        image_crop,
+        image_tensor,
+        image_size,
+        connected_components,
+        text_line_boxes,
+        ctc_decode,
         panic;
 
         public static Func is(String value) {
@@ -230,6 +246,17 @@ public interface SelectFunction extends Serializable {
             case timeseries_quantiles -> TimeseriesQuantiles.of(name, jsonObject, inputFields, ignore);
             case tabular_encode -> TabularEncode.of(name, jsonObject, inputFields, ignore);
             case tabular_decode -> TabularDecode.of(name, jsonObject, inputFields, ignore);
+            case image_decode -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_decode, ignore);
+            case image_encode -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_encode, ignore);
+            case image_gray -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_gray, ignore);
+            case image_resize -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_resize, ignore);
+            case image_pad -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_pad, ignore);
+            case image_crop -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_crop, ignore);
+            case image_tensor -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_tensor, ignore);
+            case image_size -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.image_size, ignore);
+            case connected_components -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.connected_components, ignore);
+            case text_line_boxes -> ImageFunctions.of(name, jsonObject, inputFields, ImageFunctions.Op.text_line_boxes, ignore);
+            case ctc_decode -> CtcDecode.of(name, jsonObject, inputFields, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };
@@ -249,6 +276,9 @@ public interface SelectFunction extends Serializable {
         for(final SelectFunction selectFunction : selectFunctions) {
             if(selectFunction.ignore()) {
                 continue;
+            }
+            if(selectFunction.onnxOnly()) {
+                throw new IllegalArgumentException("SelectField: " + selectFunction.getName() + " only works in the inputs and the outputs of the onnx transform, not inside another function");
             }
             final Schema.FieldType selectOutputFieldType = selectFunction.getOutputFieldType();
             Schema.Field field = Schema.Field.of(selectFunction.getName(), selectOutputFieldType);

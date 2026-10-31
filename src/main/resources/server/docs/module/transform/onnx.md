@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Onnx Transform Module
-description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. A loop runs the model again on what it gave, for text generation with a KV cache. Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
-tags: [transform, onnx, ml, inference, machinelearning, llm, generation, batch, streaming]
+description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. A loop runs the model again on what it gave, for text generation with a KV cache. Image functions decode, resize and crop images, for reading text from images (OCR). Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
+tags: [transform, onnx, ml, inference, machinelearning, llm, generation, image, ocr, batch, streaming]
 timestamp: 2026-10-30T00:00:00Z
 ---
 
@@ -121,7 +121,7 @@ dim0 of a model output is the batch if a value was stacked ([Rank of a value](#r
 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
-Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax), [`slice`](select.md#slice), [`sample`](select.md#sample) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`array`, `array_append`](select.md#array), [`range`](select.md#range), [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes. For a tabular model that learns in context: [`tabular_encode` and `tabular_decode`](select.md#tabular_encode).
+Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax), [`slice`](select.md#slice), [`sample`](select.md#sample) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`array`, `array_append`](select.md#array), [`range`](select.md#range), [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes. For a tabular model that learns in context: [`tabular_encode` and `tabular_decode`](select.md#tabular_encode). For images: [`image_decode` and the other image functions](select.md#image_decode), [`connected_components`](select.md#connected_components), [`text_line_boxes`](select.md#text_line_boxes) and [`ctc_decode`](select.md#ctc_decode).
 
 ## loop
 
@@ -374,3 +374,103 @@ transforms:
 - A group without a row to predict gives an empty `predictions` without running the model, and null for an output of the model, whatever its context is. A group with a row to predict that has no context row, more than 10 classes, or no column left after the constant ones are removed fails by itself.
 - The time and the memory grow quickly with the number of rows of a group: `maxContextRows` bounds the context, but all the rows to predict go to the model. Split a group with too many of them before this transform.
 - For a regression, use the regressor model with `task: regression`, and `quantiles` in `tabular_decode`.
+
+## Example: reading the text of an image
+
+A set of OCR models finds the lines of a page with one model, chooses the script of each line with another, and reads a line with the model of its script. Each is a transform: a page gives a record per line, and only the texts are shuffled, to choose the best reading of a line. The names of the model inputs and outputs, the sizes and the labels below are those of one such set: use those of your models.
+
+```yaml
+transforms:
+  - name: detect
+    module: onnx
+    inputs: [pages]
+    parameters:
+      model: { path: gs://my-bucket/models/ocr/, file: detector.onnx }
+      inputs:
+        - { name: decoded, func: image_decode, field: content }
+        - { name: page, func: image_gray, field: decoded }
+        - { name: small, func: image_resize, field: page, longSide: 1024 }
+        - { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
+        - { name: x, func: image_tensor, field: padded, invert: true }
+      outputs:
+        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15, minArea: 2 }
+        - { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
+        - { name: windows, func: image_crop, field: page, boxes: boxes, height: 96, padX: 0.3, padY: 1.6, invertDark: true }
+        - { name: numbers, func: range, field: boxes }
+  - name: lines
+    module: select
+    inputs: [detect]
+    parameters:
+      select:
+        - { name: id, field: id }
+        - { name: line, func: array_zip, fields: [{ name: number, field: numbers }, { name: band, field: bands }, { name: tall, field: windows }] }
+      flattenField: line
+  - name: script
+    module: onnx
+    inputs: [lines]
+    parameters:
+      model: { path: gs://my-bucket/models/ocr/, file: script.onnx }
+      bufferSize: 4
+      inputs:
+        - { name: decoded, func: image_decode, field: line.band }
+        - { name: gray, func: image_gray, field: decoded }
+        - { name: size, func: image_size, field: gray }
+        - { name: x, func: image_tensor, field: gray, invert: true, pad: { value: 0, multiple: 8 } }
+        - { name: widths, field: size.width }
+      outputs:
+        - { name: best, func: topk, field: p, k: 1 }
+        - { name: first, func: slice, field: best, index: 0 }
+        - { name: confidence, field: first.value }
+        - { name: index, field: first.index }
+        - { name: group, func: labels, field: index, labels: [base, cjk, rtl, world] }
+  - name: route
+    module: partition
+    inputs: [script]
+    parameters:
+      exclusive: false
+      partitions:
+        - name: base
+          filter: { or: [{ key: group, op: "=", value: base }, { key: confidence, op: "<=", value: 0.95 }] }
+        - name: cjk
+          filter: { key: group, op: "=", value: cjk }
+  - name: rec_base
+    module: onnx
+    inputs: [route.base]
+    parameters:
+      model: { path: gs://my-bucket/models/ocr/, file: recognizer.onnx }
+      bufferSize: 4
+      inputs:
+        - { name: decoded, func: image_decode, field: line.tall }
+        - { name: gray, func: image_gray, field: decoded }
+        - { name: size, func: image_size, field: gray }
+        - { name: x, func: image_tensor, field: gray, invert: true, pad: { value: 0, multiple: 8 } }
+        - { name: widths, field: size.width }
+      outputs:
+        - { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: gs://my-bucket/models/ocr/meta.json, key: vocab, normalize: NFC, minConf: 0.5 }
+        - { name: text, field: read.text }
+        - { name: confidence, field: read.conf }
+  # rec_cjk is the same with file: recognizer_cjk.onnx, field: line.band and key: vocab_cjk; rtl and world as well
+  - name: read
+    module: select
+    inputs: [rec_base, rec_cjk]
+    parameters:
+      select:
+        - { name: id, field: id }
+        - { name: number, field: line.number }
+        - { name: text, field: text }
+        - { name: confidence, field: confidence }
+  - name: best
+    module: aggregation
+    inputs: [read]
+    parameters:
+      groupFields: [id, number]
+      aggregations:
+        - input: read
+          fields:
+            - { name: text, op: arg_max, field: text, comparingField: confidence }
+```
+
+- A line the script model is not sure of also goes to `rec_base`, and `best` keeps the reading with the highest confidence.
+- `recognizer.onnx` reads a tall window, the line with the page above and below it, at 96 pixels. The other recognizers read the line at 32 pixels.
+- `numbers` is the order the lines are found in, which is not the reading order of a page of several columns.
+- This is only the models above. It does not detect small text a second time, turn or straighten a page, use a language model for lines of low confidence, put the text of right-to-left scripts in order, or find the reading order.
