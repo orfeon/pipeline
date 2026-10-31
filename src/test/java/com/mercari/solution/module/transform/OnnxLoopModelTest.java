@@ -115,4 +115,17 @@ public class OnnxLoopModelTest implements Serializable {
             """, "no cache");
     }
 
+    // a low temperature, so that the answer stays the same one while the choice goes through topK, topP and the seed
+    @Test
+    public void testSample() throws Exception {
+        run("""
+                          "past_key_values.%d.%s": "present.%d.%s"
+                          token: { func: sample, field: logits, position: last, temperature: 0.3, topK: 50, topP: 0.9, seed: 42 }
+                          generated: { func: array_append, field: generated, valueField: token }
+                          input_ids: { func: array, fields: [token] }
+                          attention_mask: { func: array_append, field: attention_mask, value: 1 }
+                          position_ids: { func: range, field: attention_mask, last: 1 }
+            """, "sample");
+    }
+
 }

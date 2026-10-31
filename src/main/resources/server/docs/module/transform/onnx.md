@@ -2,7 +2,7 @@
 type: Transform Module
 title: Onnx Transform Module
 description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. A loop runs the model again on what it gave, for text generation with a KV cache. Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
-tags: [transform, onnx, ml, inference, machinelearning, batch, streaming]
+tags: [transform, onnx, ml, inference, machinelearning, llm, generation, batch, streaming]
 timestamp: 2026-10-30T00:00:00Z
 ---
 
@@ -130,7 +130,7 @@ Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `
 | parameter     | optional | type | description |
 |---------------|----------|------|-------------|
 | next          | required | Map<String, String or [Select](../common/select.md)\> | What the next run takes, evaluated in order after each run. A string is the name of a model output, which the next run takes as it is. An object is a select function, whose key is its `name`. |
-| until         | required | [Filter](../common/filter.md) | Checked after `next`: the loop stops when it holds. It compares single values: a field that is an array or a matrix is a configuration error. |
+| until         | required | [Filter](../common/filter.md) | Checked after `next`: the loop stops when it holds. It compares single values: a field that is an array or a matrix is a configuration error, as is a filter without a condition. `false` runs every record up to `maxIterations`. |
 | maxIterations | required | Integer | The largest number of runs. Reaching it is not a failure: the record gets the values of the last run. |
 | vars          | optional | Map<String, [Select](../common/select.md)\> | Variables of the loop, set before the first run. `{ value: [], type: array<int64> }` is an empty array. An item of `next` of the same name updates one. |
 

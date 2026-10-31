@@ -17,7 +17,8 @@ import java.util.Map;
 
 /**
  * Select functions that build an array, typically the inputs of the next run of a model in a loop of the onnx transform.
- * A Tensor in the record is left alone, so that the values of a model output are not boxed. A NULL field yields NULL.
+ * A Tensor in the record is left alone, so that the values of a model output are not boxed. {@code array_append} and
+ * {@code range} of a NULL field give NULL, and {@code array} keeps a NULL field as a NULL value of the array.
  *
  * <pre>{@code
  * { "name": "input_ids",      "func": "array",        "fields": ["token"] },

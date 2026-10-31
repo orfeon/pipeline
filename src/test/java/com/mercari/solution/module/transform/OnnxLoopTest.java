@@ -286,6 +286,8 @@ public class OnnxLoopTest implements Serializable {
             assertConfigError(model, entry.getValue(), entry.getKey());
         }
         assertConfigError(model, loop(NEXT, "null", 1), "until must not be null");
+        assertConfigError(model, loop(NEXT, "[]", 1), "until has no condition");
+        assertConfigError(model, loop(NEXT, "{ and: [] }", 1), "until has no condition");
         assertConfigError(model, """
                         next:
                 %s

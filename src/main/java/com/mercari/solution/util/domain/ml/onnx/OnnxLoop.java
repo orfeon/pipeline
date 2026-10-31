@@ -137,7 +137,13 @@ public class OnnxLoop implements Serializable {
         }
 
         final String untilJson = loop.get("until").toString();
-        validateUntil(Filter.parse(untilJson).getRequiredVariables(), new ArrayList<>(context.values()));
+        final Set<String> untilVariables = Filter.parse(untilJson).getRequiredVariables();
+        // a filter without a condition does not hold, and every record would run up to maxIterations: false says that on purpose
+        final JsonElement untilElement = loop.get("until");
+        if(untilVariables.isEmpty() && !(untilElement.isJsonPrimitive() && untilElement.getAsJsonPrimitive().isBoolean())) {
+            throw new IllegalArgumentException("onnx loop.until has no condition: " + untilJson);
+        }
+        validateUntil(untilVariables, new ArrayList<>(context.values()));
 
         // what the functions read: the outputs that only feed the next run are not copied
         final Set<String> valueOutputs = OnnxInputs.mentioned(nextItems + untilJson, outputNames);
