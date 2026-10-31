@@ -449,7 +449,7 @@ public class Vectors implements SelectFunction {
     }
 
     // NaN is never the largest; -1 if there is no other value
-    private static int argmax(final double[] vector) {
+    static int argmax(final double[] vector) {
         int best = -1;
         for(int i=0; i<vector.length; i++) {
             if(!Double.isNaN(vector[i]) && (best < 0 || vector[i] > vector[best])) {

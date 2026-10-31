@@ -130,7 +130,9 @@ public class OnnxTransform extends Transform {
         }
         for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
             if(output.isTensor()) {
-                fields.put(output.name(), Schema.Field.of(output.name(), OnnxToElementConverter.convertFieldType(output, inputs.isBatched())));
+                final Schema.FieldType type = OnnxToElementConverter.convertFieldType(output, inputs.isBatched());
+                // a record that does not ask the model has no value for it
+                fields.put(output.name(), Schema.Field.of(output.name(), inputs.canSkipModel() ? type.withNullable(true) : type));
             }
         }
         return new ArrayList<>(fields.values());
@@ -295,21 +297,31 @@ public class OnnxTransform extends Transform {
                 return;
             }
 
+            final Buffered buffered = new Buffered(input, values, evaluated, c.timestamp());
+            if(inputs.skipsModel(evaluated)) {
+                emit(buffered, new HashMap<>(), emitter(c));
+                return;
+            }
+
             final List<Buffered> buffer = buffers.computeIfAbsent(window, w -> new ArrayList<>());
-            buffer.add(new Buffered(input, values, evaluated, c.timestamp()));
+            buffer.add(buffered);
             if(buffer.size() >= bufferSize) {
                 buffers.remove(window);
-                flush(buffer, new Emitter() {
-                    @Override
-                    public void output(final MElement element, final Instant timestamp) {
-                        c.outputWithTimestamp(element, timestamp);
-                    }
-                    @Override
-                    public void failure(final BadRecord badRecord, final Instant timestamp) {
-                        c.outputWithTimestamp(failureTag, badRecord, timestamp);
-                    }
-                });
+                flush(buffer, emitter(c));
             }
+        }
+
+        private Emitter emitter(final ProcessContext c) {
+            return new Emitter() {
+                @Override
+                public void output(final MElement element, final Instant timestamp) {
+                    c.outputWithTimestamp(element, timestamp);
+                }
+                @Override
+                public void failure(final BadRecord badRecord, final Instant timestamp) {
+                    c.outputWithTimestamp(failureTag, badRecord, timestamp);
+                }
+            };
         }
 
         private void flush(final List<Buffered> buffer, final Emitter emitter) {
@@ -332,18 +344,21 @@ public class OnnxTransform extends Transform {
             }
 
             for(int i=0; i<buffer.size(); i++) {
-                final Buffered buffered = buffer.get(i);
-                final MElement output;
-                try {
-                    output = createOutput(buffered, modelOutputs.get(i));
-                } catch (final Throwable e) {
-                    final BadRecord badRecord = processError("Failed to postprocess onnx output", buffered.element, e, failFast);
-                    emitter.failure(badRecord, buffered.timestamp);
-                    continue;
-                }
-                // outside the try: an error thrown by a fused downstream step is not a failure of this record
-                emitter.output(output, buffered.timestamp);
+                emit(buffer.get(i), modelOutputs.get(i), emitter);
             }
+        }
+
+        private void emit(final Buffered buffered, final Map<String, Object> modelOutputs, final Emitter emitter) {
+            final MElement output;
+            try {
+                output = createOutput(buffered, modelOutputs);
+            } catch (final Throwable e) {
+                final BadRecord badRecord = processError("Failed to postprocess onnx output", buffered.element, e, failFast);
+                emitter.failure(badRecord, buffered.timestamp);
+                return;
+            }
+            // outside the try: an error thrown by a fused downstream step is not a failure of this record
+            emitter.output(output, buffered.timestamp);
         }
 
         private MElement createOutput(final Buffered buffered, final Map<String, Object> modelOutputs) {

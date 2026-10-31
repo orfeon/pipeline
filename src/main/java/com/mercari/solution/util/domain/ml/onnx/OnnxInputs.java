@@ -292,6 +292,16 @@ public class OnnxInputs implements Serializable {
         apply(select, values, timestamp);
     }
 
+    /** Whether a record can have no model outputs, as {@link #skipsModel} leaves nothing to ask the model for it. */
+    public boolean canSkipModel() {
+        return select.getSelectFunctions().stream().anyMatch(SelectFunction::canSkipModel);
+    }
+
+    /** Whether a value of the evaluated {@code values} leaves nothing to ask the model for the record. */
+    public boolean skipsModel(final Map<String, Object> values) {
+        return select.getSelectFunctions().stream().anyMatch(function -> function.skipsModel(values.get(function.getName())));
+    }
+
     /**
      * Evaluates a select list in order on {@code values}, which also receive the results. Functions that do not take a
      * Tensor find every value as a record field would hold it.

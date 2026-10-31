@@ -811,6 +811,61 @@ Turns a matrix of forecast quantiles to an array of structs, one per step of the
 
 Output type: array of ELEMENT with `timestamp` and a field per level, float32 (float64 for float64 values). A level names its field by its decimals, at least two: 0.1 is `q10`, 0.05 is `q05` and 0.975 is `q975`.
 
+### tabular_encode
+
+Turns the rows of a group, such as an `array_agg` result, to the inputs of a tabular model that learns in context. A row with a target is context, and a row without one (null or NaN) is to be predicted. Everything is fitted on the context rows.
+
+| parameter      | optional | type          | description |
+|----------------|----------|---------------|-------------|
+| preset         | required | Enum          | The steps: `kumo`, for Kumo Tabular. |
+| task           | required | Enum          | `classification` or `regression`. |
+| field          | required | String        | Source field: an array of elements. |
+| key            | required | String        | Field of a row that identifies it. Rows are sorted by it, so that the result does not depend on their order. Null or the same key twice fails the record. |
+| target         | required | String        | Field of a row with the value to learn: numeric for a regression, where an infinity fails the record. |
+| numerical      | selective required | Array<String\> | Numeric fields of a row. A null is a missing value. |
+| categorical    | selective required | Array<String\> | Fields of a row with a category: a string, a number, a bool or a time. |
+| maxContextRows | required | Integer       | The largest number of context rows. Over it, a fixed sample of them is taken: a class can be lost from it. |
+
+```yaml
+- { name: tab, func: tabular_encode, preset: kumo, task: classification, field: rows, key: item_id, target: label, numerical: [price], categorical: [brand], maxContextRows: 2000 }
+```
+
+Output type: ELEMENT with
+
+- `x`: array of array of FLOAT32, a row per input row with the context rows first
+- `yContext`: array of INT32 with the number of the class (classification), or array of FLOAT32 with the standardized target (regression)
+- `categoricalMask`: array of BOOLEAN, per column of `x`
+- `queryKeys`: array with the `key` of the rows to predict
+- `classes` (classification): array of STRING, the labels by their number, in ascending order of their values: 9 comes before 10 in a numeric field
+- `yMean`, `yScale` (regression): FLOAT64, what the target was standardized with
+
+The steps of `kumo` are the default recipe of [structured-data-models](https://github.com/NVIDIA/structured-data-models) for one estimator, without its random augmentations:
+
+- A category becomes its number among the values of the context rows in ascending order. A missing or an unknown value is -1. A field of more than 50 values also gets a column with the logarithm of the count of its value.
+- A column with one value in the context rows is removed, unless there is only one context row. Each column is standardized, clipped to ±100 and clipped softly at 4 standard deviations. At most 500 columns are kept: numerical fields, then counts, then categories.
+- A group with a row to predict fails the record if its context has more than 10 classes, no row, or no column left.
+- A group without a row to predict has empty arrays, and no `yMean` and `yScale`.
+
+### tabular_decode
+
+Turns the output of a tabular model to a result per row to predict, with the [`tabular_encode`](#tabular_encode) result.
+
+| parameter | optional | type          | description |
+|-----------|----------|---------------|-------------|
+| preset    | required | Enum          | The steps: `kumo`. |
+| field     | required | String        | Source field: a matrix of two dimensions, a row per row to predict. |
+| encoded   | required | String        | Field with the `tabular_encode` result. |
+| quantiles | optional | Array<Float\> | For a regression: the levels to output, between 0 and 1. The nearest of the outputs of the model is taken, which for 999 outputs are the levels 0.001 to 0.999. |
+
+```yaml
+- { name: predictions, func: tabular_decode, preset: kumo, field: logits, encoded: tab, quantiles: [0.05, 0.5, 0.95] }
+```
+
+Output type: array of ELEMENT, one per row to predict.
+
+- Classification: `key`, `prediction` (STRING, the most likely class, null if the logits of the row are not finite) and `probabilities` (array of ELEMENT with `label` and `probability`, FLOAT64). Only the first columns of the model output are used, as many as the classes.
+- Regression: `key`, `prediction` (FLOAT64, the mean of the outputs of the model in the scale of the target) and a FLOAT64 field per level, named as in [`timeseries_quantiles`](#timeseries_quantiles).
+
 ### cosine_similarity
 
 Cosine similarity of two numeric array fields of equal length (embedding similarity). Returns null when either field is null or has zero norm.
