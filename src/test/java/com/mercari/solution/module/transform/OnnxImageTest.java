@@ -153,6 +153,58 @@ public class OnnxImageTest implements Serializable {
         pipeline.run();
     }
 
+    // an image of any size for a vision encoder, with as many tokens in the prompt as it gives features
+    @Test
+    public void testPatchesOfAnyImage() throws Exception {
+        final short[] data = new short[5 * 9 * 3];
+        Arrays.fill(data, (short) 51);
+        final String image = Base64.getEncoder().encodeToString(ImageTensors.encode(Tensor.of(data, new long[]{5, 9, 3})));
+        final Path model = OnnxTestModels.write(DIR.resolve("patches.onnx"), OnnxTestModels.identity(OnnxTestModels.FLOAT, "rows", "columns", 2L, 2L, 24L));
+        final String config = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - { question: "What?", image: "%s" }
+                    schema:
+                      fields:
+                        - { name: question, type: string }
+                        - { name: image, type: string }
+                transforms:
+                  - name: onnx
+                    module: onnx
+                    inputs: [create]
+                    failFast: true
+                    parameters:
+                      model:
+                        path: "%s"
+                      inputs:
+                        - { name: content, func: base64_decode, field: image, type: bytes }
+                        - { name: decoded, func: image_decode, field: content }
+                        - { name: resized, func: image_resize, field: decoded, multiple: 4, interpolation: bicubic }
+                        - { name: size, func: image_size, field: resized }
+                        - { name: values, func: image_tensor, field: resized }
+                        - { name: x, func: image_patches, field: values, patchSize: 2, mergeSize: 2, temporalSize: 2 }
+                      outputs:
+                        - { name: features, field: y }
+                        - { name: size, field: size }
+                        - { name: prompt, func: text, text: "<#list 1..(size.height/4*size.width/4) as i><|image|></#list>${question}" }
+                """.formatted(image, OnnxTestModels.configPath(model));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+
+        PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
+            final MElement row = rows.iterator().next();
+            Assertions.assertEquals("<|image|><|image|>What?", row.getAsString("prompt"), "two merges of a size of 4 x 8");
+            final List<?> features = (List<?>) row.getPrimitiveValue("features");
+            Assertions.assertEquals(1 * 2 * 2 * 2 * 24, features.size());
+            features.forEach(value -> Assertions.assertEquals(0.2f, ((Number) value).floatValue(), 1e-6f));
+            return null;
+        });
+        pipeline.run();
+    }
+
     // the vocabulary travels in the function: it is read when the pipeline is built
     @Test
     public void testCtcDecodeOfAVocabularyFileInASelect() throws Exception {
@@ -273,6 +325,14 @@ public class OnnxImageTest implements Serializable {
         cases.put(decoded + "- { name: r, func: image_resize, field: i, width: 8 }", "both of width and height");
         cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 0 }", "longSide must be over than zero");
         cases.put(decoded + "- { name: r, func: image_resize, field: i, longSide: 8, interpolation: cubic }", "SelectField: r func: image_resize interpolation must be one of");
+        cases.put(decoded + "- { name: r, func: image_resize, field: i, multiple: 8, longSide: 8 }", "requires one of longSide");
+        cases.put(decoded + "- { name: r, func: image_resize, field: i, maxPixels: 8, width: 8, height: 8 }", "requires one of longSide");
+        cases.put(decoded + "- { name: r, func: image_resize, field: i, multiple: 8, minPixels: 0 }", "minPixels must be over than zero");
+        cases.put(decoded + "- { name: r, func: image_resize, field: i, minPixels: 9, maxPixels: 8 }", "must not be over maxPixels");
+        cases.put(decoded + "- { name: p, func: image_patches, field: i, patchSize: 2 }", "must be the values of image_tensor");
+        cases.put(gray + "- { name: p, func: image_patches, field: g, patchSize: 2 }", "must be a matrix of rank [3]");
+        cases.put(decoded + "- { name: t, func: image_tensor, field: i }\n- { name: p, func: image_patches, field: t }", "requires patchSize");
+        cases.put(decoded + "- { name: t, func: image_tensor, field: i }\n- { name: p, func: image_patches, field: t, patchSize: 0 }", "patchSize must be over than zero");
         cases.put(decoded + "- { name: p, func: image_pad, field: i }", "requires multiple, width or height");
         cases.put(decoded + "- { name: t, func: image_tensor, field: i, layout: nchw }", "layout must be chw or hwc");
         cases.put(decoded + "- { name: t, func: image_tensor, field: i, mean: [] }", "mean must be a number");

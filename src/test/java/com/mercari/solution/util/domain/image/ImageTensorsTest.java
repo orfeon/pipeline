@@ -50,6 +50,84 @@ public class ImageTensorsTest {
         Assertions.assertEquals(List.of(0, 25, 75, 100), values(resized));
     }
 
+    private static void assertNear(final List<Integer> expected, final Tensor actual) {
+        Assertions.assertEquals(expected.size(), actual.size());
+        for(int i=0; i<expected.size(); i++) {
+            Assertions.assertEquals(expected.get(i), actual.getDouble(i), 1d, "at " + i + " of " + actual.toList());
+        }
+    }
+
+    // the values of Pillow
+    @Test
+    public void testResizeBicubic() {
+        Assertions.assertEquals(List.of(7, 106, 212, 70, 11),
+                values(ImageTensors.resize(image(1, 12, 0, 10, 40, 90, 160, 250, 200, 120, 60, 20, 0, 30), 1, 5, ImageTensors.Interpolation.bicubic)), "shrinking counts every value");
+        Assertions.assertEquals(List.of(0, 2, 9, 23, 43, 76, 94),
+                values(ImageTensors.resize(image(1, 4, 0, 10, 40, 90), 1, 7, ImageTensors.Interpolation.bicubic)));
+        Assertions.assertEquals(List.of(0, 17, 43, 47, 88, 130, 99, 158, 217),
+                values(ImageTensors.resize(image(2, 2, 0, 50, 100, 200), 3, 3, ImageTensors.Interpolation.bicubic)));
+
+        // the sharp edges go out of the range after the first pass, which is limited before the second. A tie can go the other way
+        final Tensor edges = image(4, 4, 0, 255, 0, 255, 255, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0);
+        assertNear(List.of(113, 128, 142, 83, 128, 172, 182, 128, 73), ImageTensors.resize(edges, 3, 3, ImageTensors.Interpolation.bicubic));
+        assertNear(List.of(0, 136, 245, 10, 119, 255, 202, 133, 79, 176, 122, 53, 128, 43, 0, 255, 212, 128, 53, 63, 86, 169, 192, 202, 255, 255, 232, 23, 0, 0),
+                ImageTensors.resize(edges, 5, 6, ImageTensors.Interpolation.bicubic));
+
+        // floats have no range
+        final Tensor floats = ImageTensors.resize(Tensor.of(new float[]{0f, 0f, 1f, 1f}, new long[]{1, 4}), 1, 8, ImageTensors.Interpolation.bicubic);
+        Assertions.assertEquals(Tensor.Type.FLOAT, floats.type());
+        Assertions.assertTrue(floats.getDouble(5) > 1d, floats.toList().toString());
+    }
+
+    @Test
+    public void testMultipleSize() {
+        final long none = Long.MAX_VALUE;
+        Assertions.assertArrayEquals(new int[]{480, 640}, ImageTensors.multipleSize(480, 640, 32, 1, none));
+        Assertions.assertArrayEquals(new int[]{384, 512}, ImageTensors.multipleSize(389, 517, 32, 1, none), "the nearest multiples");
+        Assertions.assertArrayEquals(new int[]{64, 64}, ImageTensors.multipleSize(48, 80, 32, 1, none), "half to even: 1.5 and 2.5 give 2");
+        Assertions.assertArrayEquals(new int[]{256, 352}, ImageTensors.multipleSize(480, 640, 32, 65536, 102400), "down to the largest pixels");
+        Assertions.assertArrayEquals(new int[]{1248, 1664}, ImageTensors.multipleSize(480, 640, 32, 2000000, none), "up to the smallest pixels");
+        Assertions.assertArrayEquals(new int[]{224, 352}, ImageTensors.multipleSize(61, 97, 32, 65536, none));
+        Assertions.assertArrayEquals(new int[]{32, 32}, ImageTensors.multipleSize(10, 500, 32, 1, none), "a side that would have no multiple gets one");
+        Assertions.assertArrayEquals(new int[]{32, 320}, ImageTensors.multipleSize(100, 10000, 32, 1, 1024), "and when it is scaled down, even over the pixels");
+        Assertions.assertArrayEquals(new int[]{70, 100}, ImageTensors.multipleSize(140, 200, 1, 1, 7000), "a multiple of 1 only limits the pixels");
+    }
+
+    private static Tensor channelsFirst(final int channels, final int height, final int width) {
+        final float[] values = new float[channels * height * width];
+        for(int c=0; c<channels; c++) {
+            for(int y=0; y<height; y++) {
+                for(int x=0; x<width; x++) {
+                    values[(c * height + y) * width + x] = c * 100 + y * 10 + x;
+                }
+            }
+        }
+        return Tensor.of(values, new long[]{channels, height, width});
+    }
+
+    @Test
+    public void testPatches() {
+        // the patches of a merge next to each other, from left to right and then down, each by channel and by frame
+        final Tensor merged = ImageTensors.patches(channelsFirst(2, 2, 4), 1, 2, 2, false);
+        Assertions.assertArrayEquals(new long[]{1, 2, 2, 2, 4}, merged.shape());
+        Assertions.assertEquals(List.of(
+                0f, 0f, 100f, 100f,   1f, 1f, 101f, 101f,   10f, 10f, 110f, 110f,   11f, 11f, 111f, 111f,
+                2f, 2f, 102f, 102f,   3f, 3f, 103f, 103f,   12f, 12f, 112f, 112f,   13f, 13f, 113f, 113f), values(merged));
+
+        final Tensor flat = ImageTensors.patches(channelsFirst(2, 2, 4), 1, 2, 2, true);
+        Assertions.assertArrayEquals(new long[]{8, 4}, flat.shape());
+        Assertions.assertEquals(values(merged), values(flat));
+
+        // the values of a patch by row, without a merge or frames
+        final Tensor patches = ImageTensors.patches(channelsFirst(1, 2, 4), 2, 1, 1, false);
+        Assertions.assertArrayEquals(new long[]{1, 2, 1, 1, 4}, patches.shape());
+        Assertions.assertEquals(List.of(0f, 1f, 10f, 11f, 2f, 3f, 12f, 13f), values(patches));
+
+        final IllegalArgumentException size = Assertions.assertThrows(IllegalArgumentException.class, () -> ImageTensors.patches(channelsFirst(1, 3, 4), 1, 2, 1, false));
+        Assertions.assertTrue(size.getMessage().contains("multiples of 2"), size.getMessage());
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ImageTensors.patches(Tensor.of(new float[4], new long[]{2, 2}), 1, 1, 1, false));
+    }
+
     @Test
     public void testResizeAuto() {
         final Tensor page = image(1, 4, 0, 100, 0, 100);

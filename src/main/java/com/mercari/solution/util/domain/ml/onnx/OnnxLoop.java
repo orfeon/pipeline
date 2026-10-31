@@ -27,7 +27,8 @@ import java.util.regex.Matcher;
  * in the http source, but after {@code next} here, as what it checks is typically a token chosen from the outputs. An
  * item of {@code next} whose value is the name of a model output gives that tensor to the next run as it is, without a copy
  * and keeping its type, so that a KV cache does not cost more than the model does. An item whose value is a select
- * function is evaluated like an item of {@code inputs}. A model input that is not in {@code next} keeps its tensor.
+ * function is evaluated like an item of {@code inputs}, and {@code empty} or {@code fill} gives a model input that constant
+ * from the second run on. A model input that is not in {@code next} keeps its tensor.
  */
 public class OnnxLoop implements Serializable {
 
@@ -113,6 +114,7 @@ public class OnnxLoop implements Serializable {
         context.put(ITERATION, Schema.Field.of(ITERATION, Schema.FieldType.INT64));
 
         final Map<String, String> feeds = new LinkedHashMap<>();
+        final Map<String, OnnxInputs.ModelInput> constants = new LinkedHashMap<>();
         final JsonArray nextItems = new JsonArray();
         for(final Map.Entry<String, JsonElement> entry : loop.getAsJsonObject("next").entrySet()) {
             final String key = entry.getKey();
@@ -120,7 +122,13 @@ public class OnnxLoop implements Serializable {
             if(value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
                 putFeeds(feeds, key, value.getAsString(), graph);
             } else {
-                nextItems.add(item("next", key, value, outputNames));
+                final JsonObject item = item("next", key, value, outputNames);
+                final OnnxInputs.ModelInput constant = OnnxInputs.constantReplacement(key, item, graph.inputs());
+                if(constant != null) {
+                    constants.put(key, constant);
+                } else {
+                    nextItems.add(item);
+                }
             }
         }
         final Select next = Select.of(nextItems, new ArrayList<>(context.values()));
@@ -134,6 +142,12 @@ public class OnnxLoop implements Serializable {
                 }
                 replacements.put(function.getName(), inputs.replacement(function.getName(), function.getOutputFieldType()));
             }
+        }
+        for(final Map.Entry<String, OnnxInputs.ModelInput> constant : constants.entrySet()) {
+            if(feeds.containsKey(constant.getKey())) {
+                throw new IllegalArgumentException("onnx loop.next: " + constant.getKey() + " is given both a model output and empty or fill");
+            }
+            replacements.put(constant.getKey(), constant.getValue());
         }
 
         final String untilJson = loop.get("until").toString();
@@ -324,6 +338,10 @@ public class OnnxLoop implements Serializable {
                     tensors.put(feed.getKey(), (OnnxTensor) result.get(feed.getValue()).orElseThrow());
                 }
                 for(final Map.Entry<String, OnnxInputs.ModelInput> replacement : replacements.entrySet()) {
+                    // a constant only has to be made once
+                    if(iteration > 0 && replacement.getValue().constant() != null) {
+                        continue;
+                    }
                     close(owned.remove(replacement.getKey()));
                     final OnnxTensor tensor = OnnxInputs.tensor(environment, replacement.getValue(), records);
                     owned.put(replacement.getKey(), tensor);

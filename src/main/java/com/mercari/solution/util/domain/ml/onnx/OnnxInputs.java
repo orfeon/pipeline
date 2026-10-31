@@ -69,7 +69,7 @@ public class OnnxInputs implements Serializable {
                 final JsonObject select = item.deepCopy();
                 select.addProperty("name", name);
                 final Pad pad = parsePad(name, select.remove("pad"));
-                final Constant constant = parseConstant(name, select);
+                final Constant constant = parseConstant("onnx inputs", name, select);
                 if(pad != null) {
                     if(constant != null) {
                         throw new IllegalArgumentException("onnx inputs: " + name + " pad can not be used with empty or fill");
@@ -111,11 +111,7 @@ public class OnnxInputs implements Serializable {
                 throw new IllegalArgumentException("onnx inputs: " + name + " is given both a value and empty or fill");
             }
             if(constant != null) {
-                if(constant.shape != null && constant.shape.length != info.rank()) {
-                    throw new IllegalArgumentException("onnx inputs: " + name + " has rank " + constant.shape.length
-                            + " in its empty or fill, but the model input is " + info);
-                }
-                validateValue(name, "fill", constant.value, info);
+                validateConstant("onnx inputs", name, constant, info);
                 modelInputs.add(new ModelInput(info, null, constant, null, 0, false));
             } else if(valueType == null) {
                 missing.add(info.toString());
@@ -238,7 +234,15 @@ public class OnnxInputs implements Serializable {
         return new Pad(params.get("value").getAsDouble(), side.equals("left"), multiple);
     }
 
-    private static Constant parseConstant(final String name, final JsonObject select) {
+    private static void validateConstant(final String where, final String name, final Constant constant, final OnnxGraphInfo.ValueInfo info) {
+        if(constant.shape != null && constant.shape.length != info.rank()) {
+            throw new IllegalArgumentException(where + ": " + name + " has rank " + constant.shape.length
+                    + " in its empty or fill, but the model input is " + info);
+        }
+        validateValue(name, "fill", constant.value, info);
+    }
+
+    private static Constant parseConstant(final String where, final String name, final JsonObject select) {
         final JsonElement empty = select.remove("empty");
         final JsonElement fill = select.remove("fill");
         final JsonElement shape = select.remove("shape");
@@ -249,33 +253,33 @@ public class OnnxInputs implements Serializable {
             return null;
         }
         if(empty != null && fill != null) {
-            throw new IllegalArgumentException("onnx inputs: " + name + " must not have both empty and fill");
+            throw new IllegalArgumentException(where + ": " + name + " must not have both empty and fill");
         }
         if(select.size() != 1) {
-            throw new IllegalArgumentException("onnx inputs: " + name + " empty or fill can not be used with a select function: " + select);
+            throw new IllegalArgumentException(where + ": " + name + " empty or fill can not be used with a select function: " + select);
         }
         if(empty != null) {
             if(shape != null) {
-                throw new IllegalArgumentException("onnx inputs: " + name + " empty is the shape: shape is not needed");
+                throw new IllegalArgumentException(where + ": " + name + " empty is the shape: shape is not needed");
             }
-            final long[] emptyShape = parseShape(name, empty);
+            final long[] emptyShape = parseShape(where, name, empty);
             if(Arrays.stream(emptyShape).noneMatch(dim -> dim == 0)) {
-                throw new IllegalArgumentException("onnx inputs: " + name + " empty shape must have a dimension of 0: " + empty);
+                throw new IllegalArgumentException(where + ": " + name + " empty shape must have a dimension of 0: " + empty);
             }
             return new Constant(emptyShape, 0);
         }
-        return new Constant(shape == null ? null : parseShape(name, shape), fill.getAsDouble());
+        return new Constant(shape == null ? null : parseShape(where, name, shape), fill.getAsDouble());
     }
 
-    private static long[] parseShape(final String name, final JsonElement shape) {
+    private static long[] parseShape(final String where, final String name, final JsonElement shape) {
         if(!shape.isJsonArray()) {
-            throw new IllegalArgumentException("onnx inputs: " + name + " shape must be an array: " + shape);
+            throw new IllegalArgumentException(where + ": " + name + " shape must be an array: " + shape);
         }
         final long[] dims = new long[shape.getAsJsonArray().size()];
         for(int i=0; i<dims.length; i++) {
             dims[i] = shape.getAsJsonArray().get(i).getAsLong();
             if(dims[i] < 0) {
-                throw new IllegalArgumentException("onnx inputs: " + name + " shape must not have a negative dimension: " + shape);
+                throw new IllegalArgumentException(where + ": " + name + " shape must not have a negative dimension: " + shape);
             }
         }
         return dims;
@@ -306,6 +310,23 @@ public class OnnxInputs implements Serializable {
                     + ", but the model input " + input.info + " takes a value of rank " + expected);
         }
         return new ModelInput(input.info, input.pad, null, fieldType, rank, stacked);
+    }
+
+    /**
+     * The model input {@code name} when {@code empty} or {@code fill} of {@code item} replaces what {@code inputs} gives it,
+     * or null if {@code item} has neither, in which case it is left as it was.
+     */
+    static ModelInput constantReplacement(final String name, final JsonObject item, final Map<String, OnnxGraphInfo.ValueInfo> modelInputInfos) {
+        final Constant constant = parseConstant("onnx loop.next", name, item);
+        if(constant == null) {
+            return null;
+        }
+        final OnnxGraphInfo.ValueInfo info = modelInputInfos.get(name);
+        if(info == null) {
+            throw new IllegalArgumentException("onnx loop.next: " + name + " has empty or fill, but it is not a model input: " + modelInputInfos.keySet());
+        }
+        validateConstant("onnx loop.next", name, constant, info);
+        return new ModelInput(info, null, constant, null, 0, false);
     }
 
     /** dim0 of the model outputs is the batch if a value was stacked on a new dim0; otherwise an output is the value of the record. */

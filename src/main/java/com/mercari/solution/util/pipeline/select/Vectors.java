@@ -65,6 +65,7 @@ public class Vectors implements SelectFunction {
     private final int[] axis;
     private final List<String> labels;
     private final String groups;
+    private final double temperature;
     private final boolean last;
     private final Slice slice;
     private final Sampling sampling;
@@ -85,6 +86,7 @@ public class Vectors implements SelectFunction {
             final int[] axis,
             final List<String> labels,
             final String groups,
+            final double temperature,
             final boolean last,
             final Slice slice,
             final Sampling sampling,
@@ -103,6 +105,7 @@ public class Vectors implements SelectFunction {
         this.axis = axis;
         this.labels = labels;
         this.groups = groups;
+        this.temperature = temperature;
         this.last = last;
         this.slice = slice;
         this.sampling = sampling;
@@ -142,6 +145,7 @@ public class Vectors implements SelectFunction {
         int[] axis = null;
         List<String> labels = null;
         String groups = null;
+        double temperature = 1d;
         Schema.Field groupsField = null;
         Slice slice = null;
         Sampling sampling = null;
@@ -214,6 +218,12 @@ public class Vectors implements SelectFunction {
                 }
                 final String groupsFieldName = ElementSchemaUtil.getInputFieldName(groups, inputFields);
                 groupsField = Schema.Field.of(groupsFieldName, ElementSchemaUtil.getInputFieldType(groupsFieldName, inputFields));
+                if(jsonObject.has("temperature")) {
+                    temperature = jsonObject.get("temperature").getAsDouble();
+                    if(!(temperature > 0)) {
+                        throw new IllegalArgumentException("SelectField: " + name + " func: group_softmax temperature must be over than zero: " + temperature);
+                    }
+                }
                 outputFieldType = Schema.FieldType.array(realType);
             }
             case slice -> {
@@ -227,7 +237,7 @@ public class Vectors implements SelectFunction {
             }
             default -> throw new IllegalArgumentException("Not supported vector func: " + op);
         }
-        return new Vectors(name, op, field, size, k, axis, labels, groups, last, slice, sampling, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
+        return new Vectors(name, op, field, size, k, axis, labels, groups, temperature, last, slice, sampling, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
     }
 
     // position: last, for a model that gives the values of every position of a sequence
@@ -454,7 +464,14 @@ public class Vectors implements SelectFunction {
             case squeeze -> squeeze(value);
             case group_softmax -> {
                 final Object ids = ElementSchemaUtil.getValue(input, groups);
-                yield ids == null ? null : values(softmax(groupMaxima(vector(value), ids)));
+                if(ids == null) {
+                    yield null;
+                }
+                final double[] maxima = groupMaxima(vector(value), ids);
+                for(int g=0; g<maxima.length; g++) {
+                    maxima[g] /= temperature;
+                }
+                yield values(softmax(maxima));
             }
             case slice -> slice(value);
             case sample -> {
