@@ -15,6 +15,7 @@ import java.awt.image.WritableRaster;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -186,6 +187,34 @@ public final class ImageTensors {
             gray[i] = (short) ((values[p] * GRAY_R + values[p + 1] * GRAY_G + values[p + 2] * GRAY_B + (1 << (GRAY_SHIFT - 1))) >> GRAY_SHIFT);
         }
         return Tensor.of(gray, shape).as(image.type());
+    }
+
+    /** {@code [H, W, channels]} of 1 or 3 channels: three of the same value for a gray image, or the gray of a color one. */
+    public static Tensor withChannels(final Tensor image, final int channels) {
+        final int current = channels(image);
+        if(image.rank() == 3 && current == channels) {
+            return image;
+        }
+        final long height = height(image);
+        final long width = width(image);
+        if(channels == 1) {
+            return gray(image).reshaped(new long[]{height, width, 1});
+        }
+        if(channels != 3 || current != 1) {
+            throw new IllegalArgumentException("An image of 1 channel can have 3, and one of 3 channels can have 1, but got " + channels + " for: " + image);
+        }
+        final List<Object> values = image.asList();
+        final List<Object> repeated = new AbstractList<>() {
+            @Override
+            public Object get(final int index) {
+                return values.get(index / 3);
+            }
+            @Override
+            public int size() {
+                return values.size() * 3;
+            }
+        };
+        return Tensor.of(image.type(), repeated, new long[]{height, width, 3});
     }
 
     /** The size that fits a long side or a short side, rounding as Python does: {@code [height, width]}. */

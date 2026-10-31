@@ -393,7 +393,7 @@ transforms:
         - { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
         - { name: x, func: image_tensor, field: padded, invert: true }
       outputs:
-        - { name: boxes, func: text_line_boxes, field: out, imageField: page, longSide: 1024 }
+        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
         - { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
         - { name: windows, func: image_crop, field: page, boxes: boxes, height: 96, padX: 0.3, padY: 1.6, invertDark: true }
         - { name: numbers, func: range, field: boxes }

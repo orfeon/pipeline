@@ -72,7 +72,7 @@ public class OnnxImageTest implements Serializable {
                         - { name: page, func: image_gray, field: decoded }
                         - { name: x, func: image_tensor, field: decoded, scale: 1 }
                       outputs:
-                        - { name: boxes, func: text_line_boxes, field: y, imageField: page, longSide: 16 }
+                        - { name: boxes, func: text_line_boxes, field: y, imageField: page, resizedField: page }
                         - { name: components, func: connected_components, field: page, threshold: 10 }
                         - { name: size, func: image_size, field: page }
                         - { name: lines, func: image_crop, field: page, boxes: boxes, height: 8, padX: 0.3, padY: 0.2, invertDark: true }
@@ -284,8 +284,12 @@ public class OnnxImageTest implements Serializable {
         cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id }", "requires height");
         cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id, height: 8 }", "must be an array of x0");
         cases.put(decoded + "- { name: c, func: image_crop, field: i, boxes: id, height: 8, minWidth: 100, maxWidth: 50 }", "must not be over maxWidth");
-        cases.put(gray + "- { name: b, func: text_line_boxes, field: i, imageField: g }", "requires imageField and longSide");
-        cases.put(gray + "- { name: b, func: text_line_boxes, field: g, imageField: g, longSide: 8 }", "must be a matrix of rank [3]");
+        cases.put(gray + "- { name: b, func: text_line_boxes, field: i, imageField: g }", "requires imageField and resizedField");
+        cases.put(gray + "- { name: b, func: text_line_boxes, field: i, resizedField: g }", "requires imageField and resizedField");
+        cases.put(gray + "- { name: b, func: text_line_boxes, field: g, imageField: g, resizedField: g }", "must be a matrix of rank [3]");
+        cases.put(gray + "- { name: b, func: text_line_boxes, field: i, imageField: g, resizedField: id }", "must be a matrix of rank");
+        cases.put("- { name: i, func: image_decode, field: content, channels: 2 }", "channels must be 1 or 3");
+        cases.put("- { name: i, func: image_decode, field: content, channels: 1 }\n- { name: t, func: image_tensor, field: i, mean: [1, 2, 3] }", "mean and std must have one value or one per channel");
         for(final Map.Entry<String, String> entry : cases.entrySet()) {
             assertConfigError(entry.getKey(), entry.getValue());
         }

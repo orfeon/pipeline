@@ -130,6 +130,26 @@ public class ImageTensorsTest {
     }
 
     @Test
+    public void testWithChannels() {
+        final Tensor one = Tensor.of(new short[]{7, 8}, new long[]{1, 2, 1});
+        final Tensor three = ImageTensors.withChannels(one, 3);
+        Assertions.assertArrayEquals(new long[]{1, 2, 3}, three.shape());
+        Assertions.assertEquals(List.of(7, 7, 7, 8, 8, 8), values(three));
+        Assertions.assertEquals(Tensor.Type.INT16, three.type());
+        Assertions.assertSame(one, ImageTensors.withChannels(one, 1));
+
+        final Tensor color = Tensor.of(new short[]{255, 0, 0}, new long[]{1, 1, 3});
+        Assertions.assertSame(color, ImageTensors.withChannels(color, 3));
+        final Tensor gray = ImageTensors.withChannels(color, 1);
+        Assertions.assertArrayEquals(new long[]{1, 1, 1}, gray.shape());
+        Assertions.assertEquals(List.of(76), values(gray));
+
+        Assertions.assertArrayEquals(new long[]{1, 2, 3}, ImageTensors.withChannels(image(1, 2, 7, 8), 3).shape(), "of [H, W]");
+        Assertions.assertArrayEquals(new long[]{1, 2, 1}, ImageTensors.withChannels(image(1, 2, 7, 8), 1).shape(), "of [H, W]");
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ImageTensors.withChannels(Tensor.of(new short[]{1, 2}, new long[]{1, 1, 2}), 3));
+    }
+
+    @Test
     public void testPad() {
         final Tensor padded = ImageTensors.pad(image(1, 2, 1, 2), 1, 1, 4, 255f);
         Assertions.assertArrayEquals(new long[]{4, 4}, padded.shape());

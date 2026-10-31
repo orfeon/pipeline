@@ -86,7 +86,7 @@ public class OnnxIndraModelTest implements Serializable {
                         - { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
                         - { name: x, func: image_tensor, field: padded, invert: true }
                       outputs:
-                        - { name: boxes, func: text_line_boxes, field: out, imageField: page, longSide: 1024 }
+                        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
                         - { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
                         - { name: windows, func: image_crop, field: page, boxes: boxes, height: 96, padX: 0.3, padY: 1.6, invertDark: true }
                         - { name: numbers, func: range, field: boxes }
@@ -181,7 +181,7 @@ public class OnnxIndraModelTest implements Serializable {
     // Korean through rec_cjk with its jamo composed, next to the English of the same page through rec
     @Test
     public void testKorean() throws IOException {
-        read("scan.png", List.of("DIOCESE OF SEOUL", "주님의 평화", "코로나19"));
+        read("scan.png", List.of("DIOCESE OF SEOUL", "주님의 평화", "코로나19", "전화 (02)735-6157 / 팩스 (02)723-2640"));
     }
 
     @Test

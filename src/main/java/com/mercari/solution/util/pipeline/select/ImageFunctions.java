@@ -23,7 +23,7 @@ import java.util.*;
  * { "name": "small",  "func": "image_resize", "field": "gray", "longSide": 1024 },
  * { "name": "padded", "func": "image_pad",    "field": "small", "multiple": 32, "value": 255 },
  * { "name": "x",      "func": "image_tensor", "field": "padded", "invert": true },
- * { "name": "boxes",  "func": "text_line_boxes", "field": "output", "imageField": "gray", "longSide": 1024 },
+ * { "name": "boxes",  "func": "text_line_boxes", "field": "output", "imageField": "gray", "resizedField": "small" },
  * { "name": "lines",  "func": "image_crop",   "field": "gray", "boxes": "boxes", "height": 32, "invertDark": true }
  * }</pre>
  */
@@ -46,6 +46,7 @@ public class ImageFunctions implements SelectFunction {
 
     private record Options(
             long maxPixels,
+            Integer channels,
             Integer width,
             Integer height,
             Integer longSide,
@@ -69,7 +70,8 @@ public class ImageFunctions implements SelectFunction {
             int minArea,
             int stride,
             double xShrink,
-            String imageField) implements Serializable {}
+            String imageField,
+            String resizedField) implements Serializable {}
 
     private final String name;
     private final Op op;
@@ -120,7 +122,7 @@ public class ImageFunctions implements SelectFunction {
         ArrayFunctions.putParent(parents, field, inputFields);
 
         final Options options = parseOptions(name, jsonObject, op, type, inputFields, parents);
-        return new ImageFunctions(name, op, field, options, new ArrayList<>(parents.values()), outputType(op, type), ignore);
+        return new ImageFunctions(name, op, field, options, new ArrayList<>(parents.values()), outputType(op, type, options), ignore);
     }
 
     private static Options parseOptions(
@@ -134,6 +136,10 @@ public class ImageFunctions implements SelectFunction {
         final long maxPixels = json.has("maxPixels") ? json.get("maxPixels").getAsLong() : DEFAULT_MAX_PIXELS;
         if(maxPixels < 1) {
             throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " maxPixels must be over than zero: " + maxPixels);
+        }
+        final Integer channels = positive(name, op, json, "channels");
+        if(channels != null && channels != 1 && channels != 3) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " channels must be 1 or 3: " + channels);
         }
         final Integer width = positive(name, op, json, "width");
         final Integer height = positive(name, op, json, "height");
@@ -165,6 +171,7 @@ public class ImageFunctions implements SelectFunction {
 
         String boxes = null;
         String imageField = null;
+        String resizedField = null;
         switch (op) {
             case image_resize -> {
                 final int sizes = (longSide != null ? 1 : 0) + (shortSide != null ? 1 : 0) + (width != null || height != null ? 1 : 0);
@@ -207,21 +214,24 @@ public class ImageFunctions implements SelectFunction {
             }
             case image_tensor -> validateChannels(name, type, mean, std);
             case text_line_boxes -> {
-                if(!json.has("imageField") || longSide == null) {
-                    throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes requires imageField and longSide, the image before it was resized and the long side it was resized to");
+                if(!json.has("imageField") || !json.has("resizedField")) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes requires imageField and resizedField, the image before and after it was resized");
                 }
                 imageField = json.get("imageField").getAsString();
                 requireMatrix(name, op, imageField, ElementSchemaUtil.getInputFieldType(imageField, inputFields), 2, 3);
                 ArrayFunctions.putParent(parents, imageField, inputFields);
+                resizedField = json.get("resizedField").getAsString();
+                requireMatrix(name, op, resizedField, ElementSchemaUtil.getInputFieldType(resizedField, inputFields), 2, 3);
+                ArrayFunctions.putParent(parents, resizedField, inputFields);
             }
             default -> {}
         }
-        return new Options(maxPixels, width, height, longSide, shortSide, interpolation,
+        return new Options(maxPixels, channels, width, height, longSide, shortSide, interpolation,
                 multiple == null ? 1 : multiple, value, boxes, padX, padY,
                 minWidth, maxWidth, invertDark,
                 scale, invert, mean, std, channelFirst, threshold, connectivity,
                 minArea == null ? (op == Op.text_line_boxes ? 2 : 1) : minArea,
-                stride == null ? 2 : stride, xShrink, imageField);
+                stride == null ? 2 : stride, xShrink, imageField, resizedField);
     }
 
     private static ImageTensors.Interpolation parseInterpolation(final String name, final Op op, final JsonObject json) {
@@ -301,10 +311,10 @@ public class ImageFunctions implements SelectFunction {
         }
     }
 
-    private static Schema.FieldType outputType(final Op op, final Schema.FieldType type) {
+    private static Schema.FieldType outputType(final Op op, final Schema.FieldType type, final Options options) {
         final Schema.FieldType int16 = Schema.FieldType.type(Schema.Type.int16).withNullable(false);
         return switch (op) {
-            case image_decode -> Schema.FieldType.matrix(int16, List.of(-1, -1, -1));
+            case image_decode -> Schema.FieldType.matrix(int16, List.of(-1, -1, options.channels == null ? -1 : options.channels));
             case image_encode -> Schema.FieldType.BYTES;
             case image_gray -> Schema.FieldType.matrix(type.getMatrixValueType(), List.of(-1, -1));
             case image_resize, image_pad -> Schema.FieldType.matrix(type.getMatrixValueType(), dynamicShape(type));
@@ -377,7 +387,10 @@ public class ImageFunctions implements SelectFunction {
             return null;
         }
         return switch (op) {
-            case image_decode -> ImageTensors.decode(bytes(value), options.maxPixels);
+            case image_decode -> {
+                final Tensor image = ImageTensors.decode(bytes(value), options.maxPixels);
+                yield options.channels == null ? image : ImageTensors.withChannels(image, options.channels);
+            }
             case image_encode -> ByteBuffer.wrap(ImageTensors.encode(tensor(field, value)));
             case image_gray -> ImageTensors.gray(tensor(field, value));
             case image_resize -> resize(tensor(field, value));
@@ -395,7 +408,7 @@ public class ImageFunctions implements SelectFunction {
                 yield size;
             }
             case connected_components -> components(tensor(field, value));
-            case text_line_boxes -> lines(tensor(field, value), ElementSchemaUtil.getValue(input, options.imageField));
+            case text_line_boxes -> lines(tensor(field, value), ElementSchemaUtil.getValue(input, options.imageField), ElementSchemaUtil.getValue(input, options.resizedField));
         };
     }
 
@@ -447,22 +460,31 @@ public class ImageFunctions implements SelectFunction {
         return components;
     }
 
-    // in pixels of the image before it was resized to the long side the model took
-    private List<Map<String, Object>> lines(final Tensor output, final Object imageValue) {
-        if(imageValue == null) {
+    // in pixels of the image before it was resized
+    private List<Map<String, Object>> lines(final Tensor output, final Object imageValue, final Object resizedValue) {
+        if(imageValue == null || resizedValue == null) {
             return null;
         }
         final Tensor image = tensor(options.imageField, imageValue);
+        final Tensor resized = tensor(options.resizedField, resizedValue);
         final int height = ImageTensors.height(image);
         final int width = ImageTensors.width(image);
-        final double scale = (double) options.longSide / Math.max(height, width);
+        final int resizedHeight = ImageTensors.height(resized);
+        final int resizedWidth = ImageTensors.width(resized);
+        // a size that keeps the ratio has one scale, that of the long side, as the rounding of the other side is no part of it.
+        // It moves a box by less than a pixel, which was enough to change the reading of a line on a real page
+        final double scale = (double) Math.max(resizedHeight, resizedWidth) / Math.max(height, width);
+        final int[] fitted = ImageTensors.fittedSize(height, width, Math.max(resizedHeight, resizedWidth), null);
+        final boolean keepsRatio = fitted[0] == resizedHeight && fitted[1] == resizedWidth;
+        final double scaleX = keepsRatio ? scale : (double) resizedWidth / width;
+        final double scaleY = keepsRatio ? scale : (double) resizedHeight / height;
         final List<Map<String, Object>> lines = new ArrayList<>();
         for(final ImageTensors.Line line : ImageTensors.textLines(output, options.threshold, options.minArea, options.stride, options.xShrink)) {
             final Map<String, Object> values = new HashMap<>();
-            values.put("x0", clip(line.x0() / scale, width));
-            values.put("y0", clip(line.y0() / scale, height));
-            values.put("x1", clip(line.x1() / scale, width));
-            values.put("y1", clip(line.y1() / scale, height));
+            values.put("x0", clip(line.x0() / scaleX, width));
+            values.put("y0", clip(line.y0() / scaleY, height));
+            values.put("x1", clip(line.x1() / scaleX, width));
+            values.put("y1", clip(line.y1() / scaleY, height));
             values.put("score", line.score());
             lines.add(values);
         }

@@ -963,9 +963,10 @@ Image functions work in the `inputs` and `outputs` of the [onnx transform](onnx.
 |-----------|----------|--------|-------------|
 | field     | required | String | Source field: bytes. |
 | maxPixels | optional | Long   | An image of more pixels is read with rows and columns skipped, at the same step, down to this many at most. Default: 40000000. |
+| channels  | optional | Integer | 1 or 3, whatever the file has: 3 for a model that takes RGB, as a grayscale file would have one channel otherwise. 1 is the gray of [`image_gray`](#image_gray). Default: what the file has. |
 
 ```yaml
-- { name: decoded, func: image_decode, field: content }
+- { name: decoded, func: image_decode, field: content, channels: 3 }
 ```
 
 ### image_encode
@@ -1026,7 +1027,7 @@ The float values a model takes: `value * scale`, then `1 - value` if `invert`, t
 | field     | required | String                  | Source field: an image. |
 | scale     | optional | Float                   | Default: 1 / 255. |
 | invert    | optional | Boolean                 | For ink on paper: dark text gives values near 1. Default: `false`. |
-| mean, std | optional | Float or Array<Float\> | One value, or one per channel. A grayscale file has one channel when it is decoded: three values fail its record. |
+| mean, std | optional | Float or Array<Float\> | One value, or one per channel. Three values fail the record of a grayscale file, unless `image_decode` has `channels: 3`. |
 | layout    | optional | Enum                    | `chw` or `hwc`. An image of `[H, W]` gets a channel. Default: `chw`. |
 
 ```yaml
@@ -1079,15 +1080,15 @@ The boxes of the lines of a page from a model that gives the logit of the band i
 | parameter  | optional | type    | description |
 |------------|----------|---------|-------------|
 | field      | required | String  | Source field: a matrix of `[C, h, w]`, whose channels 0, 1 and 2 are the logit and the distances. The others are not read. |
-| imageField | required | String  | The image before it was resized, which limits the boxes. |
-| longSide   | required | Integer | The long side it was resized to. |
+| imageField | required | String  | The image before it was resized, whose size limits the boxes. |
+| resizedField | required | String | The image after it was resized and before it was padded. A size that keeps the ratio has the scale of the long side, and another size one scale per dimension. |
 | threshold  | optional | Float   | On the probability of a pixel. Default: 0.5. |
 | minArea    | optional | Integer | In pixels of the model output. Default: 2. |
 | stride     | optional | Integer | Pixels of the model input for one of its output. Default: 2. |
 | xShrink    | optional | Float   | How much shorter the band is than the line on each side, in times the height of the line. Default: 0.15. |
 
 ```yaml
-- { name: boxes, func: text_line_boxes, field: out, imageField: page, longSide: 1024 }
+- { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
 ```
 
 ### ctc_decode
