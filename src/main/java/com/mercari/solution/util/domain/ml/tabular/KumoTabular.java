@@ -1,6 +1,7 @@
 package com.mercari.solution.util.domain.ml.tabular;
 
 import com.mercari.solution.util.domain.math.Tensor;
+import com.mercari.solution.util.pipeline.glm.GlmFit;
 
 import java.util.*;
 
@@ -96,19 +97,10 @@ public final class KumoTabular {
         final double[][] probabilities = new double[rows][classes];
         for(int r=0; r<rows; r++) {
             final double[] row = probabilities[r];
-            double max = Double.NEGATIVE_INFINITY;
             for(int k=0; k<classes; k++) {
                 row[k] = logits.getDouble(r * width + k);
-                max = Math.max(max, row[k]);
             }
-            double sum = 0;
-            for(int k=0; k<classes; k++) {
-                row[k] = Math.exp(row[k] - max);
-                sum += row[k];
-            }
-            for(int k=0; k<classes; k++) {
-                row[k] /= sum;
-            }
+            GlmFit.softmax(row, row);
         }
         return probabilities;
     }

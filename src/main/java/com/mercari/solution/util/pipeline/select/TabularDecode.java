@@ -163,20 +163,18 @@ public class TabularDecode implements SelectFunction {
         final double[][] probabilities = KumoTabular.probabilities(logits, keys.size(), classes.size());
         final List<Map<String, Object>> results = new ArrayList<>(keys.size());
         for(int r=0; r<keys.size(); r++) {
-            int best = 0;
             final List<Map<String, Object>> items = new ArrayList<>(classes.size());
             for(int k=0; k<classes.size(); k++) {
-                if(probabilities[r][k] > probabilities[r][best]) {
-                    best = k;
-                }
                 final Map<String, Object> item = new HashMap<>();
                 item.put("label", classes.get(k));
                 item.put("probability", probabilities[r][k]);
                 items.add(item);
             }
+            // logits that are not finite leave no most likely class, rather than the first one
+            final int best = Vectors.argmax(probabilities[r]);
             final Map<String, Object> result = new HashMap<>();
             result.put("key", keys.get(r));
-            result.put("prediction", classes.get(best));
+            result.put("prediction", best < 0 ? null : classes.get(best));
             result.put("probabilities", items);
             results.add(result);
         }

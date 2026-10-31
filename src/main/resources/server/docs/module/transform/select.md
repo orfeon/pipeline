@@ -821,7 +821,7 @@ Turns the rows of a group, such as an `array_agg` result, to the inputs of a tab
 | task           | required | Enum          | `classification` or `regression`. |
 | field          | required | String        | Source field: an array of elements. |
 | key            | required | String        | Field of a row that identifies it. Rows are sorted by it, so that the result does not depend on their order. Null or the same key twice fails the record. |
-| target         | required | String        | Field of a row with the value to learn: numeric for a regression. |
+| target         | required | String        | Field of a row with the value to learn: numeric for a regression, where an infinity fails the record. |
 | numerical      | selective required | Array<String\> | Numeric fields of a row. A null is a missing value. |
 | categorical    | selective required | Array<String\> | Fields of a row with a category: a string, a number, a bool or a time. |
 | maxContextRows | required | Integer       | The largest number of context rows. Over it, a fixed sample of them is taken: a class can be lost from it. |
@@ -842,7 +842,7 @@ Output type: ELEMENT with
 The steps of `kumo` are the default recipe of [structured-data-models](https://github.com/NVIDIA/structured-data-models) for one estimator, without its random augmentations:
 
 - A category becomes its number among the values of the context rows in ascending order. A missing or an unknown value is -1. A field of more than 50 values also gets a column with the logarithm of the count of its value.
-- A column with one value in the context rows is removed. Each column is standardized, clipped to ±100 and clipped softly at 4 standard deviations. At most 500 columns are kept: numerical fields, then counts, then categories.
+- A column with one value in the context rows is removed, unless there is only one context row. Each column is standardized, clipped to ±100 and clipped softly at 4 standard deviations. At most 500 columns are kept: numerical fields, then counts, then categories.
 - A context with more than 10 classes, without a context row, or without a column left fails the record.
 
 ### tabular_decode
@@ -862,7 +862,7 @@ Turns the output of a tabular model to a result per row to predict, with the [`t
 
 Output type: array of ELEMENT, one per row to predict.
 
-- Classification: `key`, `prediction` (STRING, the most likely class) and `probabilities` (array of ELEMENT with `label` and `probability`, FLOAT64). Only the first columns of the model output are used, as many as the classes.
+- Classification: `key`, `prediction` (STRING, the most likely class, null if the logits of the row are not finite) and `probabilities` (array of ELEMENT with `label` and `probability`, FLOAT64). Only the first columns of the model output are used, as many as the classes.
 - Regression: `key`, `prediction` (FLOAT64, the mean of the outputs of the model in the scale of the target) and a FLOAT64 field per level, named as in [`timeseries_quantiles`](#timeseries_quantiles).
 
 ### cosine_similarity

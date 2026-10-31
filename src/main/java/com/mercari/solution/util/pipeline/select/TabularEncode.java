@@ -91,11 +91,11 @@ public class TabularEncode implements SelectFunction {
         final List<Schema.Field> rowFields = type.getArrayValueType().getElementSchema().getFields();
 
         final String key = jsonObject.get("key").getAsString();
-        final Schema.FieldType keyType = ElementSchemaUtil.getInputFieldType(key, rowFields);
+        final Schema.FieldType keyType = rowFieldType(name, "key", key, rowFields);
         requireScalar(name, "key", key, keyType);
 
         final String target = jsonObject.get("target").getAsString();
-        final Schema.FieldType targetType = ElementSchemaUtil.getInputFieldType(target, rowFields);
+        final Schema.FieldType targetType = rowFieldType(name, "target", target, rowFields);
         if(task == Task.regression && !Vectors.isNumeric(targetType)) {
             throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode target: " + target + " of a regression must be numeric, but got: " + targetType);
         }
@@ -108,7 +108,7 @@ public class TabularEncode implements SelectFunction {
         }
         final Set<String> features = new HashSet<>();
         for(final String feature : numerical) {
-            final Schema.FieldType featureType = ElementSchemaUtil.getInputFieldType(feature, rowFields);
+            final Schema.FieldType featureType = rowFieldType(name, "numerical", feature, rowFields);
             if(!Vectors.isNumeric(featureType)) {
                 throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode numerical: " + feature + " must be numeric, but got: " + featureType);
             }
@@ -117,7 +117,7 @@ public class TabularEncode implements SelectFunction {
             }
         }
         for(final String feature : categorical) {
-            requireScalar(name, "categorical", feature, ElementSchemaUtil.getInputFieldType(feature, rowFields));
+            requireScalar(name, "categorical", feature, rowFieldType(name, "categorical", feature, rowFields));
             if(!features.add(feature)) {
                 throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode has feature: " + feature + " more than once");
             }
@@ -163,6 +163,28 @@ public class TabularEncode implements SelectFunction {
             names.add(item.getAsString());
         }
         return names;
+    }
+
+    // a nested path through an array has the type of its child, but the value of a row is a list
+    private static Schema.FieldType rowFieldType(final String name, final String parameter, final String field, final List<Schema.Field> rowFields) {
+        if(crossesArray(field, rowFields)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode " + parameter + ": " + field + " must not be a path through an array");
+        }
+        return ElementSchemaUtil.getInputFieldType(field, rowFields);
+    }
+
+    private static boolean crossesArray(final String field, final List<Schema.Field> fields) {
+        // an exact name comes first: a field name may contain dots
+        if(!field.contains(".") || fields.stream().anyMatch(f -> field.equals(f.getName()))) {
+            return false;
+        }
+        final String[] path = field.split("\\.", 2);
+        final Schema.FieldType parent = ElementSchemaUtil.getInputFieldType(path[0], fields);
+        return switch (parent.getType()) {
+            case array -> true;
+            case element -> crossesArray(path[1], parent.getElementSchema().getFields());
+            default -> false;
+        };
     }
 
     private static void requireScalar(final String name, final String parameter, final String field, final Schema.FieldType type) {
@@ -329,7 +351,8 @@ public class TabularEncode implements SelectFunction {
     private List<String> labels(final List<Map<?, ?>> context) {
         final List<String> labels = new ArrayList<>(context.size());
         for(final Map<?, ?> row : context) {
-            labels.add(comparable(ElementSchemaUtil.getValue(row, target)).toString());
+            // the value as it is: comparable would widen a float, and 0.1 would become 0.10000000149011612
+            labels.add(ElementSchemaUtil.getValue(row, target).toString());
         }
         return labels;
     }
@@ -338,6 +361,10 @@ public class TabularEncode implements SelectFunction {
         final double[] values = new double[context.size()];
         for(int i=0; i<values.length; i++) {
             values[i] = ((Number) ElementSchemaUtil.getValue(context.get(i), target)).doubleValue();
+            // the scale leaves it out, so yContext would give it to the model as it is
+            if(Double.isInfinite(values[i])) {
+                throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode target: " + target + " is infinite in the row of key: " + ElementSchemaUtil.getValue(context.get(i), key));
+            }
         }
         final KumoTabular.Scale scale = KumoTabular.scale(values);
         final List<Float> standardized = new ArrayList<>(values.length);

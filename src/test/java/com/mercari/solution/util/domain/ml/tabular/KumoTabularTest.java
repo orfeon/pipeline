@@ -189,8 +189,6 @@ public class KumoTabularTest {
         }
         // a frequent value, so that the count column is not constant
         many[1] = "v0";
-        final Comparable<?>[] fiftyOne = many.clone();
-        fiftyOne[1] = "other";
         final List<Comparable<?>[]> columns = new ArrayList<>();
         columns.add(many);
         final KumoTabular.Features fifty = KumoTabular.features(List.of(), columns, rows + 1, rows);

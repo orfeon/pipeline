@@ -19,7 +19,8 @@ public class TabularTest {
             Schema.Field.of("label", Schema.FieldType.STRING),
             Schema.Field.of("amount", Schema.FieldType.FLOAT64),
             Schema.Field.of("tags", Schema.FieldType.array(Schema.FieldType.STRING)),
-            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("size", Schema.FieldType.FLOAT32)))));
+            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("size", Schema.FieldType.FLOAT32)))),
+            Schema.Field.of("items", Schema.FieldType.array(Schema.FieldType.element(List.of(Schema.Field.of("size", Schema.FieldType.FLOAT32))))));
 
     private static final List<Schema.Field> FIELDS = List.of(
             Schema.Field.of("rows", Schema.FieldType.array(Schema.FieldType.element(ROW_FIELDS))),
@@ -118,6 +119,29 @@ public class TabularTest {
         Assertions.assertEquals(List.of(3L, 4L), encoded.get("queryKeys"));
     }
 
+    // an infinity is left out of the scale, so that yContext would give it to the model
+    @Test
+    public void testInfiniteRegressionTarget() {
+        final Exception e = failure(encoder(REGRESSION), List.of(
+                row(1, 1d, "a", null, 1d),
+                row(2, 2d, "a", null, Double.POSITIVE_INFINITY),
+                row(3, 3d, "a", null, null)));
+        Assertions.assertTrue(e.getMessage().contains("infinite"), e.getMessage());
+    }
+
+    // the label of a float is what the field holds, not its value widened to a double
+    @Test
+    public void testFloatLabels() {
+        final String parameters = "\"preset\": \"kumo\", \"task\": \"classification\", \"field\": \"rows\", \"key\": \"id\", \"target\": \"nested.size\", \"maxContextRows\": 10, \"numerical\": [\"price\"]";
+        final List<Map<String, Object>> rows = new ArrayList<>();
+        for(int i=0; i<2; i++) {
+            final Map<String, Object> row = row(i, (double) i, null, null, null);
+            row.put("nested", Map.of("size", i == 0 ? 0.1f : 0.2f));
+            rows.add(row);
+        }
+        Assertions.assertEquals(List.of("0.1", "0.2"), encode(encoder(parameters), rows).get("classes"));
+    }
+
     @Test
     public void testNestedFields() {
         final String parameters = "\"preset\": \"kumo\", \"task\": \"classification\", \"field\": \"rows\", \"key\": \"id\", \"target\": \"label\", \"maxContextRows\": 10, \"numerical\": [\"nested.size\"]";
@@ -199,8 +223,6 @@ public class TabularTest {
         replacements.put("\"target\": \"label\"", "\"target\": \"tags\"");
         replacements.put("\"numerical\": [\"price\"]", "\"numerical\": [\"brand\"]");
         replacements.put("\"categorical\": [\"brand\"]", "\"categorical\": [\"tags\"]");
-        // the same feature twice, and the target as a feature
-        replacements.put("\"categorical\": [\"brand\"]", "\"categorical\": [\"price\"]");
         for(final Map.Entry<String, String> entry : replacements.entrySet()) {
             Assertions.assertTrue(CLASSIFICATION.contains(entry.getKey()), entry.getKey());
             final String parameters = CLASSIFICATION.replace(entry.getKey(), entry.getValue());
@@ -208,9 +230,16 @@ public class TabularTest {
         }
         for(final String parameters : List.of(
                 CLASSIFICATION.replace("\"numerical\": [\"price\"], \"categorical\": [\"brand\"]", "\"numerical\": []"),
+                // the same feature twice, and the target as a feature
                 CLASSIFICATION.replace("\"numerical\": [\"price\"]", "\"numerical\": [\"price\", \"price\"]"),
+                CLASSIFICATION.replace("\"categorical\": [\"brand\"]", "\"categorical\": [\"price\"]"),
                 CLASSIFICATION.replace("\"categorical\": [\"brand\"]", "\"categorical\": [\"label\"]"),
                 CLASSIFICATION.replace("\"categorical\": [\"brand\"]", "\"categorical\": \"brand\""),
+                // a path through an array has a type, but a list per row
+                CLASSIFICATION.replace("\"key\": \"id\"", "\"key\": \"items.size\""),
+                CLASSIFICATION.replace("\"target\": \"label\"", "\"target\": \"items.size\""),
+                CLASSIFICATION.replace("\"numerical\": [\"price\"]", "\"numerical\": [\"items.size\"]"),
+                CLASSIFICATION.replace("\"categorical\": [\"brand\"]", "\"categorical\": [\"items.size\"]"),
                 REGRESSION.replace("\"target\": \"amount\"", "\"target\": \"label\""))) {
             Assertions.assertThrows(IllegalArgumentException.class, () -> encoder(parameters), parameters);
         }
@@ -254,6 +283,19 @@ public class TabularTest {
         Assertions.assertEquals(0.25, (Double) ((Map<?, ?>) probabilities.get(0)).get("probability"), 1e-6);
         Assertions.assertEquals(0.75, (Double) ((Map<?, ?>) probabilities.get(1)).get("probability"), 1e-6);
         Assertions.assertEquals("no", ((Map<?, ?>) results.get(1)).get("prediction"));
+    }
+
+    // logits that are not finite leave no most likely class: not the first one of the row
+    @Test
+    public void testDecodeNonFiniteLogits() {
+        final SelectFunction function = function("tabular_decode", "\"preset\": \"kumo\", \"field\": \"logits\", \"encoded\": \"tab\"", decodeFields(CLASSIFICATION));
+        final Map<String, Object> encoded = new HashMap<>();
+        encoded.put("queryKeys", List.of(7L, 8L));
+        encoded.put("classes", List.of("no", "yes"));
+        final Tensor logits = Tensor.of(new float[]{Float.NaN, 1, 0, 1}, new long[]{2, 2});
+        final List<?> results = (List<?>) function.apply(decodeInput(logits, encoded), Instant.EPOCH);
+        Assertions.assertNull(((Map<?, ?>) results.get(0)).get("prediction"));
+        Assertions.assertEquals("yes", ((Map<?, ?>) results.get(1)).get("prediction"));
     }
 
     // the outputs of the model are sorted, and put back in the scale of the target

@@ -295,7 +295,22 @@ public class OnnxTransform extends Transform {
                 return;
             }
 
-            final Emitter emitter = new Emitter() {
+            final Buffered buffered = new Buffered(input, values, evaluated, c.timestamp());
+            if(inputs.skipsModel(evaluated)) {
+                emit(buffered, new HashMap<>(), emitter(c));
+                return;
+            }
+
+            final List<Buffered> buffer = buffers.computeIfAbsent(window, w -> new ArrayList<>());
+            buffer.add(buffered);
+            if(buffer.size() >= bufferSize) {
+                buffers.remove(window);
+                flush(buffer, emitter(c));
+            }
+        }
+
+        private Emitter emitter(final ProcessContext c) {
+            return new Emitter() {
                 @Override
                 public void output(final MElement element, final Instant timestamp) {
                     c.outputWithTimestamp(element, timestamp);
@@ -305,18 +320,6 @@ public class OnnxTransform extends Transform {
                     c.outputWithTimestamp(failureTag, badRecord, timestamp);
                 }
             };
-            final Buffered buffered = new Buffered(input, values, evaluated, c.timestamp());
-            if(inputs.skipsModel(evaluated)) {
-                emit(buffered, new HashMap<>(), emitter);
-                return;
-            }
-
-            final List<Buffered> buffer = buffers.computeIfAbsent(window, w -> new ArrayList<>());
-            buffer.add(buffered);
-            if(buffer.size() >= bufferSize) {
-                buffers.remove(window);
-                flush(buffer, emitter);
-            }
         }
 
         private void flush(final List<Buffered> buffer, final Emitter emitter) {
