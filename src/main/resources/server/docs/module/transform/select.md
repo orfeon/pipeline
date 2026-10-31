@@ -953,6 +953,163 @@ Output type: array of ELEMENT, one per row to predict.
 - Classification: `key`, `prediction` (STRING, the most likely class, null if the logits of the row are not finite) and `probabilities` (array of ELEMENT with `label` and `probability`, FLOAT64). Only the first columns of the model output are used, as many as the classes.
 - Regression: `key`, `prediction` (FLOAT64, the mean of the outputs of the model in the scale of the target) and a FLOAT64 field per level, named as in [`timeseries_quantiles`](#timeseries_quantiles).
 
+### image_decode
+
+Image functions work in the `inputs` and `outputs` of the [onnx transform](onnx.md), where an image is a tensor of `[H, W]` or `[H, W, C]`, with values from 0 to 255 unless it is made of floats. A record does not hold one: an image leaves as bytes, with [`image_encode`](#image_encode) or [`image_crop`](#image_crop). In other modules they are a configuration error. A null field gives null.
+
+`image_decode` reads an image from bytes: PNG, JPEG, BMP, GIF or TIFF, with what Java reads. A grayscale image gives one channel with the values of the file, and the others three in RGB; an alpha channel is dropped. For a file of several images, only the first. The rotation of the EXIF of a JPEG is not applied, and a CMYK JPEG fails its record.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| field     | required | String | Source field: bytes. |
+| maxPixels | optional | Long   | An image of more pixels is read with rows and columns skipped, at the same step. Default: 40000000. |
+
+```yaml
+- { name: decoded, func: image_decode, field: content }
+```
+
+### image_encode
+
+An image as PNG bytes, of one or three channels, with its values rounded and limited to 0 to 255.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| field     | required | String | Source field: an image. |
+
+### image_gray
+
+An image of `[H, W]`. Three channels become 0.299 R + 0.587 G + 0.114 B, as OpenCV does.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| field     | required | String | Source field: an image. |
+
+### image_resize
+
+An image of another size, following the cells and the rounding of OpenCV's `resize`, without its fixed point arithmetic: a value can differ by 1.
+
+| parameter     | optional  | type    | description |
+|---------------|-----------|---------|-------------|
+| field         | required  | String  | Source field: an image. |
+| longSide      | selective | Integer | Keeps the ratio. A length is rounded as Python does, half to even. |
+| shortSide     | selective | Integer | Keeps the ratio. |
+| width, height | selective | Integer | Both of them, for a given size. |
+| interpolation | optional  | Enum    | `auto`, which is `area` when no dimension grows and `linear` otherwise, `area` or `linear`. Default: `auto`. |
+
+```yaml
+- { name: small, func: image_resize, field: page, longSide: 1024 }
+```
+
+### image_pad
+
+Pads an image at the bottom and the right.
+
+| parameter     | optional | type    | description |
+|---------------|----------|---------|-------------|
+| field         | required | String  | Source field: an image. |
+| multiple      | optional | Integer | Rounds up the height and the width to a multiple. |
+| width, height | optional | Integer | The size to reach at least, before `multiple`. |
+| value         | optional | Float   | The value of the padding. Default: 0. |
+
+One of `multiple`, `width` and `height` is required.
+
+```yaml
+- { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
+```
+
+### image_tensor
+
+The float values a model takes: `value * scale`, then `1 - value` if `invert`, then `(value - mean) / std`.
+
+| parameter | optional | type                    | description |
+|-----------|----------|-------------------------|-------------|
+| field     | required | String                  | Source field: an image. |
+| scale     | optional | Float                   | Default: 1 / 255. |
+| invert    | optional | Boolean                 | For ink on paper: dark text gives values near 1. Default: `false`. |
+| mean, std | optional | Float or Array<Float\> | One value, or one per channel. |
+| layout    | optional | Enum                    | `chw` or `hwc`. An image of `[H, W]` gets a channel. Default: `chw`. |
+
+```yaml
+- { name: x, func: image_tensor, field: padded, invert: true }
+- { name: pixel_values, func: image_tensor, field: decoded, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225] }
+```
+
+### image_size
+
+The size of an image, as ELEMENT with `height` and `width` (INT64): of a line, for a model that takes its width.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| field     | required | String | Source field: an image. |
+
+### image_crop
+
+The lines of a page as PNG bytes, each resized to a height, keeping its ratio. Output type: array of BYTES, one per box.
+
+| parameter  | optional | type    | description |
+|------------|----------|---------|-------------|
+| field      | required | String  | Source field: an image. |
+| boxes      | required | String  | Field of an array of ELEMENT with `x0`, `y0`, `x1` and `y1`, as [`text_line_boxes`](#text_line_boxes) gives, in pixels of the image. |
+| height     | required | Integer | The height of a crop. |
+| padX, padY | optional | Float   | How much a box grows on each side, in times its height. What is outside the image is `value`. Default: 0. |
+| minWidth   | optional | Integer | Default: 8. |
+| maxWidth   | optional | Integer | Default: 4096. |
+| value      | optional | Float   | Default: 255. |
+| invertDark | optional | Boolean | For an image of `[H, W]`: a line of light text on a dark ground is turned over, so that every line is dark text on light paper. Default: `false`. |
+
+```yaml
+- { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
+```
+
+### connected_components
+
+The connected components of the values over a threshold, in the order a scan first meets them. Output type: array of ELEMENT with `x`, `y`, `width`, `height` and `area` (INT32).
+
+| parameter    | optional | type    | description |
+|--------------|----------|---------|-------------|
+| field        | required | String  | Source field: a matrix of `[H, W]`. |
+| threshold    | optional | Float   | Default: 0.5. |
+| connectivity | optional | Integer | 4 or 8. Default: 8. |
+| minArea      | optional | Integer | Default: 1. |
+
+### text_line_boxes
+
+The boxes of the lines of a page from a model that gives the logit of the band in the middle of a line, and the distances from a pixel of it to the top and to the bottom of the line, such as the detector of indra-ocr. Output type: array of ELEMENT with `x0`, `y0`, `x1`, `y1` and `score` (FLOAT32), in pixels of the image before it was resized.
+
+| parameter  | optional | type    | description |
+|------------|----------|---------|-------------|
+| field      | required | String  | Source field: a matrix of `[C, h, w]`, whose channels 0, 1 and 2 are the logit and the distances. The others are not read. |
+| imageField | required | String  | The image before it was resized, which limits the boxes. |
+| longSide   | required | Integer | The long side it was resized to. |
+| threshold  | optional | Float   | On the probability of a pixel. Default: 0.5. |
+| minArea    | optional | Integer | In pixels of the model output. Default: 2. |
+| stride     | optional | Integer | Pixels of the model input for one of its output. Default: 2. |
+| xShrink    | optional | Float   | How much shorter the band is than the line on each side, in times the height of the line. Default: 0.15. |
+
+```yaml
+- { name: boxes, func: text_line_boxes, field: out, imageField: page, longSide: 1024 }
+```
+
+### ctc_decode
+
+Greedy CTC decoding of the best class of each step: consecutive repeats and the blank go, and the classes left become text. A LaTeX command followed by a letter gets a space. Output type: ELEMENT with `text` (STRING) and `conf` (FLOAT32, the mean of `confField` over the classes left).
+
+| parameter   | optional  | type           | description |
+|-------------|-----------|----------------|-------------|
+| field       | required  | String         | Source field: an array of the class of each step. |
+| confField   | optional  | String         | An array of the probability of that class. |
+| lengthField | optional  | String         | The number of steps to read, for a batch padded to the longest. |
+| tokens      | selective | Array<String\> | The vocabulary, without the blank. |
+| path        | selective | String         | A JSON file, local or `gs://`, of an array of tokens or of `{"blank": 0, "chars": [...]}`. |
+| key         | optional  | String         | The key of the vocabulary in the file. A string there is parsed as JSON in turn. |
+| blank       | optional  | Integer        | The class of the blank. Default: that of the file, or 0. |
+| normalize   | optional  | Enum           | `NFC`, `NFD`, `NFKC` or `NFKD`. |
+| minConf     | optional  | Float          | A lower `conf` gives an empty `text`. Requires `confField`. |
+
+```yaml
+- { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: gs://my-bucket/meta.json, key: vocab, normalize: NFC, minConf: 0.5 }
+```
+
 ### cosine_similarity
 
 Cosine similarity of two numeric array fields of equal length (embedding similarity). Returns null when either field is null or has zero norm.
