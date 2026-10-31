@@ -187,17 +187,17 @@ public class OnnxInputs implements Serializable {
         if(pad == null) {
             return;
         }
-        validateValue(name, "pad", pad.value, info);
+        validateValue("onnx inputs", name, "pad", pad.value, info);
         if(pad.multiple > 1 && dynamicRowDimensions(info).isEmpty()) {
             throw new IllegalArgumentException("onnx inputs: " + name + " has pad.multiple, but the model input " + info + " has no dynamic dimension to pad");
         }
     }
 
     // in an integer tensor a NaN would silently become 0, and an infinity the largest integer
-    private static void validateValue(final String name, final String key, final double value, final OnnxGraphInfo.ValueInfo info) {
+    private static void validateValue(final String where, final String name, final String key, final double value, final OnnxGraphInfo.ValueInfo info) {
         final Tensor.Type type = OnnxRuntimeUtil.tensorType(info.type());
         if(!Double.isFinite(value) && type != Tensor.Type.FLOAT && type != Tensor.Type.DOUBLE) {
-            throw new IllegalArgumentException("onnx inputs: " + name + " " + key + " is " + value + ", but the model input " + info + " is not a float");
+            throw new IllegalArgumentException(where + ": " + name + " " + key + " is " + value + ", but the model input " + info + " is not a float");
         }
     }
 
@@ -235,11 +235,20 @@ public class OnnxInputs implements Serializable {
     }
 
     private static void validateConstant(final String where, final String name, final Constant constant, final OnnxGraphInfo.ValueInfo info) {
-        if(constant.shape != null && constant.shape.length != info.rank()) {
-            throw new IllegalArgumentException(where + ": " + name + " has rank " + constant.shape.length
-                    + " in its empty or fill, but the model input is " + info);
+        if(constant.shape != null) {
+            if(constant.shape.length != info.rank()) {
+                throw new IllegalArgumentException(where + ": " + name + " has rank " + constant.shape.length
+                        + " in its empty or fill, but the model input is " + info);
+            }
+            // the model only refuses it when it runs: in a loop that is after the first run, of every record
+            for(int d=0; d<constant.shape.length; d++) {
+                if(info.shape()[d] >= 0 && constant.shape[d] != info.shape()[d]) {
+                    throw new IllegalArgumentException(where + ": " + name + " has shape " + Arrays.toString(constant.shape)
+                            + " in its empty or fill, but the model input is " + info);
+                }
+            }
         }
-        validateValue(name, "fill", constant.value, info);
+        validateValue(where, name, "fill", constant.value, info);
     }
 
     private static Constant parseConstant(final String where, final String name, final JsonObject select) {

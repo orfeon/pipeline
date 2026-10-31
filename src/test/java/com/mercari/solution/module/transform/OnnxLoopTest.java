@@ -317,6 +317,15 @@ public class OnnxLoopTest implements Serializable {
                           "past.0": { empty: [1, 1, 1] }
                           token: { func: argmax, field: logits, position: last }
             """, until, 1));
+        // here, rather than in the second run of every record
+        cases.put("onnx loop.next: past.0 has shape [1, 0, 2] in its empty or fill", loop("""
+                          "past.0": { empty: [1, 0, 2] }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
+        cases.put("onnx loop.next: attention_mask fill is NaN", loop("""
+                          attention_mask: { fill: NaN, shape: [1, 4] }
+                          token: { func: argmax, field: logits, position: last }
+            """, until, 1));
         cases.put("logits is an array or a matrix", loop(NEXT, "{ key: logits, op: in, value: [7] }", 1));
         cases.put("generated is an array or a matrix", loop(NEXT, "{ key: generated, op: in, value: [7] }", 1));
         cases.put("does not have: [token.value]", loop(NEXT, "{ key: token.value, op: in, value: [7] }", 1));

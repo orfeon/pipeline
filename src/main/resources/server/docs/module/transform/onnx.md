@@ -144,7 +144,7 @@ inputs, vars -> run -> next -> until or maxIterations? -> outputs
 - `next`, `until` and `outputs` can refer to the fields of the record, the items of `inputs`, the variables, the items of `next` above them and the model outputs of the last run. A variable or an item of `next` must not have the name of a model output, or `_iteration`.
 - `_iteration` is the number of the last run, from 0.
 - A string in `next` keeps the tensor of the model output, without a copy or a conversion: the type and the rank of the model input and output must be the same. Name variables correspond in the order they appear.
-- `empty` or `fill` in `next` gives the model input that constant from the second run on, as for the features of an image that only the first run takes. It takes one model input, without name variables.
+- `empty` or `fill` in `next` gives the model input that constant from the second run on, as for the features of an image that only the first run takes. It takes one model input, without name variables. It is not a value of the record: `next`, `until` and `outputs` still read the item of `inputs` of that name.
 - The model outputs that `next` and `until` read are copied once per run, and those that only `outputs` reads once, from the last run. The logits of a model that gives every position of a long prompt are copied whole, once: for a large vocabulary, use a model that only gives the last position.
 - All the runs of a record are held by one worker thread, and the transform has no time limit: choose `maxIterations` accordingly.
 - A failure in any run fails the record, without its earlier results.

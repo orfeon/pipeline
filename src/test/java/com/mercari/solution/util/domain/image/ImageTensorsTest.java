@@ -77,6 +77,12 @@ public class ImageTensorsTest {
         final Tensor floats = ImageTensors.resize(Tensor.of(new float[]{0f, 0f, 1f, 1f}, new long[]{1, 4}), 1, 8, ImageTensors.Interpolation.bicubic);
         Assertions.assertEquals(Tensor.Type.FLOAT, floats.type());
         Assertions.assertTrue(floats.getDouble(5) > 1d, floats.toList().toString());
+
+        // a dimension that does not change has no pass, as in Pillow: a NaN of a row stays in that row
+        final Tensor nan = ImageTensors.resize(Tensor.of(new float[]{1f, 1f, Float.NaN, Float.NaN, 1f, 1f}, new long[]{3, 2}), 3, 4, ImageTensors.Interpolation.bicubic);
+        Assertions.assertEquals(1d, nan.getDouble(0), 1e-6d, nan.toList().toString());
+        Assertions.assertTrue(Double.isNaN(nan.getDouble(4)), nan.toList().toString());
+        Assertions.assertEquals(1d, nan.getDouble(8), 1e-6d, nan.toList().toString());
     }
 
     @Test
@@ -88,7 +94,8 @@ public class ImageTensorsTest {
         Assertions.assertArrayEquals(new int[]{256, 352}, ImageTensors.multipleSize(480, 640, 32, 65536, 102400), "down to the largest pixels");
         Assertions.assertArrayEquals(new int[]{1248, 1664}, ImageTensors.multipleSize(480, 640, 32, 2000000, none), "up to the smallest pixels");
         Assertions.assertArrayEquals(new int[]{224, 352}, ImageTensors.multipleSize(61, 97, 32, 65536, none));
-        Assertions.assertArrayEquals(new int[]{32, 32}, ImageTensors.multipleSize(10, 500, 32, 1, none), "a side that would have no multiple gets one");
+        Assertions.assertArrayEquals(new int[]{32, 512}, ImageTensors.multipleSize(10, 500, 32, 1, none), "a side that would have no multiple gets one, and the other stays the nearest");
+        Assertions.assertArrayEquals(new int[]{32, 4000}, ImageTensors.multipleSize(15, 4000, 32, 65536, none), "without scaling what is then in the range");
         Assertions.assertArrayEquals(new int[]{32, 320}, ImageTensors.multipleSize(100, 10000, 32, 1, 1024), "and when it is scaled down, even over the pixels");
         Assertions.assertArrayEquals(new int[]{70, 100}, ImageTensors.multipleSize(140, 200, 1, 1, 7000), "a multiple of 1 only limits the pixels");
     }
@@ -122,6 +129,10 @@ public class ImageTensorsTest {
         final Tensor patches = ImageTensors.patches(channelsFirst(1, 2, 4), 2, 1, 1, false);
         Assertions.assertArrayEquals(new long[]{1, 2, 1, 1, 4}, patches.shape());
         Assertions.assertEquals(List.of(0f, 1f, 10f, 11f, 2f, 3f, 12f, 13f), values(patches));
+
+        // a view of a larger tensor is read from where it starts
+        final Tensor view = Tensor.of(new float[]{9f, 9f, 9f, 9f, 0f, 1f, 2f, 3f}, new long[]{2, 1, 2, 2}).row(1);
+        Assertions.assertEquals(List.of(0f, 1f, 2f, 3f), values(ImageTensors.patches(view, 2, 1, 1, true)));
 
         final IllegalArgumentException size = Assertions.assertThrows(IllegalArgumentException.class, () -> ImageTensors.patches(channelsFirst(1, 3, 4), 1, 2, 1, false));
         Assertions.assertTrue(size.getMessage().contains("multiples of 2"), size.getMessage());

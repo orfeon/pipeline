@@ -988,7 +988,7 @@ An image of `[H, W]`. Three channels become 0.299 R + 0.587 G + 0.114 B, as Open
 
 ### image_resize
 
-An image of another size, following the cells and the rounding of OpenCV's `resize`, without its fixed point arithmetic: a value can differ by 1. `bicubic` follows Pillow, with the same difference, and limits integers to the range of a pixel after each pass.
+An image of another size, following the cells and the rounding of OpenCV's `resize`, without its fixed point arithmetic: a value can differ by 1. `bicubic` follows Pillow, where a value can differ by 1 and rarely by 2, and limits integers to the range of a pixel after each pass.
 
 | parameter     | optional  | type    | description |
 |---------------|-----------|---------|-------------|
@@ -996,7 +996,7 @@ An image of another size, following the cells and the rounding of OpenCV's `resi
 | longSide      | selective | Integer | Keeps the ratio. A length is rounded as Python does, half to even. |
 | shortSide     | selective | Integer | Keeps the ratio. |
 | width, height | selective | Integer | Both of them, for a given size. |
-| multiple, minPixels, maxPixels | selective | Integer, Long, Long | Any of them, for what a vision encoder takes: each side the nearest multiple of `multiple` (default: 1), half to even, then scaled with the ratio kept, as closely as the multiples allow, if the pixels are out of the range. |
+| multiple, minPixels, maxPixels | selective | Integer, Long, Long | Any of them, for what a vision encoder takes: each side the nearest multiple of `multiple` (default: 1), half to even and at least one, then scaled with the ratio kept, as closely as the multiples allow, if the pixels are out of the range. It can stay out of a range narrower than a step of the multiples, or when a side keeps its one multiple. |
 | interpolation | optional  | Enum    | `auto`, which is `area` when no dimension grows and `linear` otherwise, `area`, `linear` or `bicubic`. Default: `auto`. |
 
 ```yaml

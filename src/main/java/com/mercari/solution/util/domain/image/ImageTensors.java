@@ -25,7 +25,7 @@ import java.util.List;
  * Images as Tensors, in pure Java. An image is {@code [H, W]} or {@code [H, W, C]}: of integers from 0 to 255, which is what
  * decoding gives (int16) and what resizing rounds to, or of floats with any values. A result keeps the type of its image.
  * {@link #resize} follows the rules of cv2.resize for the size of the cells and the rounding, without its fixed point
- * arithmetic: its values can differ by 1. Its bicubic follows those of Pillow, with the same difference.
+ * arithmetic: its values can differ by 1. Its bicubic follows those of Pillow: its values can differ by 1, and rarely by 2.
  *
  * <p>{@link #cropLine}, {@link #isDark} and {@link #textLines} are ported from {@code indra_ocr/rec_preproc.py} and
  * {@code indra_ocr/det_post.py} of datalab-to/indra (Apache-2.0), changed to work on Tensors.
@@ -227,12 +227,13 @@ public final class ImageTensors {
     }
 
     /**
-     * The size with both sides multiples of {@code multiple}, each the nearest one, rounding as Python does: {@code [height, width]}.
-     * A size out of the range of pixels is scaled into it, keeping the ratio as closely as the multiples allow.
+     * The size with both sides multiples of {@code multiple}, each the nearest one and at least one, rounding as Python does: {@code [height, width]}.
+     * A size out of the range of pixels is scaled towards it, keeping the ratio as closely as the multiples allow. It can stay
+     * out of a range narrower than a step of the multiples, or when a side keeps its one multiple.
      */
     public static int[] multipleSize(final int height, final int width, final int multiple, final long minPixels, final long maxPixels) {
-        final int newHeight = (int) Math.rint((double) height / multiple) * multiple;
-        final int newWidth = (int) Math.rint((double) width / multiple) * multiple;
+        final int newHeight = Math.max(1, (int) Math.rint((double) height / multiple)) * multiple;
+        final int newWidth = Math.max(1, (int) Math.rint((double) width / multiple)) * multiple;
         final long pixels = (long) height * width;
         final long newPixels = (long) newHeight * newWidth;
         if(newPixels > maxPixels) {
@@ -259,9 +260,8 @@ public final class ImageTensors {
         }
         final int channels = channels(image);
         final boolean shrinks = newHeight <= height && newWidth <= width;
-        final Interpolation used = interpolation == Interpolation.auto ? (shrinks ? Interpolation.area : Interpolation.linear) : interpolation;
-        final Weights rows = Weights.of(used, shrinks, height, newHeight);
-        final Weights columns = Weights.of(used, shrinks, width, newWidth);
+        final Weights rows = Weights.of(interpolation, shrinks, height, newHeight);
+        final Weights columns = Weights.of(interpolation, shrinks, width, newWidth);
 
         final float[] source = floats(image);
         final float[] horizontal = new float[height * newWidth * channels];
@@ -279,7 +279,7 @@ public final class ImageTensors {
             }
         }
         // as Pillow does for integers, which is what keeps the values near an edge, where a cubic goes out of the range
-        final boolean pixels = used == Interpolation.bicubic && image.type() != Tensor.Type.FLOAT && image.type() != Tensor.Type.DOUBLE;
+        final boolean pixels = interpolation == Interpolation.bicubic && image.type() != Tensor.Type.FLOAT && image.type() != Tensor.Type.DOUBLE;
         if(pixels) {
             roundHalfUp(horizontal);
         }
@@ -342,7 +342,9 @@ public final class ImageTensors {
         final int columns = width / cell;
         final int patchValues = Math.multiplyExact(Math.multiplyExact(channels, temporalSize), patchSize * patchSize);
         final int count = Math.multiplyExact(Math.multiplyExact(rows, columns), mergeSize * mergeSize);
-        final float[] source = floats(image);
+        // only read, and an image of a model takes much memory: floats would copy all of it for each record
+        final float[] source = image.data() instanceof float[] data ? data : floats(image);
+        final int offset = source == image.data() ? image.offset() : 0;
         final float[] patches = new float[Math.multiplyExact(count, patchValues)];
         int to = 0;
         for(int row=0; row<rows; row++) {
@@ -354,7 +356,7 @@ public final class ImageTensors {
                         for(int channel=0; channel<channels; channel++) {
                             for(int frame=0; frame<temporalSize; frame++) {
                                 for(int y=0; y<patchSize; y++) {
-                                    System.arraycopy(source, (channel * height + top + y) * width + left, patches, to, patchSize);
+                                    System.arraycopy(source, offset + (channel * height + top + y) * width + left, patches, to, patchSize);
                                     to += patchSize;
                                 }
                             }
@@ -669,8 +671,10 @@ public final class ImageTensors {
 
         static Weights of(final Interpolation interpolation, final boolean shrinks, final int size, final int newSize) {
             return switch (interpolation) {
-                case bicubic -> bicubic(size, newSize);
-                case area, auto -> shrinks ? area(size, newSize) : linear(size, newSize, true);
+                // a dimension that does not change has no pass in Pillow: here the weights of 0 would still read the rows next to it
+                case bicubic -> size == newSize ? linear(size, newSize, false) : bicubic(size, newSize);
+                case auto -> shrinks ? area(size, newSize) : linear(size, newSize, false);
+                case area -> shrinks ? area(size, newSize) : linear(size, newSize, true);
                 case linear -> linear(size, newSize, false);
             };
         }
