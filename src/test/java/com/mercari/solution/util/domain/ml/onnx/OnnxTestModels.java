@@ -173,7 +173,8 @@ public class OnnxTestModels {
     /**
      * A model of the shape of a tabular model that learns in context: {@code x float[rows, columns]} with the context rows
      * first, {@code y_context [context]} and {@code categorical_mask bool[columns]}. The output is
-     * {@code logits = ReduceSum(query rows of x, 1, keepdims) weights float[query, width]}.
+     * {@code logits = ReduceSum(query rows of x, 1, keepdims) weights float[query, width]} and the scalar
+     * {@code total = ReduceSum(weights)}.
      */
     public static byte[] tabular(final int targetType, final float... weights) {
         final Graph graph = new Graph("tabular");
@@ -188,7 +189,9 @@ public class OnnxTestModels {
         graph.node("Slice", List.of("x", "start", "end", "rowAxis"), List.of("query"));
         graph.node("ReduceSum", List.of("query", "columnAxis"), List.of("sum"), "keepdims", 1L);
         graph.node("MatMul", List.of("sum", "weights"), List.of("logits"));
+        graph.node("ReduceSum", List.of("weights"), List.of("total"), "keepdims", 0L);
         graph.output("logits", FLOAT, "query", (long) weights.length);
+        graph.output("total", FLOAT);
         return graph.model();
     }
 

@@ -29,6 +29,11 @@ public interface SelectFunction extends Serializable {
         return false;
     }
 
+    // inside the onnx transform: whether a result of the function can leave nothing to ask the model for a record
+    default boolean canSkipModel() {
+        return false;
+    }
+
     // inside the onnx transform: whether this result of the function leaves nothing to ask the model for the record
     default boolean skipsModel(final Object result) {
         return false;

@@ -836,14 +836,15 @@ Output type: ELEMENT with
 - `yContext`: array of INT32 with the number of the class (classification), or array of FLOAT32 with the standardized target (regression)
 - `categoricalMask`: array of BOOLEAN, per column of `x`
 - `queryKeys`: array with the `key` of the rows to predict
-- `classes` (classification): array of STRING, the labels by their number, in order of first appearance
+- `classes` (classification): array of STRING, the labels by their number, in ascending order of their values: 9 comes before 10 in a numeric field
 - `yMean`, `yScale` (regression): FLOAT64, what the target was standardized with
 
 The steps of `kumo` are the default recipe of [structured-data-models](https://github.com/NVIDIA/structured-data-models) for one estimator, without its random augmentations:
 
 - A category becomes its number among the values of the context rows in ascending order. A missing or an unknown value is -1. A field of more than 50 values also gets a column with the logarithm of the count of its value.
 - A column with one value in the context rows is removed, unless there is only one context row. Each column is standardized, clipped to ±100 and clipped softly at 4 standard deviations. At most 500 columns are kept: numerical fields, then counts, then categories.
-- A context with more than 10 classes, without a context row, or without a column left fails the record.
+- A group with a row to predict fails the record if its context has more than 10 classes, no row, or no column left.
+- A group without a row to predict has empty arrays, and no `yMean` and `yScale`.
 
 ### tabular_decode
 

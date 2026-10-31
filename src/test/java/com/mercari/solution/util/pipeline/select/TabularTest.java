@@ -86,8 +86,8 @@ public class TabularTest {
         final SelectFunction function = encoder(CLASSIFICATION);
         final Map<?, ?> encoded = encode(function, rows);
         Assertions.assertEquals(List.of(2L, 4L), encoded.get("queryKeys"));
-        Assertions.assertEquals(List.of("yes", "no"), encoded.get("classes"));
-        Assertions.assertEquals(List.of(0, 1, 0), encoded.get("yContext"));
+        Assertions.assertEquals(List.of("no", "yes"), encoded.get("classes"));
+        Assertions.assertEquals(List.of(1, 0, 1), encoded.get("yContext"));
         Assertions.assertEquals(List.of(false, true), encoded.get("categoricalMask"));
         Assertions.assertEquals(5, ((List<?>) encoded.get("x")).size());
 
@@ -102,7 +102,28 @@ public class TabularTest {
                 row(10, 1d, "a", "x", null),
                 row(9, 2d, "a", "y", null),
                 row(11, 3d, "a", null, null)));
-        Assertions.assertEquals(List.of("y", "x"), encoded.get("classes"));
+        Assertions.assertEquals(List.of(1, 0), encoded.get("yContext"));
+    }
+
+    // the classes depend on the values, not on the keys of the rows that hold them
+    @Test
+    public void testClassesByValue() {
+        final SelectFunction function = encoder(CLASSIFICATION);
+        final Map<?, ?> encoded = encode(function, List.of(
+                row(1, 1d, "a", "y", null),
+                row(2, 2d, "a", "x", null),
+                row(3, 3d, "a", null, null)));
+        Assertions.assertEquals(List.of("x", "y"), encoded.get("classes"));
+        Assertions.assertEquals(List.of(1, 0), encoded.get("yContext"));
+
+        // a number compares as a number: 9 comes before 10
+        final String parameters = CLASSIFICATION.replace("\"target\": \"label\"", "\"target\": \"amount\"");
+        final Map<?, ?> numbers = encode(encoder(parameters), List.of(
+                row(1, 1d, "a", null, 10d),
+                row(2, 2d, "a", null, 9d),
+                row(3, 3d, "a", null, null)));
+        Assertions.assertEquals(List.of("9.0", "10.0"), numbers.get("classes"));
+        Assertions.assertEquals(List.of(1, 0), numbers.get("yContext"));
     }
 
     @Test
@@ -139,6 +160,7 @@ public class TabularTest {
             row.put("nested", Map.of("size", i == 0 ? 0.1f : 0.2f));
             rows.add(row);
         }
+        rows.add(row(2, 2d, null, null, null));
         Assertions.assertEquals(List.of("0.1", "0.2"), encode(encoder(parameters), rows).get("classes"));
     }
 
@@ -179,11 +201,10 @@ public class TabularTest {
     @Test
     public void testFailures() {
         final SelectFunction function = encoder(CLASSIFICATION);
-        // no context row: not an array, no row, no row with a target
+        // no context row: not an array, no row with a target
         final Map<String, Object> input = new HashMap<>();
         input.put("rows", null);
         Assertions.assertThrows(IllegalArgumentException.class, () -> function.apply(input, Instant.EPOCH));
-        Assertions.assertTrue(failure(function, List.of()).getMessage().contains("no context row"));
         Assertions.assertTrue(failure(function, List.of(row(1, 1d, "a", null, null))).getMessage().contains("no context row"));
         // rows of no key or the same key have no order
         Assertions.assertTrue(failure(function, List.of(row(1, 1d, "a", "x", null), row(1, 2d, "b", "y", null))).getMessage().contains("more than once"));
@@ -191,13 +212,37 @@ public class TabularTest {
         noKey.put("id", null);
         Assertions.assertTrue(failure(function, List.of(noKey)).getMessage().contains("is null"));
         // no feature left
-        Assertions.assertTrue(failure(function, List.of(row(1, 1d, "a", "x", null), row(2, 1d, "a", "y", null))).getMessage().contains("no feature left"));
+        Assertions.assertTrue(failure(function, List.of(row(1, 1d, "a", "x", null), row(2, 1d, "a", "y", null), row(3, 1d, "a", null, null))).getMessage().contains("no feature left"));
         // over 10 classes
         final List<Map<String, Object>> rows = new ArrayList<>();
         for(int i=0; i<11; i++) {
             rows.add(row(i, (double) i, "a", "c" + i, null));
         }
+        rows.add(row(11, 11d, "a", null, null));
         Assertions.assertTrue(failure(function, rows).getMessage().contains("classes"));
+    }
+
+    // whatever the context is, there is nothing to fail without a row to predict
+    @Test
+    public void testNothingToPredict() {
+        final List<Map<String, Object>> classes = new ArrayList<>();
+        for(int i=0; i<11; i++) {
+            classes.add(row(i, (double) i, "a", "c" + i, null));
+        }
+        for(final List<Map<String, Object>> rows : List.of(
+                List.<Map<String, Object>>of(),
+                classes,
+                List.of(row(1, 1d, "a", "x", null), row(2, 1d, "a", "y", null)))) {
+            final SelectFunction function = encoder(CLASSIFICATION);
+            final Map<?, ?> encoded = encode(function, rows);
+            Assertions.assertTrue(function.skipsModel(encoded));
+            for(final String field : List.of("x", "yContext", "categoricalMask", "queryKeys", "classes")) {
+                Assertions.assertEquals(List.of(), encoded.get(field), field);
+            }
+        }
+        final Map<?, ?> regression = encode(encoder(REGRESSION), List.of(row(1, 1d, "a", null, Double.POSITIVE_INFINITY)));
+        Assertions.assertEquals(List.of(), regression.get("queryKeys"));
+        Assertions.assertNull(regression.get("yMean"));
     }
 
     @Test

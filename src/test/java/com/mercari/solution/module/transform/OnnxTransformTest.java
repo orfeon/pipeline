@@ -885,10 +885,11 @@ public class OnnxTransformTest {
                       outputs:
                         - { name: predictions, func: tabular_decode, preset: kumo, field: logits, encoded: tab%s }
                         - { name: raw, field: logits }
+                        - { name: total, field: total }
                 """.formatted(elements.indent(8), OnnxTestModels.configPath(model), tab, decode);
     }
 
-    // a group is one inference: a group without a row to predict does not ask the model, and one without context fails by itself
+    // a group is one inference: a group without a row to predict does not ask the model, whatever its context is, and one without context fails by itself
     @Test
     public void testTabularClassification() throws Exception {
         final Path model = OnnxTestModels.write(BASE_DIR.resolve("tabular_classification/model.onnx"),
@@ -901,7 +902,9 @@ public class OnnxTransformTest {
                         - { g: a, id: 3, price: 3.0, brand: p, label: "yes" }
                         - { g: b, id: 1, price: 1.0, brand: p, label: "no" }
                         - { g: b, id: 2, price: 2.0, brand: q, label: "yes" }
-                        - { g: c, id: 1, price: 1.0, brand: p }""";
+                        - { g: c, id: 1, price: 1.0, brand: p }
+                        - { g: d, id: 1, price: 1.0, brand: p, label: "no" }
+                        - { g: d, id: 2, price: 1.0, brand: p, label: "yes" }""";
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(tabularConfig(model, elements, "task: classification, target: label", "")));
 
         PAssert.that(outputs.get("onnx").getCollection()).satisfies(rows -> {
@@ -909,7 +912,7 @@ public class OnnxTransformTest {
             for(final MElement row : rows) {
                 groups.put(row.getAsString("g"), row);
             }
-            Assertions.assertEquals(Set.of("a", "b"), groups.keySet());
+            Assertions.assertEquals(Set.of("a", "b", "d"), groups.keySet());
 
             final List<?> predictions = (List<?>) groups.get("a").getPrimitiveValue("predictions");
             Assertions.assertEquals(2, predictions.size());
@@ -930,6 +933,9 @@ public class OnnxTransformTest {
             Assertions.assertEquals(List.of(), groups.get("b").getPrimitiveValue("predictions"));
             Assertions.assertNull(groups.get("b").getPrimitiveValue("raw"), "the model did not run");
             Assertions.assertNotNull(groups.get("a").getPrimitiveValue("raw"));
+            Assertions.assertNull(groups.get("b").getPrimitiveValue("total"), "a scalar output of a model that did not run");
+            Assertions.assertEquals(45f, ((Number) groups.get("a").getPrimitiveValue("total")).floatValue());
+            Assertions.assertEquals(List.of(), groups.get("d").getPrimitiveValue("predictions"), "constant features, but nothing to predict");
             return null;
         });
 

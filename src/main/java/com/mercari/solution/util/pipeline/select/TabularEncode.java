@@ -219,6 +219,11 @@ public class TabularEncode implements SelectFunction {
 
     }
 
+    @Override
+    public boolean canSkipModel() {
+        return true;
+    }
+
     // without a row to predict there is nothing to ask the model
     @Override
     public boolean skipsModel(final Object result) {
@@ -231,18 +236,22 @@ public class TabularEncode implements SelectFunction {
             throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode has no context row: field: " + field + " is not an array");
         }
 
-        // array_agg gives no order, while the numbers of the classes and the sample depend on it
+        // array_agg gives no order, while the rows given to the model and the sample depend on it
         final List<Map<?, ?>> context = new ArrayList<>();
         final List<Map<?, ?>> query = new ArrayList<>();
         for(final Map<?, ?> row : sortedRows(rows)) {
             (hasTarget(row) ? context : query).add(row);
+        }
+        // nothing to ask the model, so nothing in the context can fail a prediction
+        if(query.isEmpty()) {
+            return nothingToPredict();
         }
         if(context.isEmpty()) {
             throw new IllegalArgumentException("SelectField: " + name + " func: tabular_encode has no context row: no row of field: " + field + " has target: " + target);
         }
         // on all the context rows: a sample without a class must not decide whether the group can be predicted
         if(task == Task.classification) {
-            KumoTabular.classes(labels(context));
+            classes(context);
         }
         final List<Map<?, ?>> selected = sample(context);
 
@@ -297,6 +306,18 @@ public class TabularEncode implements SelectFunction {
         return encoded;
     }
 
+    private Map<String, Object> nothingToPredict() {
+        final Map<String, Object> encoded = new HashMap<>();
+        encoded.put("x", new ArrayList<>());
+        encoded.put("yContext", new ArrayList<>());
+        encoded.put("categoricalMask", new ArrayList<>());
+        encoded.put("queryKeys", new ArrayList<>());
+        if(task == Task.classification) {
+            encoded.put("classes", new ArrayList<>());
+        }
+        return encoded;
+    }
+
     private List<Map<?, ?>> sortedRows(final List<?> rows) {
         final TreeMap<Comparable<?>, Map<?, ?>> sorted = new TreeMap<>();
         for(final Object row : rows) {
@@ -339,7 +360,7 @@ public class TabularEncode implements SelectFunction {
     }
 
     private void putClasses(final Map<String, Object> encoded, final List<Map<?, ?>> context) {
-        final KumoTabular.Classes classes = KumoTabular.classes(labels(context));
+        final KumoTabular.Classes classes = classes(context);
         final List<Integer> codes = new ArrayList<>(classes.codes().length);
         for(final int code : classes.codes()) {
             codes.add(code);
@@ -348,13 +369,16 @@ public class TabularEncode implements SelectFunction {
         encoded.put("classes", classes.labels());
     }
 
-    private List<String> labels(final List<Map<?, ?>> context) {
+    private KumoTabular.Classes classes(final List<Map<?, ?>> context) {
+        final List<Comparable<?>> values = new ArrayList<>(context.size());
         final List<String> labels = new ArrayList<>(context.size());
         for(final Map<?, ?> row : context) {
+            final Object value = ElementSchemaUtil.getValue(row, target);
+            values.add(comparable(value));
             // the value as it is: comparable would widen a float, and 0.1 would become 0.10000000149011612
-            labels.add(ElementSchemaUtil.getValue(row, target).toString());
+            labels.add(value.toString());
         }
-        return labels;
+        return KumoTabular.classes(values, labels);
     }
 
     private void putScale(final Map<String, Object> encoded, final List<Map<?, ?>> context) {

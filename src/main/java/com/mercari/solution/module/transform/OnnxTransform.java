@@ -130,7 +130,9 @@ public class OnnxTransform extends Transform {
         }
         for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
             if(output.isTensor()) {
-                fields.put(output.name(), Schema.Field.of(output.name(), OnnxToElementConverter.convertFieldType(output, inputs.isBatched())));
+                final Schema.FieldType type = OnnxToElementConverter.convertFieldType(output, inputs.isBatched());
+                // a record that does not ask the model has no value for it
+                fields.put(output.name(), Schema.Field.of(output.name(), inputs.canSkipModel() ? type.withNullable(true) : type));
             }
         }
         return new ArrayList<>(fields.values());

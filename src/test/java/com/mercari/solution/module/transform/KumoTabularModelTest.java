@@ -15,7 +15,9 @@ import org.junit.jupiter.api.Test;
 import java.io.Serializable;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.IntUnaryOperator;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * The whole pipeline on the real models against the predictions of structured-data-models. It runs by hand with
@@ -33,9 +35,13 @@ public class KumoTabularModelTest implements Serializable {
     }
 
     private static String config(final KumoFixture fixture, final Path model, final String predictions) {
+        return config(fixture, model, predictions, IntUnaryOperator.identity());
+    }
+
+    private static String config(final KumoFixture fixture, final Path model, final String predictions, final IntUnaryOperator key) {
         final List<String> elements = new ArrayList<>();
         for(int r=0; r<fixture.rows().size(); r++) {
-            final List<String> values = new ArrayList<>(List.of("group: g", "row: " + r));
+            final List<String> values = new ArrayList<>(List.of("group: g", "row: " + key.applyAsInt(r)));
             for(final String column : fixture.header()) {
                 final Object value = column.equals(fixture.target()) && r >= fixture.contextRows() ? null : fixture.value(r, column);
                 if(value != null) {
@@ -94,9 +100,24 @@ public class KumoTabularModelTest implements Serializable {
 
     @Test
     public void testClassifier() throws Exception {
-        final Path model = Path.of(modelDir(), "classifier");
         final KumoFixture fixture = KumoFixture.load(KumoFixture.RESOURCES.resolve("mixed-churn"));
-        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config(fixture, model, "")));
+        assertClassifier(fixture, IntUnaryOperator.identity());
+    }
+
+    // other keys for the same rows give the same classes: the context rows with the last class come first
+    @Test
+    public void testClassifierWithOtherKeys() throws Exception {
+        final KumoFixture fixture = KumoFixture.load(KumoFixture.RESOURCES.resolve("mixed-churn"));
+        final String last = fixture.classes().getLast();
+        final List<Integer> context = IntStream.range(0, fixture.contextRows()).boxed()
+                .sorted(Comparator.comparing(r -> !last.equals(fixture.value(r, fixture.target()))))
+                .toList();
+        assertClassifier(fixture, r -> r < context.size() ? context.indexOf(r) : r);
+    }
+
+    private void assertClassifier(final KumoFixture fixture, final IntUnaryOperator key) throws Exception {
+        final Path model = Path.of(modelDir(), "classifier");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config(fixture, model, "", key)));
 
         final float[] expected = fixture.floats("pred.bin");
         final List<String> classes = fixture.classes();
@@ -113,8 +134,8 @@ public class KumoTabularModelTest implements Serializable {
                 int best = 0;
                 for(int k=0; k<classes.size(); k++) {
                     final Map<?, ?> item = (Map<?, ?>) probabilities.get(k);
-                    Assertions.assertEquals(classes.get(k), item.get("label").toString());
-                    worst = Math.max(worst, Math.abs(expected[r * classes.size() + k] - ((Number) item.get("probability")).doubleValue()));
+                    final int label = classes.indexOf(item.get("label").toString());
+                    worst = Math.max(worst, Math.abs(expected[r * classes.size() + label] - ((Number) item.get("probability")).doubleValue()));
                     if(expected[r * classes.size() + k] > expected[r * classes.size() + best]) {
                         best = k;
                     }

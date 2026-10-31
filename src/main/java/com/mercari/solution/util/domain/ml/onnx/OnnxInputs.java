@@ -292,6 +292,11 @@ public class OnnxInputs implements Serializable {
         apply(select, values, timestamp);
     }
 
+    /** Whether a record can have no model outputs, as {@link #skipsModel} leaves nothing to ask the model for it. */
+    public boolean canSkipModel() {
+        return select.getSelectFunctions().stream().anyMatch(SelectFunction::canSkipModel);
+    }
+
     /** Whether a value of the evaluated {@code values} leaves nothing to ask the model for the record. */
     public boolean skipsModel(final Map<String, Object> values) {
         return select.getSelectFunctions().stream().anyMatch(function -> function.skipsModel(values.get(function.getName())));

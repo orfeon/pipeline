@@ -305,6 +305,6 @@ transforms:
 
 - A row with a `label` is context, and a row without one is predicted.
 - `predictions` is an array with `key`, `prediction` and `probabilities`. For a record per row, use a later `select` transform with `flattenField: predictions` and a `select` list that names `predictions`.
-- A group without a row to predict gives an empty `predictions` without running the model. A group that has no context row, more than 10 classes, or no column left after the constant ones are removed fails by itself.
+- A group without a row to predict gives an empty `predictions` without running the model, and null for an output of the model, whatever its context is. A group with a row to predict that has no context row, more than 10 classes, or no column left after the constant ones are removed fails by itself.
 - The time and the memory grow quickly with the number of rows of a group: `maxContextRows` bounds the context, but all the rows to predict go to the model. Split a group with too many of them before this transform.
 - For a regression, use the regressor model with `task: regression`, and `quantiles` in `tabular_decode`.

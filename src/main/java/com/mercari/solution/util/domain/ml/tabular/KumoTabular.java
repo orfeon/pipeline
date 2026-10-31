@@ -63,18 +63,24 @@ public final class KumoTabular {
         return new Features(x, mask);
     }
 
-    /** The codes of the context rows, by the first appearance of a label. */
-    public static Classes classes(final List<String> labels) {
-        final Map<String, Integer> codes = new LinkedHashMap<>();
-        final int[] values = new int[labels.size()];
-        for(int i=0; i<values.length; i++) {
-            final int next = codes.size();
-            values[i] = codes.computeIfAbsent(labels.get(i), label -> next);
+    /** The codes of the context rows, by the ascending order of their values, and the label of each code. */
+    public static Classes classes(final List<Comparable<?>> values, final List<String> labels) {
+        final TreeMap<Comparable<?>, String> sorted = new TreeMap<>();
+        for(int i=0; i<values.size(); i++) {
+            sorted.put(values.get(i), labels.get(i));
         }
-        if(codes.size() > MAX_CLASSES) {
-            throw new IllegalArgumentException("kumo takes up to " + MAX_CLASSES + " classes, but got " + codes.size());
+        if(sorted.size() > MAX_CLASSES) {
+            throw new IllegalArgumentException("kumo takes up to " + MAX_CLASSES + " classes, but got " + sorted.size());
         }
-        return new Classes(values, List.copyOf(codes.keySet()));
+        final Map<Comparable<?>, Integer> index = new HashMap<>();
+        for(final Comparable<?> value : sorted.keySet()) {
+            index.put(value, index.size());
+        }
+        final int[] codes = new int[values.size()];
+        for(int i=0; i<codes.length; i++) {
+            codes[i] = index.get(values.get(i));
+        }
+        return new Classes(codes, List.copyOf(sorted.values()));
     }
 
     /** The mean and the population standard deviation of a target, whose scale is 1 if it is constant. */

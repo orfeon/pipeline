@@ -19,7 +19,7 @@ import java.util.stream.Stream;
 /** {@code tabular_encode} and {@code tabular_decode} of the kumo preset against the values of structured-data-models. */
 public class KumoTabularTest {
 
-    // a key that keeps the order of the rows of the fixture, on which the numbers of the classes depend
+    // a key that keeps the order of the rows of the fixture
     private static final String KEY = "__row";
 
     // KUMO_FIXTURES_DIR: all the tables of the source of the fixtures, which are too large to keep here
@@ -97,11 +97,14 @@ public class KumoTabularTest {
 
             final List<?> yContext = (List<?>) encoded.get("yContext");
             if(fixture.classification()) {
-                Assertions.assertEquals(fixture.classes(), encoded.get("classes"), fixture.name());
+                // the numbers of a fixture may be by first appearance, from before sdm #1037: its labels are what compares
+                final List<String> labels = fixture.classes();
+                final List<?> classes = (List<?>) encoded.get("classes");
+                Assertions.assertEquals(labels.stream().sorted().toList(), classes, fixture.name());
                 final int[] y = fixture.ints("y.bin");
                 Assertions.assertEquals(y.length, yContext.size(), fixture.name());
                 for(int i=0; i<y.length; i++) {
-                    Assertions.assertEquals(y[i], yContext.get(i), fixture.name() + " y " + i);
+                    Assertions.assertEquals(labels.get(y[i]), classes.get((Integer) yContext.get(i)), fixture.name() + " y " + i);
                 }
             } else {
                 final float[] y = fixture.floats("y.bin");
@@ -158,14 +161,18 @@ public class KumoTabularTest {
 
     @Test
     public void testClasses() {
-        final KumoTabular.Classes classes = KumoTabular.classes(List.of("b", "a", "b", "c"));
-        Assertions.assertEquals(List.of("b", "a", "c"), classes.labels());
-        Assertions.assertArrayEquals(new int[]{0, 1, 0, 2}, classes.codes());
+        final KumoTabular.Classes classes = KumoTabular.classes(List.of("b", "a", "b", "c"), List.of("b", "a", "b", "c"));
+        Assertions.assertEquals(List.of("a", "b", "c"), classes.labels());
+        Assertions.assertArrayEquals(new int[]{1, 0, 1, 2}, classes.codes());
+        // a value compares as its kind, and the label stays as it is
+        final KumoTabular.Classes numbers = KumoTabular.classes(List.of(10L, 9L), List.of("ten", "nine"));
+        Assertions.assertEquals(List.of("nine", "ten"), numbers.labels());
+        Assertions.assertArrayEquals(new int[]{1, 0}, numbers.codes());
         final List<String> tooMany = new ArrayList<>();
         for(int i=0; i<=KumoTabular.MAX_CLASSES; i++) {
             tooMany.add("c" + i);
         }
-        Assertions.assertThrows(IllegalArgumentException.class, () -> KumoTabular.classes(tooMany));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> KumoTabular.classes(new ArrayList<Comparable<?>>(tooMany), tooMany));
     }
 
     // a category: sorted by value, unknown and missing are -1, a count column only over 50 categories, and it comes first
