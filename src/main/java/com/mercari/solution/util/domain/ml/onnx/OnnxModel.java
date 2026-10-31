@@ -55,7 +55,8 @@ public class OnnxModel implements Serializable {
 
         public void setDefaults() {
             if(optLevel == null) {
-                optLevel = OrtSession.SessionOptions.OptLevel.BASIC_OPT;
+                // as ONNX Runtime does: with a lower one, a float16 quantized model on a CPU gave wrong logits without an error
+                optLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT;
             }
             if(executionMode == null) {
                 executionMode = OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL;

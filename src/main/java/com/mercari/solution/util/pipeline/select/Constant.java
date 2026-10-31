@@ -28,7 +28,7 @@ public class Constant implements SelectFunction {
         this.type = type;
         this.valueString = valueString;
         this.inputFields = new ArrayList<>();
-        this.outputFieldType = Schema.FieldType.type(type);
+        this.outputFieldType = fieldType(type);
         this.ignore = ignore;
     }
 
@@ -44,6 +44,14 @@ public class Constant implements SelectFunction {
         final String value = jsonObject.get("value").toString();
 
         return new Constant(name, type, value, ignore);
+    }
+
+    // array<int64>: the initial value of a variable of a loop
+    private static Schema.FieldType fieldType(final String type) {
+        if(type.startsWith("array<") && type.endsWith(">")) {
+            return Schema.FieldType.array(fieldType(type.substring("array<".length(), type.length() - 1)));
+        }
+        return Schema.FieldType.type(type);
     }
 
     @Override
@@ -77,7 +85,7 @@ public class Constant implements SelectFunction {
             return null;
         }
         //return Schema.Type.getValue(type, value);
-        return JsonToMapConverter.getAsPrimitiveValue(Schema.FieldType.type(type), value);
+        return JsonToMapConverter.getAsPrimitiveValue(outputFieldType, value);
     }
 
 }

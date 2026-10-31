@@ -3,10 +3,12 @@ package com.mercari.solution.module.transform;
 import ai.onnxruntime.*;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.domain.math.Tensor;
 import com.mercari.solution.util.domain.ml.onnx.OnnxGraphInfo;
 import com.mercari.solution.util.domain.ml.onnx.OnnxInputs;
+import com.mercari.solution.util.domain.ml.onnx.OnnxLoop;
 import com.mercari.solution.util.domain.ml.onnx.OnnxModel;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Select;
@@ -25,7 +27,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.regex.Pattern;
 
 
 @Transform.Module(name="onnx")
@@ -38,6 +39,7 @@ public class OnnxTransform extends Transform {
         private OnnxModel.Config model;
         private JsonArray inputs;
         private JsonArray outputs;
+        private JsonObject loop;
         private Integer bufferSize;
 
         private JsonElement filter;
@@ -61,6 +63,10 @@ public class OnnxTransform extends Transform {
             if(bufferSize != null && bufferSize < 1) {
                 errorMessages.add("parameters.bufferSize must be over than zero");
             }
+            // each record takes its own number of runs
+            if(loop != null && bufferSize != null && bufferSize != 1) {
+                errorMessages.add("parameters.bufferSize must be 1 with parameters.loop");
+            }
 
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -77,22 +83,11 @@ public class OnnxTransform extends Transform {
         }
     }
 
-    // the model outputs named in the outputs select list: naming one that is not used only costs a little more memory,
-    // while the opposite would give a null value silently, so that any mention counts (also in an expression or a template)
+    // the model outputs named in the outputs select list. Only a tensor can be read: a name such as "field" is in the text
+    // of every select item, and requesting a value that is not a tensor would fail every record
     private static Set<String> referencedOutputs(final JsonArray outputs, final OnnxGraphInfo graph) {
-        final String text = outputs.toString();
-        final Set<String> names = new LinkedHashSet<>();
-        for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
-            // only a tensor can be read: a name such as "field" is in the text of every select item, and requesting a value
-            // that is not a tensor would fail every record
-            if(output.isTensor() && Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(output.name()) + "(?![A-Za-z0-9_])").matcher(text).find()) {
-                names.add(output.name());
-            }
-        }
-        if(names.isEmpty()) {
-            throw new IllegalModuleException("parameters.outputs must refer to at least one of the model outputs: " + graph.outputs().keySet());
-        }
-        return names;
+        final List<String> tensors = graph.outputs().values().stream().filter(OnnxGraphInfo.ValueInfo::isTensor).map(OnnxGraphInfo.ValueInfo::name).toList();
+        return OnnxInputs.mentioned(outputs.toString(), tensors);
     }
 
     private static Schema createOutputSchema(
@@ -115,12 +110,8 @@ public class OnnxTransform extends Transform {
                 .build();
     }
 
-    // what the outputs select list can refer to; a model output comes last, as its value does when they are evaluated
-    private static List<Schema.Field> outputsContextFields(
-            final Schema inputSchema,
-            final OnnxInputs inputs,
-            final OnnxGraphInfo graph) {
-
+    // the fields of the record and the items of the inputs select list
+    private static List<Schema.Field> inputsContextFields(final Schema inputSchema, final OnnxInputs inputs) {
         final Map<String, Schema.Field> fields = new LinkedHashMap<>();
         for(final Schema.Field field : inputSchema.getFields()) {
             fields.put(field.getName(), field.copy());
@@ -128,13 +119,33 @@ public class OnnxTransform extends Transform {
         for(final SelectFunction function : inputs.getSelect().getSelectFunctions()) {
             fields.put(function.getName(), Schema.Field.of(function.getName(), function.getOutputFieldType()));
         }
+        return new ArrayList<>(fields.values());
+    }
+
+    private static List<Schema.Field> modelOutputFields(final OnnxInputs inputs, final OnnxGraphInfo graph) {
+        final List<Schema.Field> fields = new ArrayList<>();
         for(final OnnxGraphInfo.ValueInfo output : graph.outputs().values()) {
             if(output.isTensor()) {
                 final Schema.FieldType type = OnnxToElementConverter.convertFieldType(output, inputs.isBatched());
                 // a record that does not ask the model has no value for it
-                fields.put(output.name(), Schema.Field.of(output.name(), inputs.canSkipModel() ? type.withNullable(true) : type));
+                fields.add(Schema.Field.of(output.name(), inputs.canSkipModel() ? type.withNullable(true) : type));
             }
         }
+        return fields;
+    }
+
+    // what the outputs select list can refer to; a model output comes last, as its value does when they are evaluated
+    private static List<Schema.Field> outputsContextFields(
+            final List<Schema.Field> inputsContext,
+            final OnnxLoop loop,
+            final List<Schema.Field> modelOutputs) {
+
+        final Map<String, Schema.Field> fields = new LinkedHashMap<>();
+        inputsContext.forEach(field -> fields.put(field.getName(), field));
+        if(loop != null) {
+            loop.getFields().forEach(field -> fields.put(field.getName(), field));
+        }
+        modelOutputs.forEach(field -> fields.put(field.getName(), field));
         return new ArrayList<>(fields.values());
     }
 
@@ -162,8 +173,22 @@ public class OnnxTransform extends Transform {
         if(onnxInputs.isSingleRecord() && parameters.bufferSize > 1) {
             throw new IllegalModuleException("parameters.bufferSize must be 1: a value of inputs is the model input as it is, without a batch dimension");
         }
-        final Set<String> requestedOutputs = referencedOutputs(parameters.outputs, graph);
-        final Select outputSelect = Select.of(parameters.outputs, outputsContextFields(inputSchema, onnxInputs, graph));
+        final List<Schema.Field> inputsContext = inputsContextFields(inputSchema, onnxInputs);
+        final List<Schema.Field> modelOutputs = modelOutputFields(onnxInputs, graph);
+        final OnnxLoop loop = parameters.loop == null ? null : OnnxLoop.of(parameters.loop, graph, onnxInputs, inputsContext, modelOutputs);
+
+        // what is read as a value: the outputs that only feed the next run of a loop are not copied
+        final Set<String> valueOutputs = new LinkedHashSet<>(referencedOutputs(parameters.outputs, graph));
+        final Set<String> requestedOutputs = new LinkedHashSet<>(valueOutputs);
+        if(loop != null) {
+            valueOutputs.addAll(loop.getValueOutputs());
+            requestedOutputs.addAll(valueOutputs);
+            requestedOutputs.addAll(loop.getFeedOutputs());
+        }
+        if(requestedOutputs.isEmpty()) {
+            throw new IllegalModuleException("parameters.outputs must refer to at least one of the model outputs: " + graph.outputs().keySet());
+        }
+        final Select outputSelect = Select.of(parameters.outputs, outputsContextFields(inputsContext, loop, modelOutputs));
 
         final Schema outputSchema = createOutputSchema(inputSchema, outputSelect);
 
@@ -174,8 +199,8 @@ public class OnnxTransform extends Transform {
 
         final PCollectionTuple outputs = input
                 .apply("Inference", ParDo.of(new InferenceDoFn(
-                                model, filter, onnxInputs, outputSelect,
-                                requestedOutputs, parameters.bufferSize,
+                                model, filter, onnxInputs, loop, outputSelect,
+                                requestedOutputs, valueOutputs, parameters.bufferSize,
                                 outputSchema, getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
@@ -189,8 +214,10 @@ public class OnnxTransform extends Transform {
 
         private final OnnxModel model;
         private final OnnxInputs inputs;
+        private final OnnxLoop loop;
         private final Select outputs;
         private final Set<String> requestedOutputs;
+        private final Set<String> valueOutputs;
         private final Integer bufferSize;
 
         private final Filter filter;
@@ -215,8 +242,10 @@ public class OnnxTransform extends Transform {
                 final OnnxModel model,
                 final Filter filter,
                 final OnnxInputs inputs,
+                final OnnxLoop loop,
                 final Select outputs,
                 final Set<String> requestedOutputs,
+                final Set<String> valueOutputs,
                 final Integer bufferSize,
                 final Schema outputSchema,
                 final boolean failFast,
@@ -226,8 +255,10 @@ public class OnnxTransform extends Transform {
 
             this.model = model;
             this.inputs = inputs;
+            this.loop = loop;
             this.outputs = outputs;
             this.requestedOutputs = requestedOutputs;
+            this.valueOutputs = valueOutputs;
             this.bufferSize = bufferSize;
 
             this.outputSchema = outputSchema;
@@ -242,6 +273,9 @@ public class OnnxTransform extends Transform {
             this.model.setup();
             this.filter.setup();
             this.inputs.setup();
+            if(this.loop != null) {
+                this.loop.setup();
+            }
             this.outputs.setup();
             this.outputSchema.setup();
         }
@@ -373,6 +407,11 @@ public class OnnxTransform extends Transform {
         }
 
         private List<Map<String, Object>> inference(final List<Buffered> buffer) throws OrtException {
+            if(loop != null) {
+                final Buffered buffered = buffer.getFirst();
+                loop.run(model, inputs, requestedOutputs, valueOutputs, buffered.evaluated, buffered.timestamp);
+                return List.of(new HashMap<>());
+            }
             final List<Map<String, Object>> records = new ArrayList<>(buffer.size());
             for(final Buffered buffered : buffer) {
                 records.add(buffered.evaluated);

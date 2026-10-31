@@ -126,4 +126,40 @@ public class TensorTest {
         Assertions.assertArrayEquals(new float[]{1, 2, 3, 0}, (float[]) matrix.data());
     }
 
+
+    // along dim0, or after dimensions of 1, the values are contiguous: only then the array is shared
+    @Test
+    public void testSlice() {
+        final float[] values = {0, 1, 2, 3, 4, 5};
+        final Tensor tensor = Tensor.of(values, new long[]{3, 2});
+
+        final Tensor rows = tensor.slice(0, 1, 3);
+        Assertions.assertArrayEquals(new long[]{2, 2}, rows.shape());
+        Assertions.assertSame(values, rows.data());
+        Assertions.assertEquals(List.of(2f, 3f, 4f, 5f), rows.toList());
+
+        final Tensor columns = tensor.slice(1, 1, 2);
+        Assertions.assertArrayEquals(new long[]{3, 1}, columns.shape());
+        Assertions.assertNotSame(values, columns.data());
+        Assertions.assertEquals(List.of(1f, 3f, 5f), columns.toList());
+
+        final Tensor one = Tensor.of(values, new long[]{1, 3, 2}).slice(1, 2, 3);
+        Assertions.assertSame(values, one.data());
+        Assertions.assertEquals(List.of(4f, 5f), one.toList());
+
+        Assertions.assertEquals(0, tensor.slice(0, 1, 1).size());
+        Assertions.assertThrows(IndexOutOfBoundsException.class, () -> tensor.slice(0, 1, 4));
+        Assertions.assertThrows(IndexOutOfBoundsException.class, () -> tensor.slice(2, 0, 1));
+    }
+
+    @Test
+    public void testAsList() {
+        final float[] values = {0, 1, 2, 3};
+        final List<Object> list = Tensor.of(values, new long[]{2, 2}).row(1).asList();
+        Assertions.assertEquals(List.of(2f, 3f), list);
+        Assertions.assertEquals(2, list.size());
+        values[2] = 9;
+        Assertions.assertEquals(9f, list.getFirst(), "shares the array");
+        Assertions.assertThrows(IndexOutOfBoundsException.class, () -> list.get(2));
+    }
 }

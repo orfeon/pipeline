@@ -69,7 +69,7 @@ Four module kinds are auto-discovered by scanning their packages (Guava `ClassPa
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
 
 **Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
-`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature` `screen` `evaluation` `process` `profile`.
+`compare` `reshuffle` `onnx` `pdfextract` `feature` `screen` `evaluation` `process` `profile`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `postgres` `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.

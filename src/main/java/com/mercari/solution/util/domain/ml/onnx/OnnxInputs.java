@@ -32,7 +32,7 @@ public class OnnxInputs implements Serializable {
     /** {@code empty} / {@code fill}: a value for the whole batch. A null shape comes from the model input. */
     private record Constant(long[] shape, double value) implements Serializable {}
 
-    private record ModelInput(
+    record ModelInput(
             OnnxGraphInfo.ValueInfo info,
             Pad pad,
             Constant constant,
@@ -149,21 +149,42 @@ public class OnnxInputs implements Serializable {
      * that matches nothing is an error: it would be a setting copied from another model.
      */
     static List<String> expandName(final String name, final Collection<String> modelInputNames) {
-        if(!name.contains("%d") && !name.contains("%s")) {
+        if(!hasVariables(name)) {
             return List.of(name);
         }
-        final Pattern pattern = Pattern.compile(Arrays.stream(name.split("((?=%[ds])|(?<=%[ds]))"))
-                .map(part -> switch (part) {
-                    case "%d" -> "[0-9]+";
-                    case "%s" -> "[A-Za-z0-9_]+";
-                    default -> Pattern.quote(part);
-                })
-                .reduce("", String::concat));
+        final Pattern pattern = namePattern(name);
         final List<String> names = modelInputNames.stream().filter(n -> pattern.matcher(n).matches()).toList();
         if(names.isEmpty()) {
             throw new IllegalArgumentException("onnx inputs name: " + name + " matches no model input: " + modelInputNames);
         }
         return names;
+    }
+
+    static boolean hasVariables(final String name) {
+        return name.contains("%d") || name.contains("%s");
+    }
+
+    // a group per variable, in the order they appear
+    static Pattern namePattern(final String name) {
+        return Pattern.compile(Arrays.stream(name.split("((?=%[ds])|(?<=%[ds]))"))
+                .map(part -> switch (part) {
+                    case "%d" -> "([0-9]+)";
+                    case "%s" -> "([A-Za-z0-9_]+)";
+                    default -> Pattern.quote(part);
+                })
+                .reduce("", String::concat));
+    }
+
+    // naming one that is not used only costs a little more memory, while the opposite would give a null value silently,
+    // so that any mention counts (also in an expression or a template)
+    public static Set<String> mentioned(final String text, final Collection<String> names) {
+        final Set<String> mentioned = new LinkedHashSet<>();
+        for(final String name : names) {
+            if(Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(name) + "(?![A-Za-z0-9_])").matcher(text).find()) {
+                mentioned.add(name);
+            }
+        }
+        return mentioned;
     }
 
     private static void validatePad(final String name, final Pad pad, final OnnxGraphInfo.ValueInfo info) {
@@ -273,6 +294,20 @@ public class OnnxInputs implements Serializable {
         select.setup();
     }
 
+    /** The model input {@code name} when a later value of {@code fieldType} replaces what {@code inputs} gives it, at the same rank. */
+    ModelInput replacement(final String name, final Schema.FieldType fieldType) {
+        final ModelInput input = modelInputs.stream().filter(i -> i.info.name().equals(name)).findFirst().orElseThrow();
+        final int rank = rank(name, fieldType);
+        // a constant has no rank of its own: the value follows what the other inputs do
+        final boolean stacked = input.constant == null ? input.stacked : batched && rank == input.info.rank() - 1;
+        final int expected = stacked ? input.info.rank() - 1 : input.info.rank();
+        if(rank != expected) {
+            throw new IllegalArgumentException("onnx loop.next: " + name + " of type " + fieldType + " has rank " + rank
+                    + ", but the model input " + input.info + " takes a value of rank " + expected);
+        }
+        return new ModelInput(input.info, input.pad, null, fieldType, rank, stacked);
+    }
+
     /** dim0 of the model outputs is the batch if a value was stacked on a new dim0; otherwise an output is the value of the record. */
     public boolean isBatched() {
         return batched;
@@ -312,14 +347,18 @@ public class OnnxInputs implements Serializable {
             if(function.ignore()) {
                 continue;
             }
-            if(!function.acceptsTensor()) {
-                values.replaceAll((name, value) -> Tensor.materialize(value));
-            }
-            final Object result = function.apply(values, timestamp);
+            final Object result = function.apply(function.acceptsTensor() ? values : recordValues(values), timestamp);
             values.put(function.getName(), result);
             results.put(function.getName(), result);
         }
         return results;
+    }
+
+    // the values stay Tensors for the next function, and a list only boxes what a function reads of it
+    private static Map<String, Object> recordValues(final Map<String, Object> values) {
+        final Map<String, Object> recordValues = new HashMap<>(values);
+        recordValues.replaceAll((name, value) -> value instanceof Tensor tensor && tensor.rank() > 0 ? tensor.asList() : Tensor.materialize(value));
+        return recordValues;
     }
 
     /** The tensors of a batch from the evaluated values of its records. The caller closes them. */
@@ -327,26 +366,7 @@ public class OnnxInputs implements Serializable {
         final Map<String, OnnxTensor> tensors = new HashMap<>();
         try {
             for(final ModelInput input : modelInputs) {
-                final String name = input.info.name();
-                final Tensor.Type type = OnnxRuntimeUtil.tensorType(input.info.type());
-                final Tensor tensor;
-                if(input.constant != null) {
-                    tensor = Tensor.fill(type, constantShape(input, records.size()), input.constant.value);
-                } else if(input.stacked) {
-                    final List<Tensor> rows = new ArrayList<>(records.size());
-                    for(final Map<String, Object> record : records) {
-                        rows.add(toTensor(name, record.get(name), input, type));
-                    }
-                    tensor = input.pad == null
-                            ? Tensor.stack(rows, null, false)
-                            : Tensor.stack(rows, input.pad.value, input.pad.left, multiples(input));
-                } else {
-                    if(records.size() != 1) {
-                        throw new IllegalArgumentException("onnx inputs: " + name + " is the model input as it is, which takes one record at a time, but got " + records.size());
-                    }
-                    tensor = toTensor(name, records.getFirst().get(name), input, type);
-                }
-                tensors.put(name, OnnxRuntimeUtil.toOnnxTensor(environment, tensor, input.info.type()));
+                tensors.put(input.info.name(), tensor(environment, input, records));
             }
         } catch (final RuntimeException | OrtException e) {
             // the caller only closes the tensors it receives
@@ -354,6 +374,29 @@ public class OnnxInputs implements Serializable {
             throw e;
         }
         return tensors;
+    }
+
+    static OnnxTensor tensor(final OrtEnvironment environment, final ModelInput input, final List<Map<String, Object>> records) throws OrtException {
+        final String name = input.info.name();
+        final Tensor.Type type = OnnxRuntimeUtil.tensorType(input.info.type());
+        final Tensor tensor;
+        if(input.constant != null) {
+            tensor = Tensor.fill(type, constantShape(input, records.size()), input.constant.value);
+        } else if(input.stacked) {
+            final List<Tensor> rows = new ArrayList<>(records.size());
+            for(final Map<String, Object> record : records) {
+                rows.add(toTensor(name, record.get(name), input, type));
+            }
+            tensor = input.pad == null
+                    ? Tensor.stack(rows, null, false)
+                    : Tensor.stack(rows, input.pad.value, input.pad.left, multiples(input));
+        } else {
+            if(records.size() != 1) {
+                throw new IllegalArgumentException("onnx inputs: " + name + " is the model input as it is, which takes one record at a time, but got " + records.size());
+            }
+            tensor = toTensor(name, records.getFirst().get(name), input, type);
+        }
+        return OnnxRuntimeUtil.toOnnxTensor(environment, tensor, input.info.type());
     }
 
     // a fixed dimension of the model input keeps its length

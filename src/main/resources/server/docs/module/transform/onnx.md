@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Onnx Transform Module
-description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
+description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model from Google Cloud Storage or a local path, builds the model inputs and the output fields with select lists (padding, constant inputs, name variables for many inputs), and adds the results to each record. A loop runs the model again on what it gave, for text generation with a KV cache. Supports optional filter conditions, micro-batching via bufferSize and per-record retry of a failing batch. Works in both batch and streaming pipelines.
 tags: [transform, onnx, ml, inference, machinelearning, batch, streaming]
 timestamp: 2026-10-30T00:00:00Z
 ---
@@ -15,6 +15,7 @@ Supports:
 - **Model loading from GCS or local path** - A single `.onnx` file (`gs://bucket/model.onnx`), or a directory (`gs://bucket/models/xxx/` or a local directory) whose files are downloaded with their layout kept, so that external weight files (`*.onnx_data`) are found next to the model; `model.file` picks the model file inside it. The loaded session is shared by all DoFn instances (and all onnx modules using the same model and session options) in the same worker process (JVM), so one model copy serves multiple threads. Pipeline assembly only reads the graph of the `.onnx` file: no session is created and no weights are read, unless the graph leaves out the type or the shape of an input or an output, which only a session can infer.
 - **Select lists** - [`inputs`](#inputs) builds the model inputs with select functions, and [`outputs`](#outputs) builds the output fields from the model outputs.
 - **Padding and constant inputs** - `pad` pads the records of a batch to a common length; `empty` and `fill` give inputs that do not come from the record; `%d` / `%s` in a name match many model inputs.
+- **Loop** - [`loop`](#loop) runs the model again on what the last run gave, for text generation with a KV cache and other iterative models.
 - **Filtering** - Optional [Filter](../common/filter.md) condition; records that do not match are dropped before inference.
 - **Micro-batching** - `bufferSize` buffers records and runs inference on the batch in one session call.
 - **Failure handling** - Errors are routed as failures according to the module common `failFast` / `outputFailure` / `failureSinks` settings. A failing select function fails its record only. A failing batch is retried record by record, so that only the records that fail by themselves are failures.
@@ -41,6 +42,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 | model      | required | [Model](#model-parameters)            | The ONNX model to run. |
 | inputs     | required | Array<[InputField](#inputs)\>         | Select list that builds the model inputs. |
 | outputs    | required | Array<[Select](../common/select.md)\> | Select list that builds the output fields. |
+| loop       | optional | [Loop](#loop)                         | Runs the model again on what the last run gave. `bufferSize` must be 1. |
 | filter     | optional | [Filter](../common/filter.md)         | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output). |
 | bufferSize | optional | Integer                               | Number of records to run inference on as one batch. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With overlapping (sliding) windows inference runs once per window. |
 
@@ -52,7 +54,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 | file          | optional | String | For a directory `path`: the model file relative to the directory (e.g. `onnx/model_q4.onnx`). If omitted, the directory must contain exactly one `.onnx` file. |
 | intraOpThreads | optional | Integer | Number of threads one inference uses. Default: `1`: the worker threads share the session and run inferences in parallel, which scales better than giving every inference all the cores. Tune parallelism with the worker thread count (e.g. Dataflow `numberOfWorkerHarnessThreads`). |
 | interOpThreads | optional | Integer | Number of threads that run independent graph operators in parallel (`executionMode: PARALLEL` only). Default: the ONNX Runtime default. |
-| optLevel      | optional | Enum   | ONNX Runtime graph optimization level. One of `NO_OPT`, `BASIC_OPT`, `EXTENDED_OPT`, `ALL_OPT`. Default: `BASIC_OPT`. |
+| optLevel      | optional | Enum   | ONNX Runtime graph optimization level. One of `NO_OPT`, `BASIC_OPT`, `EXTENDED_OPT`, `ALL_OPT`. Default: `ALL_OPT`, as in ONNX Runtime. A lower level can give wrong values without an error: a model quantized with float16 weights (`model_q4f16.onnx`) gave wrong logits on a CPU with `BASIC_OPT` and `NO_OPT`. |
 | executionMode | optional | Enum   | ONNX Runtime execution mode. One of `SEQUENTIAL`, `PARALLEL`. Default: `SEQUENTIAL`. |
 
 ## inputs
@@ -69,7 +71,7 @@ An item can have these keys besides the select function:
 | `pad: 0` | Pads the records of a batch to the longest of each dimension with the value, at the tail. Without `pad`, records of different lengths can not form a batch: they are retried one by one, which works but gives up batching. |
 | `pad: { value: 0, side: left }` | Pads at the head. |
 | `pad: { value: NaN, side: left, multiple: 16 }` | `value` can be `NaN` for a float input (`.nan` in YAML works as well), where a model takes NaN as a missing value. `multiple` rounds the length up to a multiple, also for one record: for a model that only takes such lengths. It applies to the dimensions of the row that are dynamic in the model input; a model input without one is a configuration error. |
-| `fill: 0` | A tensor of the value (`NaN` for a float input only), instead of a select function. Its shape comes from the model input: a dynamic dim0 is the batch size, other dynamic dimensions are 0. `shape: [2, 3]` specifies the shape explicitly. |
+| `fill: 0` | A tensor of the value (`NaN` for a float input only), instead of a select function. Its shape comes from the model input: a dynamic dim0 is the batch size, other dynamic dimensions are 0. `shape: [2, 3]` specifies the shape explicitly. A model input of rank 0 gets a scalar (`num_logits_to_keep int64[]` with `fill: 1`), and a float16 input a float16 tensor. |
 | `empty: [0, 512]` | An empty tensor of the shape, instead of a select function, for an input the model takes but this use does not fill. |
 
 ### Name variables
@@ -119,7 +121,71 @@ dim0 of a model output is the batch if a value was stacked ([Rank of a value](#r
 
 Element types: float / float16 / bfloat16 -> `float32`, double -> `float64`, int64 -> `int64`, int8 / uint8 / int16 / int32 -> `int32`, bool -> `boolean`, string -> `string`. An output whose dim0 is not the batch size fails the batch.
 
-Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes. For a tabular model that learns in context: [`tabular_encode` and `tabular_decode`](select.md#tabular_encode).
+Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `sigmoid`, `argmax`, `topk`, `labels`](select.md#vector_normalize), [`group_softmax`](select.md#group_softmax), [`slice`](select.md#slice), [`sample`](select.md#sample) and [`timeseries_quantiles`](select.md#timeseries_quantiles). For the model inputs: [`array`, `array_append`](select.md#array), [`range`](select.md#range), [`timeseries_grid`](select.md#timeseries_grid), and [`token_ids`](select.md#token_ids) for what `group_softmax` takes. For a tabular model that learns in context: [`tabular_encode` and `tabular_decode`](select.md#tabular_encode).
+
+## loop
+
+`loop` runs the model on one record again and again, with what the last run gave. The first run takes its inputs from `inputs`.
+
+| parameter     | optional | type | description |
+|---------------|----------|------|-------------|
+| next          | required | Map<String, String or [Select](../common/select.md)\> | What the next run takes, evaluated in order after each run. A string is the name of a model output, which the next run takes as it is. An object is a select function, whose key is its `name`. |
+| until         | required | [Filter](../common/filter.md) | Checked after `next`: the loop stops when it holds. |
+| maxIterations | required | Integer | The largest number of runs. Reaching it is not a failure: the record gets the values of the last run. |
+| vars          | optional | Map<String, [Select](../common/select.md)\> | Variables of the loop, set before the first run. `{ value: [], type: array<int64> }` is an empty array. An item of `next` of the same name updates one. |
+
+```
+inputs, vars -> run -> next -> until or maxIterations? -> outputs
+                 ^                 | no
+                 +-----------------+
+```
+
+- A model input that is not in `next` keeps its value, as an encoder output or a constant does.
+- `next`, `until` and `outputs` can refer to the fields of the record, the items of `inputs`, the variables, the items of `next` above them and the model outputs of the last run. A variable or an item of `next` must not have the name of a model output.
+- `_iteration` is the number of the last run, from 0.
+- A string in `next` keeps the tensor of the model output, without a copy or a conversion: the type and the rank of the model input and output must be the same. Name variables correspond in the order they appear.
+- The model outputs that functions read are copied once per run. The logits of a model that gives every position of a long prompt are copied whole, once: for a large vocabulary, use a model that only gives the last position.
+- All the runs of a record are held by one worker thread, and the transform has no time limit: choose `maxIterations` accordingly.
+- A failure in any run fails the record, without its earlier results.
+
+The `until` of the [http source](../source/http.md) is checked before its `next`. It is the opposite here, as what `until` checks is typically what `next` chose from the outputs.
+
+### Example: text generation
+
+```yaml
+- name: generate
+  module: onnx
+  inputs: [prompts]
+  parameters:
+    model:
+      path: gs://bucket/models/llm/
+      file: onnx/model_q4.onnx
+    inputs:
+      - { name: tok, func: tokenize_encode, tokenizer: huggingface, path: gs://bucket/models/llm/tokenizer.json, field: prompt }
+      - { name: input_ids, field: tok.ids }
+      - { name: attention_mask, field: tok.attentionMask }
+      - { name: position_ids, func: range, field: tok.ids }
+      - { name: "past_key_values.%d.%s", fill: 0 }
+    loop:
+      vars:
+        generated: { value: [], type: array<int64> }
+      next:
+        "past_key_values.%d.%s": "present.%d.%s"
+        token: { func: argmax, field: logits, position: last }
+        generated: { func: array_append, field: generated, valueField: token }
+        input_ids: { func: array, fields: [token] }
+        attention_mask: { func: array_append, field: attention_mask, value: 1 }
+        position_ids: { func: range, field: attention_mask, last: 1 }
+      until: { key: token, op: in, value: [1, 7] }
+      maxIterations: 512
+    outputs:
+      - { name: text, func: tokenize_decode, tokenizer: huggingface, path: gs://bucket/models/llm/tokenizer.json, field: generated, skipSpecialTokens: true }
+```
+
+- `generated` also holds the token that stopped the loop, which `skipSpecialTokens` leaves out of `text`.
+- To sample instead, use `token: { func: sample, field: logits, position: last, temperature: 0.7, topP: 0.9, seed: 0 }`.
+- The inputs differ from model to model: leave out what the model does not take (`position_ids`), and add what it needs (`{ name: "past_conv.%d", fill: 0 }`, `{ name: num_logits_to_keep, fill: 1 }`). The ids that end a text (`until`) differ as well.
+- A model split into several files must first be merged into one.
 
 ## Example: text embedding
 

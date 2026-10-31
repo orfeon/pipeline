@@ -23,7 +23,8 @@ public class VectorsTest {
             Schema.Field.of("m2", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(2, 3))),
             Schema.Field.of("md", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(-1, 3))),
             Schema.Field.of("groups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.INT64))),
-            Schema.Field.of("floatGroups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))));
+            Schema.Field.of("floatGroups", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))),
+            Schema.Field.of("longs", Schema.FieldType.array(Schema.FieldType.INT64)));
 
     private static SelectFunction function(final String json) {
         final SelectFunction function = SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS);
@@ -240,4 +241,103 @@ public class VectorsTest {
         }
     }
 
+
+    @Test
+    public void testPositionLast() {
+        final Tensor logits = Tensor.of(new float[]{9, 0, 0, 0, 7, 8}, new long[]{2, 3});
+        Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"argmax\", \"field\": \"md\", \"position\": \"last\"}", logits));
+        final List<?> top = (List<?>) apply("{\"name\": \"o\", \"func\": \"topk\", \"field\": \"md\", \"position\": \"last\", \"k\": 1}", logits);
+        Assertions.assertEquals(2L, ((Map<?, ?>) top.getFirst()).get("index"));
+        // a matrix is flat in a record
+        Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"argmax\", \"field\": \"md\", \"position\": \"last\"}", List.of(9f, 0f, 0f, 0f, 7f, 8f)));
+        Assertions.assertNull(apply("{\"name\": \"o\", \"func\": \"argmax\", \"field\": \"md\", \"position\": \"last\"}", null));
+
+        for(final String json : List.of(
+                "{\"name\": \"o\", \"func\": \"argmax\", \"field\": \"md\", \"position\": \"first\"}",
+                "{\"name\": \"o\", \"func\": \"argmax\", \"field\": \"v\", \"position\": \"last\"}",
+                "{\"name\": \"o\", \"func\": \"softmax\", \"field\": \"md\", \"position\": \"last\"}")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
+        }
+    }
+
+    @Test
+    public void testSlice() {
+        final Tensor tensor = Tensor.of(new float[]{0, 1, 2, 3, 4, 5}, new long[]{2, 3});
+        final String row = "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"m2\", \"index\": -1}";
+        Assertions.assertEquals(Schema.Type.array, function(row).getOutputFieldType().getType());
+        final Tensor last = (Tensor) apply(row, tensor);
+        Assertions.assertSame(tensor.data(), last.data());
+        Assertions.assertEquals(List.of(3f, 4f, 5f), last.toList());
+        Assertions.assertEquals(List.of(3f, 4f, 5f), apply(row, List.of(0f, 1f, 2f, 3f, 4f, 5f)), "a record value stays one");
+
+        final String column = "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"m2\", \"axis\": -1, \"start\": 1}";
+        final Schema.FieldType columnType = function(column).getOutputFieldType();
+        Assertions.assertEquals(List.of(2, 2), columnType.getShape());
+        Assertions.assertEquals(List.of(1f, 2f, 4f, 5f), ((Tensor) apply(column, tensor)).toList());
+
+        final String part = "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"start\": -2, \"end\": 99}";
+        Assertions.assertEquals(List.of(2f, 3f), apply(part, List.of(1f, 2f, 3f)));
+        Assertions.assertEquals(2f, apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"index\": 1}", List.of(1f, 2f, 3f)));
+        Assertions.assertEquals(List.of(), apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"start\": 2, \"end\": 1}", List.of(1f, 2f, 3f)));
+        // integers stay integers
+        Assertions.assertEquals(List.of(2L), apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"longs\", \"start\": 1}", List.of(1L, 2L)));
+        Assertions.assertNull(apply(row, null));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"index\": 3}", List.of(1f, 2f, 3f)));
+
+        for(final String json : List.of(
+                "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\"}",
+                "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"index\": 0, \"start\": 1}",
+                "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"v\", \"axis\": 1, \"index\": 0}",
+                "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"s\", \"index\": 0}")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
+        }
+    }
+
+    // with a seed the result depends on the logits and on the iteration only, and each index comes as often as its probability says
+    @Test
+    public void testSample() {
+        final String seeded = "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"seed\": 7}";
+        final List<Float> logits = List.of((float) Math.log(0.2), (float) Math.log(0.8));
+        final int[] counts = new int[2];
+        final Set<Object> draws = new HashSet<>();
+        for(long iteration=0; iteration<2000; iteration++) {
+            final Map<String, Object> input = new HashMap<>();
+            input.put("v", logits);
+            input.put("_iteration", iteration);
+            final SelectFunction function = function(seeded);
+            final Object index = function.apply(input, Instant.EPOCH);
+            Assertions.assertEquals(index, function.apply(input, Instant.EPOCH), "a retried record gets the same one");
+            counts[((Number) index).intValue()]++;
+            draws.add(index);
+        }
+        Assertions.assertEquals(2, draws.size());
+        Assertions.assertEquals(0.8, counts[1] / 2000d, 0.03);
+
+        // temperature 0 is the most likely, and so are topK 1 and a small topP
+        final List<Float> three = List.of(0f, 2f, 1f);
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"temperature\": 0}", three));
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topK\": 1}", three));
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topP\": 0.01}", three));
+        // top k and top p only keep the largest
+        for(int seed=0; seed<200; seed++) {
+            final Object topK = apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topK\": 2, \"seed\": " + seed + "}", three);
+            Assertions.assertNotEquals(0L, topK);
+            final Object topP = apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topP\": 0.7, \"seed\": " + seed + "}", three);
+            Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topP\": 0.6, \"seed\": " + seed + "}", three));
+            Assertions.assertNotEquals(0L, topP);
+        }
+        // NaN is never chosen
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"seed\": 1}", List.of(Float.NaN, 0f)));
+        Assertions.assertNull(apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\"}", List.of(Float.NaN)));
+        Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"sample\", \"field\": \"md\", \"position\": \"last\", \"temperature\": 0}", Tensor.of(new float[]{9, 0, 0, 0, 7, 8}, new long[]{2, 3})));
+
+        for(final String json : List.of(
+                "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"s\"}",
+                "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"temperature\": -1}",
+                "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topK\": 0}",
+                "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topP\": 0}",
+                "{\"name\": \"o\", \"func\": \"sample\", \"field\": \"v\", \"topP\": 1.5}")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
+        }
+    }
 }

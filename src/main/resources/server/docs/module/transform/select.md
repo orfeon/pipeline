@@ -137,7 +137,7 @@ Creates a field with a constant value.
 | parameter | optional | type   | description                                           |
 |-----------|----------|--------|-------------------------------------------------------|
 | value     | required | JSON   | The constant value.                                   |
-| type      | required | String | The output type. See [supported types](#supported-types). |
+| type      | required | String | The output type. See [supported types](#supported-types). `array<int64>` gives an array. |
 
 ```yaml
 - name: source_system
@@ -680,6 +680,7 @@ Index of the largest value of a vector: the first one if several are the largest
 |-----------|----------|---------|-------------|
 | field     | required | String  | Source field. |
 | size      | optional | Integer | Uses only the first `size` values. |
+| position  | optional | String  | `last`: from the last row of a matrix `[L, V]`, as a model that gives the values of every position of a sequence does. Only that row is read. |
 
 Output type: INT64.
 
@@ -692,6 +693,7 @@ The `k` largest values of a vector with their indices, the largest first. Values
 | field     | required | String  | Source field. |
 | k         | required | Integer | Number of values. A shorter vector gives all of its values. |
 | size      | optional | Integer | Uses only the first `size` values. |
+| position  | optional | String  | `last`: from the last row of a matrix `[L, V]`, as a model that gives the values of every position of a sequence does. Only that row is read. |
 
 Output type: array of ELEMENT with `index` (int64) and `value` (float32, float64 for float64 values).
 
@@ -728,6 +730,44 @@ Softmax over groups of a vector of logits: the logit of a group is the largest o
 
 Output type: array of float32 (float64 for float64 values), one value per group.
 
+### slice
+
+Takes a part of an array or a matrix along one dimension. Inside the onnx transform it shares the values if they are contiguous: for the first dimension, or if the dimensions before `axis` are 1.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field: an array or a matrix. |
+| axis      | optional | Integer | The dimension. A negative one counts from the last. Default: `0`. |
+| index     | selective required | Integer | One position, whose dimension is removed. A negative one counts from the end, and out of range fails the record. |
+| start     | selective required | Integer | First position to keep. A negative one counts from the end. The range is cut to the length. Default: `0`. |
+| end       | selective required | Integer | Position after the last one to keep. Default: the length. |
+
+```yaml
+- { name: last_row, func: slice, field: logits, axis: 0, index: -1 }
+- { name: first_two, func: slice, field: scores, start: 0, end: 2 }
+```
+
+Output type: the input without the dimension for `index`, otherwise the same rank.
+
+### sample
+
+Chooses an index at random from logits, for text generation. The logits are divided by `temperature`, then only the `topK` largest are kept, then the most likely ones up to the probability `topP`. A NaN is never chosen, and the result is null if there is no other value.
+
+| parameter   | optional | type    | description |
+|-------------|----------|---------|-------------|
+| field       | required | String  | Source field: a numeric array, or a matrix of two dimensions with `position`. |
+| position    | optional | String  | `last`: from the last row of a matrix `[L, V]`, as for [`argmax`](#argmax). |
+| temperature | optional | Float   | Default: `1`. `0` gives the most likely index. |
+| topK        | optional | Integer | Default: all of them. |
+| topP        | optional | Float   | Over 0, at most 1. Default: `1`. |
+| seed        | optional | Integer | With a seed the result only depends on the logits and on `_iteration` in a [loop](onnx.md#loop): a retried record gets the same result, and so do two records with the same logits. Default: random. |
+
+```yaml
+- { name: token, func: sample, field: logits, position: last, temperature: 0.7, topP: 0.9, seed: 0 }
+```
+
+Output type: INT64
+
 ### token_ids
 
 A constant: the ids of the given texts, by group, keeping the texts that are one token without special tokens. It is computed once when the worker sets up, which fails if a group has no text of one token.
@@ -749,6 +789,53 @@ A constant: the ids of the given texts, by group, keeping the texts that are one
 ```
 
 Output type: array of array of INT64. Not every sink can write this type (BigQuery can not). In a `select` transform it needs the default output type: `outputType: ELEMENT` or `ROW` fails on a record with this value. In the `inputs` of an onnx transform it is an intermediate value, which is not output.
+
+### array
+
+Makes an array of fields, to give a value to a model input of one more dimension.
+
+| parameter | optional | type          | description |
+|-----------|----------|---------------|-------------|
+| fields    | required | Array<String\> | Source fields of one type. A null stays in the array. |
+
+```yaml
+- { name: input_ids, func: array, fields: [token] }
+```
+
+Output type: array of the type of the fields.
+
+### array_append
+
+Adds a value at the end of an array. The source array is not changed.
+
+| parameter  | optional | type   | description |
+|------------|----------|--------|-------------|
+| field      | required | String | Source field: an array. Null gives null. |
+| value      | selective required | Any | The value to add. |
+| valueField | selective required | String | Field with the value to add. A number is converted to the type of the array. |
+
+```yaml
+- { name: generated, func: array_append, field: generated, valueField: token }
+- { name: attention_mask, func: array_append, field: attention_mask, value: 1 }
+```
+
+Output type: the type of `field`.
+
+### range
+
+The numbers from 0 to n - 1, as the positions of a sequence.
+
+| parameter | optional | type    | description |
+|-----------|----------|---------|-------------|
+| field     | required | String  | Source field: a number, which is n, or an array, whose length is n. Null gives null. |
+| last      | optional | Integer | Only the last numbers: `last: 1` gives `[n - 1]`, the position of the next token of a [loop](onnx.md#loop). |
+
+```yaml
+- { name: position_ids, func: range, field: tok.ids }
+- { name: position_ids, func: range, field: attention_mask, last: 1 }
+```
+
+Output type: array of INT64
 
 ### array_zip
 

@@ -40,11 +40,19 @@ public class OnnxToElementConverter {
      * that share the array of the output. A rank-0 output (no batch dimension) is given to every record.
      */
     public static List<Map<String,Object>> convert(final OrtSession.Result result, final int batchSize, final boolean batched) throws OrtException {
+        return convert(result, batchSize, batched, null);
+    }
+
+    /** {@link #convert(OrtSession.Result, int, boolean)} of the outputs in {@code names}, or all of them if null. The others are not copied. */
+    public static List<Map<String,Object>> convert(final OrtSession.Result result, final int batchSize, final boolean batched, final Set<String> names) throws OrtException {
         final List<Map<String,Object>> outputs = new ArrayList<>();
         for(int i=0; i<batchSize; i++) {
             outputs.add(new HashMap<>());
         }
         for (final Map.Entry<String, OnnxValue> entry : result) {
+            if(names != null && !names.contains(entry.getKey())) {
+                continue;
+            }
             if (!(entry.getValue() instanceof OnnxTensor onnxTensor)) {
                 throw new IllegalArgumentException("Not supported onnx output: " + entry.getKey() + " type: " + entry.getValue().getInfo());
             }
