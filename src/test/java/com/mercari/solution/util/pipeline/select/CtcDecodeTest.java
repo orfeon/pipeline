@@ -114,7 +114,7 @@ public class CtcDecodeTest {
     @Test
     public void testVocabularyFile(@TempDir final Path dir) throws IOException {
         final Path meta = dir.resolve("meta.json");
-        // a vocabulary as a string in a file of many things, as meta.json of indra-ocr has them
+        // a vocabulary as a string in a file of many things
         Files.writeString(meta, "{ \"det_long_side\": 1024, \"vocab\": \"{\\\"blank\\\": 0, \\\"chars\\\": [\\\"a\\\", \\\"b\\\"]}\", \"other\": { \"chars\": [\"c\"], \"blank\": 1 } }", StandardCharsets.UTF_8);
         final String path = meta.toUri().toString();
         Assertions.assertEquals("ab", apply(decode("{ field: ids, path: \"%s\", key: vocab }".formatted(path)), values(List.of(1L, 2L), null, null)).get("text"));

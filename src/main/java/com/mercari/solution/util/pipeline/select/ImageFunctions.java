@@ -23,7 +23,7 @@ import java.util.*;
  * { "name": "small",  "func": "image_resize", "field": "gray", "longSide": 1024 },
  * { "name": "padded", "func": "image_pad",    "field": "small", "multiple": 32, "value": 255 },
  * { "name": "x",      "func": "image_tensor", "field": "padded", "invert": true },
- * { "name": "boxes",  "func": "text_line_boxes", "field": "output", "imageField": "gray", "resizedField": "small" },
+ * { "name": "boxes",  "func": "text_line_boxes", "field": "output", "imageField": "gray", "resizedField": "small", "stride": 2, "xShrink": 0.15 },
  * { "name": "lines",  "func": "image_crop",   "field": "gray", "boxes": "boxes", "height": 32, "invertDark": true }
  * }</pre>
  */
@@ -167,7 +167,7 @@ public class ImageFunctions implements SelectFunction {
         }
         final Integer minArea = positive(name, op, json, "minArea");
         final Integer stride = positive(name, op, json, "stride");
-        final double xShrink = json.has("xShrink") ? json.get("xShrink").getAsDouble() : 0.15d;
+        final double xShrink = json.has("xShrink") ? json.get("xShrink").getAsDouble() : 0d;
 
         String boxes = null;
         String imageField = null;
@@ -223,6 +223,13 @@ public class ImageFunctions implements SelectFunction {
                 resizedField = json.get("resizedField").getAsString();
                 requireMatrix(name, op, resizedField, ElementSchemaUtil.getInputFieldType(resizedField, inputFields), 2, 3);
                 ArrayFunctions.putParent(parents, resizedField, inputFields);
+                // what the model was trained with: a default would give the wrong boxes for another model, without an error
+                if(stride == null || !json.has("xShrink")) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes requires stride and xShrink, which follow from the model");
+                }
+                if(xShrink < 0) {
+                    throw new IllegalArgumentException("SelectField: " + name + " func: text_line_boxes xShrink must not be negative: " + xShrink);
+                }
             }
             default -> {}
         }
@@ -230,8 +237,8 @@ public class ImageFunctions implements SelectFunction {
                 multiple == null ? 1 : multiple, value, boxes, padX, padY,
                 minWidth, maxWidth, invertDark,
                 scale, invert, mean, std, channelFirst, threshold, connectivity,
-                minArea == null ? (op == Op.text_line_boxes ? 2 : 1) : minArea,
-                stride == null ? 2 : stride, xShrink, imageField, resizedField);
+                minArea == null ? 1 : minArea,
+                stride == null ? 1 : stride, xShrink, imageField, resizedField);
     }
 
     private static ImageTensors.Interpolation parseInterpolation(final String name, final Op op, final JsonObject json) {

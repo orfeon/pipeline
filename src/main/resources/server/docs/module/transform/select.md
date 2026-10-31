@@ -1075,20 +1075,20 @@ The connected components of the values over a threshold, in the order a scan fir
 
 ### text_line_boxes
 
-The boxes of the lines of a page from a model that gives the logit of the band in the middle of a line, and the distances from a pixel of it to the top and to the bottom of the line, such as the detector of indra-ocr. Output type: array of ELEMENT with `x0`, `y0`, `x1`, `y1` and `score` (FLOAT32), in pixels of the image before it was resized.
+The boxes of the lines of a page from a model that gives the logit of the band in the middle of a line, and the distances from a pixel of it to the top and to the bottom of the line. Output type: array of ELEMENT with `x0`, `y0`, `x1`, `y1` and `score` (FLOAT32), in pixels of the image before it was resized.
 
 | parameter  | optional | type    | description |
 |------------|----------|---------|-------------|
 | field      | required | String  | Source field: a matrix of `[C, h, w]`, whose channels 0, 1 and 2 are the logit and the distances. The others are not read. |
 | imageField | required | String  | The image before it was resized, whose size limits the boxes. |
 | resizedField | required | String | The image after it was resized and before it was padded. A size that keeps the ratio has the scale of the long side, and another size one scale per dimension. |
+| stride     | required | Integer | Pixels of the model input for one of its output, which follow from the model. |
+| xShrink    | required | Float   | How much shorter the band is than the line on each side, in times the height of the line, which follows from the model. |
 | threshold  | optional | Float   | On the probability of a pixel. Default: 0.5. |
-| minArea    | optional | Integer | In pixels of the model output. Default: 2. |
-| stride     | optional | Integer | Pixels of the model input for one of its output. Default: 2. |
-| xShrink    | optional | Float   | How much shorter the band is than the line on each side, in times the height of the line. Default: 0.15. |
+| minArea    | optional | Integer | In pixels of the model output. Default: 1. |
 
 ```yaml
-- { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
+- { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15, minArea: 2 }
 ```
 
 ### ctc_decode

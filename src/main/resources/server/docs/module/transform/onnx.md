@@ -377,7 +377,7 @@ transforms:
 
 ## Example: reading the text of an image
 
-[indra-ocr](https://huggingface.co/datalab-to/indra-ocr) finds the lines of a page with one model, chooses the script of each line with another, and reads a line with the model of its script. Each is a transform: a page gives a record per line, and only the texts are shuffled, to choose the best reading of a line. The license of the weights limits their use: read it before you use them.
+A set of OCR models finds the lines of a page with one model, chooses the script of each line with another, and reads a line with the model of its script. Each is a transform: a page gives a record per line, and only the texts are shuffled, to choose the best reading of a line. The names of the model inputs and outputs, the sizes and the labels below are those of one such set: use those of your models.
 
 ```yaml
 transforms:
@@ -385,7 +385,7 @@ transforms:
     module: onnx
     inputs: [pages]
     parameters:
-      model: { path: gs://my-bucket/models/indra-ocr/, file: det.onnx }
+      model: { path: gs://my-bucket/models/ocr/, file: detector.onnx }
       inputs:
         - { name: decoded, func: image_decode, field: content }
         - { name: page, func: image_gray, field: decoded }
@@ -393,7 +393,7 @@ transforms:
         - { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
         - { name: x, func: image_tensor, field: padded, invert: true }
       outputs:
-        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
+        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15, minArea: 2 }
         - { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
         - { name: windows, func: image_crop, field: page, boxes: boxes, height: 96, padX: 0.3, padY: 1.6, invertDark: true }
         - { name: numbers, func: range, field: boxes }
@@ -409,7 +409,7 @@ transforms:
     module: onnx
     inputs: [lines]
     parameters:
-      model: { path: gs://my-bucket/models/indra-ocr/, file: script.onnx }
+      model: { path: gs://my-bucket/models/ocr/, file: script.onnx }
       bufferSize: 4
       inputs:
         - { name: decoded, func: image_decode, field: line.band }
@@ -437,7 +437,7 @@ transforms:
     module: onnx
     inputs: [route.base]
     parameters:
-      model: { path: gs://my-bucket/models/indra-ocr/, file: rec.onnx }
+      model: { path: gs://my-bucket/models/ocr/, file: recognizer.onnx }
       bufferSize: 4
       inputs:
         - { name: decoded, func: image_decode, field: line.tall }
@@ -446,10 +446,10 @@ transforms:
         - { name: x, func: image_tensor, field: gray, invert: true, pad: { value: 0, multiple: 8 } }
         - { name: widths, field: size.width }
       outputs:
-        - { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: gs://my-bucket/models/indra-ocr/meta.json, key: vocab, normalize: NFC, minConf: 0.5 }
+        - { name: read, func: ctc_decode, field: ids, confField: conf, lengthField: lengths, path: gs://my-bucket/models/ocr/meta.json, key: vocab, normalize: NFC, minConf: 0.5 }
         - { name: text, field: read.text }
         - { name: confidence, field: read.conf }
-  # rec_cjk is the same with file: rec_cjk.onnx, field: line.band and key: vocab_cjk; rtl and world as well
+  # rec_cjk is the same with file: recognizer_cjk.onnx, field: line.band and key: vocab_cjk; rtl and world as well
   - name: read
     module: select
     inputs: [rec_base, rec_cjk]
@@ -471,6 +471,6 @@ transforms:
 ```
 
 - A line the script model is not sure of also goes to `rec_base`, and `best` keeps the reading with the highest confidence.
-- `rec.onnx` reads a tall window, the line with the page above and below it, at 96 pixels. The other recognizers read the line at 32 pixels.
+- `recognizer.onnx` reads a tall window, the line with the page above and below it, at 96 pixels. The other recognizers read the line at 32 pixels.
 - `numbers` is the order the lines are found in, which is not the reading order of a page of several columns.
-- This does not do what the package of indra-ocr does besides the models above: a second detection for small text, turning and straightening a page, the language model for lines of low confidence, the order of the text of right-to-left scripts, and the reading order.
+- This is only the models above. It does not detect small text a second time, turn or straighten a page, use a language model for lines of low confidence, put the text of right-to-left scripts in order, or find the reading order.

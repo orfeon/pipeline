@@ -52,7 +52,7 @@ public class ImageFunctionsTest {
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> box(final Tensor page, final Tensor small) {
-        final ImageFunctions function = function("{ field: out, imageField: page, resizedField: small }", ImageFunctions.Op.text_line_boxes);
+        final ImageFunctions function = function("{ field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15 }", ImageFunctions.Op.text_line_boxes);
         final Map<String, Object> values = new HashMap<>();
         values.put("out", output());
         values.put("page", page);
@@ -84,7 +84,7 @@ public class ImageFunctionsTest {
 
     @Test
     public void testNullImageGivesNoBoxes() {
-        final ImageFunctions function = function("{ field: out, imageField: page, resizedField: small }", ImageFunctions.Op.text_line_boxes);
+        final ImageFunctions function = function("{ field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15 }", ImageFunctions.Op.text_line_boxes);
         final Map<String, Object> values = new HashMap<>();
         values.put("out", output());
         values.put("page", empty(4, 4));

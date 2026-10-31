@@ -18,12 +18,12 @@ import java.nio.file.Path;
 import java.util.*;
 
 /**
- * The lines of a page read by indra-ocr. It runs by hand with {@code INDRA_MODEL_DIR}, a directory of
+ * The lines of a page read by a set of OCR models. It runs by hand with {@code OCR_MODEL_DIR}, a directory of
  * datalab-to/indra-ocr at v1.1.0 with det.onnx, script.onnx, rec.onnx, rec_cjk.onnx, rec_rtl.onnx, rec_world.onnx and meta.json,
- * and {@code INDRA_IMAGE_DIR}, a directory of the images of the repository datalab-to/indra. The license of the weights
+ * and {@code OCR_IMAGE_DIR}, a directory of the images of the repository datalab-to/indra. The license of the weights
  * limits their use: they are not in this repository, nor is what they give.
  */
-public class OnnxIndraModelTest implements Serializable {
+public class OnnxOcrModelTest implements Serializable {
 
     private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
@@ -86,7 +86,7 @@ public class OnnxIndraModelTest implements Serializable {
                         - { name: padded, func: image_pad, field: small, multiple: 32, value: 255 }
                         - { name: x, func: image_tensor, field: padded, invert: true }
                       outputs:
-                        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small }
+                        - { name: boxes, func: text_line_boxes, field: out, imageField: page, resizedField: small, stride: 2, xShrink: 0.15, minArea: 2 }
                         - { name: bands, func: image_crop, field: page, boxes: boxes, height: 32, padX: 0.3, padY: 0.2, invertDark: true }
                         - { name: windows, func: image_crop, field: page, boxes: boxes, height: 96, padX: 0.3, padY: 1.6, invertDark: true }
                         - { name: numbers, func: range, field: boxes }
@@ -151,9 +151,9 @@ public class OnnxIndraModelTest implements Serializable {
     }
 
     private void read(final String file, final List<String> expected) throws IOException {
-        final String models = System.getenv("INDRA_MODEL_DIR");
-        final String images = System.getenv("INDRA_IMAGE_DIR");
-        Assumptions.assumeTrue(models != null && images != null, "INDRA_MODEL_DIR and INDRA_IMAGE_DIR are not set");
+        final String models = System.getenv("OCR_MODEL_DIR");
+        final String images = System.getenv("OCR_IMAGE_DIR");
+        Assumptions.assumeTrue(models != null && images != null, "OCR_MODEL_DIR and OCR_IMAGE_DIR are not set");
         final long start = System.nanoTime();
         final Config config = Config.load(config(OnnxTestModels.configPath(Path.of(models)), Files.readAllBytes(Path.of(images, file))));
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
@@ -163,14 +163,14 @@ public class OnnxIndraModelTest implements Serializable {
                 lines.put((Long) row.getPrimitiveValue("number"), row.getAsString("text"));
             }
             final String text = String.join("\n", lines.values());
-            System.out.println("indra " + file + ": " + lines.size() + " lines\n" + text);
+            System.out.println("ocr " + file + ": " + lines.size() + " lines\n" + text);
             for(final String phrase : expected) {
                 Assertions.assertTrue(text.contains(phrase), phrase + " in:\n" + text);
             }
             return null;
         });
         pipeline.run();
-        System.out.println("indra " + file + ": " + (System.nanoTime() - start) / 1_000_000 + " ms");
+        System.out.println("ocr " + file + ": " + (System.nanoTime() - start) / 1_000_000 + " ms");
     }
 
     @Test
