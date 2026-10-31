@@ -5,6 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.Tensor;
+import com.mercari.solution.util.domain.ml.onnx.OnnxInputs;
+import com.mercari.solution.util.pipeline.Select;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -291,6 +293,44 @@ public class VectorsTest {
                 "{\"name\": \"o\", \"func\": \"slice\", \"field\": \"s\", \"index\": 0}")) {
             Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
         }
+    }
+
+    // an array of a record keeps its values, whatever their type
+    @Test
+    public void testSliceOfAnyArray() {
+        final List<List<Long>> groups = List.of(List.of(1L, 2L), List.of(3L));
+        Assertions.assertEquals(List.of(1L, 2L), apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"groups\", \"index\": 0}", groups));
+        Assertions.assertEquals(List.of(List.of(3L)), apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"groups\", \"start\": 1}", groups));
+        Assertions.assertEquals(Arrays.asList(1L, null), apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"longs\", \"end\": 2}", Arrays.asList(1L, null, 3L)));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> apply("{\"name\": \"o\", \"func\": \"slice\", \"field\": \"groups\", \"index\": 2}", groups));
+    }
+
+    // a function that does not take a Tensor finds what the functions before it gave, and the Tensor stays for the next one
+    @Test
+    public void testTensorsStayForTheNextFunction() {
+        final Select select = Select.of(new Gson().fromJson("""
+                [
+                  { "name": "first", "expression": "s + 1" },
+                  { "name": "last", "func": "slice", "field": "v", "index": -1 },
+                  { "name": "second", "expression": "first + last" },
+                  { "name": "row", "func": "slice", "field": "m2", "index": 0 },
+                  { "name": "third", "func": "array_zip", "fields": [{ "name": "value", "field": "row" }] }
+                ]
+                """, JsonArray.class), FIELDS);
+        select.setup();
+        final Tensor vector = Tensor.of(new float[]{1, 2}, new long[]{2});
+        final Tensor matrix = Tensor.of(new float[]{3, 4, 5, 6, 7, 8}, new long[]{2, 3});
+        final Map<String, Object> values = new HashMap<>();
+        values.put("s", 1f);
+        values.put("v", vector);
+        values.put("m2", matrix);
+
+        final Map<String, Object> results = OnnxInputs.apply(select, values, Instant.EPOCH);
+        Assertions.assertEquals(4d, ((Number) results.get("second")).doubleValue());
+        Assertions.assertSame(vector, values.get("v"));
+        Assertions.assertSame(matrix, values.get("m2"));
+        Assertions.assertInstanceOf(Tensor.class, values.get("row"));
+        Assertions.assertEquals(3, ((List<?>) results.get("third")).size(), "a function that does not take a Tensor reads a result as a list");
     }
 
     // with a seed the result depends on the logits and on the iteration only, and each index comes as often as its probability says

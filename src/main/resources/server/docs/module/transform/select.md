@@ -827,7 +827,7 @@ The numbers from 0 to n - 1, as the positions of a sequence.
 
 | parameter | optional | type    | description |
 |-----------|----------|---------|-------------|
-| field     | required | String  | Source field: a number, which is n, or an array, whose length is n. Null gives null. |
+| field     | required | String  | Source field: a number, which is n, or an array, whose length is n, or a matrix with one dimension other than 1. Null gives null. |
 | last      | optional | Integer | Only the last numbers: `last: 1` gives `[n - 1]`, the position of the next token of a [loop](onnx.md#loop). |
 
 ```yaml

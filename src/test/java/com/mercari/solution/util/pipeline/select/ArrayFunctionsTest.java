@@ -19,6 +19,10 @@ public class ArrayFunctionsTest {
             Schema.Field.of("values", Schema.FieldType.array(Schema.FieldType.INT64)),
             Schema.Field.of("reals", Schema.FieldType.array(Schema.FieldType.FLOAT32)),
             Schema.Field.of("m", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(2, 2))),
+            Schema.Field.of("row", Schema.FieldType.matrix(Schema.FieldType.FLOAT32, List.of(1, -1))),
+            Schema.Field.of("rows", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))),
+            Schema.Field.of("shorts", Schema.FieldType.array(Schema.FieldType.type(Schema.Type.int16))),
+            Schema.Field.of("names", Schema.FieldType.array(Schema.FieldType.STRING)),
             Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64))))));
 
     private static SelectFunction function(final String json) {
@@ -65,6 +69,29 @@ public class ArrayFunctionsTest {
         Assertions.assertNull(apply("{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"values\", \"value\": 9}", nothing));
     }
 
+    // a row of a model output goes into an array of arrays as a record holds it
+    @Test
+    public void testAppendTensor() {
+        final Map<String, Object> input = new HashMap<>();
+        input.put("rows", List.of(List.of(1f)));
+        input.put("reals", Tensor.of(new float[]{2f, 3f}, new long[]{2}));
+        Assertions.assertEquals(List.of(List.of(1f), List.of(2f, 3f)), apply("{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"rows\", \"valueField\": \"reals\"}", input));
+    }
+
+    // a value that can not be appended is a configuration error, not a failure of every worker
+    @Test
+    public void testAppendValue() {
+        final Map<String, Object> input = new HashMap<>();
+        input.put("shorts", List.of(1));
+        Assertions.assertEquals(List.of(1, 2), apply("{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"shorts\", \"value\": 2}", input));
+        for(final String json : List.of(
+                "{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"values\", \"value\": \"x\"}",
+                "{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"values\", \"value\": null}",
+                "{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"names\", \"value\": null}")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS), json);
+        }
+    }
+
     @Test
     public void testRange() {
         final Map<String, Object> input = new HashMap<>();
@@ -79,6 +106,9 @@ public class ArrayFunctionsTest {
         Assertions.assertEquals(List.of(0L, 1L, 2L), apply("{\"name\": \"o\", \"func\": \"range\", \"field\": \"a\", \"last\": 9}", input));
         input.put("a", 0L);
         Assertions.assertEquals(List.of(), apply("{\"name\": \"o\", \"func\": \"range\", \"field\": \"a\", \"last\": 1}", input));
+        // a matrix with one dimension other than 1 has a length, as an array does
+        input.put("row", Tensor.of(new float[]{1f, 2f}, new long[]{1, 2}));
+        Assertions.assertEquals(List.of(0L, 1L), apply("{\"name\": \"o\", \"func\": \"range\", \"field\": \"row\"}", input));
     }
 
     @Test
@@ -103,6 +133,7 @@ public class ArrayFunctionsTest {
                 "{\"name\": \"o\", \"func\": \"array_append\", \"field\": \"values\", \"valueField\": \"text\"}",
                 "{\"name\": \"o\", \"func\": \"range\"}",
                 "{\"name\": \"o\", \"func\": \"range\", \"field\": \"text\"}",
+                "{\"name\": \"o\", \"func\": \"range\", \"field\": \"m\"}",
                 "{\"name\": \"o\", \"func\": \"range\", \"field\": \"a\", \"last\": 0}")) {
             Assertions.assertThrows(IllegalArgumentException.class, () -> function(json), json);
         }

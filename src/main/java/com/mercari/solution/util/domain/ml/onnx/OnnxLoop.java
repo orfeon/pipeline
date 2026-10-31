@@ -11,6 +11,8 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Select;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
+import com.mercari.solution.util.pipeline.select.Vectors;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import com.mercari.solution.util.schema.converter.OnnxToElementConverter;
 import org.joda.time.Instant;
 
@@ -30,7 +32,7 @@ import java.util.regex.Matcher;
 public class OnnxLoop implements Serializable {
 
     /** Number of the last run, from 0, in {@code next}, {@code until} and {@code outputs}. */
-    public static final String ITERATION = "_iteration";
+    public static final String ITERATION = Vectors.ITERATION;
 
     private final Select vars;
     private final Select next;
@@ -78,11 +80,11 @@ public class OnnxLoop implements Serializable {
         if(!loop.has("next") || !loop.get("next").isJsonObject() || loop.getAsJsonObject("next").isEmpty()) {
             throw new IllegalArgumentException("onnx loop.next must not be empty");
         }
-        if(!loop.has("until")) {
+        if(!loop.has("until") || loop.get("until").isJsonNull()) {
             throw new IllegalArgumentException("onnx loop.until must not be null");
         }
         // required, unlike the http source: a loop that does not stop holds a worker with a model
-        if(!loop.has("maxIterations") || loop.get("maxIterations").getAsInt() < 1) {
+        if(!loop.has("maxIterations") || loop.get("maxIterations").isJsonNull() || loop.get("maxIterations").getAsInt() < 1) {
             throw new IllegalArgumentException("onnx loop.maxIterations is required, and must be over than zero");
         }
 
@@ -135,11 +137,7 @@ public class OnnxLoop implements Serializable {
         }
 
         final String untilJson = loop.get("until").toString();
-        final Set<String> unknown = new TreeSet<>(Filter.parse(untilJson).getRequiredVariables());
-        unknown.removeIf(variable -> context.containsKey(variable) || context.containsKey(variable.split("\\.", 2)[0]));
-        if(!unknown.isEmpty()) {
-            throw new IllegalArgumentException("onnx loop.until refers to what the loop does not have: " + unknown);
-        }
+        validateUntil(Filter.parse(untilJson).getRequiredVariables(), new ArrayList<>(context.values()));
 
         // what the functions read: the outputs that only feed the next run are not copied
         final Set<String> valueOutputs = OnnxInputs.mentioned(nextItems + untilJson, outputNames);
@@ -156,6 +154,26 @@ public class OnnxLoop implements Serializable {
         return new OnnxLoop(vars, next, feeds, replacements, untilJson, loop.get("maxIterations").getAsInt(), valueOutputs, fields);
     }
 
+    // a filter compares one value: an array would never match, and every record would run up to maxIterations
+    private static void validateUntil(final Set<String> variables, final List<Schema.Field> fields) {
+        final Set<String> unknown = new TreeSet<>();
+        for(final String variable : variables) {
+            final Schema.FieldType type;
+            try {
+                type = ElementSchemaUtil.getInputFieldType(variable, fields);
+            } catch (final IllegalArgumentException e) {
+                unknown.add(variable);
+                continue;
+            }
+            if(type.getType() == Schema.Type.array || type.getType() == Schema.Type.matrix) {
+                throw new IllegalArgumentException("onnx loop.until: " + variable + " is an array or a matrix, which a filter can not compare: take one value of it with a select function in next");
+            }
+        }
+        if(!unknown.isEmpty()) {
+            throw new IllegalArgumentException("onnx loop.until refers to what the loop does not have: " + unknown);
+        }
+    }
+
     private static JsonObject objectOf(final String parameter, final JsonElement element) {
         if(!element.isJsonObject()) {
             throw new IllegalArgumentException("onnx loop." + parameter + " must be a map of names: " + element);
@@ -170,6 +188,9 @@ public class OnnxLoop implements Serializable {
         }
         if(OnnxInputs.hasVariables(name)) {
             throw new IllegalArgumentException("onnx loop." + parameter + ": " + name + " with name variables must be the name of a model output with them");
+        }
+        if(ITERATION.equals(name)) {
+            throw new IllegalArgumentException("onnx loop." + parameter + ": " + ITERATION + " is the number of the last run");
         }
         // the value of a run would replace it, or the other way round, depending on the step
         if(outputNames.contains(name)) {
@@ -253,7 +274,8 @@ public class OnnxLoop implements Serializable {
 
     /**
      * Runs the model until the loop stops. {@code record}, the evaluated values of the record, then has the variables, the
-     * last values of {@code next} and the values of the last run of the outputs in {@code readOutputs}.
+     * last values of {@code next} and the values of the last run of the outputs that {@code next}, {@code until} and
+     * {@code readOutputs} read.
      */
     public void run(
             final OnnxModel model,
@@ -270,6 +292,9 @@ public class OnnxLoop implements Serializable {
         // the tensors made here, which stay for the runs that do not replace them
         final Map<String, OnnxTensor> owned = inputs.tensors(environment, records);
         final Map<String, OnnxTensor> tensors = new HashMap<>(owned);
+        // the outputs that only the outputs select list reads are only copied from the run that stops the loop
+        final Set<String> lastRunOutputs = new HashSet<>(readOutputs);
+        lastRunOutputs.removeAll(valueOutputs);
         OrtSession.Result last = null;
         try {
             for(int iteration=0; ; iteration++) {
@@ -280,10 +305,11 @@ public class OnnxLoop implements Serializable {
                 }
                 last = result;
 
-                record.putAll(OnnxToElementConverter.convert(result, 1, inputs.isBatched(), readOutputs).getFirst());
+                record.putAll(OnnxToElementConverter.convert(result, 1, inputs.isBatched(), valueOutputs).getFirst());
                 record.put(ITERATION, (long) iteration);
                 OnnxInputs.apply(next, record, timestamp);
                 if(iteration + 1 >= maxIterations || Filter.filter(until, record)) {
+                    record.putAll(OnnxToElementConverter.convert(result, 1, inputs.isBatched(), lastRunOutputs).getFirst());
                     return;
                 }
 

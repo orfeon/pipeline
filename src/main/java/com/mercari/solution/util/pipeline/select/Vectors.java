@@ -50,7 +50,7 @@ public class Vectors implements SelectFunction {
     }
 
     // the variable of a loop of the onnx transform, which makes a seeded sample differ from one iteration to the next
-    private static final String ITERATION = "_iteration";
+    public static final String ITERATION = "_iteration";
     private static final long SEED_STEP = 0x9E3779B97F4A7C15L;
 
     private record Slice(int axis, Long index, Long start, Long end) implements Serializable {}
@@ -197,7 +197,7 @@ public class Vectors implements SelectFunction {
                 outputFieldType = squeezeType(name, inputFieldType, axis);
                 // the dimensions the type fixes to 1: a dynamic one stays whatever its length, so that the value follows the type
                 if(axis == null) {
-                    final List<Integer> shape = squeezeShape(name, inputFieldType);
+                    final List<Integer> shape = shapeOf(name, Op.squeeze, inputFieldType);
                     axis = IntStream.range(0, shape.size()).filter(d -> shape.get(d) == 1).toArray();
                 }
             }
@@ -218,7 +218,7 @@ public class Vectors implements SelectFunction {
             }
             case slice -> {
                 slice = parseSlice(name, jsonObject, inputFieldType);
-                outputFieldType = sliceType(inputFieldType, slice);
+                outputFieldType = sliceType(name, inputFieldType, slice);
             }
             case sample -> {
                 requireVector(name, op, inputFieldType, vector);
@@ -249,7 +249,7 @@ public class Vectors implements SelectFunction {
     }
 
     private static Slice parseSlice(final String name, final JsonObject jsonObject, final Schema.FieldType type) {
-        final int rank = squeezeShape(name, type).size();
+        final int rank = shapeOf(name, Op.slice, type).size();
         final int axis = jsonObject.has("axis") ? jsonObject.get("axis").getAsInt() : 0;
         if(axis < -rank || axis >= rank) {
             throw new IllegalArgumentException("SelectField: " + name + " func: slice axis: " + axis + " is out of rank " + rank);
@@ -263,9 +263,9 @@ public class Vectors implements SelectFunction {
         return new Slice(axis < 0 ? axis + rank : axis, index, start, end);
     }
 
-    private static Schema.FieldType sliceType(final Schema.FieldType type, final Slice slice) {
+    private static Schema.FieldType sliceType(final String name, final Schema.FieldType type, final Slice slice) {
         final Schema.FieldType valueType = valueType(type);
-        final List<Integer> shape = new ArrayList<>(type.getType() == Schema.Type.array ? List.of(-1) : type.getShape());
+        final List<Integer> shape = new ArrayList<>(shapeOf(name, Op.slice, type));
         if(slice.index != null) {
             shape.remove(slice.axis);
         } else {
@@ -336,17 +336,17 @@ public class Vectors implements SelectFunction {
         };
     }
 
-    private static List<Integer> squeezeShape(final String name, final Schema.FieldType type) {
+    private static List<Integer> shapeOf(final String name, final Op op, final Schema.FieldType type) {
         return switch (type.getType()) {
             case array -> List.of(-1);
             case matrix -> type.getShape();
-            default -> throw new IllegalArgumentException("SelectField: " + name + " func: squeeze requires an array or a matrix, but got: " + type);
+            default -> throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " requires an array or a matrix, but got: " + type);
         };
     }
 
     // a dynamic dimension is only known to be 1 when axis says so
     private static Schema.FieldType squeezeType(final String name, final Schema.FieldType type, final int[] axis) {
-        final List<Integer> shape = squeezeShape(name, type);
+        final List<Integer> shape = shapeOf(name, Op.squeeze, type);
         if(axis != null) {
             for(final int a : axis) {
                 if(a < -shape.size() || a >= shape.size()) {
@@ -475,7 +475,8 @@ public class Vectors implements SelectFunction {
             case null -> null;
             case Tensor tensor -> tensor;
             // a matrix is flat in a record, with one dynamic dimension at most
-            case List<?> list -> Tensor.of(tensorType(valueType(inputFieldType)), list, listShape(list.size()));
+            case List<?> list -> Tensor.of(tensorType(valueType(inputFieldType)), list,
+                    Tensor.flatShape("SelectField: " + name + " func: " + op, shapeOf(name, op, inputFieldType), list.size()));
             default -> throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " requires an array or a matrix, but got: " + value);
         };
     }
@@ -489,40 +490,26 @@ public class Vectors implements SelectFunction {
             case int16 -> Tensor.Type.INT16;
             case int8 -> Tensor.Type.INT8;
             case bool -> Tensor.Type.BOOL;
-            default -> Tensor.Type.STRING;
+            case string -> Tensor.Type.STRING;
+            default -> throw new IllegalArgumentException("Not supported matrix value type: " + type);
         };
     }
 
-    private long[] listShape(final int size) {
-        final List<Integer> declared = inputFieldType.getType() == Schema.Type.array ? List.of(-1) : inputFieldType.getShape();
-        final long[] shape = new long[declared.size()];
-        long known = 1;
-        int dynamic = -1;
-        for(int d=0; d<shape.length; d++) {
-            shape[d] = declared.get(d);
-            if(shape[d] >= 0) {
-                known *= shape[d];
-            } else if(dynamic < 0) {
-                dynamic = d;
-            } else {
-                throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " can not restore matrix shape " + declared + " of " + size + " values");
-            }
-        }
-        if(dynamic >= 0) {
-            shape[dynamic] = known == 0 ? 0 : size / known;
-        }
-        return shape;
-    }
-
     private Object slice(final Object value) {
+        // an array of a record keeps its values, whatever their type: only a matrix needs the shape of a Tensor
+        if(value instanceof List<?> list && inputFieldType.getType() == Schema.Type.array) {
+            if(slice.index != null) {
+                return list.get(Math.toIntExact(sliceIndex(list.size())));
+            }
+            final int start = (int) bound(slice.start, 0, list.size());
+            final int end = (int) bound(slice.end, list.size(), list.size());
+            return new ArrayList<>(list.subList(start, Math.max(start, end)));
+        }
         final Tensor tensor = tensor(value);
         final long length = tensor.shape()[slice.axis];
         final Tensor sliced;
         if(slice.index != null) {
-            final long index = slice.index < 0 ? slice.index + length : slice.index;
-            if(index < 0 || index >= length) {
-                throw new IllegalArgumentException("SelectField: " + name + " func: slice index: " + slice.index + " is out of a length of " + length);
-            }
+            final long index = sliceIndex(length);
             final long[] shape = tensor.shape();
             final long[] removed = new long[shape.length - 1];
             for(int d=0; d<removed.length; d++) {
@@ -538,6 +525,14 @@ public class Vectors implements SelectFunction {
             return sliced.get(0);
         }
         return value instanceof Tensor ? sliced : sliced.toList();
+    }
+
+    private long sliceIndex(final long length) {
+        final long index = slice.index < 0 ? slice.index + length : slice.index;
+        if(index < 0 || index >= length) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: slice index: " + slice.index + " is out of a length of " + length);
+        }
+        return index;
     }
 
     private static long bound(final Long value, final long defaultValue, final long length) {

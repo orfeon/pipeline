@@ -55,9 +55,9 @@ public class JsonToMapConverter {
                 }
             }
             case uuid -> UUID.fromString(element.getAsString()).toString();
-            case int32 -> element.getAsInt();
+            case int8, int16, int32 -> element.getAsInt();
             case int64 -> element.getAsLong();
-            case float32 -> element.getAsFloat();
+            case float16, float32 -> element.getAsFloat();
             case float64 -> element.getAsDouble();
             case date -> DateTimeUtil.toEpochDay(element.getAsString());
             case time -> DateTimeUtil.toMicroOfDay(element.getAsString());

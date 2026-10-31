@@ -275,12 +275,23 @@ public class OnnxLoopTest implements Serializable {
         cases.put("is given both", loop(NEXT + """
                           "past.0": { func: range, field: ids }
             """, until, 1));
+        cases.put("logits is an array or a matrix", loop(NEXT, "{ key: logits, op: in, value: [7] }", 1));
+        cases.put("generated is an array or a matrix", loop(NEXT, "{ key: generated, op: in, value: [7] }", 1));
+        cases.put("does not have: [token.value]", loop(NEXT, "{ key: token.value, op: in, value: [7] }", 1));
+        cases.put("_iteration is the number of the last run", loop(NEXT + """
+                          _iteration: { func: range, field: ids }
+            """, until, 1));
 
         for(final Map.Entry<String, String> entry : cases.entrySet()) {
-            final Exception e = Assertions.assertThrows(Exception.class,
-                    () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config(model, entry.getValue(), OUTPUTS, 1))), entry.getKey());
-            Assertions.assertTrue(rootMessages(e).contains(entry.getKey()), entry.getKey() + ": " + rootMessages(e));
+            assertConfigError(model, entry.getValue(), entry.getKey());
         }
+        assertConfigError(model, loop(NEXT, "null", 1), "until must not be null");
+        assertConfigError(model, """
+                        next:
+                %s
+                        until: %s
+                        maxIterations: null
+                """.formatted(NEXT, until), "maxIterations is required");
 
         final Exception buffer = Assertions.assertThrows(Exception.class,
                 () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config(model, loop(NEXT, until, 1), OUTPUTS, 2))));
@@ -290,6 +301,12 @@ public class OnnxLoopTest implements Serializable {
         final Exception type = Assertions.assertThrows(Exception.class,
                 () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config(float16, loop(NEXT, until, 1), OUTPUTS, 1))));
         Assertions.assertTrue(rootMessages(type).contains("can not take the model output"), rootMessages(type));
+    }
+
+    private static void assertConfigError(final Path model, final String loop, final String message) {
+        final Exception e = Assertions.assertThrows(Exception.class,
+                () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), Config.load(config(model, loop, OUTPUTS, 1))), message);
+        Assertions.assertTrue(rootMessages(e).contains(message), message + ": " + rootMessages(e));
     }
 
     private static String rootMessages(Throwable e) {

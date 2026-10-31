@@ -125,8 +125,25 @@ public class ArrayFunctions implements SelectFunction {
             }
             putParent(parents, valueField, inputFields);
         }
-        final String value = jsonObject.has("value") ? jsonObject.get("value").toString() : null;
+        String value = null;
+        if(jsonObject.has("value")) {
+            value = jsonObject.get("value").toString();
+            // here rather than at setup: a value that can not be appended would fail every worker
+            try {
+                constantValue(type, value);
+            } catch (final RuntimeException e) {
+                throw new IllegalArgumentException("SelectField: " + name + " func: array_append value: " + value + " can not be appended to " + type, e);
+            }
+        }
         return new ArrayFunctions(name, Op.array_append, field, null, valueField, value, null, new ArrayList<>(parents.values()), type, ignore);
+    }
+
+    private static Object constantValue(final Schema.FieldType arrayType, final String value) {
+        final JsonElement element = new Gson().fromJson(value, JsonElement.class);
+        if(element.isJsonNull()) {
+            throw new IllegalArgumentException("value must not be null");
+        }
+        return JsonToMapConverter.getAsPrimitiveValue(arrayType.getArrayValueType(), element);
     }
 
     private static ArrayFunctions ofRange(final String name, final JsonObject jsonObject, final List<Schema.Field> inputFields, final boolean ignore) {
@@ -135,7 +152,9 @@ public class ArrayFunctions implements SelectFunction {
         }
         final String field = jsonObject.get("field").getAsString();
         final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        if(type.getType() != Schema.Type.array && type.getType() != Schema.Type.matrix && !Vectors.isNumeric(type)) {
+        // the length of a matrix with several dimensions other than 1 would be that of none of them
+        final boolean vector = type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
+        if(type.getType() != Schema.Type.array && !vector && !Vectors.isNumeric(type)) {
             throw new IllegalArgumentException("SelectField: " + name + " func: range field: " + field + " must be a number or an array, but got: " + type);
         }
         final Integer last = jsonObject.has("last") ? Integer.valueOf(jsonObject.get("last").getAsInt()) : null;
@@ -181,7 +200,7 @@ public class ArrayFunctions implements SelectFunction {
     @Override
     public void setup() {
         if(value != null) {
-            this.constant = JsonToMapConverter.getAsPrimitiveValue(outputFieldType.getArrayValueType(), new Gson().fromJson(value, JsonElement.class));
+            this.constant = constantValue(outputFieldType, value);
         }
     }
 
@@ -229,10 +248,10 @@ public class ArrayFunctions implements SelectFunction {
         };
     }
 
-    // as the values of the array: a token is an int64 whatever the type of the model output
+    // as the values of the array: a token is an int64 whatever the type of the model output, and a row of a model output a list
     private Object element(final Object value) {
         if(!(value instanceof Number number)) {
-            return value;
+            return Tensor.materialize(value);
         }
         return switch (outputFieldType.getArrayValueType().getType()) {
             case int8, int16, int32 -> number.intValue();

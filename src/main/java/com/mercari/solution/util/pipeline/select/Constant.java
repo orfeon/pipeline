@@ -14,7 +14,6 @@ import java.util.Map;
 public class Constant implements SelectFunction {
 
     private final String name;
-    private final String type;
     private final String valueString;
 
     private final List<Schema.Field> inputFields;
@@ -25,7 +24,6 @@ public class Constant implements SelectFunction {
 
     Constant(String name, String type, String valueString, boolean ignore) {
         this.name = name;
-        this.type = type;
         this.valueString = valueString;
         this.inputFields = new ArrayList<>();
         this.outputFieldType = fieldType(type);
@@ -84,7 +82,6 @@ public class Constant implements SelectFunction {
         if(value == null || value.isJsonNull()) {
             return null;
         }
-        //return Schema.Type.getValue(type, value);
         return JsonToMapConverter.getAsPrimitiveValue(outputFieldType, value);
     }
 

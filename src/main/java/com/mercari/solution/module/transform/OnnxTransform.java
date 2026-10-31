@@ -177,12 +177,11 @@ public class OnnxTransform extends Transform {
         final List<Schema.Field> modelOutputs = modelOutputFields(onnxInputs, graph);
         final OnnxLoop loop = parameters.loop == null ? null : OnnxLoop.of(parameters.loop, graph, onnxInputs, inputsContext, modelOutputs);
 
-        // what is read as a value: the outputs that only feed the next run of a loop are not copied
-        final Set<String> valueOutputs = new LinkedHashSet<>(referencedOutputs(parameters.outputs, graph));
-        final Set<String> requestedOutputs = new LinkedHashSet<>(valueOutputs);
+        // what the outputs select list reads. A loop also requests what next and until read, and what only feeds the next run
+        final Set<String> readOutputs = referencedOutputs(parameters.outputs, graph);
+        final Set<String> requestedOutputs = new LinkedHashSet<>(readOutputs);
         if(loop != null) {
-            valueOutputs.addAll(loop.getValueOutputs());
-            requestedOutputs.addAll(valueOutputs);
+            requestedOutputs.addAll(loop.getValueOutputs());
             requestedOutputs.addAll(loop.getFeedOutputs());
         }
         if(requestedOutputs.isEmpty()) {
@@ -200,7 +199,7 @@ public class OnnxTransform extends Transform {
         final PCollectionTuple outputs = input
                 .apply("Inference", ParDo.of(new InferenceDoFn(
                                 model, filter, onnxInputs, loop, outputSelect,
-                                requestedOutputs, valueOutputs, parameters.bufferSize,
+                                requestedOutputs, readOutputs, parameters.bufferSize,
                                 outputSchema, getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
@@ -217,7 +216,7 @@ public class OnnxTransform extends Transform {
         private final OnnxLoop loop;
         private final Select outputs;
         private final Set<String> requestedOutputs;
-        private final Set<String> valueOutputs;
+        private final Set<String> readOutputs;
         private final Integer bufferSize;
 
         private final Filter filter;
@@ -245,7 +244,7 @@ public class OnnxTransform extends Transform {
                 final OnnxLoop loop,
                 final Select outputs,
                 final Set<String> requestedOutputs,
-                final Set<String> valueOutputs,
+                final Set<String> readOutputs,
                 final Integer bufferSize,
                 final Schema outputSchema,
                 final boolean failFast,
@@ -258,7 +257,7 @@ public class OnnxTransform extends Transform {
             this.loop = loop;
             this.outputs = outputs;
             this.requestedOutputs = requestedOutputs;
-            this.valueOutputs = valueOutputs;
+            this.readOutputs = readOutputs;
             this.bufferSize = bufferSize;
 
             this.outputSchema = outputSchema;
@@ -409,7 +408,7 @@ public class OnnxTransform extends Transform {
         private List<Map<String, Object>> inference(final List<Buffered> buffer) throws OrtException {
             if(loop != null) {
                 final Buffered buffered = buffer.getFirst();
-                loop.run(model, inputs, requestedOutputs, valueOutputs, buffered.evaluated, buffered.timestamp);
+                loop.run(model, inputs, requestedOutputs, readOutputs, buffered.evaluated, buffered.timestamp);
                 return List.of(new HashMap<>());
             }
             final List<Map<String, Object>> records = new ArrayList<>(buffer.size());

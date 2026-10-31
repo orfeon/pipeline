@@ -343,22 +343,28 @@ public class OnnxInputs implements Serializable {
      */
     public static Map<String, Object> apply(final Select select, final Map<String, Object> values, final Instant timestamp) {
         final Map<String, Object> results = new HashMap<>();
+        // the values stay Tensors for the next function, and a list only boxes what a function reads of it
+        Map<String, Object> recordValues = null;
         for(final SelectFunction function : select.getSelectFunctions()) {
             if(function.ignore()) {
                 continue;
             }
-            final Object result = function.apply(function.acceptsTensor() ? values : recordValues(values), timestamp);
+            if(recordValues == null && !function.acceptsTensor()) {
+                recordValues = new HashMap<>(values);
+                recordValues.replaceAll((name, value) -> recordValue(value));
+            }
+            final Object result = function.apply(function.acceptsTensor() ? values : recordValues, timestamp);
             values.put(function.getName(), result);
             results.put(function.getName(), result);
+            if(recordValues != null) {
+                recordValues.put(function.getName(), recordValue(result));
+            }
         }
         return results;
     }
 
-    // the values stay Tensors for the next function, and a list only boxes what a function reads of it
-    private static Map<String, Object> recordValues(final Map<String, Object> values) {
-        final Map<String, Object> recordValues = new HashMap<>(values);
-        recordValues.replaceAll((name, value) -> value instanceof Tensor tensor && tensor.rank() > 0 ? tensor.asList() : Tensor.materialize(value));
-        return recordValues;
+    private static Object recordValue(final Object value) {
+        return value instanceof Tensor tensor && tensor.rank() > 0 ? tensor.asList() : Tensor.materialize(value);
     }
 
     /** The tensors of a batch from the evaluated values of its records. The caller closes them. */
@@ -428,7 +434,7 @@ public class OnnxInputs implements Serializable {
             case Tensor t -> t.as(type);
             case List<?> list -> {
                 if(input.fieldType.getType() == Schema.Type.matrix) {
-                    yield Tensor.of(type, list, matrixShape(name, input.fieldType.getShape(), list.size()));
+                    yield Tensor.of(type, list, Tensor.flatShape("onnx model input: " + name, input.fieldType.getShape(), list.size()));
                 }
                 final List<Object> flat = new ArrayList<>();
                 final List<Long> shape = new ArrayList<>();
@@ -441,31 +447,6 @@ public class OnnxInputs implements Serializable {
             throw new IllegalArgumentException("onnx model input: " + name + " must have rank " + input.rank + ", but got " + tensor);
         }
         return tensor;
-    }
-
-    // a matrix is flat row-major; one dynamic dimension is restored from the number of values
-    private static long[] matrixShape(final String name, final List<Integer> declared, final int size) {
-        final long[] shape = new long[declared.size()];
-        long known = 1;
-        int dynamic = -1;
-        for(int d=0; d<shape.length; d++) {
-            shape[d] = declared.get(d);
-            if(shape[d] < 0) {
-                if(dynamic >= 0) {
-                    throw new IllegalArgumentException("onnx model input: " + name + " of matrix shape " + declared + " has more than one dynamic dimension");
-                }
-                dynamic = d;
-            } else {
-                known *= shape[d];
-            }
-        }
-        if(dynamic >= 0) {
-            if(known == 0 || size % known != 0) {
-                throw new IllegalArgumentException("onnx model input: " + name + " has " + size + " values for matrix shape " + declared);
-            }
-            shape[dynamic] = size / known;
-        }
-        return shape;
     }
 
     private static void flatten(final String name, final List<?> list, final int dim, final List<Long> shape, final List<Object> flat) {

@@ -59,6 +59,34 @@ public final class Tensor {
         return new Tensor(type, data, 0, shape);
     }
 
+    /**
+     * The shape of flat row-major values of a declared shape, of which one dynamic dimension (-1) at most is restored from
+     * their number. {@code name} says what they are in an error.
+     */
+    public static long[] flatShape(final String name, final List<Integer> declared, final int size) {
+        final long[] shape = new long[declared.size()];
+        long known = 1;
+        int dynamic = -1;
+        for(int d=0; d<shape.length; d++) {
+            shape[d] = declared.get(d);
+            if(shape[d] < 0) {
+                if(dynamic >= 0) {
+                    throw new IllegalArgumentException(name + " of matrix shape " + declared + " has more than one dynamic dimension");
+                }
+                dynamic = d;
+            } else {
+                known *= shape[d];
+            }
+        }
+        if(dynamic >= 0) {
+            if(known == 0 || size % known != 0) {
+                throw new IllegalArgumentException(name + " has " + size + " values for matrix shape " + declared);
+            }
+            shape[dynamic] = size / known;
+        }
+        return shape;
+    }
+
     public static Tensor fill(final Type type, final long[] shape, final Number value) {
         final int size = size(shape);
         final Object data = newArray(type, size);

@@ -130,7 +130,7 @@ Select functions for model outputs: [`vector_normalize`, `squeeze`, `softmax`, `
 | parameter     | optional | type | description |
 |---------------|----------|------|-------------|
 | next          | required | Map<String, String or [Select](../common/select.md)\> | What the next run takes, evaluated in order after each run. A string is the name of a model output, which the next run takes as it is. An object is a select function, whose key is its `name`. |
-| until         | required | [Filter](../common/filter.md) | Checked after `next`: the loop stops when it holds. |
+| until         | required | [Filter](../common/filter.md) | Checked after `next`: the loop stops when it holds. It compares single values: a field that is an array or a matrix is a configuration error. |
 | maxIterations | required | Integer | The largest number of runs. Reaching it is not a failure: the record gets the values of the last run. |
 | vars          | optional | Map<String, [Select](../common/select.md)\> | Variables of the loop, set before the first run. `{ value: [], type: array<int64> }` is an empty array. An item of `next` of the same name updates one. |
 
@@ -141,10 +141,10 @@ inputs, vars -> run -> next -> until or maxIterations? -> outputs
 ```
 
 - A model input that is not in `next` keeps its value, as an encoder output or a constant does.
-- `next`, `until` and `outputs` can refer to the fields of the record, the items of `inputs`, the variables, the items of `next` above them and the model outputs of the last run. A variable or an item of `next` must not have the name of a model output.
+- `next`, `until` and `outputs` can refer to the fields of the record, the items of `inputs`, the variables, the items of `next` above them and the model outputs of the last run. A variable or an item of `next` must not have the name of a model output, or `_iteration`.
 - `_iteration` is the number of the last run, from 0.
 - A string in `next` keeps the tensor of the model output, without a copy or a conversion: the type and the rank of the model input and output must be the same. Name variables correspond in the order they appear.
-- The model outputs that functions read are copied once per run. The logits of a model that gives every position of a long prompt are copied whole, once: for a large vocabulary, use a model that only gives the last position.
+- The model outputs that `next` and `until` read are copied once per run, and those that only `outputs` reads once, from the last run. The logits of a model that gives every position of a long prompt are copied whole, once: for a large vocabulary, use a model that only gives the last position.
 - All the runs of a record are held by one worker thread, and the transform has no time limit: choose `maxIterations` accordingly.
 - A failure in any run fails the record, without its earlier results.
 
