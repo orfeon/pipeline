@@ -195,6 +195,58 @@ public class OnnxTestModels {
         return graph.model();
     }
 
+    /** {@link #generator(int, int)} with a cache of one type. */
+    public static byte[] generator(final int cacheType) {
+        return generator(cacheType, cacheType);
+    }
+
+    /**
+     * A model of the shape of a text generator with a KV cache: {@code input_ids int64[batch, length]},
+     * {@code attention_mask int64[batch, mask]}, {@code position_ids int64[batch, length]} and {@code past.0 [batch, past, 1]}.
+     * {@code logits float[batch, length, 16]} choose the next token of a position, its token plus 1, and
+     * {@code present.0 [batch, present, 1]} is the cache with the tokens added. {@code mask_sum int64[batch]} is the length of
+     * the mask, and {@code positions} the position ids.
+     */
+    public static byte[] generator(final int pastType, final int presentType) {
+        final Graph graph = new Graph("generator");
+        graph.input("input_ids", INT64, "batch", "length");
+        graph.input("attention_mask", INT64, "batch", "mask");
+        graph.input("position_ids", INT64, "batch", "length");
+        graph.input("past.0", pastType, "batch", "past", 1L);
+        graph.initializer("one", INT64, new long[0], new long[]{1});
+        graph.initializer("depth", INT64, new long[0], new long[]{16});
+        graph.initializer("onOff", FLOAT, new long[]{2}, new float[]{0, 1});
+        graph.initializer("lastAxis", INT64, new long[]{1}, new long[]{2});
+        graph.initializer("maskAxis", INT64, new long[]{1}, new long[]{1});
+        graph.node("Add", List.of("input_ids", "one"), List.of("nextToken"));
+        graph.node("OneHot", List.of("nextToken", "depth", "onOff"), List.of("logits"));
+        graph.node("Cast", List.of("input_ids"), List.of("tokens"), "to", (long) pastType);
+        graph.node("Unsqueeze", List.of("tokens", "lastAxis"), List.of("added"));
+        graph.node("Concat", List.of("past.0", "added"), List.of("concatenated"), "axis", 1L);
+        graph.node("Cast", List.of("concatenated"), List.of("present.0"), "to", (long) presentType);
+        graph.node("Shape", List.of("attention_mask"), List.of("maskShape"));
+        graph.node("ConstantOfShape", List.of("maskShape"), List.of("mask_zeros"));
+        graph.node("Cast", List.of("mask_zeros"), List.of("mask_int"), "to", (long) INT64);
+        graph.node("Add", List.of("mask_int", "one"), List.of("mask_ones"));
+        graph.node("ReduceSum", List.of("mask_ones", "maskAxis"), List.of("mask_sum"), "keepdims", 0L);
+        graph.node("Identity", List.of("position_ids"), List.of("positions"));
+        graph.output("logits", FLOAT, "batch", "length", 16L);
+        graph.output("present.0", presentType, "batch", "present", 1L);
+        graph.output("mask_sum", INT64, "batch");
+        graph.output("positions", INT64, "batch", "length");
+        return graph.model();
+    }
+
+    /** {@code x float[batch]} and {@code keep int64[]}, with the output {@code kept = keep}. */
+    public static byte[] scalarInput() {
+        final Graph graph = new Graph("scalar");
+        graph.input("x", FLOAT, "batch");
+        graph.input("keep", INT64);
+        graph.node("Identity", List.of("keep"), List.of("kept"));
+        graph.output("kept", INT64);
+        return graph.model();
+    }
+
     /**
      * {@code ids float[batch, length]} and {@code features float[n, 2]} with the outputs
      * {@code pooled = ReduceSum(ids, 1, keepdims) float[batch, 1]} and {@code rows = features float[n, 2]}.

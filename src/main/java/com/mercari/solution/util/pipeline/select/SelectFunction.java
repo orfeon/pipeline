@@ -81,7 +81,12 @@ public interface SelectFunction extends Serializable {
         topk,
         labels,
         group_softmax,
+        slice,
+        sample,
         token_ids,
+        array,
+        array_append,
+        range,
         array_zip,
         timeseries_grid,
         timeseries_quantiles,
@@ -214,7 +219,12 @@ public interface SelectFunction extends Serializable {
             case topk -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.topk, ignore);
             case labels -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.labels, ignore);
             case group_softmax -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.group_softmax, ignore);
+            case slice -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.slice, ignore);
+            case sample -> Vectors.of(name, jsonObject, inputFields, Vectors.Op.sample, ignore);
             case token_ids -> Tokenize.ofIds(name, jsonObject, ignore);
+            case array -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.array, ignore);
+            case array_append -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.array_append, ignore);
+            case range -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.range, ignore);
             case array_zip -> ArrayZip.of(name, jsonObject, inputFields, ignore);
             case timeseries_grid -> TimeseriesGrid.of(name, jsonObject, inputFields, ignore);
             case timeseries_quantiles -> TimeseriesQuantiles.of(name, jsonObject, inputFields, ignore);

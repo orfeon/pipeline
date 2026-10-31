@@ -1,5 +1,6 @@
 package com.mercari.solution.util.domain.math;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -56,6 +57,34 @@ public final class Tensor {
             set(type, data, i, values.get(i));
         }
         return new Tensor(type, data, 0, shape);
+    }
+
+    /**
+     * The shape of flat row-major values of a declared shape, of which one dynamic dimension (-1) at most is restored from
+     * their number. {@code name} says what they are in an error.
+     */
+    public static long[] flatShape(final String name, final List<Integer> declared, final int size) {
+        final long[] shape = new long[declared.size()];
+        long known = 1;
+        int dynamic = -1;
+        for(int d=0; d<shape.length; d++) {
+            shape[d] = declared.get(d);
+            if(shape[d] < 0) {
+                if(dynamic >= 0) {
+                    throw new IllegalArgumentException(name + " of matrix shape " + declared + " has more than one dynamic dimension");
+                }
+                dynamic = d;
+            } else {
+                known *= shape[d];
+            }
+        }
+        if(dynamic >= 0) {
+            if(known == 0 || size % known != 0) {
+                throw new IllegalArgumentException(name + " has " + size + " values for matrix shape " + declared);
+            }
+            shape[dynamic] = size / known;
+        }
+        return shape;
     }
 
     public static Tensor fill(final Type type, final long[] shape, final Number value) {
@@ -168,6 +197,29 @@ public final class Tensor {
         return new Tensor(type, data, offset + index * size(rowShape), rowShape);
     }
 
+    /**
+     * The values {@code start} (inclusive) to {@code end} (exclusive) of dimension {@code axis}, which stays with the new
+     * length. This shares the array when they are contiguous: for dim0, or if the dimensions before {@code axis} are all 1.
+     */
+    public Tensor slice(final int axis, final long start, final long end) {
+        if(axis < 0 || axis >= shape.length || start < 0 || end > shape[axis] || start > end) {
+            throw new IndexOutOfBoundsException("slice: " + start + " to " + end + " of axis " + axis + " of tensor shape " + Arrays.toString(shape));
+        }
+        final long[] sliced = shape.clone();
+        sliced[axis] = end - start;
+        final int stride = size(Arrays.copyOfRange(shape, axis + 1, shape.length));
+        final int outer = size(Arrays.copyOfRange(shape, 0, axis));
+        if(outer == 1) {
+            return new Tensor(type, data, offset + Math.toIntExact(start) * stride, sliced);
+        }
+        final int chunk = Math.toIntExact(end - start) * stride;
+        final Object copied = newArray(type, outer * chunk);
+        for(int i=0; i<outer; i++) {
+            System.arraycopy(data, offset + (i * Math.toIntExact(shape[axis]) + Math.toIntExact(start)) * stride, copied, i * chunk, chunk);
+        }
+        return new Tensor(type, copied, 0, sliced);
+    }
+
     /** The same values with another shape, sharing the array. */
     public Tensor reshaped(final long[] newShape) {
         if(size(newShape) != size) {
@@ -222,6 +274,23 @@ public final class Tensor {
             values.add(get(i));
         }
         return values;
+    }
+
+    /** The values as a list that shares the array: a value is only boxed when it is read. */
+    public List<Object> asList() {
+        return new AbstractList<>() {
+            @Override
+            public Object get(final int index) {
+                if(index < 0 || index >= size) {
+                    throw new IndexOutOfBoundsException(index);
+                }
+                return Tensor.this.get(index);
+            }
+            @Override
+            public int size() {
+                return size;
+            }
+        };
     }
 
     /** A Tensor as a record field holds it: a flat list, or the value itself for rank 0. Other values are returned as is. */

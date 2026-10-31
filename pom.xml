@@ -1094,14 +1094,5 @@
       <version>${langchain4j.version}-beta32</version>
     </dependency>
 
-    <!-- Experimental LLM -->
-    <dependency>
-      <groupId>com.microsoft.onnxruntime</groupId>
-      <artifactId>onnxruntime-genai</artifactId>
-      <version>0.12.0-SNAPSHOT</version>
-      <scope>system</scope>
-      <systemPath>${project.basedir}/src/main/resources/mocks/onnxruntime-genai-0.12.0-mock.jar</systemPath>
-    </dependency>
-
   </dependencies>
 </project>

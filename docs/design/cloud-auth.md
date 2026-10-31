@@ -280,7 +280,7 @@ Implementation notes:
   (which lives inside the config being loaded).
 - Sites that stay on `StorageUtil` (GCS-only by design, not gated by `gs://`-vs-`s3://`):
   directory-listing/streaming loaders (`MHuggingFaceTokenizer`, `TokenAnalyzer` dictionaries,
-  `OnnxModel`/`OnnxGenModel` client-based reads, `PDFExtractTransform` runtime reads) and GCS
+  `OnnxModel` client-based reads, `PDFExtractTransform` runtime reads) and GCS
   write/list/copy operations in sinks.
 
 ### 6.3 Template functions

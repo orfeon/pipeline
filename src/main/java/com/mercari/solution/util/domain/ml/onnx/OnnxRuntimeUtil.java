@@ -65,14 +65,22 @@ public class OnnxRuntimeUtil {
         };
     }
 
-    /** Copies a model output to a Tensor, which outlives the {@code OrtSession.Result}: uint8 widens to int32, float16 to float. */
+    /**
+     * Copies a model output to a Tensor, which outlives the {@code OrtSession.Result}: uint8 widens to int32, float16 to float.
+     * The Java API has no public view of the memory of a model output: {@code getFloatBuffer} always copies it.
+     */
     public static Tensor fromOnnxTensor(final OnnxTensor tensor) throws OrtException {
         final long[] shape = tensor.getInfo().getShape();
         final int size = Math.toIntExact(tensor.getInfo().getNumElements());
         return switch (tensor.getInfo().type) {
             case FLOAT, FLOAT16, BFLOAT16 -> {
+                final FloatBuffer buffer = tensor.getFloatBuffer();
+                // already a copy: the logits of a whole sequence are too large to copy twice
+                if(buffer.hasArray() && buffer.arrayOffset() == 0 && buffer.array().length == size) {
+                    yield Tensor.of(buffer.array(), shape);
+                }
                 final float[] values = new float[size];
-                tensor.getFloatBuffer().get(values);
+                buffer.get(values);
                 yield Tensor.of(values, shape);
             }
             case DOUBLE -> {

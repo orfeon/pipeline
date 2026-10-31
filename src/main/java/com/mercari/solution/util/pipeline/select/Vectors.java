@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.SplittableRandom;
 import java.util.stream.IntStream;
 
 /**
@@ -27,7 +28,10 @@ import java.util.stream.IntStream;
  * { "name": "best",      "func": "argmax",           "field": "probs" },
  * { "name": "top",       "func": "topk",             "field": "probs", "k": 5 },
  * { "name": "scores",    "func": "labels",           "field": "probs", "labels": ["a", "b"] },
- * { "name": "choices",   "func": "group_softmax",    "field": "logits", "groups": "options" }
+ * { "name": "choices",   "func": "group_softmax",    "field": "logits", "groups": "options" },
+ * { "name": "last",      "func": "slice",            "field": "logits", "axis": 0, "index": -1 },
+ * { "name": "token",     "func": "argmax",           "field": "logits", "position": "last" },
+ * { "name": "token",     "func": "sample",           "field": "logits", "position": "last", "temperature": 0.7, "topP": 0.9, "seed": 0 }
  * }</pre>
  */
 public class Vectors implements SelectFunction {
@@ -40,8 +44,18 @@ public class Vectors implements SelectFunction {
         argmax,
         topk,
         labels,
-        group_softmax
+        group_softmax,
+        slice,
+        sample
     }
+
+    // the variable of a loop of the onnx transform, which makes a seeded sample differ from one iteration to the next
+    public static final String ITERATION = "_iteration";
+    private static final long SEED_STEP = 0x9E3779B97F4A7C15L;
+
+    private record Slice(int axis, Long index, Long start, Long end) implements Serializable {}
+
+    private record Sampling(double temperature, Integer topK, double topP, Long seed) implements Serializable {}
 
     private final String name;
     private final Op op;
@@ -51,6 +65,9 @@ public class Vectors implements SelectFunction {
     private final int[] axis;
     private final List<String> labels;
     private final String groups;
+    private final boolean last;
+    private final Slice slice;
+    private final Sampling sampling;
 
     private final Schema.FieldType inputFieldType;
     private final boolean outputDouble;
@@ -68,6 +85,9 @@ public class Vectors implements SelectFunction {
             final int[] axis,
             final List<String> labels,
             final String groups,
+            final boolean last,
+            final Slice slice,
+            final Sampling sampling,
             final Schema.FieldType inputFieldType,
             final boolean outputDouble,
             final Schema.Field inputField,
@@ -83,6 +103,9 @@ public class Vectors implements SelectFunction {
         this.axis = axis;
         this.labels = labels;
         this.groups = groups;
+        this.last = last;
+        this.slice = slice;
+        this.sampling = sampling;
         this.inputFieldType = inputFieldType;
         this.outputDouble = outputDouble;
         this.inputFields = new ArrayList<>();
@@ -109,8 +132,9 @@ public class Vectors implements SelectFunction {
         }
         final Integer k = jsonObject.has("k") ? Integer.valueOf(jsonObject.get("k").getAsInt()) : null;
 
+        final boolean last = position(name, jsonObject, inputFieldType, op);
         final boolean scalar = isNumeric(inputFieldType);
-        final boolean vector = isVector(inputFieldType);
+        final boolean vector = last || isVector(inputFieldType);
         final Schema.FieldType valueType = valueType(inputFieldType);
         final boolean outputDouble = valueType != null && valueType.getType() == Schema.Type.float64;
         final Schema.FieldType realType = (outputDouble ? Schema.FieldType.FLOAT64 : Schema.FieldType.FLOAT32).withNullable(false);
@@ -119,6 +143,8 @@ public class Vectors implements SelectFunction {
         List<String> labels = null;
         String groups = null;
         Schema.Field groupsField = null;
+        Slice slice = null;
+        Sampling sampling = null;
         final Schema.FieldType outputFieldType;
         switch (op) {
             case vector_normalize, softmax -> {
@@ -171,7 +197,7 @@ public class Vectors implements SelectFunction {
                 outputFieldType = squeezeType(name, inputFieldType, axis);
                 // the dimensions the type fixes to 1: a dynamic one stays whatever its length, so that the value follows the type
                 if(axis == null) {
-                    final List<Integer> shape = squeezeShape(name, inputFieldType);
+                    final List<Integer> shape = shapeOf(name, Op.squeeze, inputFieldType);
                     axis = IntStream.range(0, shape.size()).filter(d -> shape.get(d) == 1).toArray();
                 }
             }
@@ -190,9 +216,88 @@ public class Vectors implements SelectFunction {
                 groupsField = Schema.Field.of(groupsFieldName, ElementSchemaUtil.getInputFieldType(groupsFieldName, inputFields));
                 outputFieldType = Schema.FieldType.array(realType);
             }
+            case slice -> {
+                slice = parseSlice(name, jsonObject, inputFieldType);
+                outputFieldType = sliceType(name, inputFieldType, slice);
+            }
+            case sample -> {
+                requireVector(name, op, inputFieldType, vector);
+                sampling = parseSampling(name, jsonObject);
+                outputFieldType = Schema.FieldType.INT64;
+            }
             default -> throw new IllegalArgumentException("Not supported vector func: " + op);
         }
-        return new Vectors(name, op, field, size, k, axis, labels, groups, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
+        return new Vectors(name, op, field, size, k, axis, labels, groups, last, slice, sampling, inputFieldType, outputDouble, inputField, groupsField, outputFieldType, ignore);
+    }
+
+    // position: last, for a model that gives the values of every position of a sequence
+    private static boolean position(final String name, final JsonObject jsonObject, final Schema.FieldType type, final Op op) {
+        if(!jsonObject.has("position")) {
+            return false;
+        }
+        if(op != Op.argmax && op != Op.topk && op != Op.sample) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " does not take position");
+        }
+        final String position = jsonObject.get("position").getAsString();
+        if(!"last".equals(position)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " position must be last, but got: " + position);
+        }
+        if(type.getType() != Schema.Type.matrix || type.getShape().size() != 2 || !isNumeric(type.getMatrixValueType())) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " position: last requires a numeric matrix of two dimensions, but got: " + type);
+        }
+        return true;
+    }
+
+    private static Slice parseSlice(final String name, final JsonObject jsonObject, final Schema.FieldType type) {
+        final int rank = shapeOf(name, Op.slice, type).size();
+        final int axis = jsonObject.has("axis") ? jsonObject.get("axis").getAsInt() : 0;
+        if(axis < -rank || axis >= rank) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: slice axis: " + axis + " is out of rank " + rank);
+        }
+        final Long index = jsonObject.has("index") ? Long.valueOf(jsonObject.get("index").getAsLong()) : null;
+        final Long start = jsonObject.has("start") ? Long.valueOf(jsonObject.get("start").getAsLong()) : null;
+        final Long end = jsonObject.has("end") ? Long.valueOf(jsonObject.get("end").getAsLong()) : null;
+        if((index == null) == (start == null && end == null)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: slice requires either index, or start and end");
+        }
+        return new Slice(axis < 0 ? axis + rank : axis, index, start, end);
+    }
+
+    private static Schema.FieldType sliceType(final String name, final Schema.FieldType type, final Slice slice) {
+        final Schema.FieldType valueType = valueType(type);
+        final List<Integer> shape = new ArrayList<>(shapeOf(name, Op.slice, type));
+        if(slice.index != null) {
+            shape.remove(slice.axis);
+        } else {
+            final int length = shape.get(slice.axis);
+            final long start = slice.start == null ? 0 : slice.start;
+            final long end = slice.end == null ? length : slice.end;
+            // the length is only known if the range does not depend on a dynamic length
+            final boolean known = length >= 0 && start >= 0 && end >= 0;
+            shape.set(slice.axis, known ? (int) Math.max(0, Math.min(end, length) - Math.min(start, length)) : -1);
+        }
+        return switch (shape.size()) {
+            case 0 -> valueType.withNullable(true);
+            case 1 -> Schema.FieldType.array(valueType);
+            default -> Schema.FieldType.matrix(valueType, shape);
+        };
+    }
+
+    private static Sampling parseSampling(final String name, final JsonObject jsonObject) {
+        final double temperature = jsonObject.has("temperature") ? jsonObject.get("temperature").getAsDouble() : 1d;
+        if(temperature < 0) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: sample temperature must not be negative: " + temperature);
+        }
+        final Integer topK = jsonObject.has("topK") ? Integer.valueOf(jsonObject.get("topK").getAsInt()) : null;
+        if(topK != null && topK < 1) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: sample topK must be over than zero: " + topK);
+        }
+        final double topP = jsonObject.has("topP") ? jsonObject.get("topP").getAsDouble() : 1d;
+        if(topP <= 0 || topP > 1) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: sample topP must be over zero, and at most 1: " + topP);
+        }
+        final Long seed = jsonObject.has("seed") ? Long.valueOf(jsonObject.get("seed").getAsLong()) : null;
+        return new Sampling(temperature, topK, topP, seed);
     }
 
     private static void requireVector(final String name, final Op op, final Schema.FieldType type, final boolean vector) {
@@ -231,17 +336,17 @@ public class Vectors implements SelectFunction {
         };
     }
 
-    private static List<Integer> squeezeShape(final String name, final Schema.FieldType type) {
+    private static List<Integer> shapeOf(final String name, final Op op, final Schema.FieldType type) {
         return switch (type.getType()) {
             case array -> List.of(-1);
             case matrix -> type.getShape();
-            default -> throw new IllegalArgumentException("SelectField: " + name + " func: squeeze requires an array or a matrix, but got: " + type);
+            default -> throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " requires an array or a matrix, but got: " + type);
         };
     }
 
     // a dynamic dimension is only known to be 1 when axis says so
     private static Schema.FieldType squeezeType(final String name, final Schema.FieldType type, final int[] axis) {
-        final List<Integer> shape = squeezeShape(name, type);
+        final List<Integer> shape = shapeOf(name, Op.squeeze, type);
         if(axis != null) {
             for(final int a : axis) {
                 if(a < -shape.size() || a >= shape.size()) {
@@ -314,7 +419,7 @@ public class Vectors implements SelectFunction {
 
     @Override
     public Object apply(final Map<String, Object> input, final Instant timestamp) {
-        final Object value = ElementSchemaUtil.getValue(input, field);
+        final Object value = last ? lastRow(ElementSchemaUtil.getValue(input, field)) : ElementSchemaUtil.getValue(input, field);
         if(value == null) {
             return null;
         }
@@ -351,7 +456,135 @@ public class Vectors implements SelectFunction {
                 final Object ids = ElementSchemaUtil.getValue(input, groups);
                 yield ids == null ? null : values(softmax(groupMaxima(vector(value), ids)));
             }
+            case slice -> slice(value);
+            case sample -> {
+                final int index = sample(vector(value), input.get(ITERATION));
+                yield index < 0 ? null : (Object) (long) index;
+            }
         };
+    }
+
+    // the row is a view: only that row is read of the values of a whole sequence
+    private Object lastRow(final Object value) {
+        final Tensor tensor = tensor(value);
+        return tensor == null ? null : tensor.row(Math.toIntExact(tensor.shape()[0]) - 1);
+    }
+
+    private Tensor tensor(final Object value) {
+        return switch (value) {
+            case null -> null;
+            case Tensor tensor -> tensor;
+            // a matrix is flat in a record, with one dynamic dimension at most
+            case List<?> list -> Tensor.of(tensorType(valueType(inputFieldType)), list,
+                    Tensor.flatShape("SelectField: " + name + " func: " + op, shapeOf(name, op, inputFieldType), list.size()));
+            default -> throw new IllegalArgumentException("SelectField: " + name + " func: " + op + " requires an array or a matrix, but got: " + value);
+        };
+    }
+
+    private static Tensor.Type tensorType(final Schema.FieldType type) {
+        return switch (type.getType()) {
+            case float16, float32 -> Tensor.Type.FLOAT;
+            case float64 -> Tensor.Type.DOUBLE;
+            case int64 -> Tensor.Type.INT64;
+            case int32 -> Tensor.Type.INT32;
+            case int16 -> Tensor.Type.INT16;
+            case int8 -> Tensor.Type.INT8;
+            case bool -> Tensor.Type.BOOL;
+            case string -> Tensor.Type.STRING;
+            default -> throw new IllegalArgumentException("Not supported matrix value type: " + type);
+        };
+    }
+
+    private Object slice(final Object value) {
+        // an array of a record keeps its values, whatever their type: only a matrix needs the shape of a Tensor
+        if(value instanceof List<?> list && inputFieldType.getType() == Schema.Type.array) {
+            if(slice.index != null) {
+                return list.get(Math.toIntExact(sliceIndex(list.size())));
+            }
+            final int start = (int) bound(slice.start, 0, list.size());
+            final int end = (int) bound(slice.end, list.size(), list.size());
+            return new ArrayList<>(list.subList(start, Math.max(start, end)));
+        }
+        final Tensor tensor = tensor(value);
+        final long length = tensor.shape()[slice.axis];
+        final Tensor sliced;
+        if(slice.index != null) {
+            final long index = sliceIndex(length);
+            final long[] shape = tensor.shape();
+            final long[] removed = new long[shape.length - 1];
+            for(int d=0; d<removed.length; d++) {
+                removed[d] = shape[d < slice.axis ? d : d + 1];
+            }
+            sliced = tensor.slice(slice.axis, index, index + 1).reshaped(removed);
+        } else {
+            final long start = bound(slice.start, 0, length);
+            final long end = bound(slice.end, length, length);
+            sliced = tensor.slice(slice.axis, start, Math.max(start, end));
+        }
+        if(sliced.rank() == 0) {
+            return sliced.get(0);
+        }
+        return value instanceof Tensor ? sliced : sliced.toList();
+    }
+
+    private long sliceIndex(final long length) {
+        final long index = slice.index < 0 ? slice.index + length : slice.index;
+        if(index < 0 || index >= length) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: slice index: " + slice.index + " is out of a length of " + length);
+        }
+        return index;
+    }
+
+    private static long bound(final Long value, final long defaultValue, final long length) {
+        if(value == null) {
+            return defaultValue;
+        }
+        return Math.max(0, Math.min(length, value < 0 ? value + length : value));
+    }
+
+    // temperature, then top k, then top p, as is usual. NaN is never chosen; -1 if there is no other value
+    private int sample(final double[] logits, final Object iteration) {
+        if(sampling.temperature == 0) {
+            return argmax(logits);
+        }
+        final List<Integer> indices = new ArrayList<>(logits.length);
+        for(int i=0; i<logits.length; i++) {
+            if(!Double.isNaN(logits[i])) {
+                indices.add(i);
+            }
+        }
+        if(indices.isEmpty()) {
+            return -1;
+        }
+        indices.sort((a, b) -> Double.compare(logits[b], logits[a]));
+        final List<Integer> top = indices.subList(0, sampling.topK == null ? indices.size() : Math.min(sampling.topK, indices.size()));
+        final double[] scaled = new double[top.size()];
+        for(int i=0; i<scaled.length; i++) {
+            scaled[i] = logits[top.get(i)] / sampling.temperature;
+        }
+        final double[] probabilities = softmax(scaled);
+        int kept = 0;
+        double total = 0;
+        while(kept < probabilities.length && (kept == 0 || total < sampling.topP)) {
+            total += probabilities[kept++];
+        }
+        double remaining = random(iteration).nextDouble() * total;
+        for(int i=0; i<kept; i++) {
+            remaining -= probabilities[i];
+            if(remaining < 0) {
+                return top.get(i);
+            }
+        }
+        return top.get(kept - 1);
+    }
+
+    // with a seed the result only depends on the values and the iteration, so that a retried record gets the same one
+    private SplittableRandom random(final Object iteration) {
+        if(sampling.seed == null) {
+            return new SplittableRandom();
+        }
+        final long step = iteration instanceof Number number ? number.longValue() : 0L;
+        return new SplittableRandom(sampling.seed + step * SEED_STEP);
     }
 
     // the logit of a group is that of its most likely token
