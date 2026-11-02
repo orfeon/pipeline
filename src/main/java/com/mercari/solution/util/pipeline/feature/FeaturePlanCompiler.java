@@ -633,8 +633,10 @@ public final class FeaturePlanCompiler {
     private Set<String> blockReferences(final FeatureDef def) {
         final Set<String> refs = new LinkedHashSet<>();
         if (def.expr != null) refs.addAll(expressionReferences(def.expr).others);
-        // a context block's and its ops' row conditions read the group's rows
-        if (def.filter != null) refs.addAll(expressionReferences(def.filter).others);
+        // a context block's and its ops' row conditions read the group's rows (elsewhere a filter is filter.scope:
+        // waiting on its references would report them unresolved instead)
+        final boolean contextFilters = def.scope == Scope.context;
+        if (contextFilters && def.filter != null) refs.addAll(expressionReferences(def.filter).others);
         if (def.input != null) refs.add(def.input);
         refs.addAll(def.inputs);
         if (def.baseline != null) refs.add(def.baseline);
@@ -650,7 +652,7 @@ public final class FeaturePlanCompiler {
             if (def.scope == Scope.sequence && op.context != null && contexts.containsKey(op.context)) refs.addAll(contexts.get(op.context).keys());
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
-            if (op.filter != null) refs.addAll(expressionReferences(op.filter).others);
+            if (contextFilters && op.filter != null) refs.addAll(expressionReferences(op.filter).others);
             if (op.weightBy != null) {
                 final References w = expressionReferences(op.weightBy);
                 refs.addAll(w.others);
@@ -1262,7 +1264,10 @@ public final class FeaturePlanCompiler {
             }
             // desugar: inputs × ops → op.fields; an op's expr is an anonymous row column read like a field
             final List<String> fields = new ArrayList<>(op.fields);
-            if (op.expr != null) {
+            if (op.expr != null && operator.input() == InputKind.none) {
+                // no anonymous column: nothing would read it, yet every row would compute it
+                diagnostics.warning("context.op.expr", loc, "op " + op.type + " reads no field: its expr '" + op.expr + "' is not evaluated");
+            } else if (op.expr != null) {
                 if (expressionReferences(op.expr).usesSelf) {
                     diagnostics.error("context.self", loc, "op " + op.type + " expr '" + op.expr + "' is evaluated on every row of the group: $self has no meaning there");
                     continue;
@@ -6731,7 +6736,9 @@ public final class FeaturePlanCompiler {
             // nor does a label: its null-ness is post-event too, and the flag would be a feature
             final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName)
                     && c.status != Status.label;
-            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || NULLABLE_CONTEXT_OPS.contains(c.operator))) {
+            // a filtered context column is null on the rows outside its condition, whatever the op and the field
+            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || NULLABLE_CONTEXT_OPS.contains(c.operator)
+                    || c.scope == Scope.context && c.coordinates.containsKey("filter"))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
                 flag.inputs.add(c.canonicalName);

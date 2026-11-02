@@ -139,7 +139,7 @@ public class ExpressionUtil {
     // variables are derived by the compiler's parser; the argument remains only for call-site compatibility
     public static Expression createDefaultExpression(final String expression, final Collection<String> variables) {
         try {
-            return new Expression(JavascriptCompiler.compile(rewriteCoalesce(expression), FUNCTIONS));
+            return new Expression(JavascriptCompiler.compile(rewriteCoalesce(expression), FUNCTIONS), expression);
         } catch (final ParseException e) {
             throw new IllegalArgumentException("Failed to parse expression: " + expression, e);
         }
@@ -163,6 +163,11 @@ public class ExpressionUtil {
             int end = -1;
             for(int i = matcher.end(); i < expression.length() && end < 0; i++) {
                 switch (expression.charAt(i)) {
+                    // a quoted member name (map['a,b']) is one token: its commas and parentheses are not the call's
+                    case '\'', '"' -> {
+                        final int close = expression.indexOf(expression.charAt(i), i + 1);
+                        i = close < 0 ? expression.length() : close;
+                    }
                     case '(' -> depth++;
                     case ')' -> {
                         if(depth == 0) {
@@ -183,6 +188,9 @@ public class ExpressionUtil {
                 // an unclosed call: left to the compiler, which reports where
                 return expression;
             }
+            if(expression.substring(matcher.end(), end).isBlank()) {
+                arguments = 0;
+            }
             if(arguments < COALESCE_MIN || arguments > COALESCE_MAX) {
                 throw new IllegalArgumentException("coalesce takes " + COALESCE_MIN + " to " + COALESCE_MAX + " arguments, but got "
                         + arguments + " in expression: " + expression + " (nest calls for more: coalesce(a, coalesce(b, ...)))");
@@ -202,9 +210,12 @@ public class ExpressionUtil {
 
         private final org.apache.lucene.expressions.Expression expression;
         private final Set<String> variableNames;
+        /** The expression as written: the compiled one may carry rewritten calls (coalesce3). */
+        private final String sourceText;
 
-        private Expression(final org.apache.lucene.expressions.Expression expression) {
+        private Expression(final org.apache.lucene.expressions.Expression expression, final String sourceText) {
             this.expression = expression;
+            this.sourceText = sourceText;
             final Set<String> names = new HashSet<>(Arrays.asList(expression.variables));
             names.removeAll(CONSTANTS.keySet());
             this.variableNames = Collections.unmodifiableSet(names);
@@ -224,20 +235,20 @@ public class ExpressionUtil {
                 } else if(values != null && values.containsKey(name)) {
                     value = values.get(name);
                 } else {
-                    throw new IllegalArgumentException("Variable value has not been set for expression: " + expression.sourceText + ", variable: " + name);
+                    throw new IllegalArgumentException("Variable value has not been set for expression: " + sourceText + ", variable: " + name);
                 }
                 functionValues[i] = constantValues(value == null ? Double.NaN : value);
             }
             try {
                 return expression.evaluate(functionValues);
             } catch (final IOException e) {
-                throw new IllegalStateException("Failed to evaluate expression: " + expression.sourceText, e);
+                throw new IllegalStateException("Failed to evaluate expression: " + sourceText, e);
             }
         }
 
         @Override
         public String toString() {
-            return expression.sourceText;
+            return sourceText;
         }
 
     }

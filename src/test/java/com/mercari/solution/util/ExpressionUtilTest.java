@@ -145,7 +145,14 @@ public class ExpressionUtilTest {
         Assertions.assertEquals(Set.of("my_coalesce", "a"), ExpressionUtil.createDefaultExpression("my_coalesce + coalesce (a, 0)").getVariableNames());
         Assertions.assertEquals(Set.of("a", "b"), ExpressionUtil.estimateVariables("coalesce(a, b)"));
 
-        // one argument, more than eight
+        // the expression keeps the text as written (the compiled one reads coalesce2)
+        Assertions.assertEquals("coalesce(a, b)", two.toString());
+        // a quoted member name is one token: its comma is not an argument separator
+        Assertions.assertEquals("coalesce2(m['a,b'], 1)", ExpressionUtil.rewriteCoalesce("coalesce(m['a,b'], 1)"));
+
+        // no argument, one argument, more than eight
+        Assertions.assertTrue(Assertions.assertThrows(IllegalArgumentException.class, () -> ExpressionUtil.createDefaultExpression("coalesce()"))
+                .getMessage().contains("but got 0"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ExpressionUtil.createDefaultExpression("coalesce(a)"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ExpressionUtil.createDefaultExpression("coalesce(a, b, c, d, f, g, h, i, j)"));
     }

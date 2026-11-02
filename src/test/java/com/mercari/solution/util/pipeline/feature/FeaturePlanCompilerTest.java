@@ -3410,6 +3410,22 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasError(compile(SOURCES, SPEC.replace("    entity: seller\n", "    entity: seller\n    filter: \"quantity >= 1\"\n")), "filter.scope"));
         // a reference in a condition resolves like a field: a typo is reported
         Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("filter: \"quantity >= 1\"", "filter: \"quantitty >= 1\""))), "reference.unresolved"));
+        // ... but outside a context block the filter is reported as misplaced, not as a reference the block waits for
+        final FeaturePlan misplaced = compile(SOURCES, SPEC.replace("    entity: seller\n", "    entity: seller\n    filter: \"quantitty >= 1\"\n"));
+        Assertions.assertTrue(hasError(misplaced, "filter.scope"), misplaced::describe);
+        Assertions.assertFalse(hasCode(misplaced, "reference.unresolved"), misplaced::describe);
+        // a condition is text: the object form would hide the fields it reads from the availability check
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("filter: \"quantity >= 1\"", "filter: {key: sold, op: \"=\", value: 1}"))), "filter.parse"));
+        // a filtered column is null outside its condition: nullPolicy indicator flags it, whatever the op
+        final FeaturePlan flagged = compile(SOURCES, withEncoding(blocks).replace("prefix: f_", "prefix: f_\n  nullPolicy: indicator"));
+        Assertions.assertNotNull(flagged.getColumn("bids_groupSize_isnull"), flagged::describe);
+        Assertions.assertNotNull(flagged.getColumn("bids_start_price_shareOfTotal_isnull"), flagged::describe);
+        Assertions.assertNull(flagged.getColumn("plain_groupSize_isnull"), flagged::describe);
+        // an op that reads no field evaluates no expr: no anonymous column is computed for it
+        final FeaturePlan unused = compile(SOURCES, withEncoding(blocks.replace("      - {type: groupSize}\n", "      - {type: groupSize, expr: \"1 / start_price\"}\n")));
+        Assertions.assertFalse(unused.getDiagnostics().hasErrors(), unused::describe);
+        Assertions.assertTrue(hasCode(unused, "context.op.expr"), unused::describe);
+        Assertions.assertEquals(1, unused.getColumns().stream().filter(c -> c.getCanonicalName().startsWith("bids__e")).count(), unused::describe);
     }
 
     /** coalesce in a row expr: a function, not a reference; its arguments are the column's inputs. */

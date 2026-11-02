@@ -2347,7 +2347,7 @@ compare among them, `groupSize` counts them, a `softmax` normalises over them an
 that is not selected reads **null** in the op's columns. With both, a row must meet both.
 
 ```yaml
-- name: odds_share
+- name: bid_share
   scope: context
   context: session
   filter: "grade = 1 AND channel != 2"              # every op of the block
@@ -2362,9 +2362,11 @@ that is not selected reads **null** in the op's columns. With both, a row must m
 - The fields the condition reads are inputs of every column of the op, so their availability is the column's, as a
   field's would be: a condition on an outcome makes the column a violation.
 - A filtered op is not group-constant (the rows outside it read null), so with `output.groupBy` it stays on the
-  child record (`groupSize` and the value counts without a filter go to the parent).
+  child record (`groupSize` and the value counts without a filter go to the parent). With `nullPolicy: indicator` every
+  filtered column gets its `<name>_isnull` flag. An `expr` on an op that reads no field (`groupSize`) is not
+  evaluated (`context.op.expr`, warning).
 - An op's `expr` is a numeric expression evaluated on each row of the group and read like a field (`fields` may be
-  given as well). A null or non-finite result is a missing value: `1 / bid` on a row with a bid of 0 takes no part
+  given as well, without `as`: it replaces the field segment of every column of the op, so they would collide). A null or non-finite result is a missing value: `1 / bid` on a row with a bid of 0 takes no part
   in the total and reads null. Name it with `as:` — without it the column is named by the spec-wide anonymous
   counter (`<block>__e{n}`, `context.expr.anonymous`). `$self` is not allowed (`context.self`).
 - `filter` belongs to context blocks: on a row, sequence or population block, or on their ops, it is an error
