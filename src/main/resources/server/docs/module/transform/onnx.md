@@ -18,9 +18,36 @@ Supports:
 - **Loop** - [`loop`](#loop) runs the model again on what the last run gave, for text generation with a KV cache and other iterative models.
 - **Filtering** - Optional [Filter](../common/filter.md) condition; records that do not match are dropped before inference.
 - **Micro-batching** - `bufferSize` buffers records and runs inference on the batch in one session call.
+- **Concurrency cap** - `maxConcurrency` caps the inferences running at once in a worker, for models whose inference needs much memory ([Memory per worker](#memory-per-worker)).
 - **Failure handling** - Errors are routed as failures according to the module common `failFast` / `outputFailure` / `failureSinks` settings. A failing select function fails its record only. A failing batch is retried record by record, so that only the records that fail by themselves are failures.
 
 The same processing works in batch and streaming. Large ONNX files require large worker memory at startup; multi-core workers with large memory are recommended because the model is shared in memory across threads on a worker.
+
+### Memory per worker
+
+The model is loaded once per worker process, but every inference running at once needs its own working memory: the
+input tensors, the activations, and for a [loop](#loop) the KV cache it keeps until its last run. That memory grows
+with the input size (rows of a table, tokens of a text, the batch of `bufferSize`) and is taken by every worker thread
+that runs an inference at the same time. When one inference needs gigabytes, the threads together can exceed the
+worker's memory.
+
+`maxConcurrency` caps the inferences of this module running at once in one process: a thread that reaches the model
+when the cap is taken waits there for one to end. The worker can then keep its thread count (e.g. Dataflow
+`numberOfWorkerHarnessThreads`) for the other steps of the pipeline, instead of lowering it for this one. A waiting
+thread is still taken, though: the steps fused with this module run on the same thread and wait with it (a
+[reshuffle](reshuffle.md) before the module separates them). Sizing:
+`maxConcurrency × (memory of one inference) + threads × (inputs and outputs of one batch) + model + the rest of the pipeline < worker memory`.
+
+- One inference holds a permit from its input tensors to its last run: a loop is one inference, whatever its number
+  of runs, and its `vars`, `next` and `until` are evaluated inside it. A batch that fails releases it before its
+  records are retried one by one, each taking its own.
+- The `inputs` select list (preprocessing) and the `outputs` select list run outside the cap. What they hold is not
+  capped: a waiting thread keeps the values of its `inputs`, and a thread that ends its inference keeps the model
+  outputs it read until its `outputs` are evaluated, so large outputs (e.g. logits of every token) count per thread.
+- The cap is per module and per pipeline run: two onnx modules each have their own, even when they share the model's
+  session, and a process that runs several pipelines at once (the HTTP server with `MPIPELINE_MAX_CONCURRENCY` over
+  1) gives each run its own.
+- A waiting thread is not overtaken by threads that arrive later.
 
 ## Transform module common parameters
 
@@ -45,6 +72,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 | loop       | optional | [Loop](#loop)                         | Runs the model again on what the last run gave. `bufferSize` must be 1. |
 | filter     | optional | [Filter](../common/filter.md)         | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output). |
 | bufferSize | optional | Integer                               | Number of records to run inference on as one batch. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With overlapping (sliding) windows inference runs once per window. |
+| maxConcurrency | optional | Integer                           | The most inferences this module runs at once in one worker process (JVM) for one pipeline run, whatever the number of worker threads. Default: no cap (one per worker thread). See [Memory per worker](#memory-per-worker). |
 
 ## Model parameters
 
@@ -52,7 +80,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 |---------------|----------|--------|-------------|
 | path          | required | String | Path of the ONNX model. A GCS object path (`gs://bucket/model.onnx`), a GCS directory path ending with `/` (all files under the directory are downloaded to the worker, keeping the sub directories), a local file path, or a local directory path. |
 | file          | optional | String | For a directory `path`: the model file relative to the directory (e.g. `onnx/model_q4.onnx`). If omitted, the directory must contain exactly one `.onnx` file. |
-| intraOpThreads | optional | Integer | Number of threads one inference uses. Default: `1`: the worker threads share the session and run inferences in parallel, which scales better than giving every inference all the cores. Tune parallelism with the worker thread count (e.g. Dataflow `numberOfWorkerHarnessThreads`). |
+| intraOpThreads | optional | Integer | Number of threads one inference uses. Default: `1`: the worker threads share the session and run inferences in parallel, which scales better than giving every inference all the cores. Tune parallelism with the worker thread count (e.g. Dataflow `numberOfWorkerHarnessThreads`), or cap this module alone with `maxConcurrency`. |
 | interOpThreads | optional | Integer | Number of threads that run independent graph operators in parallel (`executionMode: PARALLEL` only). Default: the ONNX Runtime default. |
 | optLevel      | optional | Enum   | ONNX Runtime graph optimization level. One of `NO_OPT`, `BASIC_OPT`, `EXTENDED_OPT`, `ALL_OPT`. Default: `ALL_OPT`, as in ONNX Runtime. A lower level can give wrong values without an error: a model quantized with float16 weights (`model_q4f16.onnx`) gave wrong logits on a CPU with `BASIC_OPT` and `NO_OPT`. |
 | executionMode | optional | Enum   | ONNX Runtime execution mode. One of `SEQUENTIAL`, `PARALLEL`. Default: `SEQUENTIAL`. |
