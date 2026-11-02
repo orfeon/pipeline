@@ -33,13 +33,20 @@ worker's memory.
 
 `maxConcurrency` caps the inferences of this module running at once in one process: a thread that reaches the model
 when the cap is taken waits there for one to end. The worker can then keep its thread count (e.g. Dataflow
-`numberOfWorkerHarnessThreads`) for the other steps of the pipeline, instead of lowering it for this one. Sizing:
-`maxConcurrency × (memory of one inference) + model + the rest of the pipeline < worker memory`.
+`numberOfWorkerHarnessThreads`) for the other steps of the pipeline, instead of lowering it for this one. A waiting
+thread is still taken, though: the steps fused with this module run on the same thread and wait with it (a
+[reshuffle](reshuffle.md) before the module separates them). Sizing:
+`maxConcurrency × (memory of one inference) + threads × (inputs and outputs of one batch) + model + the rest of the pipeline < worker memory`.
 
 - One inference holds a permit from its input tensors to its last run: a loop is one inference, whatever its number
-  of runs. A batch that fails releases it before its records are retried one by one, each taking its own.
-- The `inputs` select list (preprocessing) and the `outputs` select list run outside the cap.
-- The cap is per module: two onnx modules each have their own, even when they share the model's session.
+  of runs, and its `vars`, `next` and `until` are evaluated inside it. A batch that fails releases it before its
+  records are retried one by one, each taking its own.
+- The `inputs` select list (preprocessing) and the `outputs` select list run outside the cap. What they hold is not
+  capped: a waiting thread keeps the values of its `inputs`, and a thread that ends its inference keeps the model
+  outputs it read until its `outputs` are evaluated, so large outputs (e.g. logits of every token) count per thread.
+- The cap is per module and per pipeline run: two onnx modules each have their own, even when they share the model's
+  session, and a process that runs several pipelines at once (the HTTP server with `MPIPELINE_MAX_CONCURRENCY` over
+  1) gives each run its own.
 - A waiting thread is not overtaken by threads that arrive later.
 
 ## Transform module common parameters
@@ -65,7 +72,7 @@ When multiple `inputs` are specified they are unioned into a single collection b
 | loop       | optional | [Loop](#loop)                         | Runs the model again on what the last run gave. `bufferSize` must be 1. |
 | filter     | optional | [Filter](../common/filter.md)         | Filter condition applied before inference. Records that do not match are discarded (they do not appear in the output). |
 | bufferSize | optional | Integer                               | Number of records to run inference on as one batch. Default: `1`. Records left in a partially filled buffer are inferred when the bundle finishes; each record keeps its own timestamp and window. With overlapping (sliding) windows inference runs once per window. |
-| maxConcurrency | optional | Integer                           | The most inferences this module runs at once in one worker process (JVM), whatever the number of worker threads. Default: no cap (one per worker thread). See [Memory per worker](#memory-per-worker). |
+| maxConcurrency | optional | Integer                           | The most inferences this module runs at once in one worker process (JVM) for one pipeline run, whatever the number of worker threads. Default: no cap (one per worker thread). See [Memory per worker](#memory-per-worker). |
 
 ## Model parameters
 

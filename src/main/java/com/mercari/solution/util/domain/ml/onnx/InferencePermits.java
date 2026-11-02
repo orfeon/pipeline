@@ -10,6 +10,9 @@ import java.util.concurrent.Semaphore;
  * at assembly, so the copies share the transform's id and find one semaphore under it. The semaphore is fair: a thread
  * waiting for a permit is not overtaken by threads arriving later.
  *
+ * <p>The id is drawn at assembly, so the cap is per pipeline run: a process that runs several pipelines at once (the
+ * HTTP server with {@code MPIPELINE_MAX_CONCURRENCY} over 1) gives each run its own semaphore.
+ *
  * <p>The copies register in their setup and unregister in their teardown; the last one to leave removes the entry, so a
  * process that assembles many pipelines (the HTTP server) does not keep one per run. A runner that skips the teardown
  * leaves the entry behind, a few bytes.
