@@ -18,14 +18,16 @@ import java.util.Map;
 /**
  * Select functions that build an array, typically the inputs of the next run of a model in a loop of the onnx transform.
  * A Tensor in the record is left alone, so that the values of a model output are not boxed. {@code array_append} and
- * {@code range} of a NULL field give NULL, and {@code array} keeps a NULL field as a NULL value of the array.
+ * {@code range} and {@code array_length} of a NULL field give NULL, and {@code array} keeps a NULL field as a NULL value
+ * of the array.
  *
  * <pre>{@code
  * { "name": "input_ids",      "func": "array",        "fields": ["token"] },
  * { "name": "generated",      "func": "array_append", "field": "generated", "valueField": "token" },
  * { "name": "attention_mask", "func": "array_append", "field": "attention_mask", "value": 1 },
  * { "name": "position_ids",   "func": "range",        "field": "attention_mask" },
- * { "name": "position_ids",   "func": "range",        "field": "attention_mask", "last": 1 }
+ * { "name": "position_ids",   "func": "range",        "field": "attention_mask", "last": 1 },
+ * { "name": "length",         "func": "array_length", "field": "groups" }
  * }</pre>
  */
 public class ArrayFunctions implements SelectFunction {
@@ -33,7 +35,8 @@ public class ArrayFunctions implements SelectFunction {
     public enum Op implements Serializable {
         array,
         array_append,
-        range
+        range,
+        array_length
     }
 
     private final String name;
@@ -79,6 +82,7 @@ public class ArrayFunctions implements SelectFunction {
             case array -> ofArray(name, jsonObject, inputFields, ignore);
             case array_append -> ofAppend(name, jsonObject, inputFields, ignore);
             case range -> ofRange(name, jsonObject, inputFields, ignore);
+            case array_length -> ofLength(name, jsonObject, inputFields, ignore);
         };
     }
 
@@ -168,6 +172,22 @@ public class ArrayFunctions implements SelectFunction {
                 Schema.FieldType.array(Schema.FieldType.INT64.withNullable(false)), ignore);
     }
 
+    private static ArrayFunctions ofLength(final String name, final JsonObject jsonObject, final List<Schema.Field> inputFields, final boolean ignore) {
+        if(!jsonObject.has("field")) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length requires field parameter");
+        }
+        final String field = jsonObject.get("field").getAsString();
+        final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
+        final boolean vector = type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
+        if(type.getType() != Schema.Type.array && !vector) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length field: " + field
+                    + " must be an array or a matrix with one dimension other than 1, but got: " + type);
+        }
+        final Map<String, Schema.Field> parents = new LinkedHashMap<>();
+        putParent(parents, field, inputFields);
+        return new ArrayFunctions(name, Op.array_length, field, null, null, null, null, new ArrayList<>(parents.values()), Schema.FieldType.INT64, ignore);
+    }
+
     static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
         final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
         parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
@@ -237,6 +257,13 @@ public class ArrayFunctions implements SelectFunction {
                     values.add(i);
                 }
                 yield values;
+            }
+            case array_length -> {
+                final Object source = ElementSchemaUtil.getValue(input, field);
+                if(source == null) {
+                    yield null;
+                }
+                yield source instanceof Tensor tensor ? (long) tensor.size() : (long) list(source).size();
             }
         };
     }

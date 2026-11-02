@@ -112,6 +112,30 @@ public class ArrayFunctionsTest {
     }
 
     @Test
+    public void testArrayLength() {
+        final String json = "{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"names\"}";
+        Assertions.assertEquals(Schema.Type.int64, function(json).getOutputFieldType().getType());
+        final Map<String, Object> input = new HashMap<>();
+        input.put("names", List.of("x", "y", "z"));
+        input.put("nested", Map.of("ids", List.of(7L)));
+        Assertions.assertEquals(3L, apply(json, input));
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"nested.ids\"}", input));
+        input.put("names", List.of());
+        Assertions.assertEquals(0L, apply(json, input));
+        input.put("names", null);
+        Assertions.assertNull(apply(json, input));
+        // a model output stays a Tensor: its length without boxing the values
+        input.put("row", Tensor.of(new float[]{1f, 2f}, new long[]{1, 2}));
+        Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"row\"}", input));
+        input.put("reals", Tensor.of(new float[]{1f, 2f, 3f}, new long[]{3}));
+        Assertions.assertEquals(3L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"reals\"}", input));
+        // no array, a number (range takes one, a length would be the number itself), a matrix with two dimensions over 1
+        for (final String field : List.of("text", "a", "m")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"" + field + "\"}"), field);
+        }
+    }
+
+    @Test
     public void testConstantArray() {
         final SelectFunction function = function("{\"name\": \"o\", \"value\": [], \"type\": \"array<int64>\"}");
         Assertions.assertEquals(Schema.Type.array, function.getOutputFieldType().getType());

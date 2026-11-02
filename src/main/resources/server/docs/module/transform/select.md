@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Select Transform Module
-description: Filters rows and transforms field values. Supports 28 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, fwf_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
+description: Filters rows and transforms field values. Supports select functions such as pass, cast, rename, constant, replace, regexp_extract, regexp_extract_all, regexp_replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, fwf_decode, reshape, tokenize_encode, tokenize_decode, array functions (array, array_append, array_length, range, array_zip) and lag with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
 tags: [transform, select, filter, batch, streaming, field, projection]
 timestamp: 2026-09-01T00:00:00Z
 ---
@@ -166,6 +166,56 @@ Maps input values to replacement values using a mapping table.
     "3": "deleted"
   default: "unknown"
 ```
+
+### regexp_extract
+
+The first match of a regular expression ([Java syntax](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/regex/Pattern.html)) in a string field.
+
+| parameter | optional | type             | description |
+|-----------|----------|------------------|-------------|
+| field     | required | String           | Source field: a string (cast another type first). Supports dot notation. Null gives null. |
+| pattern   | required | String           | Regular expression. Flags go inline, e.g. `(?i)` for case-insensitive matching. |
+| group     | optional | Integer / String | A capturing group, by number or by name, in place of the whole match. A group that takes no part in the match gives null. |
+
+```yaml
+- { name: item_code, func: regexp_extract, field: url, pattern: '/items/([A-Z0-9]+)', group: 1 }
+```
+
+Output type: STRING. No match gives null. The pattern and the group are checked when the config is read.
+
+### regexp_extract_all
+
+Every match of a regular expression in a string field, in order: splits a string into the pieces a pattern describes.
+
+| parameter | optional | type             | description |
+|-----------|----------|------------------|-------------|
+| field     | required | String           | Source field: a string. Null gives null. |
+| pattern   | required | String           | Regular expression. |
+| group     | optional | Integer / String | A capturing group, by number or by name, in place of each whole match. A match in which the group takes no part gives a null item, so the items keep their positions. |
+
+```yaml
+# "14-11(1,2,7)(3,8)6" -> ["14", "11", "(1,2,7)", "(3,8)", "6"]
+- { name: items, func: regexp_extract_all, field: ranking, pattern: '\([^)]*\)|[0-9]+' }
+```
+
+Output type: array of STRING. No match gives an empty array. With `range`, `array_zip` and `flattenField` the items become one record each with their position: see [Example 19](#example-19-one-record-per-regular-expression-match).
+
+### regexp_replace
+
+Replaces every match of a regular expression in a string field.
+
+| parameter   | optional | type   | description |
+|-------------|----------|--------|-------------|
+| field       | required | String | Source field: a string. Null gives null. |
+| pattern     | required | String | Regular expression. |
+| replacement | required | String | Replacement text. `$1` or `${name}` inserts a group, `\$` a dollar sign, `\\` a backslash. A group the pattern lacks fails when the config is read. |
+
+```yaml
+- { name: digits, func: regexp_replace, field: phone, pattern: '[^0-9]', replacement: '' }
+- { name: swapped, func: regexp_replace, field: pair, pattern: '([0-9]+)-([0-9]+)', replacement: '$2-$1' }
+```
+
+Output type: STRING.
 
 ### expression
 
@@ -837,6 +887,20 @@ The numbers from 0 to n - 1, as the positions of a sequence.
 ```
 
 Output type: array of INT64
+
+### array_length
+
+The number of items of an array.
+
+| parameter | optional | type   | description |
+|-----------|----------|--------|-------------|
+| field     | required | String | Source field: an array, or a matrix with one dimension other than 1. Null gives null. |
+
+```yaml
+- { name: item_count, func: array_length, field: items }
+```
+
+Output type: INT64
 
 ### array_zip
 
@@ -1775,3 +1839,33 @@ transforms:
                 op: in
                 value: [events, users]
 ```
+
+### Example 19: One record per regular expression match
+
+Split a string of items in order (the tied ones in parentheses) into one record per item with its position.
+`regexp_extract_all` splits it, `range` numbers the items, `array_zip` pairs them and `flattenField` unnests the pairs.
+
+```yaml
+transforms:
+  - name: items
+    module: select
+    inputs:
+      - source
+    parameters:
+      select:
+        - name: id
+        - name: items                  # "14-11(1,2,7)(3,8)6" -> ["14", "11", "(1,2,7)", "(3,8)", "6"]
+          func: regexp_extract_all
+          field: ranking
+          pattern: '\([^)]*\)|[0-9]+'
+        - { name: count, func: array_length, field: items }
+        - { name: positions, func: range, field: items }
+        - name: entry                  # [{items: "14", position: 0}, {items: "11", position: 1}, ...]
+          func: array_zip
+          fields: [items, { name: position, field: positions }]
+      flattenField: entry
+```
+
+The output has one record per item, with `entry.items` and `entry.position`. A string without a match (an empty
+array) or a null string still gives one record, with a null `entry`: `flattenField` keeps a record whose array is
+empty or null.
