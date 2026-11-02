@@ -173,7 +173,7 @@ The first match of a regular expression ([Java syntax](https://docs.oracle.com/e
 
 | parameter | optional | type             | description |
 |-----------|----------|------------------|-------------|
-| field     | required | String           | Source field: a string (cast another type first). Supports dot notation. Null gives null. |
+| field     | required | String           | Source field: a string (cast another type first). Supports dot notation, but not a field of the records of an array (that is a list of strings). Null gives null. |
 | pattern   | required | String           | Regular expression. Flags go inline, e.g. `(?i)` for case-insensitive matching. |
 | group     | optional | Integer / String | A capturing group, by number or by name, in place of the whole match. A group that takes no part in the match gives null. |
 
@@ -191,7 +191,7 @@ Every match of a regular expression in a string field, in order: splits a string
 |-----------|----------|------------------|-------------|
 | field     | required | String           | Source field: a string. Null gives null. |
 | pattern   | required | String           | Regular expression. |
-| group     | optional | Integer / String | A capturing group, by number or by name, in place of each whole match. A match in which the group takes no part gives a null item, so the items keep their positions. |
+| group     | optional | Integer / String | A capturing group, by number or by name, in place of each whole match. A match in which the group takes no part gives a null item, so the items keep their positions. BigQuery does not store an array with a null item: before a BigQuery sink, use a group that takes part in every match. |
 
 ```yaml
 # "14-11(1,2,7)(3,8)6" -> ["14", "11", "(1,2,7)", "(3,8)", "6"]

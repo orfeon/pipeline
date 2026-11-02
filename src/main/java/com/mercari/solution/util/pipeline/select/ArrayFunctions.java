@@ -157,9 +157,7 @@ public class ArrayFunctions implements SelectFunction {
         }
         final String field = jsonObject.get("field").getAsString();
         final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        // the length of a matrix with several dimensions other than 1 would be that of none of them
-        final boolean vector = type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
-        if(type.getType() != Schema.Type.array && !vector && !Vectors.isNumeric(type)) {
+        if(type.getType() != Schema.Type.array && !isVector(type) && !Vectors.isNumeric(type)) {
             throw new IllegalArgumentException("SelectField: " + name + " func: range field: " + field + " must be a number or an array, but got: " + type);
         }
         final Integer last = jsonObject.has("last") ? Integer.valueOf(jsonObject.get("last").getAsInt()) : null;
@@ -178,19 +176,42 @@ public class ArrayFunctions implements SelectFunction {
         }
         final String field = jsonObject.get("field").getAsString();
         final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        final boolean vector = type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
-        if(type.getType() != Schema.Type.array && !vector) {
+        if(type.getType() != Schema.Type.array && !isVector(type)) {
             throw new IllegalArgumentException("SelectField: " + name + " func: array_length field: " + field
                     + " must be an array or a matrix with one dimension other than 1, but got: " + type);
+        }
+        if(underArray(field, inputFields)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length field: " + field
+                    + " is a field of the records of an array: it gives one value per record, not one array");
         }
         final Map<String, Schema.Field> parents = new LinkedHashMap<>();
         putParent(parents, field, inputFields);
         return new ArrayFunctions(name, Op.array_length, field, null, null, null, null, new ArrayList<>(parents.values()), Schema.FieldType.INT64, ignore);
     }
 
+    // the length of a matrix with several dimensions other than 1 would be that of none of them
+    private static boolean isVector(final Schema.FieldType type) {
+        return type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
+    }
+
     static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
         final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
         parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
+    }
+
+    // whether a dotted field reads a field of the records of an array: its value is then a list with one value per
+    // record, whatever type ElementSchemaUtil.getInputFieldType gives for it (that of the field of one record)
+    static boolean underArray(final String field, final List<Schema.Field> inputFields) {
+        if(!field.contains(".") || inputFields.stream().anyMatch(inputField -> field.equals(inputField.getName()))) {
+            return false;
+        }
+        final String[] names = field.split("\\.", 2);
+        final Schema.FieldType parent = ElementSchemaUtil.getInputFieldType(names[0], inputFields);
+        return switch (parent.getType()) {
+            case array -> true;
+            case element -> underArray(names[1], parent.getElementSchema().getFields());
+            default -> false;
+        };
     }
 
     @Override
@@ -263,7 +284,8 @@ public class ArrayFunctions implements SelectFunction {
                 if(source == null) {
                     yield null;
                 }
-                yield source instanceof Tensor tensor ? (long) tensor.size() : (long) list(source).size();
+                // a Tensor's list is a view over its values: its size boxes none of them
+                yield (long) list(source).size();
             }
         };
     }

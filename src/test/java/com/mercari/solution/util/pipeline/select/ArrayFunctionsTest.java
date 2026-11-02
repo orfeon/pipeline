@@ -23,7 +23,8 @@ public class ArrayFunctionsTest {
             Schema.Field.of("rows", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))),
             Schema.Field.of("shorts", Schema.FieldType.array(Schema.FieldType.type(Schema.Type.int16))),
             Schema.Field.of("names", Schema.FieldType.array(Schema.FieldType.STRING)),
-            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64))))));
+            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64))))),
+            Schema.Field.of("records", Schema.FieldType.array(Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64)))))));
 
     private static SelectFunction function(final String json) {
         final SelectFunction function = SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS);
@@ -129,8 +130,9 @@ public class ArrayFunctionsTest {
         Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"row\"}", input));
         input.put("reals", Tensor.of(new float[]{1f, 2f, 3f}, new long[]{3}));
         Assertions.assertEquals(3L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"reals\"}", input));
-        // no array, a number (range takes one, a length would be the number itself), a matrix with two dimensions over 1
-        for (final String field : List.of("text", "a", "m")) {
+        // no array, a number (range takes one, a length would be the number itself), a matrix with two dimensions over 1,
+        // an array of each record of an array (one array per record, not one array)
+        for (final String field : List.of("text", "a", "m", "records.ids")) {
             Assertions.assertThrows(IllegalArgumentException.class, () -> function("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"" + field + "\"}"), field);
         }
     }

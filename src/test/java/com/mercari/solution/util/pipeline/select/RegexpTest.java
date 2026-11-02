@@ -15,7 +15,9 @@ public class RegexpTest {
             Schema.Field.of("s", Schema.FieldType.STRING),
             Schema.Field.of("n", Schema.FieldType.INT64),
             Schema.Field.of("nested", Schema.FieldType.element(List.of(
-                    Schema.Field.of("t", Schema.FieldType.STRING)))));
+                    Schema.Field.of("t", Schema.FieldType.STRING)))),
+            Schema.Field.of("records", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                    Schema.Field.of("t", Schema.FieldType.STRING))))));
 
     // items in order, the tied ones in parentheses
     private static final String RANKING = "14-11(1,2,7)(3,8)6(4,12)(13,5)(16,9,15)10";
@@ -84,9 +86,16 @@ public class RegexpTest {
                 "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"s\" }",
                 "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"n\", \"pattern\": \"a\" }",
                 "{ \"name\": \"o\", \"func\": \"regexp_extract_all\", \"field\": \"s\", \"pattern\": \"(a\" }",
-                // a group the pattern lacks, by number and by name
+                // a field of the records of an array: a list of strings, not a string
+                "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"records.t\", \"pattern\": \"a\" }",
+                "{ \"name\": \"o\", \"func\": \"regexp_replace\", \"field\": \"records.t\", \"pattern\": \"a\", \"replacement\": \"b\" }",
+                // a group the pattern lacks, by number and by name; a fraction of a group; a replacement
                 "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"s\", \"pattern\": \"(a)\", \"group\": 2 }",
                 "{ \"name\": \"o\", \"func\": \"regexp_extract_all\", \"field\": \"s\", \"pattern\": \"(a)\", \"group\": \"x\" }",
+                "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"s\", \"pattern\": \"(a)(b)\", \"group\": 1.5 }",
+                "{ \"name\": \"o\", \"func\": \"regexp_extract\", \"field\": \"s\", \"pattern\": \"(a)\", \"replacement\": \"b\" }",
+                // a digit of another script is no group number for Matcher
+                "{ \"name\": \"o\", \"func\": \"regexp_replace\", \"field\": \"s\", \"pattern\": \"(a)\", \"replacement\": \"$１\" }",
                 // replace: no replacement, a group, a reference the pattern lacks, a bare $
                 "{ \"name\": \"o\", \"func\": \"regexp_replace\", \"field\": \"s\", \"pattern\": \"a\" }",
                 "{ \"name\": \"o\", \"func\": \"regexp_replace\", \"field\": \"s\", \"pattern\": \"(a)\", \"replacement\": \"b\", \"group\": 1 }",

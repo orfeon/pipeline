@@ -88,6 +88,10 @@ public class Regexp implements SelectFunction {
         if(type == null || type.getType() != Schema.Type.string) {
             throw new IllegalArgumentException(prefix + " field: " + field + " must be a string (cast it first), but got: " + type);
         }
+        // its value would be a list of strings, and the pattern would run over the text of the list
+        if(ArrayFunctions.underArray(field, inputFields)) {
+            throw new IllegalArgumentException(prefix + " field: " + field + " is a field of the records of an array: it gives a list of strings, not a string");
+        }
         final String patternText = jsonObject.get("pattern").getAsString();
         final Pattern pattern;
         try {
@@ -108,17 +112,22 @@ public class Regexp implements SelectFunction {
             }
             replacement = jsonObject.get("replacement").getAsString();
             checkReplacement(prefix, pattern, replacement);
+        } else if(jsonObject.has("replacement")) {
+            throw new IllegalArgumentException(prefix + " does not take replacement: use func: regexp_replace");
         } else if(jsonObject.has("group")) {
             final JsonElement group = jsonObject.get("group");
             if(!group.isJsonPrimitive()) {
                 throw new IllegalArgumentException(prefix + " group must be a number or a name: " + group);
             }
             if(group.getAsJsonPrimitive().isNumber()) {
-                groupIndex = group.getAsInt();
-                if(groupIndex < 0 || groupIndex > pattern.matcher("").groupCount()) {
-                    throw new IllegalArgumentException(prefix + " group: " + groupIndex + " is not a group of pattern: " + patternText
-                            + " (it has " + pattern.matcher("").groupCount() + ")");
+                final int groups = pattern.matcher("").groupCount();
+                final double number = group.getAsDouble();
+                // a fraction would be cut to the group before it
+                if(number != Math.rint(number) || number < 0 || number > groups) {
+                    throw new IllegalArgumentException(prefix + " group: " + group + " is not a group of pattern: " + patternText
+                            + " (it has " + groups + ")");
                 }
+                groupIndex = (int) number;
             } else {
                 groupName = group.getAsString();
                 if(!pattern.namedGroups().containsKey(groupName)) {
@@ -162,7 +171,7 @@ public class Regexp implements SelectFunction {
                                 + "}, which is not a named group of the pattern (it has " + pattern.namedGroups().keySet() + ")");
                     }
                     i = end;
-                } else if(Character.isDigit(next)) {
+                } else if(isAsciiDigit(next)) {
                     // as Matcher reads it: the first digit, then more while the number stays a group
                     int group = next - '0';
                     if(group > groups) {
@@ -170,7 +179,7 @@ public class Regexp implements SelectFunction {
                                 + ", but the pattern has " + groups + " group(s) (write \\$ for a dollar sign)");
                     }
                     i++;
-                    while(i + 1 < replacement.length() && Character.isDigit(replacement.charAt(i + 1))) {
+                    while(i + 1 < replacement.length() && isAsciiDigit(replacement.charAt(i + 1))) {
                         final int longer = group * 10 + (replacement.charAt(i + 1) - '0');
                         if(longer > groups) {
                             break;
@@ -184,6 +193,11 @@ public class Regexp implements SelectFunction {
                 }
             }
         }
+    }
+
+    // Matcher reads 0-9 only: Character.isDigit would take other scripts' digits too
+    private static boolean isAsciiDigit(final char c) {
+        return c >= '0' && c <= '9';
     }
 
     @Override
