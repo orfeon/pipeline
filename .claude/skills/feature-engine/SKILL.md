@@ -240,10 +240,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   dispatched by a pattern switch; a new parameterised op is a new record implementing it, a new case, nothing else);
   `apply(op, values, self, excludeSelf)` serves the rest; a `filter` coordinate (the block's and the op's condition,
   joined with AND by `contextFilter`) makes the column read the rows meeting it as its group and write null on the others:
-  `caches(group)` is called once per column with the group AS IT ARRIVES (identity = the per-group cache reset), the
-  subset is cached per condition text (`subsetCache`), and the shared solver passes (harville / svd / poisson) carry the
-  condition in their key — a subset list passed to `caches` would reset every cache per column, and a key without the
-  condition would hand a filtered column the unfiltered pass (`testContextFilter` fails on exactly that); a filtered op
+  `rowSet(plan, group)` checks the identity of the group AS IT ARRIVES (a new list = a new group: every set dropped),
+  and hands back a `RowSet` — the whole group, or the rows meeting one condition, selected once per condition text — which
+  carries the shared solver caches (harville places / svd fit / poisson match, by solver key). A pass is cached beside
+  the rows it ran over, so a solver key never names the condition and a new solver cannot hand a filtered column the
+  unfiltered pass (`testContextFilter` fails when the two share a cache); a filtered op
   never takes `Placement.parent`; group-constant ops are
   evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
   `softmax`, `ratingProb` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
@@ -251,12 +252,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   `c² = Σ (sigma² + beta²)` over the group's active rows — coordinates `sigma` (column, optional) and `beta`; `poissonProb` = the poisson
   rating's match read forward (`PoissonMatch`: the Skellam difference law summed over the Poisson masses, Dixon–Coles as one tilt of the four
   low-score cells, bivariate Poisson as a common part that cancels in the difference and doubles in the total) over the two rated rows of the
-  group — coordinates `defence`, `offset`, `rho` / `covariance`, `func`, `threshold`; one model per op and group (`poissonCache`), the sides
+  group — coordinates `defence`, `offset`, `rho` / `covariance`, `func`, `threshold`; one model per op and row set (`RowSet.poisson`), the sides
   ordered by rate so the bits do not depend on the arrival order; `variants` of `ContextOpParams` carry its per-func columns; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
   `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
   group solvers `residualize` / `harville` / `svd` hand back one value per row through `write` ← `GroupOps` (pure
   `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.
-  Work shared by several columns of one group is cached on the group's list identity (`caches(rows)`: `harvillePlaces` — every
+  Work shared by several columns of one group is cached in its `RowSet` (dropped on the group's list identity: `harvillePlaces` — every
   place of a `top` is one pass — and `groupSvd` — the columns of one svd op read one fit; a new group is a new list, so
   the caches cannot outlive it). The context `svd` (`GroupOps.svd`: the complete rows sorted by their values, folded into
   `Svd.Moments`, `Svd.fit(rank, center, standardize)` per group — the population svd's orientation, re-read by

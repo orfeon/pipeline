@@ -11,12 +11,13 @@ import java.util.*;
  * Groups are expected to be small (the rows of one event), so per-row "others" statistics are O(n²).
  *
  * <p>Every column's coordinates are resolved into a {@link Plan} once per worker ({@link #setup()}): the group loop
- * reads parsed numbers and arrays, never strings. The group solvers of one field share their work through
- * {@link #harvilleCache} — the places of a harville are one pass, whatever {@code top} the columns ask for.
+ * reads parsed numbers and arrays, never strings. The group solvers of one field share their work through the
+ * caches of a {@link RowSet} — the places of a harville are one pass, whatever {@code top} the columns ask for.
  *
  * <p>A column with a {@code filter} reads the rows of the group that meet it, as if they were the group, and the other
- * rows read null. The rows that meet one condition are selected once per group ({@link #subsetCache}), and the group
- * solvers key their caches by the condition too, so columns with and without one share nothing by accident.
+ * rows read null. The rows that meet one condition are selected once per group into their own {@link RowSet}, which
+ * carries its own solver caches: a pass is cached beside the rows it was computed over, so columns with and without a
+ * condition cannot share one whatever a solver puts in its key.
  */
 public class ContextEvaluator implements Serializable {
 
@@ -25,13 +26,10 @@ public class ContextEvaluator implements Serializable {
     /** The largest place any column of a group solver asks for, by solver key: one pass serves them all. */
     private transient Map<String, Integer> places;
     private transient List<Map<String, Object>> cachedGroup;
-    private transient Map<String, double[][]> harvilleCache;
-    /** The group's principal components per (fields, rank, standardize): the columns of one svd op read one fit. */
-    private transient Map<String, GroupOps.GroupSvd> svdCache;
-    /** The match of the group per (attack, defence, offset, dependence): the columns of one poissonProb op read one model (null = no match). */
-    private transient Map<String, Match> poissonCache;
-    /** The rows of the group that meet a condition, by its text: the columns of one condition read one list. */
-    private transient Map<String, List<Map<String, Object>>> subsetCache;
+    /** The whole group as a row set (the columns without a condition). */
+    private transient RowSet groupSet;
+    /** The rows of the group that meet a condition, by its text: the columns of one condition read one set. */
+    private transient Map<String, RowSet> subsets;
 
     public ContextEvaluator(final List<OutputColumn> columns) {
         this.columns = columns;
@@ -59,30 +57,22 @@ public class ContextEvaluator implements Serializable {
     /** Evaluates one context column for every row of the group (rows are mutated in place). */
     public void evaluateColumn(final OutputColumn c, final List<Map<String, Object>> group) {
         final Plan plan = plan(c.canonicalName, c);
-        // the caches follow the group as it arrives, never a subset of it
-        caches(group);
-        final List<Map<String, Object>> rows;
-        if (plan.condition() == null) {
-            rows = group;
-        } else {
+        final RowSet set = rowSet(plan, group);
+        if (plan.condition() != null) {
             for (final Map<String, Object> row : group) row.put(c.canonicalName, null);
-            rows = subsetCache.computeIfAbsent(plan.filter(), text -> {
-                final List<Map<String, Object>> subset = new ArrayList<>();
-                for (final Map<String, Object> row : group) if (Filter.filter(plan.condition(), row)) subset.add(row);
-                return subset;
-            });
-            if (rows.isEmpty()) return;
+            if (set.rows().isEmpty()) return;
         }
+        final List<Map<String, Object>> rows = set.rows();
         // a parameterised op is dispatched on its solver; the group solvers (GroupOps) hand back one value per row, NaN = null
         switch (plan.solver()) {
             case null -> { }
             case Softmax softmax -> { softmax(c.canonicalName, plan.field(), softmax, rows); return; }
             case RatingProb ratingProb -> { ratingProb(c.canonicalName, plan.field(), ratingProb, rows); return; }
-            case PoissonProb poissonProb -> { poissonProb(c.canonicalName, plan.field(), poissonProb, rows); return; }
+            case PoissonProb poissonProb -> { poissonProb(c.canonicalName, plan.field(), poissonProb, set); return; }
             case Shuffle shuffle -> { shuffle(c.canonicalName, plan.field(), shuffle, rows); return; }
             case Residualize residualize -> { write(c.canonicalName, rows, residualize(residualize, plan.field(), plan.excludeSelf(), rows)); return; }
-            case SvdColumn svd -> { write(c.canonicalName, rows, svdReadout(svd, rows)); return; }
-            case Harville harville -> { write(c.canonicalName, rows, harvillePlaces(harville, plan.field(), rows)[harville.top() - 1]); return; }
+            case SvdColumn svd -> { write(c.canonicalName, rows, svdReadout(svd, set)); return; }
+            case Harville harville -> { write(c.canonicalName, rows, harvillePlaces(harville, plan.field(), set)[harville.top() - 1]); return; }
         }
         final String op = plan.op();
         if (op == null) {
@@ -199,8 +189,7 @@ public class ContextEvaluator implements Serializable {
 
     private static Plan planOf(final OutputColumn c) {
         final Map<String, String> at = c.coordinates;
-        // the passes the columns of one op share are passes over one set of rows: the condition is part of their key
-        final String rowsKey = "\u0000" + at.getOrDefault("filter", "");
+        // a solver key names the pass, not the rows it runs over: the caches live in the RowSet of those rows
         final boolean excludeSelf = "true".equals(at.get("excludeSelf"));
         final String field = at.get("field");
         if ("baseline".equals(c.operator)) {
@@ -221,20 +210,20 @@ public class ContextEvaluator implements Serializable {
                 final String defence = at.get("defence"), offset = at.get("offset"), rho = at.getOrDefault("rho", "0"), covariance = at.getOrDefault("covariance", "0");
                 yield plan.with(new PoissonProb(defence, offset, Double.parseDouble(rho), Double.parseDouble(covariance), at.get("func"),
                         at.containsKey("threshold") ? Double.parseDouble(at.get("threshold")) : Double.NaN,
-                        field + "\u0000" + defence + "\u0000" + offset + "\u0000" + rho + "\u0000" + covariance + rowsKey));
+                        field + "\u0000" + defence + "\u0000" + offset + "\u0000" + rho + "\u0000" + covariance));
             }
             case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
             case "svd" -> {
                 final String fields = at.get("fields"), rank = at.get("rank"), standardize = at.getOrDefault("standardize", "false");
                 yield plan.with(new SvdColumn(split(fields), Integer.parseInt(rank), "true".equals(standardize), at.get("func"),
-                        at.containsKey("index") ? Integer.parseInt(at.get("index")) : -1, fields + "\u0000" + rank + "\u0000" + standardize + rowsKey));
+                        at.containsKey("index") ? Integer.parseInt(at.get("index")) : -1, fields + "\u0000" + rank + "\u0000" + standardize));
             }
             case "harville" -> {
                 final String discount = at.get("discount");
                 final int maxGroupSize = Integer.parseInt(at.get("maxGroupSize"));
                 final String shape = at.getOrDefault("shape", "1");
                 yield plan.with(new Harville(Integer.parseInt(at.get("top")), doubles(discount), Double.parseDouble(shape), maxGroupSize,
-                        field + "\u0000" + discount + "\u0000" + shape + "\u0000" + maxGroupSize + rowsKey));
+                        field + "\u0000" + discount + "\u0000" + shape + "\u0000" + maxGroupSize));
             }
             case "shuffle" -> {
                 final List<String> order = new ArrayList<>(List.of(split(at.get("order"))));
@@ -390,8 +379,9 @@ public class ContextEvaluator implements Serializable {
      * rating's own — and reads null otherwise (a group of one or of three, a side without a rating, a rate that is not
      * a positive number up to {@link PoissonMatch#MAX_RATE}). The columns of one op read one {@link PoissonMatch}.
      */
-    private void poissonProb(final String name, final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
-        final Match match = poissonMatch(field, plan, rows);
+    private static void poissonProb(final String name, final String field, final PoissonProb plan, final RowSet set) {
+        final List<Map<String, Object>> rows = set.rows();
+        final Match match = poissonMatch(field, plan, set);
         for (final Map<String, Object> row : rows) row.put(name, null);
         if (match == null) return;
         final PoissonMatch model = match.model();
@@ -418,8 +408,10 @@ public class ContextEvaluator implements Serializable {
      * ordered by their rate — the sums of {@link PoissonMatch} run from side 0, so two rows that arrive the other way
      * round read the same bits; two sides at one rate are one law and read the same bits whichever is side 0.
      */
-    private Match poissonMatch(final String field, final PoissonProb plan, final List<Map<String, Object>> rows) {
+    private static Match poissonMatch(final String field, final PoissonProb plan, final RowSet set) {
+        final Map<String, Match> poissonCache = set.poisson();
         if (poissonCache.containsKey(plan.key())) return poissonCache.get(plan.key());
+        final List<Map<String, Object>> rows = set.rows();
         final int[] sides = new int[2];
         final double[] attack = new double[2], defence = new double[2], offset = new double[2];
         int m = 0;
@@ -490,10 +482,10 @@ public class ContextEvaluator implements Serializable {
     }
 
     /** One readout of the group's principal components ({@link #groupSvd}): a row that took no part reads null whatever the readout. */
-    private double[] svdReadout(final SvdColumn column, final List<Map<String, Object>> rows) {
-        final GroupOps.GroupSvd svd = groupSvd(column, rows);
-        final double[] result = new double[rows.size()];
-        for (int i = 0; i < rows.size(); i++) {
+    private static double[] svdReadout(final SvdColumn column, final RowSet set) {
+        final GroupOps.GroupSvd svd = groupSvd(column, set);
+        final double[] result = new double[set.rows().size()];
+        for (int i = 0; i < result.length; i++) {
             // every column is over the same rows: those with every field present
             final boolean fitted = svd.scores()[i] != null;
             result[i] = switch (column.func()) {
@@ -513,39 +505,56 @@ public class ContextEvaluator implements Serializable {
      * moment the identity changes. A column asking for a place beyond what the cached pass holds (only possible when
      * {@link #setup()} has not seen every column) recomputes it.
      */
-    private double[][] harvillePlaces(final Harville harville, final String field, final List<Map<String, Object>> rows) {
-        double[][] cached = harvilleCache.get(harville.key());
+    private double[][] harvillePlaces(final Harville harville, final String field, final RowSet set) {
+        double[][] cached = set.harville().get(harville.key());
         if (cached == null || cached.length < harville.top()) {
             final int maxTop = Math.max(harville.top(), places == null ? 0 : places.getOrDefault(harville.key(), 0));
             cached = harville.shape() == 1d
-                    ? GroupOps.harvillePlaces(channel(rows, field), maxTop, harville.discount(), harville.maxGroupSize())
-                    : GroupOps.racePlaces(channel(rows, field), maxTop, harville.shape(), harville.maxGroupSize());
-            harvilleCache.put(harville.key(), cached);
+                    ? GroupOps.harvillePlaces(channel(set.rows(), field), maxTop, harville.discount(), harville.maxGroupSize())
+                    : GroupOps.racePlaces(channel(set.rows(), field), maxTop, harville.shape(), harville.maxGroupSize());
+            set.harville().put(harville.key(), cached);
         }
         return cached;
     }
 
-    /** The group's principal components this column reads ({@link GroupOps#svd}), fitted once per group and (fields, rank, standardize). */
-    private GroupOps.GroupSvd groupSvd(final SvdColumn column, final List<Map<String, Object>> rows) {
-        return svdCache.computeIfAbsent(column.key(), key -> {
+    /** The group's principal components this column reads ({@link GroupOps#svd}), fitted once per row set and (fields, rank, standardize). */
+    private static GroupOps.GroupSvd groupSvd(final SvdColumn column, final RowSet set) {
+        return set.svd().computeIfAbsent(column.key(), key -> {
             final double[][] channels = new double[column.fields().length][];
-            for (int c = 0; c < channels.length; c++) channels[c] = channel(rows, column.fields()[c]);
+            for (int c = 0; c < channels.length; c++) channels[c] = channel(set.rows(), column.fields()[c]);
             return GroupOps.svd(channels, column.rank(), column.standardize());
         });
     }
 
     /**
-     * The per-group caches, dropped the moment the group changes (a new group arrives as a new list). Called with the
-     * group as it arrives: a filtered column reads a subset of it, which must not count as a new group.
+     * The rows a group solver runs over — the whole group, or the rows of it that meet one condition — with the passes
+     * computed over them, by solver key: the harville places per (field, discount, shape, bound), the principal
+     * components per (fields, rank, standardize) and the poissonProb match per (attack, defence, offset, dependence;
+     * null = no match). A pass is cached beside its rows, so a solver key never has to name the condition.
      */
-    private void caches(final List<Map<String, Object>> group) {
+    private record RowSet(List<Map<String, Object>> rows, Map<String, double[][]> harville, Map<String, GroupOps.GroupSvd> svd,
+                          Map<String, Match> poisson) {
+        RowSet(final List<Map<String, Object>> rows) {
+            this(rows, new HashMap<>(), new HashMap<>(), new HashMap<>());
+        }
+    }
+
+    /**
+     * The row set this column reads. Every set is dropped the moment the group changes (a new group arrives as a new
+     * list): the identity checked is the group's as it arrives, never a subset's, so the columns of one group share them.
+     */
+    private RowSet rowSet(final Plan plan, final List<Map<String, Object>> group) {
         if (cachedGroup != group) {
             cachedGroup = group;
-            harvilleCache = new HashMap<>();
-            svdCache = new HashMap<>();
-            poissonCache = new HashMap<>();
-            subsetCache = new HashMap<>();
+            groupSet = new RowSet(group);
+            subsets = new HashMap<>();
         }
+        if (plan.condition() == null) return groupSet;
+        return subsets.computeIfAbsent(plan.filter(), text -> {
+            final List<Map<String, Object>> subset = new ArrayList<>();
+            for (final Map<String, Object> row : group) if (Filter.filter(plan.condition(), row)) subset.add(row);
+            return new RowSet(subset);
+        });
     }
 
     /**
