@@ -18,14 +18,16 @@ import java.util.Map;
 /**
  * Select functions that build an array, typically the inputs of the next run of a model in a loop of the onnx transform.
  * A Tensor in the record is left alone, so that the values of a model output are not boxed. {@code array_append} and
- * {@code range} of a NULL field give NULL, and {@code array} keeps a NULL field as a NULL value of the array.
+ * {@code range} and {@code array_length} of a NULL field give NULL, and {@code array} keeps a NULL field as a NULL value
+ * of the array.
  *
  * <pre>{@code
  * { "name": "input_ids",      "func": "array",        "fields": ["token"] },
  * { "name": "generated",      "func": "array_append", "field": "generated", "valueField": "token" },
  * { "name": "attention_mask", "func": "array_append", "field": "attention_mask", "value": 1 },
  * { "name": "position_ids",   "func": "range",        "field": "attention_mask" },
- * { "name": "position_ids",   "func": "range",        "field": "attention_mask", "last": 1 }
+ * { "name": "position_ids",   "func": "range",        "field": "attention_mask", "last": 1 },
+ * { "name": "length",         "func": "array_length", "field": "groups" }
  * }</pre>
  */
 public class ArrayFunctions implements SelectFunction {
@@ -33,7 +35,8 @@ public class ArrayFunctions implements SelectFunction {
     public enum Op implements Serializable {
         array,
         array_append,
-        range
+        range,
+        array_length
     }
 
     private final String name;
@@ -79,6 +82,7 @@ public class ArrayFunctions implements SelectFunction {
             case array -> ofArray(name, jsonObject, inputFields, ignore);
             case array_append -> ofAppend(name, jsonObject, inputFields, ignore);
             case range -> ofRange(name, jsonObject, inputFields, ignore);
+            case array_length -> ofLength(name, jsonObject, inputFields, ignore);
         };
     }
 
@@ -153,9 +157,7 @@ public class ArrayFunctions implements SelectFunction {
         }
         final String field = jsonObject.get("field").getAsString();
         final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
-        // the length of a matrix with several dimensions other than 1 would be that of none of them
-        final boolean vector = type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
-        if(type.getType() != Schema.Type.array && !vector && !Vectors.isNumeric(type)) {
+        if(type.getType() != Schema.Type.array && !isVector(type) && !Vectors.isNumeric(type)) {
             throw new IllegalArgumentException("SelectField: " + name + " func: range field: " + field + " must be a number or an array, but got: " + type);
         }
         final Integer last = jsonObject.has("last") ? Integer.valueOf(jsonObject.get("last").getAsInt()) : null;
@@ -168,9 +170,48 @@ public class ArrayFunctions implements SelectFunction {
                 Schema.FieldType.array(Schema.FieldType.INT64.withNullable(false)), ignore);
     }
 
+    private static ArrayFunctions ofLength(final String name, final JsonObject jsonObject, final List<Schema.Field> inputFields, final boolean ignore) {
+        if(!jsonObject.has("field")) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length requires field parameter");
+        }
+        final String field = jsonObject.get("field").getAsString();
+        final Schema.FieldType type = ElementSchemaUtil.getInputFieldType(field, inputFields);
+        if(type.getType() != Schema.Type.array && !isVector(type)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length field: " + field
+                    + " must be an array or a matrix with one dimension other than 1, but got: " + type);
+        }
+        if(underArray(field, inputFields)) {
+            throw new IllegalArgumentException("SelectField: " + name + " func: array_length field: " + field
+                    + " is a field of the records of an array: it gives one value per record, not one array");
+        }
+        final Map<String, Schema.Field> parents = new LinkedHashMap<>();
+        putParent(parents, field, inputFields);
+        return new ArrayFunctions(name, Op.array_length, field, null, null, null, null, new ArrayList<>(parents.values()), Schema.FieldType.INT64, ignore);
+    }
+
+    // the length of a matrix with several dimensions other than 1 would be that of none of them
+    private static boolean isVector(final Schema.FieldType type) {
+        return type.getType() == Schema.Type.matrix && type.getShape().stream().filter(dim -> dim != 1).count() <= 1;
+    }
+
     static void putParent(final Map<String, Schema.Field> parents, final String field, final List<Schema.Field> inputFields) {
         final String parent = ElementSchemaUtil.getInputFieldName(field, inputFields);
         parents.put(parent, Schema.Field.of(parent, ElementSchemaUtil.getInputFieldType(parent, inputFields)));
+    }
+
+    // whether a dotted field reads a field of the records of an array: its value is then a list with one value per
+    // record, whatever type ElementSchemaUtil.getInputFieldType gives for it (that of the field of one record)
+    static boolean underArray(final String field, final List<Schema.Field> inputFields) {
+        if(!field.contains(".") || inputFields.stream().anyMatch(inputField -> field.equals(inputField.getName()))) {
+            return false;
+        }
+        final String[] names = field.split("\\.", 2);
+        final Schema.FieldType parent = ElementSchemaUtil.getInputFieldType(names[0], inputFields);
+        return switch (parent.getType()) {
+            case array -> true;
+            case element -> underArray(names[1], parent.getElementSchema().getFields());
+            default -> false;
+        };
     }
 
     @Override
@@ -237,6 +278,14 @@ public class ArrayFunctions implements SelectFunction {
                     values.add(i);
                 }
                 yield values;
+            }
+            case array_length -> {
+                final Object source = ElementSchemaUtil.getValue(input, field);
+                if(source == null) {
+                    yield null;
+                }
+                // a Tensor's list is a view over its values: its size boxes none of them
+                yield (long) list(source).size();
             }
         };
     }

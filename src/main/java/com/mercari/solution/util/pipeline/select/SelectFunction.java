@@ -92,7 +92,11 @@ public interface SelectFunction extends Serializable {
         array,
         array_append,
         range,
+        array_length,
         array_zip,
+        regexp_extract,
+        regexp_extract_all,
+        regexp_replace,
         timeseries_grid,
         timeseries_quantiles,
         tabular_encode,
@@ -242,7 +246,11 @@ public interface SelectFunction extends Serializable {
             case array -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.array, ignore);
             case array_append -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.array_append, ignore);
             case range -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.range, ignore);
+            case array_length -> ArrayFunctions.of(name, jsonObject, inputFields, ArrayFunctions.Op.array_length, ignore);
             case array_zip -> ArrayZip.of(name, jsonObject, inputFields, ignore);
+            case regexp_extract -> Regexp.of(name, jsonObject, inputFields, Regexp.Op.regexp_extract, ignore);
+            case regexp_extract_all -> Regexp.of(name, jsonObject, inputFields, Regexp.Op.regexp_extract_all, ignore);
+            case regexp_replace -> Regexp.of(name, jsonObject, inputFields, Regexp.Op.regexp_replace, ignore);
             case timeseries_grid -> TimeseriesGrid.of(name, jsonObject, inputFields, ignore);
             case timeseries_quantiles -> TimeseriesQuantiles.of(name, jsonObject, inputFields, ignore);
             case tabular_encode -> TabularEncode.of(name, jsonObject, inputFields, ignore);

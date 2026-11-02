@@ -23,7 +23,8 @@ public class ArrayFunctionsTest {
             Schema.Field.of("rows", Schema.FieldType.array(Schema.FieldType.array(Schema.FieldType.FLOAT32))),
             Schema.Field.of("shorts", Schema.FieldType.array(Schema.FieldType.type(Schema.Type.int16))),
             Schema.Field.of("names", Schema.FieldType.array(Schema.FieldType.STRING)),
-            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64))))));
+            Schema.Field.of("nested", Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64))))),
+            Schema.Field.of("records", Schema.FieldType.array(Schema.FieldType.element(List.of(Schema.Field.of("ids", Schema.FieldType.array(Schema.FieldType.INT64)))))));
 
     private static SelectFunction function(final String json) {
         final SelectFunction function = SelectFunction.of(new Gson().fromJson(json, JsonObject.class), FIELDS);
@@ -109,6 +110,31 @@ public class ArrayFunctionsTest {
         // a matrix with one dimension other than 1 has a length, as an array does
         input.put("row", Tensor.of(new float[]{1f, 2f}, new long[]{1, 2}));
         Assertions.assertEquals(List.of(0L, 1L), apply("{\"name\": \"o\", \"func\": \"range\", \"field\": \"row\"}", input));
+    }
+
+    @Test
+    public void testArrayLength() {
+        final String json = "{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"names\"}";
+        Assertions.assertEquals(Schema.Type.int64, function(json).getOutputFieldType().getType());
+        final Map<String, Object> input = new HashMap<>();
+        input.put("names", List.of("x", "y", "z"));
+        input.put("nested", Map.of("ids", List.of(7L)));
+        Assertions.assertEquals(3L, apply(json, input));
+        Assertions.assertEquals(1L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"nested.ids\"}", input));
+        input.put("names", List.of());
+        Assertions.assertEquals(0L, apply(json, input));
+        input.put("names", null);
+        Assertions.assertNull(apply(json, input));
+        // a model output stays a Tensor: its length without boxing the values
+        input.put("row", Tensor.of(new float[]{1f, 2f}, new long[]{1, 2}));
+        Assertions.assertEquals(2L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"row\"}", input));
+        input.put("reals", Tensor.of(new float[]{1f, 2f, 3f}, new long[]{3}));
+        Assertions.assertEquals(3L, apply("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"reals\"}", input));
+        // no array, a number (range takes one, a length would be the number itself), a matrix with two dimensions over 1,
+        // an array of each record of an array (one array per record, not one array)
+        for (final String field : List.of("text", "a", "m", "records.ids")) {
+            Assertions.assertThrows(IllegalArgumentException.class, () -> function("{\"name\": \"o\", \"func\": \"array_length\", \"field\": \"" + field + "\"}"), field);
+        }
     }
 
     @Test

@@ -349,6 +349,82 @@ public class SelectTransformTest {
         pipeline.run();
     }
 
+    // a string of items in order, the tied ones in parentheses, to one record per item with its position: regexp_extract_all
+    // splits it, range numbers the items, array_zip pairs them and flattenField unnests the pairs. No match is an empty
+    // array (length 0), a null string null all the way; flattenField keeps either record once, with a null entry.
+    @Test
+    public void testRegexpExtractAllFlattened() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - id: a
+                          ranking: "14-11(1,2,7)(3,8)6"
+                        - id: b
+                          ranking: "-"
+                        - id: c
+                    schema:
+                      fields:
+                        - name: id
+                          type: string
+                        - name: ranking
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: id
+                        - name: items
+                          func: regexp_extract_all
+                          field: ranking
+                          pattern: '\\([^)]*\\)|[0-9]+'
+                        - { name: count, func: array_length, field: items }
+                        - { name: positions, func: range, field: items }
+                        - name: entry
+                          func: array_zip
+                          fields: [items, { name: position, field: positions }]
+                        - name: tied
+                          func: regexp_replace
+                          field: ranking
+                          pattern: '[^(),0-9]+'
+                          replacement: ''
+                      flattenField: entry
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            final Map<Long, String> items = new java.util.TreeMap<>();
+            final java.util.Set<String> unmatched = new java.util.HashSet<>();
+            for (final MElement row : rows) {
+                final Map<String, Object> values = row.asPrimitiveMap();
+                final String id = values.get("id").toString();
+                if (!"a".equals(id)) {
+                    org.junit.jupiter.api.Assertions.assertNull(values.get("entry"), id);
+                    org.junit.jupiter.api.Assertions.assertEquals("b".equals(id) ? Long.valueOf(0L) : null, values.get("count"), id);
+                    org.junit.jupiter.api.Assertions.assertEquals("b".equals(id) ? "" : null, values.get("tied"), id);
+                    org.junit.jupiter.api.Assertions.assertTrue(unmatched.add(id), id);
+                    continue;
+                }
+                org.junit.jupiter.api.Assertions.assertEquals(5L, ((Number) values.get("count")).longValue());
+                org.junit.jupiter.api.Assertions.assertEquals("1411(1,2,7)(3,8)6", values.get("tied").toString());
+                final Map<?, ?> entry = (Map<?, ?>) values.get("entry");
+                items.put(((Number) entry.get("position")).longValue(), entry.get("items").toString());
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(Map.of(0L, "14", 1L, "11", 2L, "(1,2,7)", 3L, "(3,8)", 4L, "6"), items);
+            org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of("b", "c"), unmatched);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
     // outputFilter also applies on the stateful select path.
     @Test
     public void testOutputFilterStateful() throws IOException {
