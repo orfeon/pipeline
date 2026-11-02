@@ -633,6 +633,10 @@ public final class FeaturePlanCompiler {
     private Set<String> blockReferences(final FeatureDef def) {
         final Set<String> refs = new LinkedHashSet<>();
         if (def.expr != null) refs.addAll(expressionReferences(def.expr).others);
+        // a context block's and its ops' row conditions read the group's rows (elsewhere a filter is filter.scope:
+        // waiting on its references would report them unresolved instead)
+        final boolean contextFilters = def.scope == Scope.context;
+        if (contextFilters && def.filter != null) refs.addAll(expressionReferences(def.filter).others);
         if (def.input != null) refs.add(def.input);
         refs.addAll(def.inputs);
         if (def.baseline != null) refs.add(def.baseline);
@@ -648,6 +652,7 @@ public final class FeaturePlanCompiler {
             if (def.scope == Scope.sequence && op.context != null && contexts.containsKey(op.context)) refs.addAll(contexts.get(op.context).keys());
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
+            if (contextFilters && op.filter != null) refs.addAll(expressionReferences(op.filter).others);
             if (op.weightBy != null) {
                 final References w = expressionReferences(op.weightBy);
                 refs.addAll(w.others);
@@ -863,6 +868,11 @@ public final class FeaturePlanCompiler {
 
     private void expandBlock(final FeatureDef def) {
         final AvailableAt computeAt = computeAtOf(def);
+        if (def.scope != Scope.context && (def.filter != null || def.ops.stream().anyMatch(op -> op.filter != null))) {
+            diagnostics.error("filter.scope", def.location(), "filter (on a block or an op) selects the rows of a context group: a "
+                    + def.scope + " block does not take it" + (def.scope == Scope.sequence || def.scope == Scope.population
+                    ? " - select the past rows with windows[].filter" : " - write the condition into the expr (cond ? x : null)"));
+        }
         switch (def.scope) {
             case row -> expandRow(def, computeAt);
             case context -> expandContext(def, computeAt);
@@ -1239,14 +1249,38 @@ public final class FeaturePlanCompiler {
         warnRowSetDrift(def, context);
         final List<String> blockInputs = new ArrayList<>(def.inputs);
         if (def.input != null) blockInputs.add(def.input);
+        if (def.filter != null && expressionReferences(def.filter).usesSelf) {
+            diagnostics.error("context.filter.self", loc, "filter '" + def.filter + "' selects rows of the group by their own fields: $self has no meaning there");
+        }
         for (final Op op : def.ops) {
             final Operator operator = OperatorCatalog.get(Scope.context, op.type);
             if (operator == null) {
                 diagnostics.error("context.op", loc, "unknown context op: " + op.type);
                 continue;
             }
-            // desugar: inputs × ops → op.fields
-            final List<String> fields = !op.fields.isEmpty() ? op.fields : blockInputs;
+            if (op.filter != null && expressionReferences(op.filter).usesSelf) {
+                diagnostics.error("context.filter.self", loc, "op " + op.type + " filter '" + op.filter + "' selects rows of the group by their own fields: $self has no meaning there");
+                continue;
+            }
+            // desugar: inputs × ops → op.fields; an op's expr is an anonymous row column read like a field
+            final List<String> fields = new ArrayList<>(op.fields);
+            if (op.expr != null && operator.input() == InputKind.none) {
+                // no anonymous column: nothing would read it, yet every row would compute it
+                diagnostics.warning("context.op.expr", loc, "op " + op.type + " reads no field: its expr '" + op.expr + "' is not evaluated");
+            } else if (op.expr != null) {
+                if (expressionReferences(op.expr).usesSelf) {
+                    diagnostics.error("context.self", loc, "op " + op.type + " expr '" + op.expr + "' is evaluated on every row of the group: $self has no meaning there");
+                    continue;
+                }
+                if (op.as == null) {
+                    diagnostics.info("context.expr.anonymous", loc, "op " + op.type + " expr '" + op.expr + "' is named by the spec-wide anonymous counter ("
+                            + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name its columns with as:");
+                }
+                final OutputColumn anonymous = desugarExpression(def, op.expr, computeAt);
+                if (anonymous == null) continue;
+                fields.add(anonymous.canonicalName);
+            }
+            if (fields.isEmpty()) fields.addAll(blockInputs);
             if (operator.input() == InputKind.none) {
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + op.type, operator.output(), computeAt);
                 finishContext(c, def, context, op);
@@ -1786,14 +1820,36 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("op", op.type);
         if (def.excludeSelf) c.coordinates.put("excludeSelf", "true");
         for (final String key : context.keys()) addSelfInput(c, key);
+        // the rows the op reads: a condition is read on every row of the group, so its fields are the column's inputs
+        // (their availability is the column's, as a field's is)
+        final String filter = contextFilter(def, op);
+        if (filter != null) {
+            c.coordinates.put("filter", filter);
+            for (final String text : Arrays.asList(def.filter, op.filter)) {
+                if (text != null) for (final String r : expressionReferences(text).others) addSelfInput(c, r);
+            }
+        }
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         if (def.validFor != null || c.validFor == null) c.validFor = def.validFor; // an op may have inherited one (softmax offset)
         c.status = rowStatus(c.availableAt, c.computeAt);
-        if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
+        // a filtered op is not group-constant: the rows outside the condition read null
+        if (!def.excludeSelf && filter == null && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
             // group-constant only within its own context: parent placement requires the grouping context
             c.placement = Placement.parent;
         }
         register(c);
+    }
+
+    /**
+     * The condition a context op's rows meet: the block's {@code filter} and the op's own, both (null = every row). A
+     * condition that does not parse is reported by {@link #conditionText} and reads as none.
+     */
+    private String contextFilter(final FeatureDef def, final Op op) {
+        final String block = conditionText(def.filter, def.location(), "filter");
+        final String own = conditionText(op.filter, def.location(), "filter");
+        if (block == null) return own;
+        if (own == null) return block;
+        return "(" + block + ") AND (" + own + ")";
     }
 
     /** §6.1 context: the row set of a corrections source without snapshotOf is the final set. */
@@ -6680,7 +6736,9 @@ public final class FeaturePlanCompiler {
             // nor does a label: its null-ness is post-event too, and the flag would be a feature
             final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName)
                     && c.status != Status.label;
-            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || NULLABLE_CONTEXT_OPS.contains(c.operator))) {
+            // a filtered context column is null on the rows outside its condition, whatever the op and the field
+            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || NULLABLE_CONTEXT_OPS.contains(c.operator)
+                    || c.scope == Scope.context && c.coordinates.containsKey("filter"))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
                 flag.inputs.add(c.canonicalName);

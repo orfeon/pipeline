@@ -93,6 +93,7 @@ Operands are converted to 64-bit integers: `&#124;`, `&`, `^`, `~`, `<<`, `>>`, 
 | atan2(`y`, `x`)                                             | Returns the angle theta from the conversion of rectangular coordinates to polar coordinates.         |
 | if(`expr`, `true_result`, `else_result`)                    | If `expr` evaluates to `true`, returns `true_result`, else returns the evaluation for `else_result`. |
 | switchN(`cond1`, `value1`, ..., `condN`, `valueN`)          | For N = 3..8 (e.g. `switch3`). Returns the value paired with the first true condition, or `0`.       |
+| coalesce(`value1`, `value2`, ...)                           | 2 to 8 arguments. Returns the first argument that is a number: a null or infinite value falls through to the next; null (NaN) when none is. |
 | max(`value1`, `value2`)                                     | Returns the greater of two arguments values.                                                         |
 | min(`value1`, `value2`)                                     | Returns the smaller of two arguments values.                                                         |
 | timestamp_diff_millisecond(`timestamp1`, `timestamp2`)      | Returns the difference between two timestamps in milliseconds                                        |

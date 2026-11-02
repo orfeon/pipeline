@@ -171,6 +171,13 @@ features:
       - {type: countByValue, fields: [condition_grade], values: [good, fair]}  # one INT64 column per value (sink / model friendly)
       - {type: entropy, fields: [condition_grade]}
       - {type: groupSize}
+  - name: open_bids                 # the group's rows that meet a condition (see Rows of a context group)
+    scope: context
+    context: session
+    filter: "quantity >= 1"
+    ops:
+      - {type: shareOfTotal, expr: "1 / current_bid", filter: "current_bid > 0", as: inv_bid}
+      - {type: groupSize}
   - name: prob                      # group softmax: a model score into a probability, on top of a baseline
     scope: context
     context: session
@@ -2220,7 +2227,9 @@ that are only usable offline get a leading `_` and are not emitted.
 
 Inline `expr` in sequence ops and encoding targets is evaluated per past row (no `$self`); expressions are
 numeric (Lucene expression syntax), predicates and window filters use the SQL-like
-[Filter](../common/filter.md) syntax.
+[Filter](../common/filter.md) syntax. In an expression a null field is NaN, which most operations carry through:
+`coalesce(a, b, ...)` (2 to 8 arguments) gives the first argument that is a number — a null or an infinite value
+falls through to the next — and null when none is, e.g. `coalesce(bid_10m, bid_60m, start_price)`.
 
 ### Weighted aggregates (sequence `aggregate` with `weightBy`)
 
@@ -2329,6 +2338,40 @@ event and weighs it by how similar it is to the current row instead:
   `groupSize` without `excludeSelf`) are placed on the **parent** record, not in the child array — look for
   them next to the group keys (`placement: parent` in the plan's column list).
 - Hints such as `sequence.aggregate.encoding` are reported once per block.
+
+### Rows of a context group (context `filter`, op `expr`)
+
+A context block's `filter`, and an op's own `filter`, select the rows of the group an op reads. The selected rows
+are the group as far as the op knows: a `shareOfTotal` divides by their total, `rank` / `zscore` / `percentile`
+compare among them, `groupSize` counts them, a `softmax` normalises over them and the group solvers fit them. A row
+that is not selected reads **null** in the op's columns. With both, a row must meet both.
+
+```yaml
+- name: bid_share
+  scope: context
+  context: session
+  filter: "grade = 1 AND channel != 2"              # every op of the block
+  ops:
+    - {type: shareOfTotal, expr: "1 / bid_10m", filter: "bid_10m > 0 AND bid_60m > 0", as: bid10}
+    - {type: shareOfTotal, expr: "1 / bid_60m", filter: "bid_10m > 0 AND bid_60m > 0", as: bid60}
+```
+
+- The condition uses the SQL-like [Filter](../common/filter.md) syntax, as a sequence window's `filter`, and is
+  parsed at compile time (`filter.parse`). It is read on each row of the group by that row's own fields: `$self` has
+  no meaning there (`context.filter.self`). A row whose field is null fails a comparison — `!=` included.
+- The fields the condition reads are inputs of every column of the op, so their availability is the column's, as a
+  field's would be: a condition on an outcome makes the column a violation.
+- A filtered op is not group-constant (the rows outside it read null), so with `output.groupBy` it stays on the
+  child record (`groupSize` and the value counts without a filter go to the parent). With `nullPolicy: indicator` every
+  filtered column gets its `<name>_isnull` flag. An `expr` on an op that reads no field (`groupSize`) is not
+  evaluated (`context.op.expr`, warning).
+- An op's `expr` is a numeric expression evaluated on each row of the group and read like a field (`fields` may be
+  given as well, without `as`: it replaces the field segment of every column of the op, so they would collide). A null or non-finite result is a missing value: `1 / bid` on a row with a bid of 0 takes no part
+  in the total and reads null. Name it with `as:` — without it the column is named by the spec-wide anonymous
+  counter (`<block>__e{n}`, `context.expr.anonymous`). `$self` is not allowed (`context.self`).
+- `filter` belongs to context blocks: on a row, sequence or population block, or on their ops, it is an error
+  (`filter.scope`) — a sequence or a population window selects past rows with `windows[].filter`, and a row
+  expression writes the condition into the value (`cond ? x : null`).
 
 ### Group softmax (context op `softmax`)
 

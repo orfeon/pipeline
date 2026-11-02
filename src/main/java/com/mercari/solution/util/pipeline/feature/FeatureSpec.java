@@ -90,6 +90,8 @@ public class FeatureSpec implements Serializable {
         public List<String> fields = new ArrayList<>();
         public String expr;
         public String predicate;
+        /** context: the condition a row must meet to take part in this op (with the block's {@code filter}, both); the other rows read null. */
+        public String filter;
         public Integer k;
         public List<Double> halflife = new ArrayList<>();
         public List<String> funcs = new ArrayList<>();
@@ -397,6 +399,11 @@ public class FeatureSpec implements Serializable {
         // context / sequence
         public String context;
         public boolean excludeSelf;
+        /**
+         * context: the condition a row of the group must meet to take part in the block's ops (SQL-like, as a sequence
+         * window's filter); the other rows read null. An op's own {@code filter} narrows it further.
+         */
+        public String filter;
         public List<Op> ops = new ArrayList<>();
         public String entity;
         /**
@@ -1118,6 +1125,7 @@ public class FeatureSpec implements Serializable {
 
         def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
+        def.filter = conditionString(o, "filter", diagnostics, loc);
         def.entity = Json.string(o, "entity");
         def.direction = Json.string(o, "direction");
         if (def.direction != null && def.scope != Scope.sequence) {
@@ -1573,6 +1581,20 @@ public class FeatureSpec implements Serializable {
         return exprs;
     }
 
+    /**
+     * A context block's or op's {@code filter}: condition text only. An object (the JSON form of a Filter) would reach
+     * the compiler as JSON whose quoted field names hide the fields it reads from the availability check, and would
+     * be joined with the other condition into text that does not parse.
+     */
+    private static String conditionString(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
+        final JsonElement e = o.get(key);
+        if (e != null && !e.isJsonNull() && !(e.isJsonPrimitive() && e.getAsJsonPrimitive().isString())) {
+            diagnostics.error("filter.parse", loc, key + " must be a condition text in the SQL-like Filter syntax (\"price > 0 AND grade = 1\"): " + e);
+            return null;
+        }
+        return Json.string(o, key);
+    }
+
     private static Op parseOp(final JsonElement e, final Diagnostics diagnostics, final String loc) {
         final Op op = new Op();
         if (e.isJsonPrimitive()) {
@@ -1594,6 +1616,7 @@ public class FeatureSpec implements Serializable {
         if (field != null) op.fields.add(field);
         op.expr = Json.string(o, "expr");
         op.predicate = Json.string(o, "predicate");
+        op.filter = conditionString(o, "filter", diagnostics, loc);
         op.k = Json.integer(o, "k");
         op.against = Json.string(o, "against");
         op.lag = Json.integer(o, "lag");

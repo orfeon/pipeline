@@ -647,6 +647,12 @@ and counts towards `maxFeatures`.
 
 `excludeSelf: true` evaluates the group without the row itself (difference to the group mean etc.).
 
+`filter` (on the block, on an op, or both — both must hold) narrows the group an op reads to the rows that meet
+a condition (the SQL-like grammar of a window filter, read on each row by its own fields, so no `$self`); the
+other rows read null. It is one `filter` coordinate of the column, and the fields it reads are the column's
+inputs, so the availability rule of §6 covers them as it covers the op's fields. An op's `expr` is sugar for an
+anonymous row column read as one of its `fields`.
+
 ### 4.3 sequence — entity history transforms
 
 Frequent simple cases use sugar ops; the general form is the three-stage Lift / Summarize / Compress.

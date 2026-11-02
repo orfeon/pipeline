@@ -103,7 +103,7 @@ not expand because another block failed).
 | `window.invalid` / `window.both` | error | `window` is an object with `maxEvents` / `maxAge` / `filter`; do not use `window` and `windows` together |
 | `window.nearEdge` | error | a window key that would set the near edge; the near edge comes from `ingestionLag` |
 | `window.as` | error | a window's name for the generated columns: letters, digits and `_` starting with a letter — and two windows of a block named the same must select the same rows (`maxAge` / `maxEvents` / `clock` / `filter`), since the statistics behind the name are shared |
-| `filter.parse` / `predicate.parse` | error | the condition text does not parse (Filter grammar) |
+| `filter.parse` / `predicate.parse` | error | the condition text does not parse (Filter grammar); a context `filter` given as an object instead of text |
 | `filter.quoted` / `predicate.quoted` | info | a column named like a reserved word was quoted automatically |
 | `validFor.alwaysExpired` | warning | the column's `validFor` expires before `predictAt` for every row — the value is always null |
 
@@ -154,6 +154,10 @@ not expand because another block failed).
 | `context.unknown` | error | `context` must name a declared context |
 | `context.ops` / `context.fields` | error | `ops` required; a field-taking op needs `fields` or block `inputs` |
 | `context.op` / `context.op.type` | error | unknown op, or wrong input type (numeric op on a categorical field) |
+| `context.filter.self` / `context.self` | error | a context block's or op's `filter`, or an op's `expr`, is read on each row of the group by its own fields: `$self` has no meaning there |
+| `context.expr.anonymous` | info | an op `expr` without `as:` is named by the spec-wide anonymous counter (`<block>__e{n}`), which renumbers when an earlier expression is added or removed: name it with `as:` |
+| `context.op.expr` | warning | an `expr` on an op that reads no field (`groupSize`) is not evaluated |
+| `filter.scope` | error | `filter` (block or op) selects the rows of a context group: a row / sequence / population block does not take it — use `windows[].filter` for past rows, `cond ? x : null` in a row expr |
 | `context.softmax.offset` | error | `offset` must be a `baselines[].name` or a numeric column (an unknown name is `reference.unresolved`) |
 | `context.softmax.temperature` / `.offsetScale` / `.scoreNull` | error | temperature must be a number > 0; offsetScale probability / log (`offsetUnits` is the rating op's parameter: use `offsetScale: log`); scoreNull zero / null |
 | `context.softmax.temperatureFrom.unresolved` | error | `temperatureFrom` must be a URI (resolved before compile); a document that is neither a number nor JSON with `temperature` / `T` fails at resolve |
