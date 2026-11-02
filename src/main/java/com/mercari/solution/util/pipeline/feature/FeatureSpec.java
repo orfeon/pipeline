@@ -90,6 +90,8 @@ public class FeatureSpec implements Serializable {
         public List<String> fields = new ArrayList<>();
         public String expr;
         public String predicate;
+        /** context: the condition a row must meet to take part in this op (with the block's {@code filter}, both); the other rows read null. */
+        public String filter;
         public Integer k;
         public List<Double> halflife = new ArrayList<>();
         public List<String> funcs = new ArrayList<>();
@@ -397,6 +399,11 @@ public class FeatureSpec implements Serializable {
         // context / sequence
         public String context;
         public boolean excludeSelf;
+        /**
+         * context: the condition a row of the group must meet to take part in the block's ops (SQL-like, as a sequence
+         * window's filter); the other rows read null. An op's own {@code filter} narrows it further.
+         */
+        public String filter;
         public List<Op> ops = new ArrayList<>();
         public String entity;
         /**
@@ -1118,6 +1125,7 @@ public class FeatureSpec implements Serializable {
 
         def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
+        def.filter = Json.string(o, "filter");
         def.entity = Json.string(o, "entity");
         def.direction = Json.string(o, "direction");
         if (def.direction != null && def.scope != Scope.sequence) {
@@ -1594,6 +1602,7 @@ public class FeatureSpec implements Serializable {
         if (field != null) op.fields.add(field);
         op.expr = Json.string(o, "expr");
         op.predicate = Json.string(o, "predicate");
+        op.filter = Json.string(o, "filter");
         op.k = Json.integer(o, "k");
         op.against = Json.string(o, "against");
         op.lag = Json.integer(o, "lag");

@@ -122,6 +122,34 @@ public class ExpressionUtilTest {
         Assertions.assertEquals(0D, constants.evaluate(Map.of()), DELTA);
     }
 
+    // the first argument that is a number: a null (NaN) or an infinite value falls through; none gives NaN (null)
+    @Test
+    public void testCoalesce() {
+        final Expression two = ExpressionUtil.createDefaultExpression("coalesce(a, b)");
+        Assertions.assertEquals(Set.of("a", "b"), two.getVariableNames());
+        Assertions.assertEquals(1D, two.evaluate(Map.of("a", 1D, "b", 2D)), DELTA);
+        Assertions.assertEquals(2D, two.evaluate(Map.of("a", Double.NaN, "b", 2D)), DELTA);
+        Assertions.assertEquals(0D, two.evaluate(Map.of("a", 0D, "b", 2D)), DELTA);
+        Assertions.assertTrue(Double.isNaN(two.evaluate(Map.of("a", Double.NaN, "b", Double.NaN))));
+
+        // more arguments, an argument that is an expression with commas of its own, and a nested call
+        final Expression many = ExpressionUtil.createDefaultExpression("coalesce(1 / a, max(b, c) * 2, coalesce(d, 7), 9) + 1");
+        Assertions.assertEquals(3D, many.evaluate(Map.of("a", 0.5D, "b", 1D, "c", 2D, "d", 5D)), DELTA);
+        Assertions.assertEquals(5D, many.evaluate(Map.of("a", 0D, "b", 1D, "c", 2D, "d", 5D)), DELTA);
+        Assertions.assertEquals(6D, many.evaluate(Map.of("a", 0D, "b", Double.NaN, "c", 2D, "d", 5D)), DELTA);
+        Assertions.assertEquals(8D, many.evaluate(Map.of("a", 0D, "b", Double.NaN, "c", 2D, "d", Double.NaN)), DELTA);
+        Assertions.assertEquals(8, ExpressionUtil.createDefaultExpression("coalesce(a, b, c, d, e2, f, g, h)").evaluate(
+                Map.of("a", Double.NaN, "b", Double.NaN, "c", Double.NaN, "d", Double.NaN, "e2", Double.NaN, "f", Double.NaN, "g", Double.NaN, "h", 8D)), DELTA);
+
+        // a variable whose name ends in coalesce is a variable, and the name is reserved for estimateVariables
+        Assertions.assertEquals(Set.of("my_coalesce", "a"), ExpressionUtil.createDefaultExpression("my_coalesce + coalesce (a, 0)").getVariableNames());
+        Assertions.assertEquals(Set.of("a", "b"), ExpressionUtil.estimateVariables("coalesce(a, b)"));
+
+        // one argument, more than eight
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ExpressionUtil.createDefaultExpression("coalesce(a)"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ExpressionUtil.createDefaultExpression("coalesce(a, b, c, d, f, g, h, i, j)"));
+    }
+
     @Test
     public void testErrors() {
         // invalid syntax must fail at compile time

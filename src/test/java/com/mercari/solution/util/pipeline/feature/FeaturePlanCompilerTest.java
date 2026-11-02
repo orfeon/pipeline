@@ -3359,6 +3359,83 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * A context block's {@code filter} and an op's own select the rows of the group the op reads (both, when both are
+     * given); the condition is one {@code filter} coordinate, and its fields are the column's inputs, so their
+     * availability is the column's. A filtered op is not group-constant (the other rows read null), so it never takes
+     * the parent placement. An op's {@code expr} is an anonymous row column read like a field.
+     */
+    @Test
+    public void testContextFilter() {
+        final String blocks = """
+                  - name: bids
+                    scope: context
+                    context: session
+                    filter: "quantity >= 1"
+                    ops:
+                      - {type: shareOfTotal, expr: "1 / current_bid_t10", filter: "current_bid_t10 > 0", as: inv_bid}
+                      - {type: shareOfTotal, fields: [start_price]}
+                      - {type: groupSize}
+                  - name: plain
+                    scope: context
+                    context: session
+                    ops: [groupSize]
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(blocks).replace("prefix: f_", "prefix: f_\n  groupBy: session"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn invBid = column(plan, "bids_inv_bid_shareOfTotal");
+        Assertions.assertEquals("(quantity >= 1) AND (current_bid_t10 > 0)", invBid.getCoordinates().get("filter"));
+        Assertions.assertTrue(invBid.getInputs().containsAll(List.of("quantity", "current_bid_t10", "session_id")), invBid.getInputs()::toString);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, invBid.getStatus(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "context.expr.anonymous"), plan::describe);
+        final OutputColumn price = column(plan, "bids_start_price_shareOfTotal");
+        Assertions.assertEquals("quantity >= 1", price.getCoordinates().get("filter"));
+        Assertions.assertTrue(price.getInputs().contains("quantity"), price.getInputs()::toString);
+        // a filtered groupSize counts the rows that meet the condition: the others read null, so it is no group constant
+        Assertions.assertEquals("quantity >= 1", column(plan, "bids_groupSize").getCoordinates().get("filter"));
+        Assertions.assertNotEquals(OutputColumn.Placement.parent, column(plan, "bids_groupSize").getPlacement(), plan::describe);
+        Assertions.assertEquals(OutputColumn.Placement.parent, column(plan, "plain_groupSize").getPlacement(), plan::describe);
+        Assertions.assertNull(column(plan, "plain_groupSize").getCoordinates().get("filter"));
+
+        // a condition on an outcome puts the outcome on the row, as reading the field would
+        final FeaturePlan outcome = compile(SOURCES, withEncoding(blocks.replace("filter: \"quantity >= 1\"", "filter: \"sold = 1\"")));
+        Assertions.assertEquals(OutputColumn.Status.violation, column(outcome, "bids_start_price_shareOfTotal").getStatus(), outcome::describe);
+        // an expr without as is named by the anonymous counter
+        final FeaturePlan anonymous = compile(SOURCES, withEncoding(blocks.replace(", as: inv_bid", "")));
+        Assertions.assertFalse(anonymous.getDiagnostics().hasErrors(), anonymous::describe);
+        Assertions.assertTrue(hasCode(anonymous, "context.expr.anonymous"), anonymous::describe);
+        // $self has no meaning on the rows of a group; a condition that does not parse; a filter outside a context block
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("filter: \"quantity >= 1\"", "filter: \"quantity >= $self.quantity\""))), "context.filter.self"));
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("filter: \"current_bid_t10 > 0\"", "filter: \"current_bid_t10 > > 0\""))), "filter.parse"));
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("expr: \"1 / current_bid_t10\"", "expr: \"1 / $self.current_bid_t10\""))), "context.self"));
+        Assertions.assertTrue(hasError(compile(SOURCES, SPEC.replace("    entity: seller\n", "    entity: seller\n    filter: \"quantity >= 1\"\n")), "filter.scope"));
+        // a reference in a condition resolves like a field: a typo is reported
+        Assertions.assertTrue(hasError(compile(SOURCES, withEncoding(blocks.replace("filter: \"quantity >= 1\"", "filter: \"quantitty >= 1\""))), "reference.unresolved"));
+    }
+
+    /** coalesce in a row expr: a function, not a reference; its arguments are the column's inputs. */
+    @Test
+    public void testRowCoalesce() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding("""
+                  - name: bid_or_start
+                    scope: row
+                    expr: "coalesce(current_bid_t10, start_price, 0)"
+            """));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn c = column(plan, "bid_or_start");
+        Assertions.assertEquals(Set.of("current_bid_t10", "start_price"), c.getInputs());
+        final RowEvaluator evaluator = new RowEvaluator(List.of(c));
+        evaluator.setup();
+        final Map<String, Object> row = new HashMap<>();
+        row.put("current_bid_t10", null);
+        row.put("start_price", 80.0);
+        Assertions.assertEquals(80.0, evaluator.evaluateColumn(c, row));
+        row.put("start_price", null);
+        Assertions.assertEquals(0.0, evaluator.evaluateColumn(c, row));
+        row.put("current_bid_t10", 95.0);
+        Assertions.assertEquals(95.0, evaluator.evaluateColumn(c, row));
+    }
+
+    /**
      * Fold fits and the static-fit history warning. A fold encoding of a static residual leaves the row's fold out of
      * its own fit only: every other fold's residual comes from the curve fitted on this row's target, so it warns,
      * and forward on the curve alone is no fix. A history keyed by a hash fold's unit reads rows of the reading row's

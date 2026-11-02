@@ -241,7 +241,8 @@ Supported syntax:
   `log()` (natural), `log2()`, `log10()`, `logn(base, x)`, `min()`, `max()`, `signum()`,
   `sin()`, `cos()`, `tan()`, `asin()`, `acos()`, `atan()`, `atan2()`, `sinh()`, `cosh()`, `tanh()`
 - Conditional functions: `if(condition, valueIfTrue, valueIfFalse)`,
-  `switchN(cond1, value1, ..., condN, valueN)` for N = 3..8 (e.g. `switch3(...)`), returning the value of the first true condition (or `0`)
+  `switchN(cond1, value1, ..., condN, valueN)` for N = 3..8 (e.g. `switch3(...)`), returning the value of the first true condition (or `0`),
+  `coalesce(a, b, ...)` with 2 to 8 arguments, returning the first argument that is a number (a null or infinite value falls through; null when none is)
 - Timestamp functions: `timestamp_to_date(epochMicros, timezoneHours)`,
   `timestamp_diff_millisecond(a, b)`, `timestamp_diff_second(a, b)`, `timestamp_diff_minute(a, b)`, `timestamp_diff_hour(a, b)`, `timestamp_diff_day(a, b)` (arguments are epoch microseconds)
 - Constants: `pi`, `e`

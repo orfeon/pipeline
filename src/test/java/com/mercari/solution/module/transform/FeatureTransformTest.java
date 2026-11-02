@@ -2337,12 +2337,78 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * A context {@code filter}: the rows of the category with quantity <= 2 (electronics: A, B, D — C has 4; toys: both)
+     * are the group the ops read, and C/s1 reads null. An op's own filter narrows it further (start_price < 150 drops B),
+     * and its {@code expr} is read like a field. The filtered harville and the unfiltered one of {@code strength} read
+     * the same field of the same group: each reads its own rows.
+     */
+    private static final String CONTEXT_FILTER_BLOCKS = """
+                - name: picked
+                  scope: context
+                  context: byCategory
+                  filter: "quantity <= 2"
+                  ops:
+                    - {type: shareOfTotal, field: start_price}
+                    - {type: groupSize}
+                    - {type: shareOfTotal, expr: "1 / current_bid_t10", filter: "start_price < 150", as: inv}
+                    - {type: harville, field: start_price, top: [1]}
+            """.replaceAll("(?m)^", "    ");
+
+    @Test
+    public void testContextFilter() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("        - {name: session, keys: [session_id]}\n", "        - {name: session, keys: [session_id]}\n        - {name: byCategory, keys: [category]}\n")
+                .replace("      output:\n", GROUP_OP_BLOCKS + CONTEXT_FILTER_BLOCKS + "      output:\n");
+        Assertions.assertTrue(config.contains("byCategory, keys") && config.contains("filter: \"quantity <= 2\""));
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config)).get("features");
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            // id -> {share, groupSize, inverse-bid share, filtered harville top1, unfiltered harville top1}; null = not in the rows
+            final Map<String, Double[]> expected = Map.of(
+                    "A/s1", new Double[]{100.0 / 420, 3.0, (1 / 120.0) / (1 / 120.0 + 1 / 130.0), 100.0 / 420, 100.0 / 500},
+                    "B/s1", new Double[]{200.0 / 420, 3.0, null, 200.0 / 420, 200.0 / 500},
+                    "C/s1", new Double[]{null, null, null, null, 80.0 / 500},
+                    "D/s1", new Double[]{120.0 / 420, 3.0, (1 / 130.0) / (1 / 120.0 + 1 / 130.0), 120.0 / 420, 120.0 / 500},
+                    "A/s2", new Double[]{50.0 / 110, 2.0, (1 / 55.0) / (1 / 55.0 + 1 / 70.0), 50.0 / 110, 50.0 / 110},
+                    "C/s2", new Double[]{60.0 / 110, 2.0, (1 / 70.0) / (1 / 55.0 + 1 / 70.0), 60.0 / 110, 60.0 / 110});
+            final List<String> columns = List.of("f_picked_start_price_shareOfTotal", "f_picked_groupSize", "f_picked_inv_shareOfTotal",
+                    "f_picked_start_price_harville_top1", "f_strength_start_price_harville_top1");
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final Double[] e = expected.get(id);
+                for (int k = 0; k < columns.size(); k++) {
+                    final Object actual = row.getPrimitiveValue(columns.get(k));
+                    if (e[k] == null) {
+                        Assertions.assertNull(actual, id + " " + columns.get(k));
+                    } else {
+                        Assertions.assertNotNull(actual, id + " " + columns.get(k));
+                        Assertions.assertEquals(e[k], ((Number) actual).doubleValue(), 1e-12, id + " " + columns.get(k));
+                    }
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testContextGroupSolversParallelMatchesLinear() throws java.io.IOException {
         // one more context branch of wave 1: the solvers sum in the order of the values, not of the rows' arrival
         assertParallelMatchesLinear(PARALLEL_CONFIG
                         .replace("        - {name: session, keys: [session_id]}\n", "        - {name: session, keys: [session_id]}\n        - {name: byCategory, keys: [category]}\n")
                         .replace("      output:\n", GROUP_OP_BLOCKS + "      output:\n"), 6,
+                List.of("Wave1_FanIn"), List.of());
+    }
+
+    @Test
+    public void testContextFilterParallelMatchesLinear() throws java.io.IOException {
+        // the filtered and the unfiltered solvers of one group, in a branch of their own or in the chain
+        assertParallelMatchesLinear(PARALLEL_CONFIG
+                        .replace("        - {name: session, keys: [session_id]}\n", "        - {name: session, keys: [session_id]}\n        - {name: byCategory, keys: [category]}\n")
+                        .replace("      output:\n", GROUP_OP_BLOCKS + CONTEXT_FILTER_BLOCKS + "      output:\n"), 6,
                 List.of("Wave1_FanIn"), List.of());
     }
 

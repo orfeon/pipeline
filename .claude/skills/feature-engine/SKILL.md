@@ -238,7 +238,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   splits, `seed`, `top`, `maxGroupSize`); a parameterised op's parsed parameters are its `Solver` (a sealed interface:
   `Softmax` / `RatingProb` / `PoissonProb` / `Residualize` / `SvdColumn` / `Harville` / `Shuffle` — one slot in the `Plan`,
   dispatched by a pattern switch; a new parameterised op is a new record implementing it, a new case, nothing else);
-  `apply(op, values, self, excludeSelf)` serves the rest; group-constant ops are
+  `apply(op, values, self, excludeSelf)` serves the rest; a `filter` coordinate (the block's and the op's condition,
+  joined with AND by `contextFilter`) makes the column read the rows meeting it as its group and write null on the others:
+  `caches(group)` is called once per column with the group AS IT ARRIVES (identity = the per-group cache reset), the
+  subset is cached per condition text (`subsetCache`), and the shared solver passes (harville / svd / poisson) carry the
+  condition in their key — a subset list passed to `caches` would reset every cache per column, and a key without the
+  condition would hand a filtered column the unfiltered pass (`testContextFilter` fails on exactly that); a filtered op
+  never takes `Placement.parent`; group-constant ops are
   evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
   `softmax`, `ratingProb` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
   probability space with a max-shift; `ratingProb` = the Plackett-Luce contest read forward, `exp(mu / c)` normalised with
