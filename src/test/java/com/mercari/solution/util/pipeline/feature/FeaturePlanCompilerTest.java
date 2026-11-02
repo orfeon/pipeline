@@ -3314,14 +3314,20 @@ public class FeaturePlanCompilerTest {
         // through a row column computed from the residual
         final FeaturePlan through = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: forward, blocks: {size: P7D}}", "fit: {mode: static}")
                 .replace("fields: [price_curve_resid, surprise]", "fields: [surprise]").replace("          - {type: aggregate, field: price_curve_resid, funcs: [mean]}\n", "")));
+        Assertions.assertFalse(through.getDiagnostics().hasErrors(), through::describe);
         final List<Diagnostics.Message> viaRow = through.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
         Assertions.assertEquals(1, viaRow.size(), through::describe);
         Assertions.assertTrue(viaRow.get(0).message().contains("of surprise (through price_curve_resid)"), viaRow.get(0)::message);
         // an expanding encoding of a static residual reads it from the history too; a static one reads the whole input anyway
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SMOOTH_BLOCK)), "fit.mode.static.past"));
-        Assertions.assertFalse(hasCode(compile(SOURCES, withEncoding(SMOOTH_BLOCK.replace("        targets:\n", "        fit: {mode: static}\n        targets:\n"))), "fit.mode.static.past"));
+        final FeaturePlan expanding = compile(SOURCES, withEncoding(SMOOTH_BLOCK));
+        Assertions.assertFalse(expanding.getDiagnostics().hasErrors(), expanding::describe);
+        Assertions.assertTrue(hasCode(expanding, "fit.mode.static.past"), expanding::describe);
+        final FeaturePlan staticEncoding = compile(SOURCES, withEncoding(SMOOTH_BLOCK.replace("        targets:\n", "        fit: {mode: static}\n        targets:\n")));
+        Assertions.assertFalse(staticEncoding.getDiagnostics().hasErrors(), staticEncoding::describe);
+        Assertions.assertFalse(hasCode(staticEncoding, "fit.mode.static.past"), staticEncoding::describe);
         // a curve read on the row itself: the static-fit info only
         final FeaturePlan curve = compile(SOURCES, withEncoding(SMOOTH_BLOCK.substring(0, SMOOTH_BLOCK.indexOf("      - name: enc\n")).replace("outputs: [curve, residual]", "outputs: [curve]")));
+        Assertions.assertFalse(curve.getDiagnostics().hasErrors(), curve::describe);
         Assertions.assertTrue(hasCode(curve, "fit.mode.static"), curve::describe);
         Assertions.assertFalse(hasCode(curve, "fit.mode.static.past"), curve::describe);
         // a static fit of attributes only shapes no history with an outcome
@@ -3329,7 +3335,27 @@ public class FeaturePlanCompilerTest {
                 .replace("target: final_price", "target: quantity").replace("outputs: [residual]", "outputs: [curve, residual]")
                 .replace("fields: [price_curve_resid, surprise]", "fields: [price_curve]").replace("expr: \"price_curve_resid * 2\"", "expr: \"price_curve * 2\"")
                 .replace("          - {type: aggregate, field: price_curve_resid, funcs: [mean]}\n", "")));
+        Assertions.assertFalse(attributes.getDiagnostics().hasErrors(), attributes::describe);
         Assertions.assertFalse(hasCode(attributes, "fit.mode.static.past"), attributes::describe);
+        // discretize has no forward fit to point at: the advice names what the history can read instead
+        final FeaturePlan bins = compile(SOURCES, withEncoding("""
+                  - name: price_bin
+                    scope: population
+                    type: discretize
+                    input: final_price
+                    bins: 4
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 5}]
+                    ops:
+                      - {type: lag, fields: [price_bin], k: 1}
+            """));
+        Assertions.assertFalse(bins.getDiagnostics().hasErrors(), bins::describe);
+        final List<Diagnostics.Message> binWarnings = bins.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, binWarnings.size(), bins::describe);
+        Assertions.assertTrue(binWarnings.get(0).message().contains("price_bin is discretize"), binWarnings.get(0)::message);
+        Assertions.assertFalse(binWarnings.get(0).message().contains("Fit price_bin with fit.mode forward"), binWarnings.get(0)::message);
     }
 
     /**

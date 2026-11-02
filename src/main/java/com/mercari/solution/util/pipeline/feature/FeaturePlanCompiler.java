@@ -88,8 +88,9 @@ public final class FeaturePlanCompiler {
             resolveObservedAtAudits();
             resolveDefinitions();
             expandAll();
-            warnWholeInputFitsReadInThePast();
             finalizeColumns();
+            // after finalizeColumns: the declared label / weight roles are known there
+            warnWholeInputFitsReadInThePast();
             resolveRoles();
             reportMinIntervalAudits();
         }
@@ -156,23 +157,31 @@ public final class FeaturePlanCompiler {
      * holds for serving but not inside the training input: a past row's value then comes from a fit over the whole
      * input, which holds the targets of the rows after it, the reading row's own included. The window shift moves the
      * near edge; it does not take those targets out. One warning per (reading block, fitted block); the columns of a
-     * static or fold fit themselves keep the static-fit caveat their own info states.
+     * static or fold fit themselves keep the static-fit caveat their own info states. Labels and training weights (a
+     * future window, or a declared {@code output.roles} label / weight) are no features and get no warning.
      */
     private void warnWholeInputFitsReadInThePast() {
         final Set<String> reported = new HashSet<>();
         final Map<String, Map<String, OutputColumn>> memo = new HashMap<>();
         for (final OutputColumn c : columns) {
-            if (c.pastInputs.isEmpty() || c.status == Status.label || isWholeInputFit(c)) continue;
+            if (c.pastInputs.isEmpty() || c.status == Status.label || "label".equals(c.role) || "weight".equals(c.role) || isWholeInputFit(c)) continue;
             for (final String read : c.pastInputs) {
                 for (final OutputColumn fit : wholeInputOutcomeFits(read, memo).values()) {
                     if (!reported.add(c.block + "/" + fit.block)) continue;
                     final boolean fold = "fold".equals(fit.coordinates.get("fit"));
-                    diagnostics.warning("fit.mode.static.past", "features." + c.block, c.canonicalName + " reads past rows' values of " + read
+                    // discretize fits its edges on the whole input only: it has no forward mode to point at
+                    final boolean staticOnly = "discretize".equals(fit.operator);
+                    // a hidden level statistic of an encoding is no name the spec knows: its block is
+                    final String reader = c.anonymous ? "block " + c.block : c.canonicalName;
+                    diagnostics.warning("fit.mode.static.past", "features." + c.block, reader + " reads past rows' values of " + read
                             + (read.equals(fit.canonicalName) ? "" : " (through " + fit.canonicalName + ")") + ", which block " + fit.block
                             + (fold ? " fits out of fold over the whole input" : " fits under fit.mode static over the whole input")
                             + " from an outcome: a past row's value is shaped by the targets of the rows after it, this row's own included, so the window"
-                            + " shift does not keep them out inside the training input (the static-fit caveat, carried into the history). Fit "
-                            + fit.block + " with fit.mode forward, whose rows read only the blocks completed before them, for a history that holds in training"
+                            + " shift does not keep them out inside the training input (the static-fit caveat, carried into the history). "
+                            + (staticOnly
+                                    ? fit.block + " is discretize, which fits on the whole input only: read its input itself from the history, or a quantileTransform"
+                                            + " fitted with fit.mode forward, for a history that holds in training"
+                                    : "Fit " + fit.block + " with fit.mode forward, whose rows read only the blocks completed before them, for a history that holds in training")
                             + (fold ? "" : "; a static fit stays right for serving from an artifact fitted on an earlier period"));
                 }
             }

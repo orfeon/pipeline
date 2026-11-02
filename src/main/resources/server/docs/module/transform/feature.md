@@ -925,7 +925,10 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
 `expanding` (default) recomputes the statistics at every row from strictly-past, already-available
 contributions and is the leak-safe choice for training backfill. `static` fits each lattice level once
 over the whole input (windows are ignored) and applies it to every row as a pure map — rows then see
-their own outcome, so use it for serving / offline analysis, not for training. With `artifact.uri` the
+their own outcome, so use it for serving / offline analysis, not for training. A block that reads such a
+column from past rows (a sequence `lag` / `aggregate`, an expanding or forward encoding taking it as a target)
+inherits the caveat — every past row's value was fitted with the later targets, the reading row's own included —
+and the plan warns (`fit.mode.static.past`; fit the block `forward` for a history that holds in training). With `artifact.uri` the
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
 produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
