@@ -925,7 +925,13 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
 `expanding` (default) recomputes the statistics at every row from strictly-past, already-available
 contributions and is the leak-safe choice for training backfill. `static` fits each lattice level once
 over the whole input (windows are ignored) and applies it to every row as a pure map — rows then see
-their own outcome, so use it for serving / offline analysis, not for training. With `artifact.uri` the
+their own outcome, so use it for serving / offline analysis, not for training. A block that reads such a
+column from past rows (a sequence `lag` / `aggregate`, an expanding or forward encoding taking it as a target)
+inherits the caveat — every past row's value was fitted with the later targets, the reading row's own included —
+and the plan warns (`fit.mode.static.past`; fit the block `forward` for a history that holds in training). The same holds for
+a `fold` fit taking it as a target: leaving the row's own fold out does not take the row's target out of the other folds'
+values, so it warns as well (fit both blocks `forward`). A `fold` fit grouped by an entity (`fit.groupBy`) read from a
+history keyed by that entity is not warned: every past row shares the reading row's fold, whose targets its values leave out. With `artifact.uri` the
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
 produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
@@ -1673,7 +1679,8 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
   (`availability.intermediate`); declared as `output.roles.label` it is a label; otherwise it is an
   `availability.violation`.
 - **Fit modes.** Under `static` every training row's own target shapes the curve it reads (the static-fit caveat
-  of any target-consuming fit: harmless for serving from an artifact, optimistic inside the training set). Under
+  of any target-consuming fit: harmless for serving from an artifact, optimistic inside the training set; read from
+  a history, it reaches the past rows too — see *The residual in a history*). Under
   `forward` the moments are kept per time block and the curve is re-solved for every block window a row may read —
   the complete blocks within `fit.window` whose **targets are known at predictAt** (the target's settlement and
   ingestion lag delays the readable blocks, as for a forward encoding), the row's own block excluded; `minBlocks` /
@@ -1701,6 +1708,38 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
 - **The residual alone.** `outputs: [residual]` emits no curve column. It is the form to use when the *key* is
   known only after the event (a closing price): its curve would be an `availability.violation` as an output, while
   the residual — the target net of that key's curve — is consumed as an encoding target like any other.
+- **The residual in a history.** A sequence block reads the residual like any other outcome: a lag, a window mean or
+  an ewma of past rows' surprises.
+
+  ```yaml
+  - name: price_curve
+    scope: population
+    type: smooth
+    input: start_price
+    target: final_price
+    range: [0, 500]
+    outputs: [residual]
+    fit: {mode: forward, blocks: {size: P7D}}
+  - name: surprise
+    scope: sequence
+    entity: seller
+    windows: [{maxEvents: 5}]
+    ops:
+      - {type: lag, fields: [price_curve_resid], k: 1}
+      - {type: aggregate, field: price_curve_resid, funcs: [mean]}
+  ```
+
+  What a past row contributes is the residual **it computed at its own time**: under `forward`, its target minus the
+  curve fitted on the blocks readable at that row. The value is frozen once computed — a later row does not
+  re-read the past row under its own, newer curve. A row with no curve behind it (fewer than `minBlocks` blocks or
+  `minRows` rows readable at its time) has a null residual: a `lag` reads that null (the previous event exists, its
+  value is missing), while `aggregate` / `ewma` skip it. The sequence columns are `windowShift` by the target's own
+  availability (settlement + ingestion lag): the residual of a past row enters the window once its target is
+  known. Under `static` the same columns read past residuals of the **whole input's** curve, which holds the targets
+  of the rows after them — the reading row's own included —, so the window shift does not keep them out within the
+  training input; the plan warns (`fit.mode.static.past`, also when the history reads the residual through a row
+  column, or an expanding encoding takes it as a target). Fit the curve `forward` for a history that holds in
+  training; a static curve stays right for serving from an artifact fitted on an earlier period.
 
 ### Copula (population, type: copula)
 

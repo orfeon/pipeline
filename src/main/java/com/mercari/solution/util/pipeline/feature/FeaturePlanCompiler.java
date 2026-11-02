@@ -89,6 +89,8 @@ public final class FeaturePlanCompiler {
             resolveDefinitions();
             expandAll();
             finalizeColumns();
+            // after finalizeColumns: the declared label / weight roles are known there
+            warnWholeInputFitsReadInThePast();
             resolveRoles();
             reportMinIntervalAudits();
         }
@@ -146,6 +148,119 @@ public final class FeaturePlanCompiler {
                     + " audit query counts such events in the input, and the run counts them as feature/minInterval_" + a.entity()
                     + "_below; declare the interval the data has");
         }
+    }
+
+    /**
+     * A column that reads other rows' values — a sequence window, an expanding or forward fit — is classified by the
+     * availability of what it reads, and a column filled from a static or fold fit is available by declaration
+     * (§6.1 fit boundary: the artifact exists before the row). When such a fit consumes an outcome, the declaration
+     * holds for serving but not inside the training input: a past row's value then comes from a fit over the whole
+     * input, which holds the targets of the rows after it, the reading row's own included. The window shift moves the
+     * near edge; it does not take those targets out. One warning per (reading block, fitted block); the columns of a
+     * static fit themselves keep the static-fit caveat their own info states. A fold fit reading one is warned too: it
+     * leaves the row's own fold out of its own fit, not out of the fit it reads, whose value on every other fold's row
+     * holds the row's target. A hash fold read only within its fold unit is not: when the reader's history is keyed by
+     * the fold unit's keys, every row of it shares the reading row's fold, whose targets its out-of-fold values leave
+     * out. Labels and training weights (a future window, or a declared {@code output.roles} label / weight) are no
+     * features and get no warning.
+     */
+    private void warnWholeInputFitsReadInThePast() {
+        final Set<String> reported = new HashSet<>();
+        final Map<String, Map<String, OutputColumn>> memo = new HashMap<>();
+        for (final OutputColumn c : columns) {
+            if (c.pastInputs.isEmpty() || c.status == Status.label || "label".equals(c.role) || "weight".equals(c.role)) continue;
+            final String readerFit = c.fitted ? c.coordinates.get("fit") : null;
+            // a static reader reads the whole input itself: its own static-fit info already covers what it reads
+            if ("static".equals(readerFit)) continue;
+            final boolean foldReader = "fold".equals(readerFit);
+            for (final String read : c.pastInputs) {
+                for (final OutputColumn fit : wholeInputOutcomeFits(read, memo).values()) {
+                    if (fit.block.equals(c.block)) continue;
+                    if (!foldReader && readsOwnFoldOnly(c, fit)) continue;
+                    if (!reported.add(c.block + "/" + fit.block)) continue;
+                    diagnostics.warning("fit.mode.static.past", "features." + c.block, staticFitReadInThePast(c, read, fit, foldReader));
+                }
+            }
+        }
+    }
+
+    private static String staticFitReadInThePast(final OutputColumn c, final String read, final OutputColumn fit, final boolean foldReader) {
+        final boolean fold = "fold".equals(fit.coordinates.get("fit"));
+        // discretize fits its edges on the whole input only: it has no forward mode to point at
+        final boolean staticOnly = "discretize".equals(fit.operator);
+        // a hidden level statistic of an encoding is no name the spec knows: its block is
+        final String reader = c.anonymous ? "block " + c.block : c.canonicalName;
+        final String fitted = (read.equals(fit.canonicalName) ? "" : " (through " + fit.canonicalName + ")") + ", which block " + fit.block
+                + (fold ? " fits out of fold over the whole input" : " fits under fit.mode static over the whole input") + " from an outcome: ";
+        if (foldReader) {
+            return reader + " fits out of fold on other rows' values of " + read + fitted + "the value of every row outside this row's fold is shaped by"
+                    + " this row's own target, so leaving the fold out of " + c.block + "'s fit does not keep it out (the static-fit caveat, carried into"
+                    + " the fold). " + (staticOnly
+                            ? fit.block + " is discretize, which fits on the whole input only: read its input itself, or a quantileTransform fitted with"
+                                    + " fit.mode forward, and fit " + c.block + " with fit.mode forward"
+                            : "Fit both " + fit.block + " and " + c.block + " with fit.mode forward, whose rows read only the blocks completed before them")
+                    + ", for a fit that holds in training";
+        }
+        return reader + " reads past rows' values of " + read + fitted + "a past row's value is shaped by the targets of the rows after it, this row's"
+                + " own included, so the window shift does not keep them out inside the training input (the static-fit caveat, carried into the"
+                + " history). " + (staticOnly
+                        ? fit.block + " is discretize, which fits on the whole input only: read its input itself from the history, or a quantileTransform"
+                                + " fitted with fit.mode forward, for a history that holds in training"
+                        : "Fit " + fit.block + " with fit.mode forward, whose rows read only the blocks completed before them, for a history that holds in training")
+                + (fold ? "" : "; a static fit stays right for serving from an artifact fitted on an earlier period");
+    }
+
+    /**
+     * A hash fold fit whose fold unit's keys the reader's history is keyed by: every past row the reader sees shares
+     * its fold unit, so its fold, and its out-of-fold value leaves the reading row's target out.
+     */
+    private boolean readsOwnFoldOnly(final OutputColumn reader, final OutputColumn fit) {
+        if (!"fold".equals(fit.coordinates.get("fit")) || "time".equals(fit.coordinates.get("foldBy"))) return false;
+        final List<String> foldKeys = keyList(fit.coordinates.get("foldKeys"));
+        return !foldKeys.isEmpty() && historyKeys(reader).containsAll(foldKeys);
+    }
+
+    /** The keys every row of a column's history shares with the row reading it (the keyed stage's keys; empty = none). */
+    private List<String> historyKeys(final OutputColumn c) {
+        if (c.scope == Scope.sequence) {
+            if (c.coordinates.containsKey("stageKeys")) return keyList(c.coordinates.get("stageKeys"));
+            final EntityDef entity = entities.get(c.coordinates.get("entity"));
+            return entity == null ? List.of() : entity.keys();
+        }
+        // an expanding / window / forward population column reads the rows of its own key set's group
+        return c.scope == Scope.population ? keyList(c.coordinates.get("keys")) : List.of();
+    }
+
+    /** A static or fold fit: available by declaration, fitted over the whole input. */
+    private static boolean isWholeInputFit(final OutputColumn c) {
+        final String fit = c.coordinates.get("fit");
+        return c.fitted && ("static".equals(fit) || "fold".equals(fit));
+    }
+
+    /**
+     * The whole-input fits fed by an outcome that the value of {@code reference} depends on, by block: the fit itself, or
+     * any fit upstream of the columns it is computed from (the column graph is acyclic; memoised per reference).
+     */
+    private Map<String, OutputColumn> wholeInputOutcomeFits(final String reference, final Map<String, Map<String, OutputColumn>> memo) {
+        final Map<String, OutputColumn> known = memo.get(reference);
+        if (known != null) return known;
+        final Map<String, OutputColumn> found = new LinkedHashMap<>();
+        memo.put(reference, found);
+        final OutputColumn column = columnsByCanonical.get(reference);
+        if (column == null) return found;
+        if (isWholeInputFit(column)) {
+            for (final String p : column.pastInputs) {
+                final Ref ref = resolve(p);
+                if (ref != null && isOutcomeLike(ref)) {
+                    found.put(column.block, column);
+                    break;
+                }
+            }
+        }
+        for (final String input : column.inputs) {
+            for (final Map.Entry<String, OutputColumn> e : wholeInputOutcomeFits(input, memo).entrySet()) found.putIfAbsent(e.getKey(), e.getValue());
+        }
+        return found;
     }
 
     /**

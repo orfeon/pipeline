@@ -287,6 +287,7 @@ not expand because another block failed).
 | `encoding.globalKey` | hint | a key-less stage (global level / `share` denominator) runs on one thread and is the critical path: consider `fit.mode: static` / `fold` for that block (values change — a modeling decision) |
 | `fit.mode.static` / `fit.mode.fold` | info | how the block is fitted, where the artifact goes, and the caveat (static: rows see their own outcome; fold: other folds contain later rows) |
 | `fit.mode.static.windows` | warning | keySet windows are ignored in static / fold |
+| `fit.mode.static.past` | warning | a block reading past rows (sequence, expanding encoding, or any forward fit) reads values a static / fold fit computed from an outcome over the whole input — directly or through a row column, e.g. a static smooth `_resid` in a lag. The window shift does not keep later targets out of the training rows: fit that block `forward` (a `discretize` has no forward mode: read its input itself, or a forward `quantileTransform`). A fold fit reading such a value warns too — leaving its own fold out does not take the row's target out of the other folds' values: fit both `forward`. A history keyed by a hash fold's `groupBy` entity reads only rows of its own fold and gets no warning |
 | `fit.mode.forward` | info | how the forward block fit reads the data (complete known blocks, own block excluded) |
 | `fit.mode.forward.window` | info | `maxAge` rounded up to whole blocks |
 | `fit.mode.forward.windowIgnored` | warning | `maxEvents` / `filter` windows are ignored in forward |

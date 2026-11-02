@@ -3267,6 +3267,146 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * A residual read from the history: the sequence column is classified by the residual's availability (the
+     * target's), so it is a window shift in either fit mode. Under {@code forward} a past row's residual comes from the
+     * curve of its own time, fitted before it; under {@code static} from the curve of the whole input, which holds the
+     * targets of the rows after it — the shift does not take them out, so the plan warns (once per block pair, also
+     * through a row column computed from the residual, and for an expanding encoding of it). The columns that read a
+     * static fit on the row itself keep the static-fit info and get no warning.
+     */
+    @Test
+    public void testStaticFitReadFromTheHistoryWarns() {
+        final String blocks = """
+                  - name: price_curve
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                    outputs: [residual]
+                    fit: {mode: forward, blocks: {size: P7D}}
+                  - name: surprise
+                    scope: row
+                    expr: "price_curve_resid * 2"
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 5}]
+                    ops:
+                      - {type: lag, fields: [price_curve_resid, surprise], k: 1}
+                      - {type: aggregate, field: price_curve_resid, funcs: [mean]}
+            """;
+        final FeaturePlan forward = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertFalse(hasCode(forward, "fit.mode.static.past"), forward::describe);
+        final OutputColumn lag = column(forward, "hist_n5_price_curve_resid_lag1");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, lag.getStatus(), forward::describe);
+        Assertions.assertTrue(column(forward, "price_curve_resid").isIntermediate(), forward::describe);
+
+        final FeaturePlan statik = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: forward, blocks: {size: P7D}}", "fit: {mode: static}")));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals(OutputColumn.Status.windowShift, column(statik, "hist_n5_price_curve_resid_lag1").getStatus(), "the status alone does not show it");
+        final List<Diagnostics.Message> warnings = statik.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, warnings.size(), statik::describe);
+        Assertions.assertEquals(Diagnostics.Level.warning, warnings.get(0).level());
+        Assertions.assertEquals("features.hist", warnings.get(0).location());
+        Assertions.assertTrue(warnings.get(0).message().contains("block price_curve"), warnings.get(0)::message);
+        // through a row column computed from the residual
+        final FeaturePlan through = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: forward, blocks: {size: P7D}}", "fit: {mode: static}")
+                .replace("fields: [price_curve_resid, surprise]", "fields: [surprise]").replace("          - {type: aggregate, field: price_curve_resid, funcs: [mean]}\n", "")));
+        Assertions.assertFalse(through.getDiagnostics().hasErrors(), through::describe);
+        final List<Diagnostics.Message> viaRow = through.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, viaRow.size(), through::describe);
+        Assertions.assertTrue(viaRow.get(0).message().contains("of surprise (through price_curve_resid)"), viaRow.get(0)::message);
+        // an expanding encoding of a static residual reads it from the history too; a static one reads the whole input anyway
+        final FeaturePlan expanding = compile(SOURCES, withEncoding(SMOOTH_BLOCK));
+        Assertions.assertFalse(expanding.getDiagnostics().hasErrors(), expanding::describe);
+        Assertions.assertTrue(hasCode(expanding, "fit.mode.static.past"), expanding::describe);
+        final FeaturePlan staticEncoding = compile(SOURCES, withEncoding(SMOOTH_BLOCK.replace("        targets:\n", "        fit: {mode: static}\n        targets:\n")));
+        Assertions.assertFalse(staticEncoding.getDiagnostics().hasErrors(), staticEncoding::describe);
+        Assertions.assertFalse(hasCode(staticEncoding, "fit.mode.static.past"), staticEncoding::describe);
+        // a curve read on the row itself: the static-fit info only
+        final FeaturePlan curve = compile(SOURCES, withEncoding(SMOOTH_BLOCK.substring(0, SMOOTH_BLOCK.indexOf("      - name: enc\n")).replace("outputs: [curve, residual]", "outputs: [curve]")));
+        Assertions.assertFalse(curve.getDiagnostics().hasErrors(), curve::describe);
+        Assertions.assertTrue(hasCode(curve, "fit.mode.static"), curve::describe);
+        Assertions.assertFalse(hasCode(curve, "fit.mode.static.past"), curve::describe);
+        // a static fit of attributes only shapes no history with an outcome
+        final FeaturePlan attributes = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: forward, blocks: {size: P7D}}", "fit: {mode: static}")
+                .replace("target: final_price", "target: quantity").replace("outputs: [residual]", "outputs: [curve, residual]")
+                .replace("fields: [price_curve_resid, surprise]", "fields: [price_curve]").replace("expr: \"price_curve_resid * 2\"", "expr: \"price_curve * 2\"")
+                .replace("          - {type: aggregate, field: price_curve_resid, funcs: [mean]}\n", "")));
+        Assertions.assertFalse(attributes.getDiagnostics().hasErrors(), attributes::describe);
+        Assertions.assertFalse(hasCode(attributes, "fit.mode.static.past"), attributes::describe);
+        // discretize has no forward fit to point at: the advice names what the history can read instead
+        final FeaturePlan bins = compile(SOURCES, withEncoding("""
+                  - name: price_bin
+                    scope: population
+                    type: discretize
+                    input: final_price
+                    bins: 4
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 5}]
+                    ops:
+                      - {type: lag, fields: [price_bin], k: 1}
+            """));
+        Assertions.assertFalse(bins.getDiagnostics().hasErrors(), bins::describe);
+        final List<Diagnostics.Message> binWarnings = bins.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, binWarnings.size(), bins::describe);
+        Assertions.assertTrue(binWarnings.get(0).message().contains("price_bin is discretize"), binWarnings.get(0)::message);
+        Assertions.assertFalse(binWarnings.get(0).message().contains("Fit price_bin with fit.mode forward"), binWarnings.get(0)::message);
+    }
+
+    /**
+     * Fold fits and the static-fit history warning. A fold encoding of a static residual leaves the row's fold out of
+     * its own fit only: every other fold's residual comes from the curve fitted on this row's target, so it warns,
+     * and forward on the curve alone is no fix. A history keyed by a hash fold's unit reads rows of the reading row's
+     * own fold, whose out-of-fold values leave its target out: no warning — but a row-level or a time fold does warn.
+     */
+    @Test
+    public void testFoldFitReadFromTheHistory() {
+        final String residualFold = SMOOTH_BLOCK.replace("        targets:\n", "        fit: {mode: fold, folds: 3, groupBy: seller}\n        targets:\n");
+        final FeaturePlan foldReader = compile(SOURCES, withEncoding(residualFold));
+        Assertions.assertFalse(foldReader.getDiagnostics().hasErrors(), foldReader::describe);
+        final List<Diagnostics.Message> foldWarnings = foldReader.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, foldWarnings.size(), foldReader::describe);
+        Assertions.assertEquals("features.enc", foldWarnings.get(0).location());
+        Assertions.assertTrue(foldWarnings.get(0).message().contains("fits out of fold on other rows' values of price_curve_resid"), foldWarnings.get(0)::message);
+        Assertions.assertTrue(foldWarnings.get(0).message().contains("Fit both price_curve and enc with fit.mode forward"), foldWarnings.get(0)::message);
+
+        final String blocks = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: fold, folds: 3, groupBy: seller}
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: final_price, stats: [mean]}
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 5}]
+                    ops:
+                      - {type: lag, fields: [enc__seller_id__final_price__mean], k: 1}
+            """;
+        final FeaturePlan ownFold = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(ownFold.getDiagnostics().hasErrors(), ownFold::describe);
+        Assertions.assertTrue(hasCode(ownFold, "fit.mode.fold"), ownFold::describe);
+        Assertions.assertFalse(hasCode(ownFold, "fit.mode.static.past"), ownFold::describe);
+        // row folds: the seller's past rows sit in other folds
+        final FeaturePlan rowFolds = compile(SOURCES, withEncoding(blocks.replace(", groupBy: seller", "")));
+        Assertions.assertFalse(rowFolds.getDiagnostics().hasErrors(), rowFolds::describe);
+        Assertions.assertTrue(hasCode(rowFolds, "fit.mode.static.past"), rowFolds::describe);
+        // time folds: a past block is fitted on the later ones, this row's included
+        final FeaturePlan timeFolds = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: fold, folds: 3, groupBy: seller}",
+                "fit: {mode: fold, blocks: {size: P30D}, fold: {by: time}}")));
+        Assertions.assertFalse(timeFolds.getDiagnostics().hasErrors(), timeFolds::describe);
+        Assertions.assertTrue(hasCode(timeFolds, "fit.mode.static.past"), timeFolds::describe);
+    }
+
+    /**
      * {@code fit.minRows}: the fewest rows a lookup fit is solved from. A curve defaults to one row more than its
      * coefficients (fewer leave it to the penalty alone, as many are interpolated), the other types to no floor; a
      * block's own value wins over the top-level one, 0 switches the floor off, and the types that do not take it —

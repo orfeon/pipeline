@@ -3774,6 +3774,69 @@ public class FeatureTransformTest {
     }
 
     /**
+     * A residual read from the history is the value the past row computed at its own time, not a re-reading of the
+     * past row under the current row's curve. The forward constant curve of {@link #testSmoothForwardFit} is 50 at C
+     * (A and B behind it) and 63.4 at D: C/s1 carries 95 − 50 = 45, which D/s1 reads as its lag — not 95 − 63.4. B
+     * has no curve behind it, so its residual is null and C/s1's lag reads that null; the mean over the window skips
+     * it. Under static every residual comes from the whole input's curve, (150 + 0 + 0 + 95 + 72 + 140) / 6, D's own
+     * target included — which is why the plan warns (fit.mode.static.past).
+     */
+    @Test
+    public void testSmoothResidualReadFromTheHistory() throws java.io.IOException {
+        final String blocks = """
+                    - name: price_fwd
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {order: 1, lambda: 1000000000}
+                      outputs: [residual]
+                      fit: {mode: forward, blocks: {size: P7D}, minRows: 0}
+                    - name: price_all
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {order: 1, lambda: 1000000000}
+                      outputs: [residual]
+                      fit: {minRows: 0}
+                    - name: hist
+                      scope: sequence
+                      entity: seller
+                      windows: [{maxEvents: 5}]
+                      ops:
+                        - {type: lag, fields: [price_fwd_resid, price_all_resid], k: 1}
+                        - {type: aggregate, field: price_fwd_resid, funcs: [mean]}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertEquals("windowShift", schema.getField("f_hist_n5_price_fwd_resid_lag1").getOptions().get("feature.status"));
+        Assertions.assertEquals("windowShift", schema.getField("f_hist_n5_price_all_resid_lag1").getOptions().get("feature.status"));
+        Assertions.assertNull(schema.getField("f_price_fwd_resid"), "the residual is an outcome: an intermediate");
+        final double all = (150 + 0 + 0 + 95 + 72 + 140) / 6.0;
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            Assertions.assertEquals(95 - 50.0, byKey.get("D/s1").getAsDouble("f_hist_n5_price_fwd_resid_lag1"), 1e-3, "C's own curve");
+            Assertions.assertEquals(95 - 50.0, byKey.get("D/s1").getAsDouble("f_hist_n5_price_fwd_resid_mean"), 1e-3, "A and B have no curve");
+            Assertions.assertNull(byKey.get("C/s1").getPrimitiveValue("f_hist_n5_price_fwd_resid_lag1"), "B's residual is null");
+            Assertions.assertNull(byKey.get("C/s1").getPrimitiveValue("f_hist_n5_price_fwd_resid_mean"));
+            Assertions.assertNull(byKey.get("C/s2").getPrimitiveValue("f_hist_n5_price_fwd_resid_lag1"), "A's residual is null");
+            Assertions.assertEquals(95 - all, byKey.get("D/s1").getAsDouble("f_hist_n5_price_all_resid_lag1"), 1e-3);
+            Assertions.assertEquals(0 - all, byKey.get("C/s1").getAsDouble("f_hist_n5_price_all_resid_lag1"), 1e-3);
+            Assertions.assertEquals(0 - all, byKey.get("C/s2").getAsDouble("f_hist_n5_price_all_resid_lag1"), 1e-3);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
      * transitionStats is a desugaring, so it must read exactly what the blocks it stands for read: a lag of the
      * entity plus an expanding, shrunk distribution keyed on it. Sellers' grades in time order — s1: good, good, fair,
      * good; s2: fair, good — give the pooled transitions good→good (B), good→fair (C/s1), fair→good (C/s2, D).
