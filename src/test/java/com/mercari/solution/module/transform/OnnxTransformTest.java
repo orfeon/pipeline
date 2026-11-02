@@ -81,6 +81,27 @@ public class OnnxTransformTest {
         assertLinear(linearConfig(OnnxTestModels.configPath(model), null, 3));
     }
 
+    // maxConcurrency caps the inferences running at once, values unchanged
+    @Test
+    public void testLinearMaxConcurrency() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("concurrency/model.onnx"), OnnxTestModels.linear());
+        assertLinear(linearConfig(OnnxTestModels.configPath(model), null, 2) + "      maxConcurrency: 1\n");
+    }
+
+    @Test
+    public void testMaxConcurrencyInvalid() throws Exception {
+        final Path model = OnnxTestModels.write(BASE_DIR.resolve("concurrency-invalid/model.onnx"), OnnxTestModels.linear());
+        final String config = linearConfig(OnnxTestModels.configPath(model), null, 1) + "      maxConcurrency: 0\n";
+        final Exception e = Assertions.assertThrows(Exception.class, () -> MPipeline.apply(pipeline, Config.load(config)));
+        Assertions.assertTrue(messages(e).contains("parameters.maxConcurrency must be over than zero"), messages(e));
+    }
+
+    private static String messages(final Throwable e) {
+        final StringBuilder text = new StringBuilder();
+        for(Throwable t = e; t != null; t = t.getCause()) text.append(t.getMessage()).append('\n');
+        return text.toString();
+    }
+
     // a model directory: the model file is given relative to it
     @Test
     public void testModelDirectoryWithFile() throws Exception {

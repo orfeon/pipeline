@@ -6,6 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.domain.math.Tensor;
+import com.mercari.solution.util.domain.ml.onnx.InferencePermits;
 import com.mercari.solution.util.domain.ml.onnx.OnnxGraphInfo;
 import com.mercari.solution.util.domain.ml.onnx.OnnxInputs;
 import com.mercari.solution.util.domain.ml.onnx.OnnxLoop;
@@ -27,6 +28,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.Semaphore;
 
 
 @Transform.Module(name="onnx")
@@ -41,6 +43,7 @@ public class OnnxTransform extends Transform {
         private JsonArray outputs;
         private JsonObject loop;
         private Integer bufferSize;
+        private Integer maxConcurrency;
 
         private JsonElement filter;
 
@@ -66,6 +69,9 @@ public class OnnxTransform extends Transform {
             // each record takes its own number of runs
             if(loop != null && bufferSize != null && bufferSize != 1) {
                 errorMessages.add("parameters.bufferSize must be 1 with parameters.loop");
+            }
+            if(maxConcurrency != null && maxConcurrency < 1) {
+                errorMessages.add("parameters.maxConcurrency must be over than zero");
             }
 
             if(!errorMessages.isEmpty()) {
@@ -200,6 +206,8 @@ public class OnnxTransform extends Transform {
                 .apply("Inference", ParDo.of(new InferenceDoFn(
                                 model, filter, onnxInputs, loop, outputSelect,
                                 requestedOutputs, readOutputs, parameters.bufferSize,
+                                // the copies of the DoFn on a worker share the cap through this id (InferencePermits)
+                                parameters.maxConcurrency, UUID.randomUUID().toString(),
                                 outputSchema, getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
@@ -218,6 +226,9 @@ public class OnnxTransform extends Transform {
         private final Set<String> requestedOutputs;
         private final Set<String> readOutputs;
         private final Integer bufferSize;
+        // null = no cap
+        private final Integer maxConcurrency;
+        private final String permitsId;
 
         private final Filter filter;
 
@@ -228,6 +239,8 @@ public class OnnxTransform extends Transform {
 
         // buffered elements per window: a batch is flushed by the element that fills it, which shares its window
         private transient Map<BoundedWindow, List<Buffered>> buffers;
+        // shared by the copies of this DoFn in the process; null without maxConcurrency
+        private transient Semaphore permits;
 
         // values: the fields of the input record, evaluated: those with the values of the inputs select list
         private record Buffered(MElement element, Map<String, Object> values, Map<String, Object> evaluated, Instant timestamp) {}
@@ -246,6 +259,8 @@ public class OnnxTransform extends Transform {
                 final Set<String> requestedOutputs,
                 final Set<String> readOutputs,
                 final Integer bufferSize,
+                final Integer maxConcurrency,
+                final String permitsId,
                 final Schema outputSchema,
                 final boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
@@ -259,6 +274,8 @@ public class OnnxTransform extends Transform {
             this.requestedOutputs = requestedOutputs;
             this.readOutputs = readOutputs;
             this.bufferSize = bufferSize;
+            this.maxConcurrency = maxConcurrency;
+            this.permitsId = permitsId;
 
             this.outputSchema = outputSchema;
 
@@ -277,6 +294,17 @@ public class OnnxTransform extends Transform {
             }
             this.outputs.setup();
             this.outputSchema.setup();
+            if(this.maxConcurrency != null) {
+                this.permits = InferencePermits.register(permitsId, maxConcurrency);
+            }
+        }
+
+        @Teardown
+        public void teardown() {
+            if(this.permits != null) {
+                this.permits = null;
+                InferencePermits.unregister(permitsId);
+            }
         }
 
         @StartBundle
@@ -405,7 +433,23 @@ public class OnnxTransform extends Transform {
                     .convert(outputSchema.withType(DataType.AVRO));
         }
 
+        // one inference holds a permit from its input tensors to its last run: a loop is one inference, whose KV cache
+        // lives until it ends. A batch that fails releases it before its records are retried one by one, each taking
+        // its own. The wait is uninterruptible: an interrupted wait would turn the records into failures, and the
+        // threads that hold the permits give them back when their run ends
         private List<Map<String, Object>> inference(final List<Buffered> buffer) throws OrtException {
+            if(permits == null) {
+                return run(buffer);
+            }
+            permits.acquireUninterruptibly();
+            try {
+                return run(buffer);
+            } finally {
+                permits.release();
+            }
+        }
+
+        private List<Map<String, Object>> run(final List<Buffered> buffer) throws OrtException {
             if(loop != null) {
                 final Buffered buffered = buffer.getFirst();
                 loop.run(model, inputs, requestedOutputs, readOutputs, buffered.evaluated, buffered.timestamp);
