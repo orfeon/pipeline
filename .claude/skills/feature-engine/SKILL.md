@@ -521,7 +521,10 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
    the row side decides). That declaration does not hold inside the training input, and a reader of past rows
    (sequence, expanding / forward fit) inherits it without a trace in its status: `warnWholeInputFitsReadInThePast`
    (after `finalizeColumns`, which settles the label / weight roles it skips) walks each such column's `pastInputs` back through `inputs` to any static / fold fit fed by an
-   outcome and warns `fit.mode.static.past` once per (reading block, fitted block). A `minInterval` that absorbs a shift is recorded per entity (`FeaturePlan.MinIntervalAudit`,
+   outcome and warns `fit.mode.static.past` once per (reading block, fitted block). A static reader is skipped (its own
+   info covers it); a fold reader is not (it leaves its own fold out, not the fold of the fit it reads); a non-fold reader
+   whose history keys contain a hash fold's `foldKeys` is skipped (`readsOwnFoldOnly`: every past row shares the reading
+   row's fold). A `minInterval` that absorbs a shift is recorded per entity (`FeaturePlan.MinIntervalAudit`,
    the `minIntervalEntity` coordinate): audit SQL + `entity.minInterval` info at compile time, and `KeyedHistoryDoFn.auditInterval`
    counts the rows below it as `feature/minInterval_<entity>_below` at run time (per row, against the key's previous distinct
    event time; `Wiring.assignMinIntervalAudits` gives each entity exactly one stage — the one keyed by the entity itself where

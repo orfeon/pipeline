@@ -3359,6 +3359,54 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * Fold fits and the static-fit history warning. A fold encoding of a static residual leaves the row's fold out of
+     * its own fit only: every other fold's residual comes from the curve fitted on this row's target, so it warns,
+     * and forward on the curve alone is no fix. A history keyed by a hash fold's unit reads rows of the reading row's
+     * own fold, whose out-of-fold values leave its target out: no warning — but a row-level or a time fold does warn.
+     */
+    @Test
+    public void testFoldFitReadFromTheHistory() {
+        final String residualFold = SMOOTH_BLOCK.replace("        targets:\n", "        fit: {mode: fold, folds: 3, groupBy: seller}\n        targets:\n");
+        final FeaturePlan foldReader = compile(SOURCES, withEncoding(residualFold));
+        Assertions.assertFalse(foldReader.getDiagnostics().hasErrors(), foldReader::describe);
+        final List<Diagnostics.Message> foldWarnings = foldReader.getDiagnostics().getMessages().stream().filter(d -> "fit.mode.static.past".equals(d.code())).toList();
+        Assertions.assertEquals(1, foldWarnings.size(), foldReader::describe);
+        Assertions.assertEquals("features.enc", foldWarnings.get(0).location());
+        Assertions.assertTrue(foldWarnings.get(0).message().contains("fits out of fold on other rows' values of price_curve_resid"), foldWarnings.get(0)::message);
+        Assertions.assertTrue(foldWarnings.get(0).message().contains("Fit both price_curve and enc with fit.mode forward"), foldWarnings.get(0)::message);
+
+        final String blocks = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: fold, folds: 3, groupBy: seller}
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: final_price, stats: [mean]}
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 5}]
+                    ops:
+                      - {type: lag, fields: [enc__seller_id__final_price__mean], k: 1}
+            """;
+        final FeaturePlan ownFold = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(ownFold.getDiagnostics().hasErrors(), ownFold::describe);
+        Assertions.assertTrue(hasCode(ownFold, "fit.mode.fold"), ownFold::describe);
+        Assertions.assertFalse(hasCode(ownFold, "fit.mode.static.past"), ownFold::describe);
+        // row folds: the seller's past rows sit in other folds
+        final FeaturePlan rowFolds = compile(SOURCES, withEncoding(blocks.replace(", groupBy: seller", "")));
+        Assertions.assertFalse(rowFolds.getDiagnostics().hasErrors(), rowFolds::describe);
+        Assertions.assertTrue(hasCode(rowFolds, "fit.mode.static.past"), rowFolds::describe);
+        // time folds: a past block is fitted on the later ones, this row's included
+        final FeaturePlan timeFolds = compile(SOURCES, withEncoding(blocks.replace("fit: {mode: fold, folds: 3, groupBy: seller}",
+                "fit: {mode: fold, blocks: {size: P30D}, fold: {by: time}}")));
+        Assertions.assertFalse(timeFolds.getDiagnostics().hasErrors(), timeFolds::describe);
+        Assertions.assertTrue(hasCode(timeFolds, "fit.mode.static.past"), timeFolds::describe);
+    }
+
+    /**
      * {@code fit.minRows}: the fewest rows a lookup fit is solved from. A curve defaults to one row more than its
      * coefficients (fewer leave it to the penalty alone, as many are interpolated), the other types to no floor; a
      * block's own value wins over the top-level one, 0 switches the floor off, and the types that do not take it —

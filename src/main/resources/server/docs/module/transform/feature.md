@@ -928,7 +928,10 @@ over the whole input (windows are ignored) and applies it to every row as a pure
 their own outcome, so use it for serving / offline analysis, not for training. A block that reads such a
 column from past rows (a sequence `lag` / `aggregate`, an expanding or forward encoding taking it as a target)
 inherits the caveat — every past row's value was fitted with the later targets, the reading row's own included —
-and the plan warns (`fit.mode.static.past`; fit the block `forward` for a history that holds in training). With `artifact.uri` the
+and the plan warns (`fit.mode.static.past`; fit the block `forward` for a history that holds in training). The same holds for
+a `fold` fit taking it as a target: leaving the row's own fold out does not take the row's target out of the other folds'
+values, so it warns as well (fit both blocks `forward`). A `fold` fit grouped by an entity (`fit.groupBy`) read from a
+history keyed by that entity is not warned: every past row shares the reading row's fold, whose targets its values leave out. With `artifact.uri` the
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
 produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
