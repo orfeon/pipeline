@@ -88,6 +88,7 @@ public final class FeaturePlanCompiler {
             resolveObservedAtAudits();
             resolveDefinitions();
             expandAll();
+            warnWholeInputFitsReadInThePast();
             finalizeColumns();
             resolveRoles();
             reportMinIntervalAudits();
@@ -146,6 +147,68 @@ public final class FeaturePlanCompiler {
                     + " audit query counts such events in the input, and the run counts them as feature/minInterval_" + a.entity()
                     + "_below; declare the interval the data has");
         }
+    }
+
+    /**
+     * A column that reads other rows' values — a sequence window, an expanding or forward fit — is classified by the
+     * availability of what it reads, and a column filled from a static or fold fit is available by declaration
+     * (§6.1 fit boundary: the artifact exists before the row). When such a fit consumes an outcome, the declaration
+     * holds for serving but not inside the training input: a past row's value then comes from a fit over the whole
+     * input, which holds the targets of the rows after it, the reading row's own included. The window shift moves the
+     * near edge; it does not take those targets out. One warning per (reading block, fitted block); the columns of a
+     * static or fold fit themselves keep the static-fit caveat their own info states.
+     */
+    private void warnWholeInputFitsReadInThePast() {
+        final Set<String> reported = new HashSet<>();
+        final Map<String, Map<String, OutputColumn>> memo = new HashMap<>();
+        for (final OutputColumn c : columns) {
+            if (c.pastInputs.isEmpty() || c.status == Status.label || isWholeInputFit(c)) continue;
+            for (final String read : c.pastInputs) {
+                for (final OutputColumn fit : wholeInputOutcomeFits(read, memo).values()) {
+                    if (!reported.add(c.block + "/" + fit.block)) continue;
+                    final boolean fold = "fold".equals(fit.coordinates.get("fit"));
+                    diagnostics.warning("fit.mode.static.past", "features." + c.block, c.canonicalName + " reads past rows' values of " + read
+                            + (read.equals(fit.canonicalName) ? "" : " (through " + fit.canonicalName + ")") + ", which block " + fit.block
+                            + (fold ? " fits out of fold over the whole input" : " fits under fit.mode static over the whole input")
+                            + " from an outcome: a past row's value is shaped by the targets of the rows after it, this row's own included, so the window"
+                            + " shift does not keep them out inside the training input (the static-fit caveat, carried into the history). Fit "
+                            + fit.block + " with fit.mode forward, whose rows read only the blocks completed before them, for a history that holds in training"
+                            + (fold ? "" : "; a static fit stays right for serving from an artifact fitted on an earlier period"));
+                }
+            }
+        }
+    }
+
+    /** A static or fold fit: available by declaration, fitted over the whole input. */
+    private static boolean isWholeInputFit(final OutputColumn c) {
+        final String fit = c.coordinates.get("fit");
+        return c.fitted && ("static".equals(fit) || "fold".equals(fit));
+    }
+
+    /**
+     * The whole-input fits fed by an outcome that the value of {@code reference} depends on, by block: the fit itself, or
+     * any fit upstream of the columns it is computed from (the column graph is acyclic; memoised per reference).
+     */
+    private Map<String, OutputColumn> wholeInputOutcomeFits(final String reference, final Map<String, Map<String, OutputColumn>> memo) {
+        final Map<String, OutputColumn> known = memo.get(reference);
+        if (known != null) return known;
+        final Map<String, OutputColumn> found = new LinkedHashMap<>();
+        memo.put(reference, found);
+        final OutputColumn column = columnsByCanonical.get(reference);
+        if (column == null) return found;
+        if (isWholeInputFit(column)) {
+            for (final String p : column.pastInputs) {
+                final Ref ref = resolve(p);
+                if (ref != null && isOutcomeLike(ref)) {
+                    found.put(column.block, column);
+                    break;
+                }
+            }
+        }
+        for (final String input : column.inputs) {
+            for (final Map.Entry<String, OutputColumn> e : wholeInputOutcomeFits(input, memo).entrySet()) found.putIfAbsent(e.getKey(), e.getValue());
+        }
+        return found;
     }
 
     /**
