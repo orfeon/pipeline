@@ -1,5 +1,6 @@
 package com.mercari.solution.util.domain.pdf;
 
+import org.apache.pdfbox.cos.COSDictionary;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDDocumentCatalog;
 import org.apache.pdfbox.pdmodel.PDDocumentInformation;
@@ -18,20 +19,25 @@ import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationFileAttachme
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationLink;
 import org.apache.pdfbox.pdmodel.interactive.digitalsignature.PDSignature;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDDestination;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDNamedDestination;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageDestination;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineNode;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDSignatureField;
 import org.apache.pdfbox.pdmodel.interactive.form.PDTerminalField;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Document-level structures of a PDF as primitive values (timestamps in epoch micros, boxes in points
@@ -40,8 +46,37 @@ import java.util.Map;
 public class PdfStructure {
 
     private static final int MAX_OUTLINE_ITEMS = 10_000;
+    private static final int MAX_OUTLINE_DEPTH = 64;
 
     private PdfStructure() {}
+
+    /**
+     * 1-based page numbers of a document's pages, built on first use: {@code PDPageTree.indexOf} walks
+     * the whole page tree per lookup, which costs O(pages * links) over a document.
+     */
+    public static final class PageIndex {
+
+        private final PDDocument document;
+        private Map<COSDictionary, Long> numbers;
+
+        public PageIndex(final PDDocument document) {
+            this.document = document;
+        }
+
+        Long numberOf(final PDPage page) {
+            if(page == null) {
+                return null;
+            }
+            if(numbers == null) {
+                numbers = new IdentityHashMap<>();
+                long number = 1;
+                for(final PDPage p : document.getPages()) {
+                    numbers.putIfAbsent(p.getCOSObject(), number++);
+                }
+            }
+            return numbers.get(page.getCOSObject());
+        }
+    }
 
     public static Map<String, Object> metadata(final PDDocument document, final long fileSize) {
         final Map<String, Object> values = new HashMap<>();
@@ -84,36 +119,47 @@ public class PdfStructure {
             final Map<String, Object> value = new HashMap<>();
             value.put("name", field.getFullyQualifiedName());
             value.put("type", field.getFieldType());
-            value.put("value", field.getValueAsString());
+            // a signature field's value is its PDSignature, whose string form is an object id (see signatures)
+            value.put("value", field instanceof PDSignatureField ? null : field.getValueAsString());
             values.add(value);
         }
         return values;
     }
 
-    public static List<Map<String, Object>> outline(final PDDocument document) throws IOException {
+    public static List<Map<String, Object>> outline(final PDDocument document, final PageIndex pageIndex) throws IOException {
         final List<Map<String, Object>> values = new ArrayList<>();
         final PDOutlineNode root = document.getDocumentCatalog().getDocumentOutline();
         if(root != null) {
-            outline(document, root, 1, values);
+            outline(document, pageIndex, root, 1, Collections.newSetFromMap(new IdentityHashMap<>()), values);
         }
         return values;
     }
 
-    private static void outline(final PDDocument document, final PDOutlineNode node, final int level, final List<Map<String, Object>> values) throws IOException {
+    private static void outline(
+            final PDDocument document, final PageIndex pageIndex, final PDOutlineNode node, final int level,
+            final Set<COSDictionary> visited, final List<Map<String, Object>> values) throws IOException {
+
+        if(level > MAX_OUTLINE_DEPTH) {
+            return;
+        }
         for(final PDOutlineItem item : node.children()) {
             if(values.size() >= MAX_OUTLINE_ITEMS) {
                 return;
             }
+            if(!visited.add(item.getCOSObject())) {
+                // a broken outline whose items point back to an ancestor
+                continue;
+            }
             final Map<String, Object> value = new HashMap<>();
             value.put("level", (long) level);
             value.put("title", item.getTitle());
-            value.put("page", pageNumber(document, item.findDestinationPage(document)));
+            value.put("page", pageIndex.numberOf(item.findDestinationPage(document)));
             values.add(value);
-            outline(document, item, level + 1, values);
+            outline(document, pageIndex, item, level + 1, visited, values);
         }
     }
 
-    public static List<Map<String, Object>> links(final PDDocument document, final PDPage page, final int pageNumber) throws IOException {
+    public static List<Map<String, Object>> links(final PDDocument document, final PageIndex pageIndex, final PDPage page, final int pageNumber) throws IOException {
         final List<Map<String, Object>> values = new ArrayList<>();
         for(final PDAnnotation annotation : page.getAnnotations()) {
             if(!(annotation instanceof PDAnnotationLink link)) {
@@ -125,9 +171,9 @@ public class PdfStructure {
             if(action instanceof PDActionURI actionURI) {
                 uri = actionURI.getURI();
             } else if(action instanceof PDActionGoTo goTo) {
-                targetPage = targetPage(document, goTo.getDestination());
+                targetPage = targetPage(document, pageIndex, goTo.getDestination());
             } else if(action == null) {
-                targetPage = targetPage(document, link.getDestination());
+                targetPage = targetPage(document, pageIndex, link.getDestination());
             }
             if(uri == null && targetPage == null) {
                 continue;
@@ -228,45 +274,40 @@ public class PdfStructure {
 
     /** A box in PDF user space converted to top-left-origin crop-box coordinates. */
     static Map<String, Object> box(final PDPage page, final PDRectangle rect) {
-        final PDRectangle crop = page.getCropBox();
-        final Map<String, Object> value = new HashMap<>();
         if(rect == null) {
+            final Map<String, Object> value = new HashMap<>();
             value.put("x0", null);
             value.put("y0", null);
             value.put("x1", null);
             value.put("y1", null);
             return value;
         }
-        value.put("x0", (double) (rect.getLowerLeftX() - crop.getLowerLeftX()));
-        value.put("x1", (double) (rect.getUpperRightX() - crop.getLowerLeftX()));
-        value.put("y0", (double) (crop.getUpperRightY() - rect.getUpperRightY()));
-        value.put("y1", (double) (crop.getUpperRightY() - rect.getLowerLeftY()));
+        return box(page.getCropBox(), rect.getLowerLeftX(), rect.getLowerLeftY(), rect.getUpperRightX(), rect.getUpperRightY());
+    }
+
+    /** The box (minX, minY)-(maxX, maxY) in PDF user space converted to top-left-origin crop-box coordinates. */
+    static Map<String, Object> box(final PDRectangle crop, final double minX, final double minY, final double maxX, final double maxY) {
+        final Map<String, Object> value = new HashMap<>();
+        value.put("x0", minX - crop.getLowerLeftX());
+        value.put("x1", maxX - crop.getLowerLeftX());
+        value.put("y0", crop.getUpperRightY() - maxY);
+        value.put("y1", crop.getUpperRightY() - minY);
         return value;
     }
 
-    private static Long targetPage(final PDDocument document, final PDDestination destination) throws IOException {
+    private static Long targetPage(final PDDocument document, final PageIndex pageIndex, final PDDestination destination) throws IOException {
         if(destination instanceof PDPageDestination pageDestination) {
             if(pageDestination.getPage() != null) {
-                return pageNumber(document, pageDestination.getPage());
+                return pageIndex.numberOf(pageDestination.getPage());
             }
             final int index = pageDestination.getPageNumber();
             return index >= 0 ? (long) index + 1 : null;
         }
-        if(destination != null) {
-            // named destination
-            final PDPageDestination resolved = document.getDocumentCatalog().findNamedDestinationPage(
-                    (org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDNamedDestination) destination);
-            return resolved == null ? null : targetPage(document, resolved);
+        if(destination instanceof PDNamedDestination named) {
+            final PDPageDestination resolved = document.getDocumentCatalog().findNamedDestinationPage(named);
+            return resolved == null ? null : targetPage(document, pageIndex, resolved);
         }
         return null;
-    }
-
-    private static Long pageNumber(final PDDocument document, final PDPage page) {
-        if(page == null) {
-            return null;
-        }
-        final int index = document.getPages().indexOf(page);
-        return index < 0 ? null : (long) index + 1;
     }
 
     static Long micros(final Calendar calendar) {

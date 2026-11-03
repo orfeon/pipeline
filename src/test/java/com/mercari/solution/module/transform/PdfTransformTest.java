@@ -447,6 +447,58 @@ public class PdfTransformTest {
     }
 
     @Test
+    public void testSplitChunkHoldsOnlyItsPages() {
+        // page 2 holds a form widget whose /P points to the source page: importing the page as is would
+        // pull the source page tree, and so every page of the document, into the chunk
+        final Map<String, MCollection> outputs = apply(config(DOC, """
+                operation: split
+                pages: "2"
+                """));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            final List<MElement> list = list(elements);
+            Assertions.assertEquals(1, list.size());
+            try(final PDDocument chunk = Loader.loadPDF(bytes(list.getFirst(), "content"))) {
+                Assertions.assertEquals(1, chunk.getNumberOfPages());
+                Assertions.assertEquals(1, chunk.getDocument().getObjectsByType(org.apache.pdfbox.cos.COSName.PAGE).size());
+            } catch (final IOException e) {
+                throw new RuntimeException(e);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testPathIsNotGlob() throws IOException {
+        // on gs:// a '[' makes the path a glob ("glob[1].pdf" would match "glob1.pdf"); the local filesystem
+        // prefers an existing file, so this only guards that the exact read handles such a name
+        final String path = DIR + "/glob[1].pdf";
+        Files.copy(Path.of(DOC), Path.of(path), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        final Map<String, MCollection> outputs = apply(config(path, ""));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            final List<MElement> list = list(elements);
+            Assertions.assertEquals(1, list.size());
+            Assertions.assertEquals(3L, list.getFirst().getAsLong("pageCount"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testUnknownEnumValue() {
+        final Exception e = Assertions.assertThrows(Exception.class, () -> apply(config(DOC, """
+                operation: Render
+                """)));
+        Assertions.assertTrue(rootMessage(e).contains("parameters.operation"), rootMessage(e));
+        final Exception r = Assertions.assertThrows(Exception.class, () -> apply(config(DOC, """
+                operation: render
+                render:
+                  format: jpg
+                """)));
+        Assertions.assertTrue(rootMessage(r).contains("parameters.render.format"), rootMessage(r));
+    }
+
+    @Test
     public void testBytesFieldAndPassword() throws IOException {
         final String base64 = Base64.getEncoder().encodeToString(Files.readAllBytes(Path.of(ENCRYPTED)));
         final String yaml = """

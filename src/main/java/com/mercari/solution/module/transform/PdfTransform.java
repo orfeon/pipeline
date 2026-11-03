@@ -1,6 +1,8 @@
 package com.mercari.solution.module.transform;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ResourceUtil;
@@ -92,8 +94,19 @@ public class PdfTransform extends Transform {
         private HttpTransport.Parameters http;
         private JsonArray select;
 
-        private Parameters validate(final Schema inputSchema) {
+        private Parameters validate(final Schema inputSchema, final JsonObject json) {
             final List<String> errorMessages = new ArrayList<>();
+            // gson reads an unknown enum name as null, which setDefaults would silently replace
+            checkEnum(errorMessages, json, "operation", operation, Operation.values());
+            checkEnum(errorMessages, json, "unit", unit, Unit.values());
+            if(render != null && json.get("render") instanceof JsonObject renderJson) {
+                checkEnum(errorMessages, renderJson, "render.format", render.format, PdfRender.Format.values());
+                checkEnum(errorMessages, renderJson, "render.color", render.color, PdfRender.Color.values());
+                checkEnum(errorMessages, renderJson, "render.when", render.when, PdfRender.When.values());
+            }
+            if(images != null && json.get("images") instanceof JsonObject imagesJson) {
+                checkEnum(errorMessages, imagesJson, "images.format", images.format, PdfImages.Format.values());
+            }
             if(field == null) {
                 errorMessages.add("parameters.field must not be null");
             } else if(!inputSchema.hasField(field)) {
@@ -149,6 +162,10 @@ public class PdfTransform extends Transform {
                 if(!auth.isNone() && (http == null || http.allowedHosts == null || http.allowedHosts.isEmpty())) {
                     errorMessages.add("parameters.http.allowedHosts is required with parameters.auth, so that credentials are only sent to the hosts you trust");
                 }
+                if(AuthProvider.Type.gcpOidc.equals(auth.type) && auth.audience == null) {
+                    // the urls come from the data, so there is no static origin to default the audience to
+                    errorMessages.add("parameters.auth.audience is required for auth.type gcpOidc");
+                }
             }
             if(timeout != null) {
                 errorMessages.addAll(timeout.validate("parameters.timeout"));
@@ -160,6 +177,15 @@ public class PdfTransform extends Transform {
                 throw new IllegalModuleException(errorMessages);
             }
             return this;
+        }
+
+        private static void checkEnum(
+                final List<String> errorMessages, final JsonObject json, final String path, final Enum<?> value, final Enum<?>[] values) {
+
+            final String name = path.substring(path.lastIndexOf('.') + 1);
+            if(value == null && json != null && json.has(name) && !json.get(name).isJsonNull()) {
+                errorMessages.add("parameters." + path + ": " + json.get(name) + " is unknown, available: " + Arrays.toString(values));
+            }
         }
 
         private Parameters setDefaults() {
@@ -225,7 +251,9 @@ public class PdfTransform extends Transform {
             final MErrorHandler errorHandler) {
 
         final Schema inputSchema = Union.createUnionSchema(inputs);
-        final Parameters parameters = getParameters(Parameters.class).validate(inputSchema).setDefaults();
+        final Parameters parameters = getParameters(Parameters.class)
+                .validate(inputSchema, Config.convertConfigJson(getParametersText(), Config.Format.json))
+                .setDefaults();
 
         final boolean isSourceBytes = Schema.Type.bytes.equals(inputSchema.getField(parameters.field).getFieldType().getType());
         final boolean dropSource = isSourceBytes && !parameters.keepSource;
@@ -459,13 +487,13 @@ public class PdfTransform extends Transform {
         @Setup
         public void setup() throws IOException {
             this.pdfText = new PdfText(parameters.text);
+            // the http transport (an HttpClient with its own threads) is created on the first http(s) path
             if(!isSourceBytes) {
                 final ResponsePolicy.Parameters response = new ResponsePolicy.Parameters();
                 response.format = ResponsePolicy.Format.bytes;
                 response.setDefaults();
                 this.policy = new ResponsePolicy(response);
                 this.policy.setup();
-                this.transport = new HttpTransport(parameters.http, parameters.timeout, AuthProvider.create(parameters.auth, null));
             }
             for(final SelectFunction selectFunction : selectFunctions) {
                 selectFunction.setup();
@@ -491,6 +519,10 @@ public class PdfTransform extends Transform {
             try {
                 bytes = readContent(input);
                 document = Loader.loadPDF(bytes, parameters.password == null ? "" : parameters.password);
+            } catch (final InterruptedException e) {
+                // the worker is shutting down: fail the bundle (it is retried) rather than routing the pdf as a failure
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while reading pdf from field: " + parameters.field, e);
             } catch (final Throwable e) {
                 c.output(failureTag, processError("Failed to read pdf from field: " + parameters.field, input, e, failFast));
                 return;
@@ -502,6 +534,7 @@ public class PdfTransform extends Transform {
                 }
                 final int pageCount = document.getNumberOfPages();
                 final List<Integer> pages = pageSelection.resolve(pageCount);
+                final PdfStructure.PageIndex pageIndex = new PdfStructure.PageIndex(document);
                 switch (parameters.operation) {
                     case split -> {
                         for(final PdfSplit.Chunk chunk : PdfSplit.split(document, pages, parameters.split.pagesPerChunk)) {
@@ -517,21 +550,21 @@ public class PdfTransform extends Transform {
                         final PDFRenderer renderer = new PDFRenderer(document);
                         for(final int page : pages) {
                             try {
-                                output(c, base, pageRow(document, renderer, bytes.length, page, pageCount));
+                                output(c, base, pageRow(document, pageIndex, renderer, bytes.length, page, pageCount));
                             } catch (final Throwable e) {
-                                c.output(failureTag, processError("Failed to render pdf page: " + page, input, e, failFast));
+                                pageFailure(c, "Failed to render pdf page: " + page, input, e);
                             }
                         }
                     }
                     case extract -> {
                         switch (parameters.unit) {
-                            case document -> output(c, base, documentRow(document, bytes.length, pages, pageCount));
+                            case document -> output(c, base, documentRow(document, pageIndex, bytes.length, pages, pageCount));
                             case page -> {
                                 for(final int page : pages) {
                                     try {
-                                        output(c, base, pageRow(document, null, bytes.length, page, pageCount));
+                                        output(c, base, pageRow(document, pageIndex, null, bytes.length, page, pageCount));
                                     } catch (final Throwable e) {
-                                        c.output(failureTag, processError("Failed to extract pdf page: " + page, input, e, failFast));
+                                        pageFailure(c, "Failed to extract pdf page: " + page, input, e);
                                     }
                                 }
                             }
@@ -543,7 +576,7 @@ public class PdfTransform extends Transform {
                                             output(c, base, values);
                                         }
                                     } catch (final Throwable e) {
-                                        c.output(failureTag, processError("Failed to extract images of pdf page: " + page, input, e, failFast));
+                                        pageFailure(c, "Failed to extract images of pdf page: " + page, input, e);
                                     }
                                 }
                             }
@@ -561,8 +594,20 @@ public class PdfTransform extends Transform {
             }
         }
 
+        /**
+         * A failing page is routed on its own, so that the other pages are still output. Under failFast it is
+         * thrown to the document-level catch instead, which reports it once.
+         */
+        private void pageFailure(final ProcessContext c, final String message, final MElement input, final Throwable e) {
+            if(failFast) {
+                throw new IllegalStateException(message, e);
+            }
+            c.output(failureTag, processError(message, input, e, false));
+        }
+
         private Map<String, Object> documentRow(
-                final PDDocument document, final long fileSize, final List<Integer> pages, final int pageCount) throws IOException {
+                final PDDocument document, final PdfStructure.PageIndex pageIndex,
+                final long fileSize, final List<Integer> pages, final int pageCount) throws IOException {
 
             final Map<String, Object> values = new HashMap<>();
             values.put("pageCount", (long) pageCount);
@@ -591,7 +636,7 @@ public class PdfTransform extends Transform {
             if(include.contains(Include.links)) {
                 final List<Map<String, Object>> links = new ArrayList<>();
                 for(final int page : pages) {
-                    links.addAll(PdfStructure.links(document, document.getPage(page - 1), page));
+                    links.addAll(PdfStructure.links(document, pageIndex, document.getPage(page - 1), page));
                 }
                 values.put("links", links);
             }
@@ -599,7 +644,7 @@ public class PdfTransform extends Transform {
                 values.put("forms", PdfStructure.forms(document));
             }
             if(include.contains(Include.outline)) {
-                values.put("outline", PdfStructure.outline(document));
+                values.put("outline", PdfStructure.outline(document, pageIndex));
             }
             if(include.contains(Include.signatures)) {
                 values.put("signatures", PdfStructure.signatures(document));
@@ -608,7 +653,8 @@ public class PdfTransform extends Transform {
         }
 
         private Map<String, Object> pageRow(
-                final PDDocument document, final PDFRenderer renderer, final long fileSize, final int page, final int pageCount) throws IOException {
+                final PDDocument document, final PdfStructure.PageIndex pageIndex, final PDFRenderer renderer,
+                final long fileSize, final int page, final int pageCount) throws IOException {
 
             final PDPage pdPage = document.getPage(page - 1);
             final Map<String, Object> values = PdfStructure.pageValues(pdPage, page);
@@ -628,7 +674,7 @@ public class PdfTransform extends Transform {
                 }
             }
             if(include.contains(Include.links)) {
-                values.put("links", PdfStructure.links(document, pdPage, page));
+                values.put("links", PdfStructure.links(document, pageIndex, pdPage, page));
             }
             if(renderer != null) {
                 final boolean hasText = text == null
@@ -700,6 +746,9 @@ public class PdfTransform extends Transform {
                 throw new IllegalArgumentException("pdf path field: " + parameters.field + " is null or empty");
             }
             if(path.startsWith("https://") || path.startsWith("http://")) {
+                if(transport == null) {
+                    transport = new HttpTransport(parameters.http, parameters.timeout, AuthProvider.create(parameters.auth, null));
+                }
                 final OutboundRequest request = new OutboundRequest(path, "GET", Map.of("Accept", "application/pdf, */*"), null, 1);
                 final SyncCaller.Result result = SyncCaller.call("pdf", transport, policy, request);
                 if(!result.succeeded()) {
@@ -707,7 +756,8 @@ public class PdfTransform extends Transform {
                 }
                 return result.parsed().bytes();
             }
-            return ResourceUtil.readBytes(path);
+            // a path from the data is read as is: not matched as a glob ('[', '*', '?' are legal in object names)
+            return ResourceUtil.readBytesExact(path);
         }
 
     }

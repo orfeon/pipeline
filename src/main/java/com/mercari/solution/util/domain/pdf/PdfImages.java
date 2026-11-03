@@ -157,12 +157,7 @@ public class PdfImages {
                 minY = Math.min(minY, p.y);
                 maxY = Math.max(maxY, p.y);
             }
-            final Map<String, Object> box = new HashMap<>();
-            box.put("x0", minX - crop.getLowerLeftX());
-            box.put("x1", maxX - crop.getLowerLeftX());
-            box.put("y0", crop.getUpperRightY() - maxY);
-            box.put("y1", crop.getUpperRightY() - minY);
-            drawn.add(new Drawn(image, box));
+            drawn.add(new Drawn(image, PdfStructure.box(crop, minX, minY, maxX, maxY)));
         }
 
         @Override public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) {}

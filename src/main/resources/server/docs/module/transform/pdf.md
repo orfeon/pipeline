@@ -49,7 +49,7 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | include    | optional | Array<Enum\>                          | What to add to `document` / `page` records and to `render` records: `text`, `metadata`, `lines`, `words`, `links`, and for `unit: document` only `forms`, `outline`, `signatures`. Default: `[text, metadata]` for `unit: document`, `[text]` for `unit: page`, none for `render`. |
 | pages      | optional | String                                | Pages to process, 1-based: `"1-3,5,10-"` (`N-` runs to the last page). Pages beyond the document are ignored. Default: all pages. |
 | password   | optional | String                                | Password of an encrypted PDF. Use `${utils.secrets.get(...)}` rather than writing it in the config. |
-| prefix     | optional | String                                | Prefix added to the names of the output fields of the operation (e.g. `pdf_` gives `pdf_text`). Required when they collide with input field names — the module refuses to build otherwise. Default: `""`. |
+| prefix     | optional | String                                | Prefix added to the names of the output fields of the operation (e.g. `pdf_` gives `pdf_text`). Required when they collide with input field names — the module refuses to build otherwise (e.g. the `content` of `split`, `unit: image` and `unit: attachment` collides with the `content` field of the [files source](../source/files.md), and the `pageCount` of `split` with that of a following `render`). Default: `""`. |
 | keepSource | optional | Boolean                               | Keep the bytes `field` in the output. Default: `false`. A string `field` (a path) is always kept. |
 | text       | optional | [Text](#text-parameters)              | Text extraction options. |
 | render     | optional | [Render](#render-parameters)          | Options of `operation: render`. |
@@ -179,7 +179,7 @@ The fields of `unit: page`, plus:
 | lines      | `lines`: Array<{`page`, `text`, `x0`, `y0`, `x1`, `y1`, `fontSize`}> — one per text line, in reading order. |
 | words      | `words`: Array<{`page`, `text`, `x0`, `y0`, `x1`, `y1`, `fontName`, `fontSize`}> — the runs of text PDFBox separates with a space. `fontName` drops the subset tag (`ABCDEF+`). |
 | links      | `links`: Array<{`page`, `uri`, `targetPage`, `x0`, `y0`, `x1`, `y1`}> — link annotations: `uri` for web links, `targetPage` for links inside the document. |
-| forms      | `forms`: Array<{`name`, `type`, `value`}> — AcroForm fields: fully qualified name, type (`Tx` text, `Btn` button / checkbox, `Ch` choice, `Sig` signature) and value. |
+| forms      | `forms`: Array<{`name`, `type`, `value`}> — AcroForm fields: fully qualified name, type (`Tx` text, `Btn` button / checkbox, `Ch` choice, `Sig` signature) and value (null for `Sig` fields: see `signatures`). |
 | outline    | `outline`: Array<{`level`, `title`, `page`}> — bookmarks in document order, `level` from 1. |
 | signatures | `signatures`: Array<{`name`, `signDate`, `reason`, `location`, `contactInfo`, `subFilter`}> — signature dictionaries (the signatures are not verified). |
 
@@ -239,7 +239,7 @@ transforms:
 
 ## Example: render only the scanned pages of large documents
 
-`split` cuts each document into single pages and reshuffles them, so that `render` runs page-parallel. Pages that have text keep it in `text`; scanned pages get an `image` to read with an OCR model.
+`split` cuts each document into single pages and reshuffles them, so that `render` runs page-parallel. Pages that have text keep it in `text`; scanned pages get an `image` to read with an OCR model. The `prefix` of `split` keeps its `content` and `pageCount` apart from the `content` of the files source and the `pageCount` of `render`.
 
 ```yaml
 transforms:
@@ -249,6 +249,7 @@ transforms:
     parameters:
       operation: split
       field: resource
+      prefix: chunk_
       split:
         pagesPerChunk: 1
   - name: rendered
@@ -256,7 +257,7 @@ transforms:
     inputs: [chunks]
     parameters:
       operation: render
-      field: content
+      field: chunk_content
       include: [text]
       render:
         dpi: 200
@@ -279,9 +280,11 @@ transforms:
             value: true
 ```
 
-The `startPage` of a chunk is the page number in the source document; the `page` of the rendered record is the page within the chunk (1 for single pages).
+The `chunk_startPage` of a chunk is the page number in the source document; the `page` of the rendered record is the page within the chunk (1 for single pages).
 
 ## Example: save the images and attachments of the documents
+
+The files source has a `content` field of its own, so the outputs are given a `prefix`.
 
 ```yaml
 transforms:
@@ -291,6 +294,7 @@ transforms:
     parameters:
       field: resource
       unit: image
+      prefix: image_
       images:
         minWidth: 64
         minHeight: 64
@@ -300,23 +304,24 @@ transforms:
     parameters:
       field: resource
       unit: attachment
+      prefix: attachment_
 
 sinks:
   - name: image_files
     module: files
     inputs: [images]
     parameters:
-      output: "gs://my-bucket/images/${filename}/${page}_${index}.${format}"
+      output: "gs://my-bucket/images/${filename}/${image_page}_${image_index}.${image_format}"
       content:
-        field: content
+        field: image_content
         format: bytes
   - name: attachment_files
     module: files
     inputs: [attachments]
     parameters:
-      output: "gs://my-bucket/attachments/${filename}/${name}"
+      output: "gs://my-bucket/attachments/${filename}/${attachment_name}"
       content:
-        field: content
+        field: attachment_content
         format: bytes
 ```
 

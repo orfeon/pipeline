@@ -1,6 +1,8 @@
 package com.mercari.solution.util.domain.pdf;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageTree;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
@@ -53,12 +55,13 @@ public class PdfText {
         this.stripper.setLineSeparator(options.lineSeparator);
         this.stripper.setSuppressDuplicateOverlappingText(true);
         this.stripper.setShouldSeparateByBeads(true);
+        // the stripper processes only the requested page (see CollectingStripper.processPages), which it counts as page 1
+        this.stripper.setStartPage(1);
+        this.stripper.setEndPage(1);
     }
 
     /** Text of one page (1-based); words are collected only when {@code collectWords}. */
     public PageText extract(final PDDocument document, final int page, final boolean collectWords) throws IOException {
-        stripper.setStartPage(page);
-        stripper.setEndPage(page);
         stripper.begin(page, collectWords);
         final String text = stripper.getText(document);
         return new PageText(text, stripper.words());
@@ -143,6 +146,18 @@ public class PdfText {
 
         List<Word> words() {
             return words;
+        }
+
+        /**
+         * PDFTextStripper walks the whole page tree on every getText call and filters by start / end page,
+         * so reading a document page by page would cost O(pages²). Go to the requested page directly.
+         */
+        @Override
+        protected void processPages(final PDPageTree pages) throws IOException {
+            final PDPage target = pages.get(page - 1);
+            if(target.hasContents()) {
+                processPage(target);
+            }
         }
 
         @Override
