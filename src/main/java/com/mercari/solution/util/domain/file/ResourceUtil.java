@@ -44,6 +44,19 @@ public class ResourceUtil {
         }
     }
 
+    /**
+     * Reads the file at exactly {@code path}. Unlike {@link #readBytes}, the path is not matched as a glob
+     * ({@code *}, {@code ?}, {@code [..]} are literal, as they may be in object names) and no metadata
+     * lookup precedes the read: for paths that come from data rather than from a config.
+     */
+    public static byte[] readBytesExact(final String path) {
+        try(final InputStream is = Channels.newInputStream(FileSystems.open(newResource(path)))) {
+            return is.readAllBytes();
+        } catch (final IOException e) {
+            throw new RuntimeException("Failed to read resource: " + path, e);
+        }
+    }
+
     public static boolean exists(final String path) {
         try {
             match(path);

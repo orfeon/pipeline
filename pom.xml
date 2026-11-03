@@ -25,6 +25,7 @@
     <freemarker.version>2.3.35</freemarker.version>
     <lucene.version>10.5.2</lucene.version>
     <pdfbox.version>3.0.8</pdfbox.version>
+    <pdfbox-jbig2.version>3.0.5</pdfbox-jbig2.version>
     <jsoup.version>1.23.2</jsoup.version>
     <djl.version>0.39.0</djl.version>
     <ojalgo.version>57.5.0</ojalgo.version>
@@ -845,6 +846,12 @@
       <groupId>org.apache.pdfbox</groupId>
       <artifactId>pdfbox</artifactId>
       <version>${pdfbox.version}</version>
+    </dependency>
+    <!-- JBIG2 decoder (ImageIO plugin) for scanned PDFs: https://mvnrepository.com/artifact/org.apache.pdfbox/jbig2-imageio -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>jbig2-imageio</artifactId>
+      <version>${pdfbox-jbig2.version}</version>
     </dependency>
 
     <!-- Google Services -->

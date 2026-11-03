@@ -48,7 +48,10 @@ public final class SyncCaller {
             try {
                 response = transport.sendSync(request);
             } catch (final IOException e) {
-                final Duration backoff = policy.backoff(attempt, null, startedAt);
+                // a request that cannot be built (malformed url, host not in allowedHosts) fails alike on every attempt
+                final Duration backoff = e.getCause() instanceof IllegalArgumentException
+                        ? null
+                        : policy.backoff(attempt, null, startedAt);
                 if(backoff == null) {
                     return new Result(request, null, null, ResponsePolicy.Verdict.FAILED, attempt,
                             "request failed after " + attempt + " attempt(s): " + e.getMessage());
