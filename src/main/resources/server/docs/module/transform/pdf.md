@@ -23,7 +23,7 @@ The PDF is read from the field named by `field`:
 - a **bytes** field holds the PDF file itself (e.g. the `content` of the [files source](../source/files.md) with `withContent: true`);
 - a **string** field holds its location: `gs://...`, `s3://...`, a local path, or an `http(s)://` URL (downloaded with retries; set `auth` and `http.allowedHosts` for endpoints that need credentials).
 
-Errors are routed as module failures (`failFast` / `outputFailure`): a file that cannot be read or parsed fails its input record. With `unit: page`, `unit: image` and `render`, a page that fails is reported on its own and the other pages are still output. With `unit: document`, a failing page fails the whole document.
+Errors are routed as module failures (`failFast` / `outputFailure`): a file that cannot be read or parsed fails its input record. With `unit: page`, `unit: image` and `render`, a page that fails is reported on its own and the other pages are still output. With `unit: document`, a failing page fails the whole document. A failure record carries the whole input record so that it can be reprocessed; with a bytes `field` that includes the PDF itself, once per failing page. For large files, prefer a string path `field` to keep failure records small.
 
 In batch mode the input is reshuffled before processing, and the output of `split` is reshuffled again, so that a following `render` or `extract` spreads the pages of a large document over the workers.
 
