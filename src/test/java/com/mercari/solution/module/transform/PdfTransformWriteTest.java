@@ -158,6 +158,10 @@ public class PdfTransformWriteTest {
                 """.formatted(DOC, DOC, DOC, PNG, JPEG, parameters.indent(6));
     }
 
+    private static String failFast(final String yaml) {
+        return yaml.replace("failFast: false", "failFast: true");
+    }
+
     private Map<String, MCollection> apply(final String yaml) {
         try {
             return MPipeline.apply(pipeline, Config.load(yaml));
@@ -251,17 +255,17 @@ public class PdfTransformWriteTest {
     }
 
     @Test
-    public void testGenerateFormUnknownFieldFailsSetup() {
-        apply(config("""
+    public void testGenerateFormUnknownFieldFailsAssembly() {
+        // the template is read when the pipeline is built, so a typo never reaches the workers
+        final Exception e = Assertions.assertThrows(Exception.class, () -> apply(config("""
                 operation: generate
                 generate:
                   type: form
                   template: "%s"
                   values:
                     nmae: "${name}"
-                """.formatted(FORM)));
-        final Exception e = Assertions.assertThrows(Exception.class, pipeline::run);
-        Assertions.assertTrue(rootMessage(e).contains("nmae"), rootMessage(e));
+                """.formatted(FORM))));
+        Assertions.assertTrue(rootMessage(e).contains("form fields [nmae] are not in the template"), rootMessage(e));
     }
 
     @Test
@@ -559,17 +563,17 @@ public class PdfTransformWriteTest {
 
     @Test
     public void testEditEncryptedNeedsSecurityStep() {
-        // without decrypt / encrypt the pdf cannot be saved: the record fails
-        final Map<String, MCollection> outputs = apply(config("""
+        // without decrypt / encrypt the pdf cannot be saved: the record fails (failFast reports why)
+        apply(failFast(config("""
                 operation: edit
                 field: path
                 password: secret
                 steps:
                   - type: rotate
                     angle: 180
-                """).replace("path: \"" + DOC + "\"", "path: \"" + ENCRYPTED + "\""));
-        PAssert.that(outputs.get("pdf").getCollection()).empty();
-        pipeline.run();
+                """).replace("path: \"" + DOC + "\"", "path: \"" + ENCRYPTED + "\"")));
+        final Exception e = Assertions.assertThrows(Exception.class, pipeline::run);
+        Assertions.assertTrue(rootMessage(e).contains("pdf is encrypted: add a decrypt step"), rootMessage(e));
     }
 
     @Test
@@ -616,6 +620,85 @@ public class PdfTransformWriteTest {
                 """));
         PAssert.that(outputs.get("pdf").getCollection()).empty();
         pipeline.run();
+    }
+
+    @Test
+    public void testTextOutsideStandardFontReason() {
+        apply(failFast(config("""
+                operation: edit
+                field: path
+                steps:
+                  - type: overlay
+                    items:
+                      - text: "あ"
+                """)));
+        final Exception e = Assertions.assertThrows(Exception.class, pipeline::run);
+        Assertions.assertTrue(rootMessage(e).contains("cannot draw the text"), rootMessage(e));
+        Assertions.assertTrue(rootMessage(e).contains("parameters.fonts"), rootMessage(e));
+    }
+
+    @Test
+    public void testGenerateImagesExifOrientation() throws IOException {
+        // stored 60 x 120, top half red and bottom half blue; EXIF orientation 6 shows it turned 90 degrees clockwise
+        final BufferedImage stored = new BufferedImage(60, 120, BufferedImage.TYPE_INT_RGB);
+        final Graphics2D g = stored.createGraphics();
+        g.setColor(Color.RED);
+        g.fillRect(0, 0, 60, 60);
+        g.setColor(Color.BLUE);
+        g.fillRect(0, 60, 60, 60);
+        g.dispose();
+        final ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
+        ImageIO.write(stored, "jpg", jpeg);
+        final String path = DIR + "/rotated.jpg";
+        Files.write(Path.of(path), withExifOrientation(jpeg.toByteArray(), 6));
+
+        final Map<String, MCollection> outputs = apply(config("""
+                operation: generate
+                field: path
+                generate:
+                  type: images
+                  dpi: 72
+                """).replace("path: \"" + DOC + "\"", "path: \"" + path + "\""));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            try(final PDDocument document = Loader.loadPDF(content(single(elements)))) {
+                final PDRectangle box = document.getPage(0).getMediaBox();
+                Assertions.assertEquals(120, box.getWidth(), 0.01);
+                Assertions.assertEquals(60, box.getHeight(), 0.01);
+                // the jpeg is embedded as stored
+                Assertions.assertEquals(60, image(document.getPage(0)).getWidth());
+                final BufferedImage rendered = new org.apache.pdfbox.rendering.PDFRenderer(document).renderImageWithDPI(0, 72);
+                // the stored top (red) is on the right as displayed, the bottom (blue) on the left
+                final Color right = new Color(rendered.getRGB(90, 30));
+                final Color left = new Color(rendered.getRGB(30, 30));
+                Assertions.assertTrue(right.getRed() > 200 && right.getBlue() < 80, "right: " + right);
+                Assertions.assertTrue(left.getBlue() > 200 && left.getRed() < 80, "left: " + left);
+            } catch (final IOException e) {
+                throw new RuntimeException(e);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /** Inserts an APP1 Exif segment with only the orientation tag after the SOI marker. */
+    private static byte[] withExifOrientation(final byte[] jpeg, final int orientation) {
+        final byte[] tiff = {
+                'M', 'M', 0, 42, 0, 0, 0, 8,            // big-endian TIFF header, IFD0 at 8
+                0, 1,                                   // one entry
+                0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, (byte) orientation, 0, 0, // orientation, SHORT, count 1
+                0, 0, 0, 0                              // no next IFD
+        };
+        final int length = 2 + 6 + tiff.length;
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(jpeg, 0, 2);
+        out.write(0xFF);
+        out.write(0xE1);
+        out.write(length >> 8);
+        out.write(length & 0xFF);
+        out.writeBytes(new byte[]{'E', 'x', 'i', 'f', 0, 0});
+        out.writeBytes(tiff);
+        out.write(jpeg, 2, jpeg.length - 2);
+        return out.toByteArray();
     }
 
     @Test

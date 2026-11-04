@@ -2,7 +2,6 @@ package com.mercari.solution.util.domain.pdf;
 
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import freemarker.template.Template;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.multipdf.PDFMergerUtility;
@@ -284,7 +283,7 @@ public class PdfEdit {
 
     // compile
 
-    public static List<Compiled> compile(final List<Step> steps, final String name) {
+    public static List<Compiled> compile(final List<Step> steps, final String name, final PdfResources resources) {
         final List<Compiled> compiled = new ArrayList<>();
         if(steps == null) {
             return compiled;
@@ -297,7 +296,7 @@ public class PdfEdit {
                 case merge -> new MergeStep(step);
                 case pages -> new PagesStep(step);
                 case rotate -> new RotateStep(step);
-                case overlay -> new OverlayStep(step, n);
+                case overlay -> new OverlayStep(step, n, resources);
                 case metadata -> new MetadataStep(step, n);
                 case encrypt -> new EncryptStep(step, n);
                 case decrypt -> context -> context.document().setAllSecurityToBeRemoved(true);
@@ -349,10 +348,6 @@ public class PdfEdit {
 
         FormStep(final Step step, final String name) {
             this(step.values, step.flatten, step.font, name);
-        }
-
-        public Set<String> fieldNames() {
-            return values == null ? null : values.keySet();
         }
 
         @Override
@@ -515,7 +510,7 @@ public class PdfEdit {
         private final List<Text> texts;
         private final List<byte[]> images;
 
-        OverlayStep(final Step step, final String name) {
+        OverlayStep(final Step step, final String name, final PdfResources resources) {
             this.pages = PdfPages.parse(step.pages);
             this.background = Layer.background.equals(step.layer);
             this.items = step.items;
@@ -524,7 +519,7 @@ public class PdfEdit {
             for(int i = 0; i < items.size(); i++) {
                 final Item item = items.get(i);
                 texts.add(item.text == null ? null : new Text(name + ".items[" + i + "].text", item.text));
-                images.add(item.image == null ? null : ResourceUtil.readBytes(item.image));
+                images.add(item.image == null ? null : resources.read(item.image));
             }
         }
 
@@ -533,7 +528,7 @@ public class PdfEdit {
             final PDDocument document = context.document();
             final int pageCount = document.getNumberOfPages();
             // an image is embedded once and drawn on every page
-            final List<PDImageXObject> xObjects = new ArrayList<>();
+            final List<PdfGenerate.Image> xObjects = new ArrayList<>();
             for(int i = 0; i < items.size(); i++) {
                 final Item item = items.get(i);
                 byte[] bytes = images.get(i);
@@ -644,7 +639,7 @@ public class PdfEdit {
         }
 
         private static void drawImage(
-                final PDPageContentStream content, final Item item, final PDImageXObject image,
+                final PDPageContentStream content, final Item item, final PdfGenerate.Image image,
                 final float pageWidth, final float pageHeight) throws IOException {
 
             final float width;
@@ -654,18 +649,18 @@ public class PdfEdit {
                 height = item.height;
             } else if(item.width != null) {
                 width = item.width;
-                height = item.width * image.getHeight() / image.getWidth();
+                height = item.width * image.height() / image.width();
             } else if(item.height != null) {
                 height = item.height;
-                width = item.height * image.getWidth() / image.getHeight();
+                width = item.height * image.width() / image.height();
             } else {
-                width = image.getWidth();
-                height = image.getHeight();
+                width = image.width();
+                height = image.height();
             }
             final float[] origin = layout(item, width, height, pageWidth, pageHeight);
             content.saveGraphicsState();
             applyStyle(content, item, origin, width, height);
-            content.drawImage(image, origin[0], origin[1], width, height);
+            image.draw(content, origin[0], origin[1], width, height);
             content.restoreGraphicsState();
         }
 

@@ -369,6 +369,9 @@ public class PdfTransform extends Transform {
                 .validate(inputSchema, Config.convertConfigJson(getParametersText(), Config.Format.json))
                 .setDefaults();
 
+        if(isGenerateForm(parameters)) {
+            checkTemplate(parameters);
+        }
         final boolean dropSource = parameters.field != null && isBinary(inputSchema.getField(parameters.field).getFieldType())
                 && !parameters.keepSource;
 
@@ -424,6 +427,46 @@ public class PdfTransform extends Transform {
             output = output.apply("ReshuffleChunks", Reshuffle.viaRandomKey());
         }
         return MCollectionTuple.of(output, outputSchema);
+    }
+
+    private static boolean isGenerateForm(final Parameters parameters) {
+        return Operation.generate.equals(parameters.operation) && PdfGenerate.Type.form.equals(parameters.generate.type);
+    }
+
+    private static boolean setsSecurity(final Parameters parameters) {
+        return parameters.steps.stream()
+                .anyMatch(s -> PdfEdit.StepType.encrypt.equals(s.type) || PdfEdit.StepType.decrypt.equals(s.type));
+    }
+
+    /**
+     * Reads the form template when the pipeline is built: a misspelled field name or a protected template would
+     * fail every record, and a failing worker setup is retried forever in streaming.
+     */
+    private static void checkTemplate(final Parameters parameters) {
+        final String path = parameters.generate.template;
+        final String password = parameters.password == null ? "" : PdfEdit.resolve(parameters.password);
+        final byte[] bytes;
+        try {
+            bytes = ResourceUtil.readBytes(path);
+        } catch (final RuntimeException e) {
+            throw new IllegalModuleException("parameters.generate.template: failed to read " + path + ": " + e.getMessage());
+        }
+        try(final PDDocument document = Loader.loadPDF(bytes, password)) {
+            if(document.isEncrypted() && !setsSecurity(parameters)) {
+                throw new IllegalModuleException("parameters.generate.template: " + path
+                        + " is encrypted: add a decrypt step to save the forms without encryption, or an encrypt step to protect them again");
+            }
+            final List<String> names = PdfForm.fieldNames(document);
+            if(parameters.generate.values != null) {
+                final List<String> unknown = parameters.generate.values.keySet().stream().filter(n -> !names.contains(n)).toList();
+                if(!unknown.isEmpty()) {
+                    throw new IllegalModuleException("parameters.generate.values: form fields " + unknown
+                            + " are not in the template: " + path + ", available: " + names);
+                }
+            }
+        } catch (final IOException e) {
+            throw new IllegalModuleException("parameters.generate.template: " + path + " is not a readable pdf: " + e.getMessage());
+        }
     }
 
     private static boolean isBinary(final Schema.FieldType fieldType) {
@@ -588,6 +631,8 @@ public class PdfTransform extends Transform {
         private transient ResponsePolicy policy;
 
         // generate / edit
+        private final String resourceOwner = UUID.randomUUID().toString();
+        private transient PdfResources resources;
         private transient PdfFonts fonts;
         private transient List<PdfEdit.Compiled> steps;
         private transient byte[] template;
@@ -626,29 +671,16 @@ public class PdfTransform extends Transform {
             this.policy = new ResponsePolicy(response);
             this.policy.setup();
             if(parameters.operation.writes()) {
-                this.fonts = PdfFonts.load(parameters.fonts);
-                this.steps = PdfEdit.compile(parameters.steps, "pdf");
-                this.setsSecurity = parameters.steps.stream()
-                        .anyMatch(s -> PdfEdit.StepType.encrypt.equals(s.type) || PdfEdit.StepType.decrypt.equals(s.type));
-                if(Operation.generate.equals(parameters.operation) && PdfGenerate.Type.form.equals(parameters.generate.type)) {
-                    this.template = ResourceUtil.readBytes(parameters.generate.template);
+                // fonts, the template and overlay images are read once for all threads of the worker
+                this.resources = new PdfResources(resourceOwner);
+                this.fonts = PdfFonts.load(parameters.fonts, resources);
+                this.steps = PdfEdit.compile(parameters.steps, "pdf", resources);
+                this.setsSecurity = setsSecurity(parameters);
+                if(isGenerateForm(parameters)) {
+                    // checked at assembly (checkTemplate)
+                    this.template = resources.read(parameters.generate.template);
                     this.templateForm = new PdfEdit.FormStep(
                             parameters.generate.values, parameters.generate.flatten, parameters.generate.font, "pdf.generate");
-                    // a misspelled field name or a protected template would fail every record: fail the setup instead
-                    try(final PDDocument document = Loader.loadPDF(template, password)) {
-                        if(document.isEncrypted() && !setsSecurity) {
-                            throw new IllegalArgumentException("parameters.generate.template: " + parameters.generate.template
-                                    + " is encrypted: add a decrypt step to save the forms without encryption, or an encrypt step to protect them again");
-                        }
-                        final List<String> names = PdfForm.fieldNames(document);
-                        if(templateForm.fieldNames() != null) {
-                            final List<String> unknown = templateForm.fieldNames().stream().filter(n -> !names.contains(n)).toList();
-                            if(!unknown.isEmpty()) {
-                                throw new IllegalArgumentException("parameters.generate.values: form fields " + unknown
-                                        + " are not in the template: " + parameters.generate.template + ", available: " + names);
-                            }
-                        }
-                    }
                 }
             }
             for(final SelectFunction selectFunction : selectFunctions) {
@@ -663,6 +695,9 @@ public class PdfTransform extends Transform {
             }
             if(fonts != null) {
                 fonts.close();
+            }
+            if(resources != null) {
+                resources.release();
             }
         }
 

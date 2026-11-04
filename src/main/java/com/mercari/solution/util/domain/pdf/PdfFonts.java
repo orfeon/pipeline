@@ -1,6 +1,5 @@
 package com.mercari.solution.util.domain.pdf;
 
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.fontbox.ttf.TTFParser;
 import org.apache.fontbox.ttf.TrueTypeCollection;
 import org.apache.fontbox.ttf.TrueTypeFont;
@@ -76,15 +75,15 @@ public class PdfFonts implements Closeable {
         return null;
     }
 
-    /** Reads and parses the font files. */
-    public static PdfFonts load(final List<Definition> definitions) throws IOException {
+    /** Parses the font files, read by {@code resources}. */
+    public static PdfFonts load(final List<Definition> definitions, final PdfResources resources) throws IOException {
         final Map<String, TrueTypeFont> fonts = new HashMap<>();
         final Set<String> collectionFonts = new HashSet<>();
         final List<Closeable> closeables = new ArrayList<>();
         if(definitions != null) {
             for(final Definition definition : definitions) {
                 // throws for a missing file
-                final byte[] bytes = ResourceUtil.readBytes(definition.path);
+                final byte[] bytes = resources.read(definition.path);
                 final TrueTypeFont font;
                 if(isCollection(bytes)) {
                     final TrueTypeCollection collection = new TrueTypeCollection(new ByteArrayInputStream(bytes));

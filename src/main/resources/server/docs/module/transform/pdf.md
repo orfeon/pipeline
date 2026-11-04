@@ -52,7 +52,7 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | unit       | optional | Enum                                  | For `extract`: `document` (default), `page`, `image` or `attachment`. |
 | include    | optional | Array<Enum\>                          | What to add to `document` / `page` records and to `render` records: `text`, `metadata`, `lines`, `words`, `links`, and for `unit: document` only `forms`, `outline`, `signatures`. Default: `[text, metadata]` for `unit: document`, `[text]` for `unit: page`, none for `render`. |
 | pages      | optional | String                                | Pages to process, 1-based: `"1-3,5,10-"` (`N-` runs to the last page). Pages beyond the document are ignored. Default: all pages. Not for `generate` / `edit`, whose steps take their own `pages`. |
-| password   | optional | String                                | Password of an encrypted PDF (also of the PDFs an `edit` reads and of `generate.template`). Use `${utils.secrets.get(...)}` rather than writing it in the config. |
+| password   | optional | String                                | Password of an encrypted PDF (also of the PDFs an `edit` reads and of `generate.template`). Use `${utils.secrets.get(...)}` rather than writing it in the config: the value is a template, resolved once per worker (so a password containing `${` must be written `${r"${"}`). |
 | prefix     | optional | String                                | Prefix added to the names of the output fields of the operation (e.g. `pdf_` gives `pdf_text`). Required when they collide with input field names — the module refuses to build otherwise (e.g. the `content` of `split`, `unit: image` and `unit: attachment` collides with the `content` field of the [files source](../source/files.md), and the `pageCount` of `split` with that of a following `render`). Default: `""`. |
 | keepSource | optional | Boolean                               | Keep the bytes `field` in the output. Default: `false`. A string `field` (a path) is always kept. |
 | text       | optional | [Text](#text-parameters)              | Text extraction options. |
@@ -106,8 +106,8 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | parameter   | optional | type    | description |
 |-------------|----------|---------|-------------|
 | type        | required | Enum    | `form`: fill the form fields (AcroForm) of `template` with each record. `images`: one page per image of `field`. |
-| template    | selective | String | For `form`: path of the template PDF (gs:// / s3:// / local), read once per worker. An encrypted template is opened with `password` and needs a `decrypt` or `encrypt` step. |
-| values      | optional | Map<String,String\> | For `form`: form field name (fully qualified, e.g. `applicant.name`) → value, a [FreeMarker template](#templates) over the record. Without `values`, every form field whose name is an input field gets that field's value. A name that is not in the template fails the worker setup, before any record is processed. |
+| template    | selective | String | For `form`: path of the template PDF (gs:// / s3:// / local). It is read when the pipeline is built, to check `values` and encryption, and once per worker. An encrypted template is opened with `password` and needs a `decrypt` or `encrypt` step. |
+| values      | optional | Map<String,String\> | For `form`: form field name (fully qualified, e.g. `applicant.name`) → value, a [FreeMarker template](#templates) over the record. Without `values`, every form field whose name is an input field gets that field's value. A name that is not in the template fails when the pipeline is built, before the job is submitted. |
 | flatten     | optional | Boolean | For `form`: turn the fields into page content, so that the values can no longer be changed. Default: `false`. |
 | font        | optional | String  | For `form`: font for the values, a Standard 14 name or a [`fonts`](#fonts) name. Default: each field's own font. |
 | pageSize    | optional | Enum    | For `images`: `image` (default: the page has the size of the image at `dpi`), `A3`, `A4`, `A5`, `letter` or `legal` (the image is scaled to fit inside the margins, keeping its aspect ratio, and centered). |
@@ -115,7 +115,7 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | dpi         | optional | Float   | For `images` with `pageSize: image`: resolution of the images. Default: `96`. |
 | margin      | optional | Float   | For `images`: margin around the image, in points. Default: `0`. |
 
-Images: JPEG is embedded as is (no re-encoding); PNG, GIF, BMP and TIFF are embedded losslessly (a multi-page TIFF gives its first page only).
+Images: JPEG is embedded as is (no re-encoding), turned as its EXIF orientation says (phone photos are often stored sideways); PNG, GIF, BMP and TIFF are embedded losslessly (a multi-page TIFF gives its first page only). The same applies to overlay images.
 
 ### Steps
 
@@ -159,7 +159,7 @@ Each item draws exactly one of `text`, `image` or `imageField`. Positions are in
 | parameter | optional | type   | description |
 |-----------|----------|--------|-------------|
 | name      | required | String | Name to use in `font` (not a Standard 14 font name). |
-| path      | required | String | TrueType font file (`.ttf`) or collection (`.ttc`), gs:// / s3:// / local. Read once per worker; each document embeds only the characters it uses. OpenType fonts with CFF outlines (most `.otf` files) cannot be embedded. |
+| path      | required | String | TrueType font file (`.ttf`) or collection (`.ttc`), gs:// / s3:// / local. Read once per worker and shared by its threads (a `.ttc` is copied per thread); each document embeds only the characters it uses. OpenType fonts with CFF outlines (most `.otf` files) cannot be embedded. |
 | fontName  | optional | String | For a `.ttc`: PostScript name of the font in the collection. Default: the first font. |
 
 For Japanese and other scripts outside WinAnsi, give a font that covers them, e.g. [Noto Sans JP](https://fonts.google.com/noto/specimen/Noto+Sans+JP) or IPAex Gothic (`.ttf`). A text that a font cannot draw fails its record. A form field that is not flattened embeds the whole font (several MB for a CJK font), so that a viewer can redraw a changed value; fonts from a `.ttc` can only be embedded as a subset, so they need `flatten: true` in a form.
