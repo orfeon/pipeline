@@ -91,9 +91,23 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 
 | parameter | optional | type    | description |
 |-----------|----------|---------|-------------|
-| minWidth  | optional | Integer | Skip images narrower than this (pixels), e.g. icons and rules. Default: `1`. |
-| minHeight | optional | Integer | Skip images lower than this (pixels). Default: `1`. |
+| minWidth  | optional | Integer | Skip images narrower than this (pixels), e.g. icons and rules. Default: `1`. With `merge`, it applies to the merged image. |
+| minHeight | optional | Integer | Skip images lower than this (pixels). Default: `1`. With `merge`, it applies to the merged image. |
 | format    | optional | Enum    | `original` (default): JPEG (gray / RGB) and JPEG 2000 images are output as stored in the PDF, the others as PNG. `png`: every image as PNG. |
+| merge     | optional | Enum    | `none` (default): one record per image of the PDF. `adjacent`: images whose boxes touch, overlap or are at most `mergeGap` apart are output as one PNG, composed as they are drawn on the page. For a picture the PDF stores as tiles or strips, and for scans stored as layers (a background image and a text mask). See [Merging images](#merging-images). |
+| mergeGap  | optional | Float   | Only for `merge: adjacent`: largest gap between two images that are merged, in points. Default: `1`. |
+
+#### Merging images
+
+Some PDFs store what looks like one picture as several images: tiles or strips of a large picture, or the layers of a compressed scan (a JPEG background with a black and white mask of the text over it). With `merge: adjacent` each such group comes out as one record:
+
+- The images are drawn in page order onto one canvas covering their boxes, at the resolution of the finest of them (pixels per point), so that tiles keep their pixels. A stencil mask is painted in its fill color.
+- The merged image is a PNG (`format: png`, `colorSpace: DeviceRGB`), transparent where no image covers the box. `x0` .. `y1` is the box of the group.
+- `parts` holds the number of images merged; an image that is not merged has `parts: 1` and is output as without `merge`. An image drawn again at the same place counts once.
+- Only the images are composed: text and vector graphics over them are not, and a clipping path is ignored, as for single images. The images' own masks are applied, but the transparency of the page (constant opacity, soft masks of the graphics state, blend modes) is not: the parts are drawn opaque, one over the other. A stencil mask filled with a pattern is painted black.
+- An image that is part of a merged image and also drawn elsewhere on the page alone is output again there, as drawn.
+- Merging is by position only: a page-size background image merges every image on the page, and two photos placed edge to edge become one. Use it for documents of the kind above.
+- A group larger than 25,000,000 pixels is composed at a lower resolution.
 
 ### Split parameters
 
@@ -192,7 +206,7 @@ Names are given without `prefix`. Coordinates (`x0`, `y0`, `x1`, `y1`) are in po
 
 ### extract, unit: image
 
-One record per image drawn on a selected page (also images inside form XObjects, and inline images). An image drawn several times on a page is output once per page.
+One record per image drawn on a selected page (also images inside form XObjects, and inline images). An image drawn several times on a page is output once per page. With `images.merge: adjacent`, one record per group of images that touch ([Merging images](#merging-images)).
 
 | field            | type    | description |
 |------------------|---------|-------------|
@@ -205,6 +219,7 @@ One record per image drawn on a selected page (also images inside form XObjects,
 | colorSpace       | String  | Color space name, e.g. `DeviceRGB`, `DeviceGray`, `ICCBased`. |
 | x0, y0, x1, y1   | Float64 | Box the image is drawn in on the page. |
 | content          | Bytes   | The image file. |
+| parts            | Int64   | Only with `images.merge`: number of images merged into this one (1: not merged). |
 
 ### extract, unit: attachment
 
