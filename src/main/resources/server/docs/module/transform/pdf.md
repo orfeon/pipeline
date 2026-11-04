@@ -104,7 +104,8 @@ Some PDFs store what looks like one picture as several images: tiles or strips o
 - The images are drawn in page order onto one canvas covering their boxes, at the resolution of the finest of them (pixels per point), so that tiles keep their pixels. A stencil mask is painted in its fill color.
 - The merged image is a PNG (`format: png`, `colorSpace: DeviceRGB`), transparent where no image covers the box. `x0` .. `y1` is the box of the group.
 - `parts` holds the number of images merged; an image that is not merged has `parts: 1` and is output as without `merge`. An image drawn again at the same place counts once.
-- Only the images are composed: text and vector graphics over them are not, and a clipping path is ignored, as for single images.
+- Only the images are composed: text and vector graphics over them are not, and a clipping path is ignored, as for single images. The images' own masks are applied, but the transparency of the page (constant opacity, soft masks of the graphics state, blend modes) is not: the parts are drawn opaque, one over the other. A stencil mask filled with a pattern is painted black.
+- An image that is part of a merged image and also drawn elsewhere on the page alone is output again there, as drawn.
 - Merging is by position only: a page-size background image merges every image on the page, and two photos placed edge to edge become one. Use it for documents of the kind above.
 - A group larger than 25,000,000 pixels is composed at a lower resolution.
 
