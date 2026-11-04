@@ -52,7 +52,7 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | unit       | optional | Enum                                  | For `extract`: `document` (default), `page`, `image` or `attachment`. |
 | include    | optional | Array<Enum\>                          | What to add to `document` / `page` records and to `render` records: `text`, `metadata`, `lines`, `words`, `links`, and for `unit: document` only `forms`, `outline`, `signatures`. Default: `[text, metadata]` for `unit: document`, `[text]` for `unit: page`, none for `render`. |
 | pages      | optional | String                                | Pages to process, 1-based: `"1-3,5,10-"` (`N-` runs to the last page). Pages beyond the document are ignored. Default: all pages. Not for `generate` / `edit`, whose steps take their own `pages`. |
-| password   | optional | String                                | Password of an encrypted PDF (also of the PDFs an `edit` reads). Use `${utils.secrets.get(...)}` rather than writing it in the config. |
+| password   | optional | String                                | Password of an encrypted PDF (also of the PDFs an `edit` reads and of `generate.template`). Use `${utils.secrets.get(...)}` rather than writing it in the config. |
 | prefix     | optional | String                                | Prefix added to the names of the output fields of the operation (e.g. `pdf_` gives `pdf_text`). Required when they collide with input field names — the module refuses to build otherwise (e.g. the `content` of `split`, `unit: image` and `unit: attachment` collides with the `content` field of the [files source](../source/files.md), and the `pageCount` of `split` with that of a following `render`). Default: `""`. |
 | keepSource | optional | Boolean                               | Keep the bytes `field` in the output. Default: `false`. A string `field` (a path) is always kept. |
 | text       | optional | [Text](#text-parameters)              | Text extraction options. |
@@ -106,8 +106,8 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | parameter   | optional | type    | description |
 |-------------|----------|---------|-------------|
 | type        | required | Enum    | `form`: fill the form fields (AcroForm) of `template` with each record. `images`: one page per image of `field`. |
-| template    | selective | String | For `form`: path of the template PDF (gs:// / s3:// / local), read once per worker. |
-| values      | optional | Map<String,String\> | For `form`: form field name (fully qualified, e.g. `applicant.name`) → value, a [FreeMarker template](#templates) over the record. Without `values`, every form field whose name is an input field gets that field's value. A name that is not in the template fails the pipeline at startup. |
+| template    | selective | String | For `form`: path of the template PDF (gs:// / s3:// / local), read once per worker. An encrypted template is opened with `password` and needs a `decrypt` or `encrypt` step. |
+| values      | optional | Map<String,String\> | For `form`: form field name (fully qualified, e.g. `applicant.name`) → value, a [FreeMarker template](#templates) over the record. Without `values`, every form field whose name is an input field gets that field's value. A name that is not in the template fails the worker setup, before any record is processed. |
 | flatten     | optional | Boolean | For `form`: turn the fields into page content, so that the values can no longer be changed. Default: `false`. |
 | font        | optional | String  | For `form`: font for the values, a Standard 14 name or a [`fonts`](#fonts) name. Default: each field's own font. |
 | pageSize    | optional | Enum    | For `images`: `image` (default: the page has the size of the image at `dpi`), `A3`, `A4`, `A5`, `letter` or `legal` (the image is scaled to fit inside the margins, keeping its aspect ratio, and centered). |
@@ -119,7 +119,7 @@ Images: JPEG is embedded as is (no re-encoding); PNG, GIF, BMP and TIFF are embe
 
 ### Steps
 
-Each step has a `type` and the parameters of that type. `pages` (as the `pages` parameter: `"1-3,5,10-"`) selects the pages a step works on; default: all pages.
+Each step has a `type` and the parameters of that type. `pages` (as the `pages` parameter: `"1-3,5,10-"`) selects the pages that a `pages`, `rotate` or `overlay` step works on (default: all pages); the other steps work on the whole document and do not take `pages`.
 
 | type     | parameters | description |
 |----------|------------|-------------|
@@ -129,7 +129,7 @@ Each step has a `type` and the parameters of that type. `pages` (as the `pages` 
 | rotate   | `angle` (required), `pages` | Rotates pages clockwise by `angle` (a multiple of 90, negative turns counterclockwise), added to their current rotation. |
 | overlay  | `items` (required), `pages`, `layer` | Draws [items](#overlay-items) on each page: page numbers, headers / footers, watermarks, stamps, logos. `layer`: `foreground` (default, over the page content) or `background` (under it; hidden by opaque page content such as scans). |
 | metadata | `title`, `author`, `subject`, `keywords`, `creator`, `producer` | Sets the document information. Each value is a [template](#templates). |
-| encrypt  | `ownerPassword`, `userPassword`, `keyLength`, `permissions` | Encrypts the saved PDF. `userPassword` is needed to open it (default: none, it opens freely but `permissions` apply); `ownerPassword` lifts the permissions (default: a random one nobody knows). Both are [templates](#templates), e.g. a per-record password. `keyLength`: `256` (default, AES-256), `128` or `40`. `permissions` (all `true` by default): `print`, `printHighQuality`, `modify`, `copy`, `annotate`, `fillForms`, `extractForAccessibility`, `assemble`. |
+| encrypt  | `ownerPassword`, `userPassword`, `keyLength`, `permissions` | Encrypts the saved PDF. `userPassword` is needed to open it (default: none, it opens freely but `permissions` apply); `ownerPassword` lifts the permissions (default: a random one nobody knows). Both are [templates](#templates), e.g. a per-record password. `keyLength`: `256` (default, AES-256), `128` (AES-128) or `40` (RC4, weak; only for very old readers). `permissions` (all `true` by default): `print`, `printHighQuality`, `modify`, `copy`, `annotate`, `fillForms`, `extractForAccessibility`, `assemble`. |
 | decrypt  | | Saves the PDF without encryption (open it with `password`). |
 
 An encrypted PDF (opened with `password`) can only be saved again with a `decrypt` or an `encrypt` step; without one, its record fails.
@@ -140,7 +140,7 @@ Each item draws exactly one of `text`, `image` or `imageField`. Positions are in
 
 | parameter  | optional | type    | description |
 |------------|----------|---------|-------------|
-| text       | selective | String | Text, a [template](#templates) with the record's fields and `page` / `pageCount` (e.g. `"${page} / ${pageCount}"`). `\n` starts a new line. |
+| text       | selective | String | Text, a [template](#templates) with the record's fields and `page` / `pageCount` (e.g. `"${page} / ${pageCount}"`). `\n` starts a new line; line breaks at the end are ignored. |
 | image      | selective | String | Path of an image (PNG / JPEG / ...), read once per worker. |
 | imageField | selective | String | Bytes field of the record holding an image (e.g. a per-record stamp or signature image). |
 | position   | optional | Enum    | Where the item's box goes: `topLeft` (default), `top`, `topRight`, `left`, `center`, `right`, `bottomLeft`, `bottom`, `bottomRight`. Lines of a text are aligned the same way (left / center / right). |

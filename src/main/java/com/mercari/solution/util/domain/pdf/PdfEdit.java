@@ -23,7 +23,6 @@ import org.apache.pdfbox.util.Matrix;
 import java.awt.Color;
 import java.io.IOException;
 import java.io.Serializable;
-import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -144,6 +143,7 @@ public class PdfEdit {
 
     private static final Pattern COLOR = Pattern.compile("#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})");
     private static final Set<Integer> KEY_LENGTHS = Set.of(40, 128, 256);
+    private static final Set<StepType> PAGE_STEPS = EnumSet.of(StepType.pages, StepType.rotate, StepType.overlay);
 
     private PdfEdit() {}
 
@@ -164,6 +164,10 @@ public class PdfEdit {
                 continue;
             }
             if(step.pages != null) {
+                if(!PAGE_STEPS.contains(step.type)) {
+                    // the step works on the whole document: a page selection would be silently ignored
+                    errorMessages.add(p + ".pages is not used by step type " + step.type + ", only by " + PAGE_STEPS);
+                }
                 try {
                     PdfPages.parse(step.pages);
                 } catch (final IllegalArgumentException e) {
@@ -380,13 +384,8 @@ public class PdfEdit {
 
         @Override
         public void apply(final Context context) throws Exception {
-            final Object value = context.fieldValue(field);
-            final List<?> values = value instanceof List<?> list ? list : (value == null ? List.of() : List.of(value));
             final PDFMergerUtility merger = new PDFMergerUtility();
-            for(final Object v : values) {
-                if(v == null) {
-                    continue;
-                }
+            for(final Object v : values(context.fieldValue(field))) {
                 merger.appendDocument(context.document(), context.load(context.read(v), password));
             }
         }
@@ -497,6 +496,8 @@ public class PdfEdit {
             access.setCanAssembleDocument(allowed(permissions.assemble));
             final StandardProtectionPolicy policy = new StandardProtectionPolicy(owner, user, access);
             policy.setEncryptionKeyLength(keyLength);
+            // PDFBox defaults to RC4 for 128-bit keys: use AES-128 (40-bit keys are RC4 only, 256-bit always AES)
+            policy.setPreferAES(true);
             context.document().protect(policy);
         }
 
@@ -542,11 +543,12 @@ public class PdfEdit {
                 }
                 xObjects.add(bytes == null ? null : PdfGenerate.createImage(document, bytes));
             }
+            // one copy of the record values per document; only page changes from page to page
+            final Map<String, Object> values = new HashMap<>(context.templateValues());
+            values.put("pageCount", pageCount);
             for(final int page : pages.resolve(pageCount)) {
                 final PDPage pdPage = document.getPage(page - 1);
-                final Map<String, Object> values = new HashMap<>(context.templateValues());
                 values.put("page", page);
-                values.put("pageCount", pageCount);
                 final PDRectangle box = pdPage.getCropBox();
                 final int rotation = Math.floorMod(pdPage.getRotation(), 360);
                 final boolean swap = rotation == 90 || rotation == 270;
@@ -591,7 +593,13 @@ public class PdfEdit {
                 final PDPageContentStream content, final PdfFonts.Resolver fonts, final Item item,
                 final String text, final float pageWidth, final float pageHeight) throws IOException {
 
-            if(text == null || text.isEmpty()) {
+            if(text == null) {
+                return;
+            }
+            // any line break (\n, \r\n, \r); trailing line breaks (e.g. of a YAML block scalar) are dropped, as an
+            // empty last line would only shift a bottom / centered box
+            final String[] lines = text.split("\\R");
+            if(lines.length == 0 || (lines.length == 1 && lines[0].isEmpty())) {
                 return;
             }
             final PDFont font = fonts.get(item.font, true);
@@ -600,7 +608,6 @@ public class PdfEdit {
             final PDFontDescriptor descriptor = font.getFontDescriptor();
             final float ascent = size * (descriptor == null || descriptor.getAscent() == 0 ? 800F : descriptor.getAscent()) / 1000F;
             final float descent = size * (descriptor == null || descriptor.getDescent() == 0 ? 200F : Math.abs(descriptor.getDescent())) / 1000F;
-            final String[] lines = text.split("\\r?\\n", -1);
             final float[] lineWidths = new float[lines.length];
             float boxWidth = 0;
             for(int i = 0; i < lines.length; i++) {
@@ -710,20 +717,20 @@ public class PdfEdit {
 
     /** Resolves a template of the config that uses only the template functions (e.g. {@code ${utils.secrets.get(...)}}). */
     public static String resolve(final String text) {
-        if(text == null || !TemplateUtil.isTemplateText(text)) {
-            return text;
-        }
         final Map<String, Object> values = new HashMap<>();
         TemplateUtil.setFunctions(values);
-        return TemplateUtil.executeStrictTemplate(TemplateUtil.createStrictTemplate("password", text), values);
+        return TemplateUtil.executeStrictTemplateIfNeeded(text, values);
     }
 
-    /** Bytes of a ByteBuffer value. */
-    public static byte[] bytes(final ByteBuffer buffer) {
-        final ByteBuffer duplicate = buffer.duplicate();
-        final byte[] bytes = new byte[duplicate.remaining()];
-        duplicate.get(bytes);
-        return bytes;
+    /** The non-null values of a field value that holds one resource or an array of them. */
+    public static List<?> values(final Object value) {
+        if(value == null) {
+            return List.of();
+        }
+        if(value instanceof List<?> list) {
+            return list.stream().filter(Objects::nonNull).toList();
+        }
+        return List.of(value);
     }
 
 }

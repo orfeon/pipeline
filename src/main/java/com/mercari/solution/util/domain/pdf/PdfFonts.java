@@ -83,10 +83,8 @@ public class PdfFonts implements Closeable {
         final List<Closeable> closeables = new ArrayList<>();
         if(definitions != null) {
             for(final Definition definition : definitions) {
+                // throws for a missing file
                 final byte[] bytes = ResourceUtil.readBytes(definition.path);
-                if(bytes == null) {
-                    throw new IOException("font file not found: " + definition.path);
-                }
                 final TrueTypeFont font;
                 if(isCollection(bytes)) {
                     final TrueTypeCollection collection = new TrueTypeCollection(new ByteArrayInputStream(bytes));

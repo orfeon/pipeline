@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.pdf.*;
@@ -15,6 +16,7 @@ import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
 import com.mercari.solution.util.pipeline.outbound.ResponsePolicy;
 import com.mercari.solution.util.pipeline.outbound.SyncCaller;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
@@ -24,7 +26,6 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.pdfbox.Loader;
-import com.mercari.solution.util.TemplateUtil;
 import org.apache.pdfbox.multipdf.PDFMergerUtility;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -174,6 +175,12 @@ public class PdfTransform extends Transform {
                     if(generate.font != null && !fontNames().contains(generate.font)) {
                         errorMessages.add("parameters.generate.font: " + generate.font + " is not a Standard 14 font nor in parameters.fonts");
                     }
+                    // the options of the other type would be silently ignored
+                    if(generateForm && (generate.pageSize != null || generate.orientation != null || generate.dpi != null || generate.margin != null)) {
+                        errorMessages.add("parameters.generate: pageSize, orientation, dpi and margin are only for generate.type images");
+                    } else if(!generateForm && (generate.template != null || generate.values != null || generate.flatten != null || generate.font != null)) {
+                        errorMessages.add("parameters.generate: template, values, flatten and font are only for generate.type form");
+                    }
                 }
             } else if(generate != null) {
                 errorMessages.add("parameters.generate is only for operation generate");
@@ -186,11 +193,16 @@ public class PdfTransform extends Transform {
                     errorMessages.add("parameters.include is not available for operation " + op);
                 }
                 if(fonts != null) {
+                    final Set<String> fontNames = new HashSet<>();
                     for(int i = 0; i < fonts.size(); i++) {
                         if(fonts.get(i) == null) {
                             errorMessages.add("parameters.fonts[" + i + "] must not be null");
                         } else {
                             errorMessages.addAll(fonts.get(i).validate("parameters.fonts[" + i + "]"));
+                            // a later definition would silently replace the earlier one
+                            if(fonts.get(i).name != null && !fontNames.add(fonts.get(i).name)) {
+                                errorMessages.add("parameters.fonts[" + i + "].name: " + fonts.get(i).name + " is defined more than once");
+                            }
                         }
                     }
                 }
@@ -622,8 +634,12 @@ public class PdfTransform extends Transform {
                     this.template = ResourceUtil.readBytes(parameters.generate.template);
                     this.templateForm = new PdfEdit.FormStep(
                             parameters.generate.values, parameters.generate.flatten, parameters.generate.font, "pdf.generate");
-                    // a misspelled field name would fail every record: fail the setup instead
-                    try(final PDDocument document = Loader.loadPDF(template)) {
+                    // a misspelled field name or a protected template would fail every record: fail the setup instead
+                    try(final PDDocument document = Loader.loadPDF(template, password)) {
+                        if(document.isEncrypted() && !setsSecurity) {
+                            throw new IllegalArgumentException("parameters.generate.template: " + parameters.generate.template
+                                    + " is encrypted: add a decrypt step to save the forms without encryption, or an encrypt step to protect them again");
+                        }
                         final List<String> names = PdfForm.fieldNames(document);
                         if(templateForm.fieldNames() != null) {
                             final List<String> unknown = templateForm.fieldNames().stream().filter(n -> !names.contains(n)).toList();
@@ -880,7 +896,7 @@ public class PdfTransform extends Transform {
                 throw new IllegalArgumentException("field: " + name + " is null");
             }
             if(value instanceof ByteBuffer buffer) {
-                return PdfEdit.bytes(buffer);
+                return ElementSchemaUtil.toBytes(buffer);
             }
             if(value instanceof byte[] bytes) {
                 return bytes;
@@ -912,10 +928,10 @@ public class PdfTransform extends Transform {
             try {
                 final PDDocument document = switch (parameters.operation) {
                     case generate -> switch (parameters.generate.type) {
-                        case form -> open(opened, Loader.loadPDF(template));
+                        case form -> load(opened, template, null);
                         case images -> {
                             final List<byte[]> images = new ArrayList<>();
-                            for(final Object value : values(input.getPrimitiveValue(parameters.field))) {
+                            for(final Object value : PdfEdit.values(input.getPrimitiveValue(parameters.field))) {
                                 images.add(readResource(value, parameters.field));
                             }
                             final PDDocument created = open(opened, new PDDocument());
@@ -924,7 +940,7 @@ public class PdfTransform extends Transform {
                         }
                     };
                     case edit -> {
-                        final List<?> sources = values(input.getPrimitiveValue(parameters.field));
+                        final List<?> sources = PdfEdit.values(input.getPrimitiveValue(parameters.field));
                         if(sources.isEmpty()) {
                             throw new IllegalArgumentException("field: " + parameters.field + " holds no pdf");
                         }
@@ -979,16 +995,6 @@ public class PdfTransform extends Transform {
                 base.remove(parameters.field);
             }
             return base;
-        }
-
-        private static List<?> values(final Object value) {
-            if(value == null) {
-                return List.of();
-            }
-            if(value instanceof List<?> list) {
-                return list.stream().filter(Objects::nonNull).toList();
-            }
-            return List.of(value);
         }
 
         private static PDDocument open(final List<PDDocument> opened, final PDDocument document) {

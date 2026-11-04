@@ -513,6 +513,30 @@ public class PdfTransformWriteTest {
     }
 
     @Test
+    public void testEditEncrypt128IsAes() {
+        final Map<String, MCollection> outputs = apply(config("""
+                operation: edit
+                field: path
+                steps:
+                  - type: encrypt
+                    userPassword: user
+                    keyLength: 128
+                """));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            try(final PDDocument document = Loader.loadPDF(content(single(elements)), "user")) {
+                Assertions.assertEquals(128, document.getEncryption().getLength());
+                // V 4 with the AESV2 crypt filter; RC4 128 would be V 2
+                Assertions.assertEquals(4, document.getEncryption().getVersion());
+                Assertions.assertEquals(COSName.AESV2, document.getEncryption().getStdCryptFilterDictionary().getCryptFilterMethod());
+            } catch (final IOException e) {
+                throw new RuntimeException(e);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testEditDecrypt() {
         final Map<String, MCollection> outputs = apply(config("""
                 operation: edit
@@ -648,6 +672,23 @@ public class PdfTransformWriteTest {
                         """,
                 "steps is only for operations generate and edit", """
                         field: path
+                        steps:
+                          - type: decrypt
+                        """,
+                "pages is not used by step type metadata", """
+                        operation: edit
+                        field: path
+                        steps:
+                          - type: metadata
+                            title: a
+                            pages: "1"
+                        """,
+                "is defined more than once", """
+                        operation: edit
+                        field: path
+                        fonts:
+                          - { name: f, path: a.ttf }
+                          - { name: f, path: b.ttf }
                         steps:
                           - type: decrypt
                         """);
