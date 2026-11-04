@@ -57,6 +57,7 @@ public class PdfTransformTest {
     private static final String DOC = DIR + "/doc.pdf";
     private static final String ENCRYPTED = DIR + "/encrypted.pdf";
     private static final String BROKEN = DIR + "/broken.pdf";
+    private static final String TILED = DIR + "/tiled.pdf";
 
     private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
@@ -66,6 +67,47 @@ public class PdfTransformTest {
         Files.write(Path.of(DOC), createDocument(null));
         Files.write(Path.of(ENCRYPTED), createDocument("secret"));
         Files.write(Path.of(BROKEN), "this is not a pdf".getBytes(StandardCharsets.UTF_8));
+        Files.write(Path.of(TILED), createTiledDocument());
+    }
+
+    /**
+     * Page 1: a picture stored as 4 tiles of 20 x 10 pixels (red | green over blue | yellow), each drawn at 40 x 20
+     * points, and a separate jpeg. Page 2: a scan stored as layers, a white background and a stencil mask painted red
+     * on its left half, both 50 x 50 pixels drawn at 100 x 100 points.
+     */
+    static byte[] createTiledDocument() throws IOException {
+        try(final PDDocument document = new PDDocument()) {
+            final PDPage page1 = new PDPage(PDRectangle.A4);
+            final PDPage page2 = new PDPage(PDRectangle.A4);
+            document.addPage(page1);
+            document.addPage(page2);
+            try(final PDPageContentStream cs = new PDPageContentStream(document, page1)) {
+                cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.RED)), 100, 620, 40, 20);
+                cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.GREEN)), 140, 620, 40, 20);
+                cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.BLUE)), 100, 600, 40, 20);
+                cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.YELLOW)), 140, 600, 40, 20);
+                cs.drawImage(JPEGFactory.createFromImage(document, image(30, 30, Color.GRAY)), 400, 100, 60, 60);
+            }
+            final BufferedImage mask = new BufferedImage(50, 50, BufferedImage.TYPE_BYTE_BINARY);
+            final Graphics2D g = mask.createGraphics();
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, 50, 50);
+            // a stencil mask paints its 0 samples
+            g.setColor(Color.BLACK);
+            g.fillRect(0, 0, 25, 50);
+            g.dispose();
+            final PDImageXObject stencil = LosslessFactory.createFromImage(document, mask);
+            stencil.setStencil(true);
+            try(final PDPageContentStream cs = new PDPageContentStream(document, page2)) {
+                cs.drawImage(LosslessFactory.createFromImage(document, image(50, 50, Color.WHITE)), 100, 100, 100, 100);
+                cs.setNonStrokingColor(Color.RED);
+                cs.drawImage(stencil, 100, 100, 100, 100);
+            }
+            try(final ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                document.save(bytes);
+                return bytes.toByteArray();
+            }
+        }
     }
 
     /**
@@ -343,6 +385,97 @@ public class PdfTransformTest {
     }
 
     @Test
+    public void testExtractImagesMergeAdjacent() {
+        final Map<String, MCollection> outputs = apply(config(TILED, """
+                unit: image
+                images:
+                  merge: adjacent
+                """));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            final List<MElement> list = list(elements);
+            Assertions.assertEquals(3, list.size());
+
+            // the 4 tiles as one picture, at the pixels of the tiles
+            final MElement tiles = list.stream().filter(e -> e.getAsLong("page") == 1L && e.getAsLong("parts") == 4L).findFirst().orElseThrow();
+            Assertions.assertEquals(0L, tiles.getAsLong("index"));
+            Assertions.assertEquals("png", tiles.getAsString("format"));
+            Assertions.assertEquals(40L, tiles.getAsLong("width"));
+            Assertions.assertEquals(20L, tiles.getAsLong("height"));
+            Assertions.assertEquals(100.0, tiles.getAsDouble("x0"), 0.01);
+            Assertions.assertEquals(180.0, tiles.getAsDouble("x1"), 0.01);
+            Assertions.assertEquals(841.89 - 640, tiles.getAsDouble("y0"), 0.01);
+            Assertions.assertEquals(841.89 - 600, tiles.getAsDouble("y1"), 0.01);
+            final BufferedImage picture = read(bytes(tiles, "content"));
+            Assertions.assertEquals(40, picture.getWidth());
+            Assertions.assertEquals(20, picture.getHeight());
+            Assertions.assertEquals(Color.RED.getRGB(), picture.getRGB(0, 0));
+            Assertions.assertEquals(Color.RED.getRGB(), picture.getRGB(19, 9));
+            Assertions.assertEquals(Color.GREEN.getRGB(), picture.getRGB(20, 0));
+            Assertions.assertEquals(Color.BLUE.getRGB(), picture.getRGB(0, 10));
+            Assertions.assertEquals(Color.YELLOW.getRGB(), picture.getRGB(39, 19));
+
+            // a separate image is output as before
+            final MElement jpeg = list.stream().filter(e -> e.getAsLong("page") == 1L && e.getAsLong("parts") == 1L).findFirst().orElseThrow();
+            Assertions.assertEquals(1L, jpeg.getAsLong("index"));
+            Assertions.assertEquals("jpeg", jpeg.getAsString("format"));
+            Assertions.assertEquals(30L, jpeg.getAsLong("width"));
+
+            // the layers of the scan: the stencil is painted in its fill color over the background
+            final MElement scan = list.stream().filter(e -> e.getAsLong("page") == 2L).findFirst().orElseThrow();
+            Assertions.assertEquals(2L, scan.getAsLong("parts"));
+            Assertions.assertEquals(50L, scan.getAsLong("width"));
+            final BufferedImage layers = read(bytes(scan, "content"));
+            Assertions.assertEquals(Color.RED.getRGB(), layers.getRGB(5, 25));
+            Assertions.assertEquals(Color.WHITE.getRGB(), layers.getRGB(45, 25));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testExtractImagesMergeGap() {
+        // with a gap wider than the distance to the jpeg, the jpeg joins the tiles; the uncovered area is transparent
+        final Map<String, MCollection> outputs = apply(config(TILED, """
+                unit: image
+                pages: "1"
+                images:
+                  merge: adjacent
+                  mergeGap: 500
+                """));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            final List<MElement> list = list(elements);
+            Assertions.assertEquals(1, list.size());
+            final MElement merged = list.getFirst();
+            Assertions.assertEquals(5L, merged.getAsLong("parts"));
+            Assertions.assertEquals(100.0, merged.getAsDouble("x0"), 0.01);
+            Assertions.assertEquals(460.0, merged.getAsDouble("x1"), 0.01);
+            final BufferedImage picture = read(bytes(merged, "content"));
+            // 0.5 pixels per point, the resolution of all parts
+            Assertions.assertEquals(180, picture.getWidth());
+            Assertions.assertEquals(270, picture.getHeight());
+            Assertions.assertEquals(Color.RED.getRGB(), picture.getRGB(0, 0));
+            Assertions.assertEquals(0, picture.getRGB(100, 100) >>> 24);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testExtractImagesWithoutMerge() {
+        final Map<String, MCollection> outputs = apply(config(TILED, """
+                unit: image
+                """));
+        // the output schema is unchanged without merge
+        Assertions.assertFalse(outputs.get("pdf").getSchema().hasField("parts"));
+        PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
+            // the 4 tiles, the jpeg and the 2 layers
+            Assertions.assertEquals(7, list(elements).size());
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testExtractAttachments() {
         final Map<String, MCollection> outputs = apply(config(DOC, """
                 unit: attachment
@@ -496,6 +629,19 @@ public class PdfTransformTest {
                   format: jpg
                 """)));
         Assertions.assertTrue(rootMessage(r).contains("parameters.render.format"), rootMessage(r));
+        final Exception m = Assertions.assertThrows(Exception.class, () -> apply(config(DOC, """
+                unit: image
+                images:
+                  merge: tiles
+                """)));
+        Assertions.assertTrue(rootMessage(m).contains("parameters.images.merge"), rootMessage(m));
+        final Exception g = Assertions.assertThrows(Exception.class, () -> apply(config(DOC, """
+                unit: image
+                images:
+                  merge: adjacent
+                  mergeGap: -1
+                """)));
+        Assertions.assertTrue(rootMessage(g).contains("parameters.images.mergeGap must not be negative"), rootMessage(g));
     }
 
     @Test
@@ -603,6 +749,14 @@ public class PdfTransformTest {
             return null;
         });
         pipeline.run();
+    }
+
+    private static BufferedImage read(final byte[] bytes) {
+        try {
+            return ImageIO.read(new ByteArrayInputStream(bytes));
+        } catch (final IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static void assertImage(final byte[] bytes, final int width, final int height) {

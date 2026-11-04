@@ -129,6 +129,7 @@ public class PdfTransform extends Transform {
             }
             if(images != null && json.get("images") instanceof JsonObject imagesJson) {
                 checkEnum(errorMessages, imagesJson, "images.format", images.format, PdfImages.Format.values());
+                checkEnum(errorMessages, imagesJson, "images.merge", images.merge, PdfImages.Merge.values());
             }
             if(generate != null && json.get("generate") instanceof JsonObject generateJson) {
                 checkEnum(errorMessages, generateJson, "generate.type", generate.type, PdfGenerate.Type.values());
@@ -246,6 +247,9 @@ public class PdfTransform extends Transform {
                 if(render.quality != null && (render.quality < 0 || render.quality > 1)) {
                     errorMessages.add("parameters.render.quality must be between 0 and 1");
                 }
+            }
+            if(images != null) {
+                errorMessages.addAll(images.validate("parameters.images"));
             }
             if(split != null && split.pagesPerChunk != null && split.pagesPerChunk < 1) {
                 errorMessages.add("parameters.split.pagesPerChunk must be positive");
@@ -548,20 +552,25 @@ public class PdfTransform extends Transform {
                             .withField("width", Schema.FieldType.FLOAT64)
                             .withField("height", Schema.FieldType.FLOAT64)
                             .withField("rotation", Schema.FieldType.INT64);
-                    case image -> builder
-                            .withField("page", Schema.FieldType.INT64)
-                            .withField("pageCount", Schema.FieldType.INT64)
-                            .withField("index", Schema.FieldType.INT64)
-                            .withField("format", Schema.FieldType.STRING)
-                            .withField("width", Schema.FieldType.INT64)
-                            .withField("height", Schema.FieldType.INT64)
-                            .withField("bitsPerComponent", Schema.FieldType.INT64)
-                            .withField("colorSpace", Schema.FieldType.STRING.withNullable(true))
-                            .withField("x0", Schema.FieldType.FLOAT64)
-                            .withField("y0", Schema.FieldType.FLOAT64)
-                            .withField("x1", Schema.FieldType.FLOAT64)
-                            .withField("y1", Schema.FieldType.FLOAT64)
-                            .withField("content", Schema.FieldType.BYTES);
+                    case image -> {
+                        builder
+                                .withField("page", Schema.FieldType.INT64)
+                                .withField("pageCount", Schema.FieldType.INT64)
+                                .withField("index", Schema.FieldType.INT64)
+                                .withField("format", Schema.FieldType.STRING)
+                                .withField("width", Schema.FieldType.INT64)
+                                .withField("height", Schema.FieldType.INT64)
+                                .withField("bitsPerComponent", Schema.FieldType.INT64)
+                                .withField("colorSpace", Schema.FieldType.STRING.withNullable(true))
+                                .withField("x0", Schema.FieldType.FLOAT64)
+                                .withField("y0", Schema.FieldType.FLOAT64)
+                                .withField("x1", Schema.FieldType.FLOAT64)
+                                .withField("y1", Schema.FieldType.FLOAT64)
+                                .withField("content", Schema.FieldType.BYTES);
+                        if(parameters.images.merges()) {
+                            builder.withField("parts", Schema.FieldType.INT64);
+                        }
+                    }
                     case attachment -> builder
                             .withField("page", Schema.FieldType.INT64.withNullable(true))
                             .withField("pageCount", Schema.FieldType.INT64)
