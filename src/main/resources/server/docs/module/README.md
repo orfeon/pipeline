@@ -48,7 +48,7 @@ This page lists the modules registered in the current codebase.
 | [compare](transform/compare.md)                                                          | Compare records across multiple inputs by primary key and output differences                                            |
 | [reshuffle](transform/reshuffle.md)     | Insert a reshuffle stage to prevent fusion optimizations and enable checkpointing                                       |
 | [onnx](transform/onnx.md)                                                               | Make inferences using the specified [ONNX](https://onnxruntime.ai/) model file                                          |
-| [pdf](transform/pdf.md)                                                                 | Extract text, structure, images and attachments from PDFs; render and split pages                                       |
+| [pdf](transform/pdf.md)                                                                 | Extract text, structure, images and attachments from PDFs; render and split pages; fill forms, merge, stamp, encrypt    |
 
 ## Sink Modules
 

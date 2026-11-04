@@ -69,4 +69,19 @@ public class PdfPages implements Serializable {
         return new ArrayList<>(pages);
     }
 
+    /**
+     * Selected 1-based page numbers in the order they are written ({@code "3,1-2"} gives 3, 1, 2), with
+     * repetitions kept; pages beyond the document are ignored.
+     */
+    public List<Integer> resolveInOrder(final int pageCount) {
+        final List<Integer> pages = new ArrayList<>();
+        for(final int[] range : ranges) {
+            final int end = Math.min(range[1], pageCount);
+            for(int page = range[0]; page <= end; page++) {
+                pages.add(page);
+            }
+        }
+        return pages;
+    }
+
 }
