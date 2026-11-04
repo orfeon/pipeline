@@ -73,14 +73,16 @@ public class PdfTransformTest {
     /**
      * Page 1: a picture stored as 4 tiles of 20 x 10 pixels (red | green over blue | yellow), each drawn at 40 x 20
      * points, and a separate jpeg. Page 2: a scan stored as layers, a white background and a stencil mask painted red
-     * on its left half, both 50 x 50 pixels drawn at 100 x 100 points.
+     * on its left half, both 50 x 50 pixels drawn at 100 x 100 points. Page 3: a jpeg drawn twice at the same place.
      */
     static byte[] createTiledDocument() throws IOException {
         try(final PDDocument document = new PDDocument()) {
             final PDPage page1 = new PDPage(PDRectangle.A4);
             final PDPage page2 = new PDPage(PDRectangle.A4);
+            final PDPage page3 = new PDPage(PDRectangle.A4);
             document.addPage(page1);
             document.addPage(page2);
+            document.addPage(page3);
             try(final PDPageContentStream cs = new PDPageContentStream(document, page1)) {
                 cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.RED)), 100, 620, 40, 20);
                 cs.drawImage(LosslessFactory.createFromImage(document, image(20, 10, Color.GREEN)), 140, 620, 40, 20);
@@ -102,6 +104,11 @@ public class PdfTransformTest {
                 cs.drawImage(LosslessFactory.createFromImage(document, image(50, 50, Color.WHITE)), 100, 100, 100, 100);
                 cs.setNonStrokingColor(Color.RED);
                 cs.drawImage(stencil, 100, 100, 100, 100);
+            }
+            final PDImageXObject twice = JPEGFactory.createFromImage(document, image(30, 30, Color.GRAY));
+            try(final PDPageContentStream cs = new PDPageContentStream(document, page3)) {
+                cs.drawImage(twice, 100, 100, 60, 60);
+                cs.drawImage(twice, 100, 100, 60, 60);
             }
             try(final ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
                 document.save(bytes);
@@ -393,7 +400,7 @@ public class PdfTransformTest {
                 """));
         PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
             final List<MElement> list = list(elements);
-            Assertions.assertEquals(3, list.size());
+            Assertions.assertEquals(4, list.size());
 
             // the 4 tiles as one picture, at the pixels of the tiles
             final MElement tiles = list.stream().filter(e -> e.getAsLong("page") == 1L && e.getAsLong("parts") == 4L).findFirst().orElseThrow();
@@ -427,6 +434,11 @@ public class PdfTransformTest {
             final BufferedImage layers = read(bytes(scan, "content"));
             Assertions.assertEquals(Color.RED.getRGB(), layers.getRGB(5, 25));
             Assertions.assertEquals(Color.WHITE.getRGB(), layers.getRGB(45, 25));
+
+            // an image drawn twice at the same place is one image, not merged with itself
+            final MElement twice = list.stream().filter(e -> e.getAsLong("page") == 3L).findFirst().orElseThrow();
+            Assertions.assertEquals(1L, twice.getAsLong("parts"));
+            Assertions.assertEquals("jpeg", twice.getAsString("format"));
             return null;
         });
         pipeline.run();
@@ -468,8 +480,8 @@ public class PdfTransformTest {
         // the output schema is unchanged without merge
         Assertions.assertFalse(outputs.get("pdf").getSchema().hasField("parts"));
         PAssert.that(outputs.get("pdf").getCollection()).satisfies(elements -> {
-            // the 4 tiles, the jpeg and the 2 layers
-            Assertions.assertEquals(7, list(elements).size());
+            // the 4 tiles, the jpeg, the 2 layers and the jpeg drawn twice
+            Assertions.assertEquals(8, list(elements).size());
             return null;
         });
         pipeline.run();
@@ -642,6 +654,12 @@ public class PdfTransformTest {
                   mergeGap: -1
                 """)));
         Assertions.assertTrue(rootMessage(g).contains("parameters.images.mergeGap must not be negative"), rootMessage(g));
+        final Exception n = Assertions.assertThrows(Exception.class, () -> apply(config(DOC, """
+                unit: image
+                images:
+                  mergeGap: 2
+                """)));
+        Assertions.assertTrue(rootMessage(n).contains("parameters.images.mergeGap is only for merge: adjacent"), rootMessage(n));
     }
 
     @Test

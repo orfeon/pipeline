@@ -19,18 +19,23 @@ import java.awt.RenderingHints;
 import java.awt.geom.AffineTransform;
 import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
+import java.awt.image.DirectColorModel;
+import java.awt.image.WritableRaster;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 /**
  * Images drawn on a page (image XObjects, also inside form XObjects, and inline images) with the box
@@ -64,6 +69,10 @@ public class PdfImages {
             final List<String> errorMessages = new ArrayList<>();
             if(mergeGap != null && mergeGap < 0) {
                 errorMessages.add(path + ".mergeGap must not be negative");
+            }
+            // it would be silently ignored
+            if(mergeGap != null && !merges()) {
+                errorMessages.add(path + ".mergeGap is only for merge: adjacent");
             }
             return errorMessages;
         }
@@ -100,7 +109,7 @@ public class PdfImages {
     private PdfImages() {}
 
     public static List<Map<String, Object>> extract(final PDPage page, final int pageNumber, final Options options) throws IOException {
-        final Collector collector = new Collector(page);
+        final Collector collector = new Collector(page, options.merges());
         collector.processPage(page);
         final PDRectangle crop = page.getCropBox();
 
@@ -180,11 +189,17 @@ public class PdfImages {
         for(int i = 0; i < n; i++) {
             parent[i] = i;
         }
-        for(int i = 0; i < n; i++) {
-            for(int j = i + 1; j < n; j++) {
-                if(near(drawn.get(i), drawn.get(j), gap)) {
-                    final int a = root(parent, i);
-                    final int b = root(parent, j);
+        // sweep in the order of minX: only the images that start at most gap after one ends can be near it
+        final int[] order = IntStream.range(0, n).boxed()
+                .sorted(Comparator.comparingDouble(i -> drawn.get(i).minX))
+                .mapToInt(Integer::intValue)
+                .toArray();
+        for(int x = 0; x < n; x++) {
+            final Drawn first = drawn.get(order[x]);
+            for(int y = x + 1; y < n && drawn.get(order[y]).minX <= first.maxX + gap; y++) {
+                if(near(first, drawn.get(order[y]), gap)) {
+                    final int a = root(parent, order[x]);
+                    final int b = root(parent, order[y]);
                     // the smaller index stays the root, so groups keep the order of their first image
                     parent[Math.max(a, b)] = Math.min(a, b);
                 }
@@ -216,54 +231,80 @@ public class PdfImages {
      */
     static BufferedImage compose(final List<Drawn> group) throws IOException {
         final double minX = minX(group), minY = minY(group), maxX = maxX(group), maxY = maxY(group);
-        final List<BufferedImage> images = new ArrayList<>();
-        final List<Double> scales = new ArrayList<>();
+        // the resolution comes from the sizes the images declare, so that they are decoded one at a time below
         double scale = 0;
         for(final Drawn drawn : group) {
-            final BufferedImage image = drawn.image.isStencil()
-                    ? drawn.image.getStencilImage(drawn.paint)
-                    : drawn.image.getImage();
-            images.add(image);
             final double area = Math.abs(drawn.ctm.createAffineTransform().getDeterminant());
-            final double s = image == null || area <= 0 ? 0 : Math.sqrt((double) image.getWidth() * image.getHeight() / area);
-            scales.add(s);
-            scale = Math.max(scale, s);
+            if(area > 0) {
+                scale = Math.max(scale, Math.sqrt((double) drawn.image.getWidth() * drawn.image.getHeight() / area));
+            }
         }
         if(scale <= 0) {
             return null;
         }
-        final double pixels = (maxX - minX) * scale * (maxY - minY) * scale;
-        if(pixels > MAX_MERGED_PIXELS) {
-            scale *= Math.sqrt(MAX_MERGED_PIXELS / pixels);
-        }
+        scale *= shrink((maxX - minX) * scale, (maxY - minY) * scale);
         // a little slack, so that float noise does not add a column of empty pixels
         final int width = Math.max(1, (int) Math.ceil((maxX - minX) * scale - 0.01));
         final int height = Math.max(1, (int) Math.ceil((maxY - minY) * scale - 0.01));
 
         final BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        boolean painted = false;
         final Graphics2D g = canvas.createGraphics();
         try {
             final AffineTransform page = new AffineTransform(scale, 0, 0, -scale, -minX * scale, maxY * scale);
-            for(int i = 0; i < group.size(); i++) {
-                final BufferedImage image = images.get(i);
+            for(final Drawn drawn : group) {
+                final BufferedImage image = drawn.image.isStencil()
+                        ? drawn.image.getStencilImage(drawn.paint)
+                        : drawn.image.getImage();
                 if(image == null) {
                     continue;
                 }
-                // images at the canvas resolution are copied pixel by pixel, others are resampled
-                final boolean resample = Math.abs(scales.get(i) - scale) > scale * 0.01;
-                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, resample
-                        ? RenderingHints.VALUE_INTERPOLATION_BILINEAR
-                        : RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
                 final AffineTransform transform = new AffineTransform(page);
-                transform.concatenate(group.get(i).ctm.createAffineTransform());
+                transform.concatenate(drawn.ctm.createAffineTransform());
                 // image pixels (top-left origin) to the unit square the image is drawn in
                 transform.concatenate(new AffineTransform(1.0 / image.getWidth(), 0, 0, -1.0 / image.getHeight(), 0, 1));
+                // images whose pixels fall one to one on canvas pixels are copied pixel by pixel, others are resampled
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, pixelForPixel(transform)
+                        ? RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
+                        : RenderingHints.VALUE_INTERPOLATION_BILINEAR);
                 g.drawImage(image, transform, null);
+                painted = true;
             }
         } finally {
             g.dispose();
         }
+        if(!painted) {
+            return null;
+        }
         return opaque(canvas) ? toRgb(canvas) : canvas;
+    }
+
+    /**
+     * The factor that brings a canvas of width x height pixels within {@link #MAX_MERGED_PIXELS}, counting a side
+     * of less than a pixel as the one pixel it is drawn on.
+     */
+    private static double shrink(final double width, final double height) {
+        double factor = 1;
+        if(width * height > MAX_MERGED_PIXELS) {
+            factor = Math.sqrt(MAX_MERGED_PIXELS / (width * height));
+        }
+        if(height * factor < 1 && width * factor > MAX_MERGED_PIXELS) {
+            factor = MAX_MERGED_PIXELS / width;
+        }
+        if(width * factor < 1 && height * factor > MAX_MERGED_PIXELS) {
+            factor = MAX_MERGED_PIXELS / height;
+        }
+        return factor;
+    }
+
+    /** Whether the transform maps image pixels onto canvas pixels one to one (also turned by quarter turns or mirrored). */
+    private static boolean pixelForPixel(final AffineTransform t) {
+        final double e = 0.01;
+        final boolean straight = Math.abs(t.getShearX()) < e && Math.abs(t.getShearY()) < e
+                && Math.abs(Math.abs(t.getScaleX()) - 1) < e && Math.abs(Math.abs(t.getScaleY()) - 1) < e;
+        final boolean turned = Math.abs(t.getScaleX()) < e && Math.abs(t.getScaleY()) < e
+                && Math.abs(Math.abs(t.getShearX()) - 1) < e && Math.abs(Math.abs(t.getShearY()) - 1) < e;
+        return straight || turned;
     }
 
     private static boolean opaque(final BufferedImage image) {
@@ -279,15 +320,11 @@ public class PdfImages {
         return true;
     }
 
-    private static BufferedImage toRgb(final BufferedImage image) {
-        final BufferedImage rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
-        final Graphics2D g = rgb.createGraphics();
-        try {
-            g.drawImage(image, 0, 0, null);
-        } finally {
-            g.dispose();
-        }
-        return rgb;
+    /** The pixels of an ARGB image without its alpha band, sharing its data (a canvas can be 25M pixels). */
+    private static BufferedImage toRgb(final BufferedImage argb) {
+        final WritableRaster rgb = argb.getRaster().createWritableChild(
+                0, 0, argb.getWidth(), argb.getHeight(), 0, 0, new int[]{0, 1, 2});
+        return new BufferedImage(new DirectColorModel(24, 0xFF0000, 0xFF00, 0xFF), rgb, false, null);
     }
 
     private static double minX(final List<Drawn> group) {
@@ -356,15 +393,24 @@ public class PdfImages {
 
     private static class Collector extends PDFGraphicsStreamEngine {
 
+        private final boolean paints;
         private final List<Drawn> drawn = new ArrayList<>();
+        private final Map<COSBase, Set<Matrix>> placed = new IdentityHashMap<>();
 
-        Collector(final PDPage page) {
+        /** paints: keep the fill color of stencil masks, which only composing uses. */
+        Collector(final PDPage page, final boolean paints) {
             super(page);
+            this.paints = paints;
         }
 
         @Override
         public void drawImage(final PDImage image) {
             final Matrix ctm = getGraphicsState().getCurrentTransformationMatrix().clone();
+            final COSBase key = image instanceof PDImageXObject xobject ? xobject.getCOSObject() : null;
+            // the same image drawn again at the same place adds nothing (and would merge with itself)
+            if(key != null && !placed.computeIfAbsent(key, k -> new HashSet<>()).add(ctm)) {
+                return;
+            }
             double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
             for(final float[] corner : new float[][]{{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
                 final Point2D.Float p = ctm.transformPoint(corner[0], corner[1]);
@@ -373,8 +419,7 @@ public class PdfImages {
                 minY = Math.min(minY, p.y);
                 maxY = Math.max(maxY, p.y);
             }
-            final COSBase key = image instanceof PDImageXObject xobject ? xobject.getCOSObject() : null;
-            final Color paint = image.isStencil() ? fillColor() : null;
+            final Color paint = paints && image.isStencil() ? fillColor() : null;
             drawn.add(new Drawn(image, ctm, key, paint, minX, minY, maxX, maxY));
         }
 

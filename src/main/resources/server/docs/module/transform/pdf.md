@@ -95,7 +95,7 @@ In batch mode the input is reshuffled before processing, and the output of `spli
 | minHeight | optional | Integer | Skip images lower than this (pixels). Default: `1`. With `merge`, it applies to the merged image. |
 | format    | optional | Enum    | `original` (default): JPEG (gray / RGB) and JPEG 2000 images are output as stored in the PDF, the others as PNG. `png`: every image as PNG. |
 | merge     | optional | Enum    | `none` (default): one record per image of the PDF. `adjacent`: images whose boxes touch, overlap or are at most `mergeGap` apart are output as one PNG, composed as they are drawn on the page. For a picture the PDF stores as tiles or strips, and for scans stored as layers (a background image and a text mask). See [Merging images](#merging-images). |
-| mergeGap  | optional | Float   | For `merge: adjacent`: largest gap between two images that are merged, in points. Default: `1`. |
+| mergeGap  | optional | Float   | Only for `merge: adjacent`: largest gap between two images that are merged, in points. Default: `1`. |
 
 #### Merging images
 
@@ -103,7 +103,7 @@ Some PDFs store what looks like one picture as several images: tiles or strips o
 
 - The images are drawn in page order onto one canvas covering their boxes, at the resolution of the finest of them (pixels per point), so that tiles keep their pixels. A stencil mask is painted in its fill color.
 - The merged image is a PNG (`format: png`, `colorSpace: DeviceRGB`), transparent where no image covers the box. `x0` .. `y1` is the box of the group.
-- `parts` holds the number of images merged; an image that is not merged has `parts: 1` and is output as without `merge`.
+- `parts` holds the number of images merged; an image that is not merged has `parts: 1` and is output as without `merge`. An image drawn again at the same place counts once.
 - Only the images are composed: text and vector graphics over them are not, and a clipping path is ignored, as for single images.
 - Merging is by position only: a page-size background image merges every image on the page, and two photos placed edge to edge become one. Use it for documents of the kind above.
 - A group larger than 25,000,000 pixels is composed at a lower resolution.
