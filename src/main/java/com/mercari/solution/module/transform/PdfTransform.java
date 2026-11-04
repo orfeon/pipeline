@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.pdf.*;
@@ -15,6 +16,7 @@ import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
 import com.mercari.solution.util.pipeline.outbound.ResponsePolicy;
 import com.mercari.solution.util.pipeline.outbound.SyncCaller;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
@@ -24,6 +26,7 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.multipdf.PDFMergerUtility;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -31,13 +34,14 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.util.*;
 
 /**
- * Reads, renders, splits PDF documents (and, in later phases, generates and edits them).
+ * Reads, renders, splits, generates and edits PDF documents.
  * Design: repo-root work_pdf.md.
  */
 @Transform.Module(name="pdf")
@@ -48,7 +52,13 @@ public class PdfTransform extends Transform {
     public enum Operation {
         extract,
         render,
-        split
+        split,
+        generate,
+        edit;
+
+        boolean writes() {
+            return this == generate || this == edit;
+        }
     }
 
     public enum Unit {
@@ -75,6 +85,16 @@ public class PdfTransform extends Transform {
         public Integer pagesPerChunk;
     }
 
+    /** {@code generate}: the document to start from; {@code steps} then change it as in {@code edit}. */
+    public static class GenerateParameters extends PdfGenerate.ImagesOptions {
+        public PdfGenerate.Type type;
+        // form
+        public String template;
+        public Map<String, String> values;
+        public Boolean flatten;
+        public String font;
+    }
+
     private static class Parameters implements Serializable {
 
         private Operation operation;
@@ -89,6 +109,9 @@ public class PdfTransform extends Transform {
         private PdfRender.Options render;
         private PdfImages.Options images;
         private SplitParameters split;
+        private GenerateParameters generate;
+        private List<PdfEdit.Step> steps;
+        private List<PdfFonts.Definition> fonts;
         private AuthProvider.Parameters auth;
         private HttpTransport.TimeoutParameters timeout;
         private HttpTransport.Parameters http;
@@ -107,21 +130,98 @@ public class PdfTransform extends Transform {
             if(images != null && json.get("images") instanceof JsonObject imagesJson) {
                 checkEnum(errorMessages, imagesJson, "images.format", images.format, PdfImages.Format.values());
             }
-            if(field == null) {
-                errorMessages.add("parameters.field must not be null");
-            } else if(!inputSchema.hasField(field)) {
-                errorMessages.add("parameters.field: " + field + " is not in the input schema: " + inputSchema.getFields().stream().map(Schema.Field::getName).toList());
-            } else {
-                final Schema.Type type = inputSchema.getField(field).getFieldType().getType();
-                if(!Schema.Type.bytes.equals(type) && !Schema.Type.string.equals(type)) {
-                    errorMessages.add("parameters.field: " + field + " must be bytes or string but: " + type);
+            if(generate != null && json.get("generate") instanceof JsonObject generateJson) {
+                checkEnum(errorMessages, generateJson, "generate.type", generate.type, PdfGenerate.Type.values());
+                checkEnum(errorMessages, generateJson, "generate.pageSize", generate.pageSize, PdfGenerate.PageSize.values());
+                checkEnum(errorMessages, generateJson, "generate.orientation", generate.orientation, PdfGenerate.Orientation.values());
+            }
+            if(steps != null && json.get("steps") instanceof JsonArray stepsJson) {
+                for(int i = 0; i < steps.size() && i < stepsJson.size(); i++) {
+                    if(steps.get(i) == null || !(stepsJson.get(i) instanceof JsonObject stepJson)) {
+                        continue;
+                    }
+                    final PdfEdit.Step step = steps.get(i);
+                    checkEnum(errorMessages, stepJson, "steps[" + i + "].type", step.type, PdfEdit.StepType.values());
+                    checkEnum(errorMessages, stepJson, "steps[" + i + "].layer", step.layer, PdfEdit.Layer.values());
+                    if(step.items != null && stepJson.get("items") instanceof JsonArray itemsJson) {
+                        for(int j = 0; j < step.items.size() && j < itemsJson.size(); j++) {
+                            if(step.items.get(j) != null && itemsJson.get(j) instanceof JsonObject itemJson) {
+                                checkEnum(errorMessages, itemJson, "steps[" + i + "].items[" + j + "].position", step.items.get(j).position, PdfEdit.Position.values());
+                            }
+                        }
+                    }
                 }
             }
             final Operation op = operation == null ? Operation.extract : operation;
+            final boolean generateForm = Operation.generate.equals(op) && generate != null && PdfGenerate.Type.form.equals(generate.type);
+            if(generateForm) {
+                if(field != null) {
+                    errorMessages.add("parameters.field is not used by generate.type form (the form comes from generate.template)");
+                }
+            } else if(field == null) {
+                errorMessages.add("parameters.field must not be null");
+            } else {
+                // edit merges an array of pdfs; generate images makes a page of each image
+                errorMessages.addAll(PdfEdit.validateResourceField(inputSchema, field, "parameters.field", op.writes()));
+            }
+            if(Operation.generate.equals(op)) {
+                if(generate == null || generate.type == null) {
+                    errorMessages.add("parameters.generate.type is required for operation generate, available: " + Arrays.toString(PdfGenerate.Type.values()));
+                } else {
+                    errorMessages.addAll(generate.validate("parameters.generate"));
+                    if(generateForm && (generate.template == null || generate.template.isBlank())) {
+                        errorMessages.add("parameters.generate.template is required for generate.type form");
+                    }
+                    if(generate.font != null && !fontNames().contains(generate.font)) {
+                        errorMessages.add("parameters.generate.font: " + generate.font + " is not a Standard 14 font nor in parameters.fonts");
+                    }
+                    // the options of the other type would be silently ignored
+                    if(generateForm && (generate.pageSize != null || generate.orientation != null || generate.dpi != null || generate.margin != null)) {
+                        errorMessages.add("parameters.generate: pageSize, orientation, dpi and margin are only for generate.type images");
+                    } else if(!generateForm && (generate.template != null || generate.values != null || generate.flatten != null || generate.font != null)) {
+                        errorMessages.add("parameters.generate: template, values, flatten and font are only for generate.type form");
+                    }
+                }
+            } else if(generate != null) {
+                errorMessages.add("parameters.generate is only for operation generate");
+            }
+            if(op.writes()) {
+                if(pages != null) {
+                    errorMessages.add("parameters.pages is not used by operation " + op + "; set pages in the steps");
+                }
+                if(include != null) {
+                    errorMessages.add("parameters.include is not available for operation " + op);
+                }
+                if(fonts != null) {
+                    final Set<String> fontNames = new HashSet<>();
+                    for(int i = 0; i < fonts.size(); i++) {
+                        if(fonts.get(i) == null) {
+                            errorMessages.add("parameters.fonts[" + i + "] must not be null");
+                        } else {
+                            errorMessages.addAll(fonts.get(i).validate("parameters.fonts[" + i + "]"));
+                            // a later definition would silently replace the earlier one
+                            if(fonts.get(i).name != null && !fontNames.add(fonts.get(i).name)) {
+                                errorMessages.add("parameters.fonts[" + i + "].name: " + fonts.get(i).name + " is defined more than once");
+                            }
+                        }
+                    }
+                }
+                errorMessages.addAll(PdfEdit.validate(steps, "parameters.steps", inputSchema, fontNames()));
+                if(Operation.edit.equals(op) && (steps == null || steps.isEmpty())) {
+                    errorMessages.add("parameters.steps must not be empty for operation edit");
+                }
+            } else {
+                if(steps != null) {
+                    errorMessages.add("parameters.steps is only for operations generate and edit");
+                }
+                if(fonts != null) {
+                    errorMessages.add("parameters.fonts is only for operations generate and edit");
+                }
+            }
             if(unit != null && !Operation.extract.equals(op)) {
                 errorMessages.add("parameters.unit is only for operation extract");
             }
-            if(include != null) {
+            if(include != null && !op.writes()) {
                 if(include.stream().anyMatch(Objects::isNull)) {
                     errorMessages.add("parameters.include has an unknown value, available: " + Arrays.toString(Include.values()));
                 }
@@ -179,6 +279,14 @@ public class PdfTransform extends Transform {
             return this;
         }
 
+        private Set<String> fontNames() {
+            final Set<String> names = new HashSet<>(PdfFonts.standardNames());
+            if(fonts != null) {
+                fonts.stream().filter(Objects::nonNull).map(f -> f.name).filter(Objects::nonNull).forEach(names::add);
+            }
+            return names;
+        }
+
         private static void checkEnum(
                 final List<String> errorMessages, final JsonObject json, final String path, final Enum<?> value, final Enum<?>[] values) {
 
@@ -229,6 +337,12 @@ public class PdfTransform extends Transform {
             if(split.pagesPerChunk == null) {
                 split.pagesPerChunk = 1;
             }
+            if(generate != null) {
+                generate.setDefaults();
+            }
+            if(steps == null) {
+                steps = new ArrayList<>();
+            }
             if(timeout == null) {
                 timeout = new HttpTransport.TimeoutParameters();
             }
@@ -255,8 +369,11 @@ public class PdfTransform extends Transform {
                 .validate(inputSchema, Config.convertConfigJson(getParametersText(), Config.Format.json))
                 .setDefaults();
 
-        final boolean isSourceBytes = Schema.Type.bytes.equals(inputSchema.getField(parameters.field).getFieldType().getType());
-        final boolean dropSource = isSourceBytes && !parameters.keepSource;
+        if(isGenerateForm(parameters)) {
+            checkTemplate(parameters);
+        }
+        final boolean dropSource = parameters.field != null && isBinary(inputSchema.getField(parameters.field).getFieldType())
+                && !parameters.keepSource;
 
         final List<Schema.Field> pdfFields = createPdfFields(parameters).stream()
                 .map(f -> Schema.Field.of(parameters.prefix + f.getName(), f.getFieldType()))
@@ -298,7 +415,7 @@ public class PdfTransform extends Transform {
 
         final PCollectionTuple outputs = input
                 .apply("Pdf", ParDo
-                        .of(new PdfDoFn(parameters, isSourceBytes, dropSource, selectFunctions,
+                        .of(new PdfDoFn(parameters, inputSchema, dropSource, selectFunctions,
                                 getLoggings(), getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
@@ -310,6 +427,51 @@ public class PdfTransform extends Transform {
             output = output.apply("ReshuffleChunks", Reshuffle.viaRandomKey());
         }
         return MCollectionTuple.of(output, outputSchema);
+    }
+
+    private static boolean isGenerateForm(final Parameters parameters) {
+        return Operation.generate.equals(parameters.operation) && PdfGenerate.Type.form.equals(parameters.generate.type);
+    }
+
+    private static boolean setsSecurity(final Parameters parameters) {
+        return parameters.steps.stream()
+                .anyMatch(s -> PdfEdit.StepType.encrypt.equals(s.type) || PdfEdit.StepType.decrypt.equals(s.type));
+    }
+
+    /**
+     * Reads the form template when the pipeline is built: a misspelled field name or a protected template would
+     * fail every record, and a failing worker setup is retried forever in streaming.
+     */
+    private static void checkTemplate(final Parameters parameters) {
+        final String path = parameters.generate.template;
+        final String password = parameters.password == null ? "" : PdfEdit.resolve(parameters.password);
+        final byte[] bytes;
+        try {
+            bytes = ResourceUtil.readBytes(path);
+        } catch (final RuntimeException e) {
+            throw new IllegalModuleException("parameters.generate.template: failed to read " + path + ": " + e.getMessage());
+        }
+        try(final PDDocument document = Loader.loadPDF(bytes, password)) {
+            if(document.isEncrypted() && !setsSecurity(parameters)) {
+                throw new IllegalModuleException("parameters.generate.template: " + path
+                        + " is encrypted: add a decrypt step to save the forms without encryption, or an encrypt step to protect them again");
+            }
+            final List<String> names = PdfForm.fieldNames(document);
+            if(parameters.generate.values != null) {
+                final List<String> unknown = parameters.generate.values.keySet().stream().filter(n -> !names.contains(n)).toList();
+                if(!unknown.isEmpty()) {
+                    throw new IllegalModuleException("parameters.generate.values: form fields " + unknown
+                            + " are not in the template: " + path + ", available: " + names);
+                }
+            }
+        } catch (final IOException e) {
+            throw new IllegalModuleException("parameters.generate.template: " + path + " is not a readable pdf: " + e.getMessage());
+        }
+    }
+
+    private static boolean isBinary(final Schema.FieldType fieldType) {
+        return Schema.Type.bytes.equals(fieldType.getType())
+                || (Schema.Type.array.equals(fieldType.getType()) && Schema.Type.bytes.equals(fieldType.getArrayValueType().getType()));
     }
 
     // schema
@@ -369,6 +531,9 @@ public class PdfTransform extends Transform {
     private static List<Schema.Field> createPdfFields(final Parameters parameters) {
         final Schema.Builder builder = Schema.builder();
         switch (parameters.operation) {
+            case generate, edit -> builder
+                    .withField("content", Schema.FieldType.BYTES)
+                    .withField("pageCount", Schema.FieldType.INT64);
             case split -> builder
                     .withField("content", Schema.FieldType.BYTES)
                     .withField("startPage", Schema.FieldType.INT64)
@@ -450,7 +615,7 @@ public class PdfTransform extends Transform {
     private static class PdfDoFn extends DoFn<MElement, MElement> {
 
         private final Parameters parameters;
-        private final boolean isSourceBytes;
+        private final Schema inputSchema;
         private final boolean dropSource;
         private final List<SelectFunction> selectFunctions;
         private final Map<String, Logging> logs;
@@ -461,12 +626,22 @@ public class PdfTransform extends Transform {
         private final Set<Include> include;
 
         private transient PdfText pdfText;
+        private transient String password;
         private transient HttpTransport transport;
         private transient ResponsePolicy policy;
 
+        // generate / edit
+        private final String resourceOwner = UUID.randomUUID().toString();
+        private transient PdfResources resources;
+        private transient PdfFonts fonts;
+        private transient List<PdfEdit.Compiled> steps;
+        private transient byte[] template;
+        private transient boolean setsSecurity;
+        private transient PdfEdit.FormStep templateForm;
+
         PdfDoFn(
                 final Parameters parameters,
-                final boolean isSourceBytes,
+                final Schema inputSchema,
                 final boolean dropSource,
                 final List<SelectFunction> selectFunctions,
                 final List<Logging> logs,
@@ -474,7 +649,7 @@ public class PdfTransform extends Transform {
                 final TupleTag<BadRecord> failureTag) {
 
             this.parameters = parameters;
-            this.isSourceBytes = isSourceBytes;
+            this.inputSchema = inputSchema;
             this.dropSource = dropSource;
             this.selectFunctions = selectFunctions;
             this.logs = Logging.map(logs);
@@ -487,13 +662,26 @@ public class PdfTransform extends Transform {
         @Setup
         public void setup() throws IOException {
             this.pdfText = new PdfText(parameters.text);
+            // e.g. ${utils.secrets.get(...)}, resolved once
+            this.password = parameters.password == null ? "" : PdfEdit.resolve(parameters.password);
             // the http transport (an HttpClient with its own threads) is created on the first http(s) path
-            if(!isSourceBytes) {
-                final ResponsePolicy.Parameters response = new ResponsePolicy.Parameters();
-                response.format = ResponsePolicy.Format.bytes;
-                response.setDefaults();
-                this.policy = new ResponsePolicy(response);
-                this.policy.setup();
+            final ResponsePolicy.Parameters response = new ResponsePolicy.Parameters();
+            response.format = ResponsePolicy.Format.bytes;
+            response.setDefaults();
+            this.policy = new ResponsePolicy(response);
+            this.policy.setup();
+            if(parameters.operation.writes()) {
+                // fonts, the template and overlay images are read once for all threads of the worker
+                this.resources = new PdfResources(resourceOwner);
+                this.fonts = PdfFonts.load(parameters.fonts, resources);
+                this.steps = PdfEdit.compile(parameters.steps, "pdf", resources);
+                this.setsSecurity = setsSecurity(parameters);
+                if(isGenerateForm(parameters)) {
+                    // checked at assembly (checkTemplate)
+                    this.template = resources.read(parameters.generate.template);
+                    this.templateForm = new PdfEdit.FormStep(
+                            parameters.generate.values, parameters.generate.flatten, parameters.generate.font, "pdf.generate");
+                }
             }
             for(final SelectFunction selectFunction : selectFunctions) {
                 selectFunction.setup();
@@ -501,9 +689,15 @@ public class PdfTransform extends Transform {
         }
 
         @Teardown
-        public void teardown() {
+        public void teardown() throws IOException {
             if(transport != null) {
                 transport.close();
+            }
+            if(fonts != null) {
+                fonts.close();
+            }
+            if(resources != null) {
+                resources.release();
             }
         }
 
@@ -514,11 +708,15 @@ public class PdfTransform extends Transform {
                 return;
             }
             Logging.log(LOG, logs, "input", input);
+            if(parameters.operation.writes()) {
+                write(c, input);
+                return;
+            }
             final byte[] bytes;
             final PDDocument document;
             try {
-                bytes = readContent(input);
-                document = Loader.loadPDF(bytes, parameters.password == null ? "" : parameters.password);
+                bytes = readResource(input.getPrimitiveValue(parameters.field), parameters.field);
+                document = Loader.loadPDF(bytes, password);
             } catch (final InterruptedException e) {
                 // the worker is shutting down: fail the bundle (it is retried) rather than routing the pdf as a failure
                 Thread.currentThread().interrupt();
@@ -528,10 +726,7 @@ public class PdfTransform extends Transform {
                 return;
             }
             try(document) {
-                final Map<String, Object> base = new HashMap<>(input.asPrimitiveMap());
-                if(dropSource) {
-                    base.remove(parameters.field);
-                }
+                final Map<String, Object> base = base(input);
                 final int pageCount = document.getNumberOfPages();
                 final List<Integer> pages = pageSelection.resolve(pageCount);
                 final PdfStructure.PageIndex pageIndex = new PdfStructure.PageIndex(document);
@@ -730,20 +925,20 @@ public class PdfTransform extends Transform {
             Logging.log(LOG, logs, "output", output);
         }
 
-        private byte[] readContent(final MElement input) throws InterruptedException {
-            if(isSourceBytes) {
-                final ByteBuffer buffer = input.getAsBytes(parameters.field);
-                if(buffer == null) {
-                    throw new IllegalArgumentException("pdf content field: " + parameters.field + " is null");
-                }
-                final ByteBuffer duplicate = buffer.duplicate();
-                final byte[] bytes = new byte[duplicate.remaining()];
-                duplicate.get(bytes);
+        /** Bytes of a bytes value, or of the file a string value points to (gs:// / s3:// / local / http(s)://). */
+        private byte[] readResource(final Object value, final String name) throws InterruptedException {
+            if(value == null) {
+                throw new IllegalArgumentException("field: " + name + " is null");
+            }
+            if(value instanceof ByteBuffer buffer) {
+                return ElementSchemaUtil.toBytes(buffer);
+            }
+            if(value instanceof byte[] bytes) {
                 return bytes;
             }
-            final String path = input.getAsString(parameters.field);
-            if(path == null || path.isBlank()) {
-                throw new IllegalArgumentException("pdf path field: " + parameters.field + " is null or empty");
+            final String path = value.toString();
+            if(path.isBlank()) {
+                throw new IllegalArgumentException("path field: " + name + " is empty");
             }
             if(path.startsWith("https://") || path.startsWith("http://")) {
                 if(transport == null) {
@@ -752,12 +947,161 @@ public class PdfTransform extends Transform {
                 final OutboundRequest request = new OutboundRequest(path, "GET", Map.of("Accept", "application/pdf, */*"), null, 1);
                 final SyncCaller.Result result = SyncCaller.call("pdf", transport, policy, request);
                 if(!result.succeeded()) {
-                    throw new IllegalStateException("Failed to download pdf from " + path + ": " + result.error());
+                    throw new IllegalStateException("Failed to download " + path + ": " + result.error());
                 }
                 return result.parsed().bytes();
             }
             // a path from the data is read as is: not matched as a glob ('[', '*', '?' are legal in object names)
             return ResourceUtil.readBytesExact(path);
+        }
+
+        // generate / edit
+
+        /** Creates (generate) or loads (edit) the document, applies the steps and outputs the saved pdf. */
+        private void write(final ProcessContext c, final MElement input) {
+            final List<PDDocument> opened = new ArrayList<>();
+            try {
+                final PDDocument document = switch (parameters.operation) {
+                    case generate -> switch (parameters.generate.type) {
+                        case form -> load(opened, template, null);
+                        case images -> {
+                            final List<byte[]> images = new ArrayList<>();
+                            for(final Object value : PdfEdit.values(input.getPrimitiveValue(parameters.field))) {
+                                images.add(readResource(value, parameters.field));
+                            }
+                            final PDDocument created = open(opened, new PDDocument());
+                            PdfGenerate.images(created, images, parameters.generate);
+                            yield created;
+                        }
+                    };
+                    case edit -> {
+                        final List<?> sources = PdfEdit.values(input.getPrimitiveValue(parameters.field));
+                        if(sources.isEmpty()) {
+                            throw new IllegalArgumentException("field: " + parameters.field + " holds no pdf");
+                        }
+                        final PDDocument base = load(opened, readResource(sources.getFirst(), parameters.field), null);
+                        final PDFMergerUtility merger = new PDFMergerUtility();
+                        for(final Object source : sources.subList(1, sources.size())) {
+                            merger.appendDocument(base, load(opened, readResource(source, parameters.field), null));
+                        }
+                        yield base;
+                    }
+                    default -> throw new IllegalStateException("not a writing operation: " + parameters.operation);
+                };
+                if(document.isEncrypted() && !setsSecurity) {
+                    // PDFBox cannot save it with its original encryption
+                    throw new IllegalArgumentException("pdf is encrypted: add a decrypt step to save it without encryption, or an encrypt step to protect it again");
+                }
+                final Context context = new Context(document, input, opened);
+                if(templateForm != null) {
+                    templateForm.apply(context);
+                }
+                for(final PdfEdit.Compiled step : steps) {
+                    step.apply(context);
+                }
+                final int pageCount = document.getNumberOfPages();
+                final Map<String, Object> values = new HashMap<>();
+                try(final ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                    document.save(bytes);
+                    values.put("content", ByteBuffer.wrap(bytes.toByteArray()));
+                }
+                values.put("pageCount", (long) pageCount);
+                output(c, base(input), values);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while reading a resource of pdf operation: " + parameters.operation, e);
+            } catch (final Throwable e) {
+                c.output(failureTag, processError("Failed to " + parameters.operation + " pdf", input, e, failFast));
+            } finally {
+                // the merged documents are read until the result is saved
+                for(final PDDocument document : opened.reversed()) {
+                    try {
+                        document.close();
+                    } catch (final IOException e) {
+                        LOG.warn("Failed to close pdf document: {}", e.getMessage());
+                    }
+                }
+            }
+        }
+
+        private Map<String, Object> base(final MElement input) {
+            final Map<String, Object> base = new HashMap<>(input.asPrimitiveMap());
+            if(dropSource) {
+                base.remove(parameters.field);
+            }
+            return base;
+        }
+
+        private static PDDocument open(final List<PDDocument> opened, final PDDocument document) {
+            opened.add(document);
+            return document;
+        }
+
+        private PDDocument load(final List<PDDocument> opened, final byte[] bytes, final String password) throws IOException {
+            final String pw = password != null ? password : this.password;
+            return open(opened, Loader.loadPDF(bytes, pw));
+        }
+
+        /** What the steps read: the record, its resources and the fonts, for one document. */
+        private final class Context implements PdfEdit.Context {
+
+            private final PDDocument document;
+            private final MElement input;
+            private final List<PDDocument> opened;
+            private Map<String, Object> recordValues;
+            private Map<String, Object> templateValues;
+            private PdfFonts.Resolver resolver;
+
+            private Context(final PDDocument document, final MElement input, final List<PDDocument> opened) {
+                this.document = document;
+                this.input = input;
+                this.opened = opened;
+            }
+
+            @Override
+            public PDDocument document() {
+                return document;
+            }
+
+            @Override
+            public Map<String, Object> recordValues() {
+                if(recordValues == null) {
+                    recordValues = input.asStandardMap(inputSchema);
+                }
+                return recordValues;
+            }
+
+            @Override
+            public Map<String, Object> templateValues() {
+                if(templateValues == null) {
+                    templateValues = new HashMap<>(recordValues());
+                    TemplateUtil.setFunctions(templateValues);
+                }
+                return templateValues;
+            }
+
+            @Override
+            public Object fieldValue(final String field) {
+                return input.getPrimitiveValue(field);
+            }
+
+            @Override
+            public byte[] read(final Object value) throws InterruptedException {
+                return readResource(value, "resource");
+            }
+
+            @Override
+            public PDDocument load(final byte[] bytes, final String password) throws IOException {
+                return PdfDoFn.this.load(opened, bytes, password);
+            }
+
+            @Override
+            public PdfFonts.Resolver fonts() {
+                if(resolver == null) {
+                    resolver = fonts.forDocument(document);
+                }
+                return resolver;
+            }
         }
 
     }
