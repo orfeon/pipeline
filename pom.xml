@@ -674,6 +674,22 @@
         <artifactId>snakeyaml</artifactId>
         <version>${snakeyaml.version}</version>
       </dependency>
+      <!-- Since Beam 2.78 the Dataflow runner brings opentelemetry-exporter-otlp, whose okhttp sender pulls
+           okhttp-jvm 5.x. That jar holds the same okhttp3.* classes as okhttp 4.12.0 (google-genai, the
+           server's agent) and needs okio 3.16+ (okio.Socket) while okio resolves to 3.6.0: whichever jar
+           the class loader picks first, one of the two callers breaks. Keep the single okhttp 4.x — the
+           sender only uses API that 4.12.0 has. Re-check on a beam.version / langchain4j bump. -->
+      <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+        <version>${beam.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp-jvm</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
       <dependency>
         <groupId>org.apache.beam</groupId>
         <artifactId>beam-sdks-java-google-cloud-platform-bom</artifactId>
