@@ -27,25 +27,28 @@ import java.util.UUID;
  * {"role": "tool",      "content": "...", "toolCall": {id, name, arguments: ""}}
  * </pre>
  *
- * <p>A model turn is restored exactly as the model produced it, which Gemini 4 requires of a turn
- * that called tools (it answers a history replayed without that with an empty MALFORMED_RESPONSE):
+ * <p>A model turn is restored as the model produced it, which Gemini 4 requires of a turn that
+ * called tools (it answers a history replayed without that with an empty MALFORMED_RESPONSE):
  * <ul>
- *   <li>{@code toolCallGroup} — set on every message that came from one model turn (its text and its
- *       tool calls), so that parallel tool calls and the accompanying text are put back into a single
- *       {@code AiMessage} instead of one model turn each;</li>
- *   <li>{@code thoughtSignature} — the opaque signature Gemini attaches to a tool-calling turn, set on
- *       the first tool call message of the group and handed back to the model on replay.</li>
+ *   <li>Adjacent assistant messages are one model turn — its text and its (parallel) tool calls —
+ *       and are put back into a single {@code AiMessage}. In the flat history two model turns are
+ *       always separated by tool results or a user message.</li>
+ *   <li>{@code thoughtSignature} — the opaque signature Gemini attaches to a part of a tool-calling
+ *       turn (base64), stored on the JSON message of that part and handed back to the model on
+ *       replay. Optional: older conversations kept by the browser do not have it.</li>
  * </ul>
- * Both are optional: messages without them (older conversations kept by the browser) are restored
- * one message per turn as before. The UI stores and returns the messages untouched.
+ * The UI stores and returns the messages untouched.
  */
 final class AgentHistory {
 
-    static final String FIELD_GROUP = "toolCallGroup";
     static final String FIELD_SIGNATURE = "thoughtSignature";
 
-    /** The AiMessage attribute under which langchain4j-google-ai-gemini keeps the thought signature. */
-    static final String ATTRIBUTE_SIGNATURE = "thinking_signature";
+    /**
+     * AiMessage attributes under which langchain4j-google-genai keeps thought signatures: the plain
+     * key for the text part, the prefix + tool call id for a function call part.
+     */
+    static final String ATTRIBUTE_SIGNATURE = "thought_signature";
+    static final String ATTRIBUTE_SIGNATURE_PREFIX = "thought_signature_";
 
     private AgentHistory() {
     }
@@ -60,20 +63,13 @@ final class AgentHistory {
             switch (role) {
                 case "user" -> messages.add(UserMessage.from(content));
                 case "assistant" -> {
-                    final String group = getString(msg, FIELD_GROUP).orElse(null);
-                    if (group != null) {
-                        // every following assistant message of the same group belongs to this model turn
-                        int end = i;
-                        while (end + 1 < historyJson.size() && isAssistantOfGroup(historyJson.get(end + 1).getAsJsonObject(), group)) {
-                            end++;
-                        }
-                        messages.add(toGroupedAiMessage(historyJson, i, end));
-                        i = end;
-                    } else if (hasToolCall(msg)) {
-                        messages.add(AiMessage.from(toToolRequest(msg.getAsJsonObject("toolCall"))));
-                    } else {
-                        messages.add(AiMessage.from(content));
+                    // the following assistant messages belong to the same model turn
+                    int end = i;
+                    while (end + 1 < historyJson.size() && isAssistant(historyJson.get(end + 1).getAsJsonObject())) {
+                        end++;
                     }
+                    messages.add(toAiMessage(historyJson, i, end));
+                    i = end;
                 }
                 case "tool" -> {
                     final ToolExecutionRequest request;
@@ -100,20 +96,24 @@ final class AgentHistory {
         return messages;
     }
 
-    private static AiMessage toGroupedAiMessage(final JsonArray historyJson, final int from, final int to) {
+    private static AiMessage toAiMessage(final JsonArray historyJson, final int from, final int to) {
         final StringBuilder text = new StringBuilder();
         final List<ToolExecutionRequest> requests = new ArrayList<>();
-        String signature = null;
+        final Map<String, Object> attributes = new LinkedHashMap<>();
         for (int i = from; i <= to; i++) {
             final JsonObject msg = historyJson.get(i).getAsJsonObject();
+            final Optional<String> signature = getString(msg, FIELD_SIGNATURE).filter(s -> !s.isEmpty());
             if (hasToolCall(msg)) {
-                requests.add(toToolRequest(msg.getAsJsonObject("toolCall")));
-                if (signature == null) {
-                    signature = getString(msg, FIELD_SIGNATURE).filter(s -> !s.isEmpty()).orElse(null);
-                }
+                final ToolExecutionRequest request = toToolRequest(msg.getAsJsonObject("toolCall"));
+                requests.add(request);
+                signature.ifPresent(s -> attributes.put(ATTRIBUTE_SIGNATURE_PREFIX + request.id(), s));
             } else {
                 text.append(getString(msg, "content").orElse(""));
+                signature.ifPresent(s -> attributes.put(ATTRIBUTE_SIGNATURE, s));
             }
+        }
+        if (requests.isEmpty() && attributes.isEmpty()) {
+            return AiMessage.from(text.toString());
         }
         final AiMessage.Builder builder = AiMessage.builder();
         if (!text.isEmpty()) {
@@ -122,8 +122,8 @@ final class AgentHistory {
         if (!requests.isEmpty()) {
             builder.toolExecutionRequests(requests);
         }
-        if (signature != null) {
-            builder.attributes(Map.of(ATTRIBUTE_SIGNATURE, signature));
+        if (!attributes.isEmpty()) {
+            builder.attributes(attributes);
         }
         return builder.build();
     }
@@ -134,19 +134,18 @@ final class AgentHistory {
             switch (message) {
                 case AiMessage aiMessage -> {
                     final boolean hasTools = aiMessage.hasToolExecutionRequests();
-                    final String group = hasTools ? UUID.randomUUID().toString() : null;
                     final String text = aiMessage.text();
                     if (text != null && !text.isBlank()) {
                         final Map<String, Object> textMessage = new LinkedHashMap<>();
                         textMessage.put("role", "assistant");
                         textMessage.put("content", text);
                         if (hasTools) {
-                            textMessage.put(FIELD_GROUP, group);
+                            // only a tool-calling turn is replayed part by part
+                            putSignature(textMessage, aiMessage, ATTRIBUTE_SIGNATURE);
                         }
                         json.add(textMessage);
                     }
                     if (hasTools) {
-                        String signature = aiMessage.attribute(ATTRIBUTE_SIGNATURE, String.class);
                         for (final ToolExecutionRequest toolRequest : aiMessage.toolExecutionRequests()) {
                             final Map<String, Object> toolCallMessage = new LinkedHashMap<>();
                             toolCallMessage.put("role", "assistant");
@@ -156,11 +155,8 @@ final class AgentHistory {
                                     "name", toolRequest.name(),
                                     "arguments", Optional.ofNullable(toolRequest.arguments()).orElse("")
                             ));
-                            toolCallMessage.put(FIELD_GROUP, group);
-                            if (signature != null && !signature.isEmpty()) {
-                                // one signature per model turn: carried by its first tool call
-                                toolCallMessage.put(FIELD_SIGNATURE, signature);
-                                signature = null;
+                            if (toolRequest.id() != null) {
+                                putSignature(toolCallMessage, aiMessage, ATTRIBUTE_SIGNATURE_PREFIX + toolRequest.id());
                             }
                             json.add(toolCallMessage);
                         }
@@ -183,17 +179,23 @@ final class AgentHistory {
         return json;
     }
 
+    private static void putSignature(final Map<String, Object> jsonMessage, final AiMessage aiMessage, final String attribute) {
+        final String signature = aiMessage.attribute(attribute, String.class);
+        if (signature != null && !signature.isEmpty()) {
+            jsonMessage.put(FIELD_SIGNATURE, signature);
+        }
+    }
+
     private static ToolExecutionRequest toToolRequest(final JsonObject toolCall) {
         return ToolExecutionRequest.builder()
-                .id(getString(toolCall, "id").orElseGet(() -> UUID.randomUUID().toString()))
+                .id(getString(toolCall, "id").filter(s -> !s.isEmpty()).orElseGet(() -> UUID.randomUUID().toString()))
                 .name(toolCall.get("name").getAsString())
                 .arguments(getString(toolCall, "arguments").orElse(""))
                 .build();
     }
 
-    private static boolean isAssistantOfGroup(final JsonObject msg, final String group) {
-        return "assistant".equals(getString(msg, "role").orElse(null))
-                && group.equals(getString(msg, FIELD_GROUP).orElse(null));
+    private static boolean isAssistant(final JsonObject msg) {
+        return "assistant".equals(getString(msg, "role").orElse(null));
     }
 
     private static boolean hasToolCall(final JsonObject msg) {

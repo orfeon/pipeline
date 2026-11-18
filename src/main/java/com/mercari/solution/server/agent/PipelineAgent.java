@@ -2,7 +2,6 @@ package com.mercari.solution.server.agent;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.server.agent.tool.CodeReader;
 import com.mercari.solution.server.agent.tool.JobTools;
@@ -10,10 +9,8 @@ import com.mercari.solution.server.agent.tool.DocsReader;
 import com.mercari.solution.server.agent.tool.FeatureValidator;
 import com.mercari.solution.server.agent.tool.PipelineLauncher;
 import com.mercari.solution.server.agent.tool.PipelineExecutor;
-import dev.langchain4j.agent.tool.*;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
-import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
