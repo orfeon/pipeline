@@ -1,15 +1,15 @@
 package com.mercari.solution.server.api;
 
-import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.ServiceOptions;
 import com.google.gson.*;
 import com.mercari.solution.server.agent.AgentInteractionLogger;
 import com.mercari.solution.server.agent.ChatModelFileLogger;
 import com.mercari.solution.server.agent.PipelineAgent;
+import com.mercari.solution.server.agent.VertexAiGeminiHttpClient;
 import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ResponseFormat;
-import dev.langchain4j.model.google.genai.GoogleGenAiChatModel;
+import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import jakarta.servlet.ServletContext;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
@@ -38,18 +39,26 @@ public class AgentService {
 
     private static ChatModel createChatModel() {
         try {
-            final GoogleCredentials credentials = GcpCredentialsCache.credentials();
-            credentials.refreshIfExpired();
+            // fail at startup, not at the first chat, when no credentials are available
+            GcpCredentialsCache.accessToken();
             final String project = ServiceOptions.getDefaultProjectId();
             final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.7-flash");
             agentModelName = modelName;
             final String location = env("MERCARI_PIPELINE_AGENT_LOCATION", "global");
             final String debugLog = env("MERCARI_PIPELINE_AGENT_DEBUG_LOG", "");
-            final GoogleGenAiChatModel.Builder builder = GoogleGenAiChatModel.builder()
-                    .googleCredentials(credentials)
+            // LangChain4j's Gemini module speaks the plain generateContent REST API over the JDK
+            // HttpClient (no google-genai SDK / okhttp). It targets the Gemini Developer API by
+            // default; pointing baseUrl at the Vertex AI publisher model path and supplying an
+            // OAuth bearer token per request (no apiKey) makes it call Vertex AI instead;
+            // VertexAiGeminiHttpClient covers the one wire difference (parallel tool results).
+            final GoogleAiGeminiChatModel.GoogleAiGeminiChatModelBuilder builder = GoogleAiGeminiChatModel.builder()
+                    .httpClientBuilder(VertexAiGeminiHttpClient.builder())
+                    .baseUrl(vertexBaseUrl(project, location))
+                    .customHeaders(AgentService::authorizationHeaders)
                     .logRequestsAndResponses(!debugLog.isEmpty())
-                    .projectId(project)
-                    .location(location)
+                    // carry the thought signatures of tool-call turns back to the model within a tool loop
+                    .returnThinking(true)
+                    .sendThinking(true)
                     .modelName(modelName);
             // Do not force responseMimeType=application/json: combined with tools, gemini-3.5+
             // keeps re-issuing the last tool call instead of emitting the final text response.
@@ -65,6 +74,21 @@ public class AgentService {
             return new ChatModelFileLogger(chatModel, Path.of(debugLog));
         } catch (IOException e) {
             throw new RuntimeException("Failed to create chat model", e);
+        }
+    }
+
+    static String vertexBaseUrl(final String project, final String location) {
+        final String host = "global".equals(location)
+                ? "aiplatform.googleapis.com"
+                : location + "-aiplatform.googleapis.com";
+        return "https://%s/v1/projects/%s/locations/%s/publishers/google".formatted(host, project, location);
+    }
+
+    private static Map<String, String> authorizationHeaders() {
+        try {
+            return Map.of("Authorization", "Bearer " + GcpCredentialsCache.accessToken().getTokenValue());
+        } catch (final IOException e) {
+            throw new UncheckedIOException("Failed to get an access token for the agent model", e);
         }
     }
 

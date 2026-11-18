@@ -674,11 +674,17 @@
         <artifactId>snakeyaml</artifactId>
         <version>${snakeyaml.version}</version>
       </dependency>
-      <!-- Since Beam 2.78 the Dataflow runner brings opentelemetry-exporter-otlp, whose okhttp sender pulls
-           okhttp-jvm 5.x. That jar holds the same okhttp3.* classes as okhttp 4.12.0 (google-genai, the
-           server's agent) and needs okio 3.16+ (okio.Socket) while okio resolves to 3.6.0: whichever jar
-           the class loader picks first, one of the two callers breaks. Keep the single okhttp 4.x — the
-           sender only uses API that 4.12.0 has. Re-check on a beam.version / langchain4j bump. -->
+      <!-- Beam 2.78 puts two okhttp generations on the classpath: okhttp 4.x (protobuf extension ->
+           apicurio -> wire-grpc-client) and okhttp-jvm 5.x (Dataflow runner -> opentelemetry-exporter-otlp's
+           okhttp sender). The two jars hold the same okhttp3.* classes, and 5.x needs okio 3.16+
+           (okio.Socket) while okio resolves to 3.6.0, so whichever jar the class loader picks first, one
+           caller breaks. Keep a single okhttp 4.12.0 — the OTLP sender only uses API that 4.12.0 has.
+           Re-check on a beam.version bump. -->
+      <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>okhttp</artifactId>
+        <version>4.12.0</version>
+      </dependency>
       <dependency>
         <groupId>org.apache.beam</groupId>
         <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
@@ -1127,11 +1133,13 @@
       <version>${langchain4j.version}</version>
     </dependency>
 
-    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-google-genai -->
+    <!-- Gemini over the JDK HttpClient (langchain4j-http-client-jdk): no google-genai SDK, okhttp or
+         Kotlin runtime. AgentService points it at Vertex AI (baseUrl + OAuth bearer header). -->
+    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-google-ai-gemini -->
     <dependency>
       <groupId>dev.langchain4j</groupId>
-      <artifactId>langchain4j-google-genai</artifactId>
-      <version>${langchain4j.version}-beta32</version>
+      <artifactId>langchain4j-google-ai-gemini</artifactId>
+      <version>${langchain4j.version}</version>
     </dependency>
 
   </dependencies>
