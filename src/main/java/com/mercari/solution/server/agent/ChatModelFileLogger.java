@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Enabled via the MERCARI_PIPELINE_AGENT_DEBUG_LOG env var (see AgentService).
  *
  * The main purpose is to verify Gemini thought-signature round-trips: AiMessage attributes
- * (where langchain4j stores "thought_signature_&lt;toolCallId&gt;") are logged as key -&gt; value
+ * (where langchain4j stores them, see AgentHistory.ATTRIBUTE_SIGNATURE) are logged as key -&gt; value
  * length for both outgoing request messages and incoming responses.
  */
 public class ChatModelFileLogger implements ChatModel {

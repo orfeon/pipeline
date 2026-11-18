@@ -42,7 +42,7 @@ public class AgentService {
             // fail at startup, not at the first chat, when no credentials are available
             GcpCredentialsCache.accessToken();
             final String project = ServiceOptions.getDefaultProjectId();
-            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.7-flash");
+            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-4-hydrogen");
             agentModelName = modelName;
             final String location = env("MERCARI_PIPELINE_AGENT_LOCATION", "global");
             final String debugLog = env("MERCARI_PIPELINE_AGENT_DEBUG_LOG", "");
