@@ -196,6 +196,15 @@ public class PipelineMcpServerTest {
         Assertions.assertTrue(String.valueOf(map(message.get("content")).get("text")).contains("run-pipeline"));
     }
 
+    @Test
+    public void testAllowedOrigins() {
+        Assertions.assertEquals(List.of(), PipelineMcpServer.allowedOrigins(null));
+        Assertions.assertEquals(List.of(), PipelineMcpServer.allowedOrigins(" , "));
+        // an Origin header has no trailing slash: one copied from an address bar must still match
+        Assertions.assertEquals(List.of("http://localhost:6274", "https://example.com:*"),
+                PipelineMcpServer.allowedOrigins(" http://localhost:6274/ ,https://example.com:*,"));
+    }
+
     private static Map<String, Object> meta() {
         return Map.of(
                 "io.modelcontextprotocol/protocolVersion", "2026-07-28",

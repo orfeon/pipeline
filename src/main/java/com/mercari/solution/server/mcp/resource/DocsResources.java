@@ -29,7 +29,6 @@ public class DocsResources implements Resources {
     /** The per-module reference pages: {@code docs://module/<type>/<name>.md}. */
     static final String MODULE_TEMPLATE = "docs://module/{type}/{name}.md";
     private static final String MODULE_URI_PREFIX = "docs://module/";
-    private static final int MAX_COMPLETIONS = 100;
 
     /** URIs of the published documents, in order (filled by {@link #sync}; completions are answered from it). */
     private final TreeSet<String> uris = new TreeSet<>();
@@ -87,14 +86,16 @@ public class DocsResources implements Resources {
         final McpSchema.ResourceTemplate template = McpSchema.ResourceTemplate.builder(MODULE_TEMPLATE, "module-reference")
                 .title("Module reference")
                 .description("Configuration reference (parameters, examples) of a pipeline module: "
-                        + "type is source, transform, sink or action, name is the module name (e.g. docs://module/source/bigquery.md)")
+                        + "type is source, transform, sink, action or failure, name is the module name "
+                        + "(e.g. docs://module/source/bigquery.md); type common holds the shared parameter pages")
                 .mimeType(MIME_TYPE)
                 .build();
         return List.of(McpSyncResourceTemplate.of(template).withCompletionHandler((ctx, request) -> {
             final Map<String, String> given = request.context() == null || request.context().arguments() == null
                     ? Map.of() : request.context().arguments();
-            return McpSchema.CompleteResult.of(completion(
-                    completeModule(request.argument().name(), request.argument().value(), given.get("type"))));
+            final List<String> values = completeModule(request.argument().name(), request.argument().value(), given.get("type"));
+            // the SDK caps a longer list at the protocol's 100 values (and then flags hasMore)
+            return McpSchema.CompleteResult.of(new McpSchema.CompleteResult.Completion(values, values.size(), false));
         }));
     }
 
@@ -127,12 +128,6 @@ public class DocsResources implements Resources {
             }
         }
         return List.copyOf(values);
-    }
-
-    private static McpSchema.CompleteResult.Completion completion(final List<String> values) {
-        final boolean hasMore = values.size() > MAX_COMPLETIONS;
-        return new McpSchema.CompleteResult.Completion(
-                hasMore ? values.subList(0, MAX_COMPLETIONS) : values, values.size(), hasMore);
     }
 
     private static String getTitle(final List<String> lines, final String name) {

@@ -44,7 +44,9 @@ public class PipelineMcpServer extends HttpServlet {
     /**
      * Comma-separated origins (e.g. {@code http://localhost:6274,https://example.com:*}) whose browser-based
      * clients may call the endpoint. Requests without an {@code Origin} header (every non-browser client)
-     * always pass; any other origin is rejected (DNS-rebinding protection).
+     * always pass; any other origin is rejected (DNS-rebinding protection). This only lifts the origin
+     * check — no CORS preflight or {@code Access-Control-Allow-*} handling is done here, so a client on
+     * another origin still needs a proxy that terminates CORS.
      */
     static final String ENV_ALLOWED_ORIGINS = "MERCARI_PIPELINE_MCP_ALLOWED_ORIGINS";
 
@@ -89,8 +91,10 @@ public class PipelineMcpServer extends HttpServlet {
         if (value == null || value.isBlank()) {
             return List.of();
         }
+        // the validator compares strings and an Origin header never ends with '/': "http://localhost:6274/"
+        // as copied from an address bar would otherwise match nothing
         return Arrays.stream(value.split(","))
-                .map(String::trim)
+                .map(origin -> origin.trim().replaceAll("/+$", ""))
                 .filter(origin -> !origin.isEmpty())
                 .toList();
     }

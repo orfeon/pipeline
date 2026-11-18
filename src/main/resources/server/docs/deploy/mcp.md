@@ -7,7 +7,7 @@ configs, launch them on Dataflow / Cloud Run, and follow and diagnose the jobs �
 Pipeline Builder's built-in agent runs, exposed to any MCP host.
 
 - Endpoint: `https://<service>/mcp` (Streamable HTTP, protocol revision **2026-07-28**; `web.xml` maps `/mcp`).
-- Capabilities: 14 tools, the documentation tree as `docs://` resources (with a module URI template and
+- Capabilities: 15 tools, the documentation tree as `docs://` resources (with a module URI template and
   completions), one prompt.
 - The Pipeline Builder agent's tools are thin wrappers over the same implementations
   (`McpToolBridge`); an agent tool is the camelCase form of the MCP tool name (`run-pipeline` /
@@ -39,7 +39,10 @@ notification when the work starts.
 
 Browser-based clients: a request with an `Origin` header is rejected (`403`) unless the origin is listed
 in `MERCARI_PIPELINE_MCP_ALLOWED_ORIGINS` (comma-separated, e.g. `http://localhost:6274`; a port may be
-`*`). Requests without `Origin` — every non-browser client — always pass.
+`*`). Requests without `Origin` — every non-browser client — always pass. The allow-list only lifts
+that check: the server does not answer CORS preflight requests or send `Access-Control-Allow-*` headers,
+so it is enough for a page served from the same origin as the server, while a client on another origin
+additionally needs a proxy in front of the service that terminates CORS.
 
 ## Tools
 

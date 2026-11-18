@@ -92,7 +92,7 @@ template location stay Dataflow-only (`_LAUNCH_DATAFLOW_*`).
 | `MERCARI_PIPELINE_AGENT_DEBUG_LOG` | File path to log agent model exchanges to |
 | `MERCARI_PIPELINE_DIAGNOSIS_SLACK_WEBHOOK` / `_WEBHOOK` / `_LOG_NAME` | [Diagnosis](diagnosis.md) outputs |
 | `MERCARI_PIPELINE_WEBHOOK_TOKEN` | Shared secret for the diagnosis webhook |
-| `MERCARI_PIPELINE_MCP_ALLOWED_ORIGINS` | Comma-separated origins of browser-based MCP clients allowed to call `/mcp` (default: none; requests without `Origin` always pass) — see [mcp.md](mcp.md#protocol) |
+| `MERCARI_PIPELINE_MCP_ALLOWED_ORIGINS` | Comma-separated origins of browser-based MCP clients allowed to call `/mcp` (default: none; requests without `Origin` always pass; the server sends no CORS headers) — see [mcp.md](mcp.md#protocol) |
 | `MERCARI_PIPELINE_SOURCES_PATH` | Where the code-reading tools find `src/main/java` |
 | `MERCARI_PIPELINE_VERSION` | Overrides the build version reported by the server |
 | `MERCARI_PIPELINE_GCP_CREDENTIALS` / `MERCARI_PIPELINE_ON_GCP` | Credentials source / metadata-server override shared with the pipeline runtime ([cross-cloud auth](cross-cloud-auth.md)) |

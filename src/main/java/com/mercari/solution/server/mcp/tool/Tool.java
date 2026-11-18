@@ -166,8 +166,8 @@ public interface Tool {
             Registry.initialize(e.getKey(), e.getValue(), servletContext);
             final Tool tool = e.getValue();
             final Module properties = tool.getClass().getAnnotation(Module.class);
-            tools.put(e.getKey(), McpSyncTool.of(toolSchema(properties), (ctx, request) -> tool.call(
-                    ctx, request.arguments() != null ? request : request(request.name(), null))));
+            tools.put(e.getKey(), McpSyncTool.of(toolSchema(properties),
+                    (ctx, request) -> tool.call(ctx, withArguments(request))));
         }
         final List<McpSchema.Tool> definitions = tools.values().stream().map(McpSyncTool::definition).toList();
         return new McpSyncToolRepository() {
@@ -184,6 +184,18 @@ public interface Tool {
                 return tools.get(name);
             }
         };
+    }
+
+    /**
+     * {@code arguments} is optional on the wire while the tools read it unconditionally: an absent one
+     * becomes empty, the rest of the request (input responses, request state, {@code _meta}) is kept.
+     */
+    private static McpSchema.CallToolRequest withArguments(final McpSchema.CallToolRequest request) {
+        if (request.arguments() != null) {
+            return request;
+        }
+        return new McpSchema.CallToolRequest(
+                request.name(), java.util.Map.of(), request.inputResponses(), request.requestState(), request.meta());
     }
 
     /**

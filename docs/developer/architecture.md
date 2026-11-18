@@ -153,7 +153,7 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
   stateless `io.modelcontextprotocol.modern` server behind `HttpServletMcpTransport` — no handshake, no
   sessions, `server/discover`, caching hints from `mcp/McpCaching`, streamed answers for
   `@Tool.Module(longRunning = true)` tools; each catalog is a repository built by `Tool.repository` /
-  `Resources.repository` / `Prompt.repository`) with `mcp/tool` (14 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
+  `Resources.repository` / `Prompt.repository`) with `mcp/tool` (15 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
   docs / source / validation / launch / job observation — user doc: `server/docs/deploy/mcp.md`),
   `mcp/resource` (`docs://` documents) and `mcp/prompt` (`design-pipeline`). `Tool.Registry` holds one
   instance per tool, shared with the agent. Runner-agnostic job observation lives in `server/job/`
