@@ -41,13 +41,16 @@ public class AgentService {
             final GoogleCredentials credentials = GcpCredentialsCache.credentials();
             credentials.refreshIfExpired();
             final String project = ServiceOptions.getDefaultProjectId();
-            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.7-flash");
+            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-4-hydrogen");
             agentModelName = modelName;
             final String location = env("MERCARI_PIPELINE_AGENT_LOCATION", "global");
             final String debugLog = env("MERCARI_PIPELINE_AGENT_DEBUG_LOG", "");
             final GoogleGenAiChatModel.Builder builder = GoogleGenAiChatModel.builder()
                     .googleCredentials(credentials)
                     .logRequestsAndResponses(!debugLog.isEmpty())
+                    // also hand back the thought signature of a text part (see AgentHistory); the
+                    // signatures of tool calls are sent regardless
+                    .sendThinking(true)
                     .projectId(project)
                     .location(location)
                     .modelName(modelName);

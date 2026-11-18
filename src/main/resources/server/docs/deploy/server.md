@@ -87,7 +87,7 @@ template location stay Dataflow-only (`_LAUNCH_DATAFLOW_*`).
 | Variable | Meaning |
 |---|---|
 | `MERCARI_PIPELINE_WAIT_SECONDS` | How long `/api/run` (in-server DirectRunner run) waits for the pipeline (default 10) |
-| `MERCARI_PIPELINE_AGENT_MODEL` / `MERCARI_PIPELINE_AGENT_LOCATION` | Gemini model / location for the agent (default `gemini-3.7-flash` / `global`) |
+| `MERCARI_PIPELINE_AGENT_MODEL` / `MERCARI_PIPELINE_AGENT_LOCATION` | Gemini model / location for the agent (default `gemini-4-hydrogen` / `global`) |
 | `MERCARI_PIPELINE_AGENT_RESPONSE_FORMAT` | `text` (default) or `json` |
 | `MERCARI_PIPELINE_AGENT_DEBUG_LOG` | File path to log agent model exchanges to |
 | `MERCARI_PIPELINE_DIAGNOSIS_SLACK_WEBHOOK` / `_WEBHOOK` / `_LOG_NAME` | [Diagnosis](diagnosis.md) outputs |

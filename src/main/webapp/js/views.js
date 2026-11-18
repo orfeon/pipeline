@@ -98,7 +98,6 @@ export function initViews() {
     });
 
     on('btn-agent', 'click', toggleAgentPane);
-    on('btn-agent-close', 'click', function() { setAgentPaneOpen(false); });
     document.addEventListener('keydown', function(e) {
         if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l') {
             e.preventDefault();

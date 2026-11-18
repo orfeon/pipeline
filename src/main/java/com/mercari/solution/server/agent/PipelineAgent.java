@@ -2,7 +2,6 @@ package com.mercari.solution.server.agent;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.server.agent.tool.CodeReader;
 import com.mercari.solution.server.agent.tool.JobTools;
@@ -10,10 +9,8 @@ import com.mercari.solution.server.agent.tool.DocsReader;
 import com.mercari.solution.server.agent.tool.FeatureValidator;
 import com.mercari.solution.server.agent.tool.PipelineLauncher;
 import com.mercari.solution.server.agent.tool.PipelineExecutor;
-import dev.langchain4j.agent.tool.*;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
-import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
@@ -35,7 +32,7 @@ public interface PipelineAgent {
 
     static String process(final ChatModel chatModel, final JsonObject body, final AgentInteractionLogger interactionLog) {
         final JsonArray historyJson = body.getAsJsonArray("history");
-        final List<ChatMessage> history = createHistoryMessages(historyJson);
+        final List<ChatMessage> history = AgentHistory.toMessages(historyJson);
         final dev.langchain4j.data.message.UserMessage lastUserMessage = (dev.langchain4j.data.message.UserMessage) history.removeLast();
 
         final ChatMemory historyMemory = MessageWindowChatMemory.withMaxMessages(history.size() + 200);
@@ -71,9 +68,26 @@ public interface PipelineAgent {
             }
         }
 
-        final List<Map<String, Object>> newMessages = createResponseMessages(newResponseMessages);
+        final List<Map<String, Object>> newMessages = AgentHistory.toJson(newResponseMessages);
+        if (!endsWithAnswer(newResponseMessages)) {
+            // e.g. Gemini's MALFORMED_RESPONSE for a history it cannot continue: tell the user
+            // instead of returning nothing (the UI would silently show no reply)
+            newMessages.add(Map.of(
+                    "role", "assistant",
+                    "content", new Gson().toJson(Map.of("message", EMPTY_ANSWER_MESSAGE))));
+        }
 
         return new Gson().toJson(newMessages);
+    }
+
+    String EMPTY_ANSWER_MESSAGE = "The model returned an empty answer. This can happen when a conversation "
+            + "started with an earlier version or another model is continued. Please clear the conversation and try again.";
+
+    /** Whether the new messages end with a model answer that has text. */
+    static boolean endsWithAnswer(final List<ChatMessage> newResponseMessages) {
+        return !newResponseMessages.isEmpty()
+                && newResponseMessages.getLast() instanceof AiMessage aiMessage
+                && aiMessage.text() != null && !aiMessage.text().isBlank();
     }
 
     private static String getCanvasConfig(final JsonObject body) {
@@ -104,99 +118,6 @@ public interface PipelineAgent {
         }
         return "\nThe user currently has the module `" + selection + "` selected in the builder; "
                 + "\"this module\" refers to it.";
-    }
-
-    private static List<ChatMessage> createHistoryMessages(final JsonArray historyJson) {
-        final List<ChatMessage> messages = new ArrayList<>();
-        for (final JsonElement entry : historyJson) {
-            final JsonObject msg = entry.getAsJsonObject();
-            final String role = msg.get("role").getAsString();
-            final String content = msg.has("content") ? msg.get("content").getAsString() : "";
-
-            final ChatMessage message = switch (role) {
-                case "user" -> dev.langchain4j.data.message.UserMessage.from(content);
-                case "assistant" -> {
-                    if (msg.has("toolCall") && msg.get("toolCall").isJsonObject()) {
-                        final JsonObject tc = msg.getAsJsonObject("toolCall");
-                        final ToolExecutionRequest toolRequest = ToolExecutionRequest.builder()
-                                .id(tc.has("id") ? tc.get("id").getAsString() : UUID.randomUUID().toString())
-                                .name(tc.get("name").getAsString())
-                                .arguments(tc.has("arguments") ? tc.get("arguments").getAsString() : "")
-                                .build();
-                        yield AiMessage.from(toolRequest);
-                    } else {
-                        yield AiMessage.from(content);
-                    }
-                }
-                case "tool" -> {
-                    if (msg.has("toolCall") && msg.get("toolCall").isJsonObject()) {
-                        final JsonObject tc = msg.getAsJsonObject("toolCall");
-                        final String toolId = tc.has("id") ? tc.get("id").getAsString() : UUID.randomUUID().toString();
-                        final String toolName = tc.has("name") ? tc.get("name").getAsString() : "unknown";
-                        final ToolExecutionRequest origReq = ToolExecutionRequest.builder()
-                                .id(toolId)
-                                .name(toolName)
-                                .arguments("")
-                                .build();
-                        yield ToolExecutionResultMessage.from(origReq, content);
-                    } else {
-                        // Fallback: create a tool result with a dummy request
-                        final ToolExecutionRequest dummyReq = ToolExecutionRequest.builder()
-                                .id(UUID.randomUUID().toString())
-                                .name("unknown")
-                                .arguments("")
-                                .build();
-                        yield ToolExecutionResultMessage.from(dummyReq, content);
-                    }
-                }
-                default -> null;
-            };
-            messages.add(message);
-        }
-        return messages;
-    }
-
-    private static List<Map<String, Object>> createResponseMessages(final List<ChatMessage> newResponseMessages) {
-        final List<Map<String, Object>> responseMessages = new ArrayList<>();
-        for(final ChatMessage newMessage : newResponseMessages) {
-            switch (newMessage) {
-                case AiMessage aiMessage -> {
-                    final String text = aiMessage.text();
-                    if (text != null && !text.isBlank()) {
-                        responseMessages.add(Map.of(
-                                "role", "assistant",
-                                "content", text
-                        ));
-                    }
-                    if (aiMessage.hasToolExecutionRequests()) {
-                        for (final ToolExecutionRequest toolRequest : aiMessage.toolExecutionRequests()) {
-                            final Map<String, Object> toolCallMsg = new LinkedHashMap<>();
-                            toolCallMsg.put("role", "assistant");
-                            toolCallMsg.put("content", "");
-                            toolCallMsg.put("toolCall", Map.of(
-                                    "id", Optional.ofNullable(toolRequest.id()).orElse(""),
-                                    "name", toolRequest.name(),
-                                    "arguments", Optional.ofNullable(toolRequest.arguments()).orElse("")
-                            ));
-                            responseMessages.add(toolCallMsg);
-                        }
-                    }
-                }
-                case ToolExecutionResultMessage toolResultMessage -> {
-                    final Map<String, Object> toolResultMap = new LinkedHashMap<>();
-                    toolResultMap.put("role", "tool");
-                    toolResultMap.put("content", toolResultMessage.text());
-                    toolResultMap.put("toolCall", Map.of(
-                            "id", Optional.ofNullable(toolResultMessage.id()).orElse(""),
-                            "name", toolResultMessage.toolName(),
-                            "arguments", "" // 結果メッセージ側には引数は保持されないため空
-                    ));
-                    responseMessages.add(toolResultMap);
-                }
-                default -> {}
-            }
-        }
-        return responseMessages;
     }
 
 }
