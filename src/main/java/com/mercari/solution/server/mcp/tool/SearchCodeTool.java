@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.code.CodeRepository;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 
@@ -50,21 +50,18 @@ public class SearchCodeTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object pattern = request.arguments().get("pattern");
         if (pattern == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("search-code mcp tool requires pattern parameter")
-                    .isError(true)
-                    .build();
+            return Tool.result("search-code mcp tool requires pattern parameter", true);
         }
         final Object pathFilter = request.arguments().get("pathFilter");
         final String result = CodeRepository.search(
                 pattern.toString(),
                 pathFilter == null ? null : pathFilter.toString());
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        return Tool.result(result, false);
     }
 
 }

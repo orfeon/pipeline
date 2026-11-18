@@ -4,8 +4,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mercari.solution.server.api.LaunchService;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /**
@@ -14,7 +14,7 @@ import jakarta.servlet.ServletContext;
  */
 @Tool.Module(
     name = "launch-pipeline",
-    readOnly = false, idempotent = false, openWorld = true,
+    readOnly = false, idempotent = false, openWorld = true, longRunning = true,
     title = "Launch Pipeline",
     description = """
         Submit a pipeline config to an execution target and return the created job:
@@ -80,16 +80,13 @@ public class LaunchPipelineTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object config = request.arguments().get("config");
         final Object runner = request.arguments().get("runner");
         if (config == null || runner == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("launch-pipeline mcp tool requires config and runner parameters")
-                    .isError(true)
-                    .build();
+            return Tool.result("launch-pipeline mcp tool requires config and runner parameters", true);
         }
         final JsonObject response = new JsonObject();
         try {
@@ -104,11 +101,11 @@ public class LaunchPipelineTool implements Tool {
             final JsonObject job = LaunchService.launchJob(config.toString(), null, launch, null);
             response.addProperty("status", "ok");
             response.add("job", job);
-            return McpSchema.CallToolResult.builder().addTextContent(response.toString()).isError(false).build();
+            return Tool.result(response.toString(), false);
         } catch (final Throwable e) {
             response.addProperty("status", "error");
             response.addProperty("error", LaunchService.launchErrorMessage(e));
-            return McpSchema.CallToolResult.builder().addTextContent(response.toString()).isError(true).build();
+            return Tool.result(response.toString(), true);
         }
     }
 

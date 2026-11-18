@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.job.JobReader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /** Why a job is slow or not scaling: workers, stage timeline, running stage composition, feature plan mapping. */
@@ -59,17 +59,17 @@ public class GetJobProgressTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
         final String job = GetJobTool.optionalString(request, "job");
         if (job == null) {
-            return McpSchema.CallToolResult.builder().addTextContent("get-job-progress mcp tool requires job parameter").isError(true).build();
+            return Tool.result("get-job-progress mcp tool requires job parameter", true);
         }
         final String result = JobReader.getJobProgress(job,
                 GetJobTool.optionalString(request, "runner"),
                 GetJobTool.optionalString(request, "project"),
                 GetJobTool.optionalString(request, "region"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
+        return Tool.result(result, result.startsWith("ERROR"));
     }
 
 }

@@ -1,7 +1,7 @@
 package com.mercari.solution.server.mcp.tool;
 
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 import java.io.InputStream;
@@ -87,7 +87,7 @@ public class ReadDocsTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object moduleObj = request.arguments().get("module");
@@ -98,20 +98,14 @@ public class ReadDocsTool implements Tool {
             final String id = moduleObj.toString().trim();
             final String[] parts = id.split("/");
             if(parts.length != 2 || !MODULE_TYPES.contains(parts[0]) || parts[1].isBlank()) {
-                return McpSchema.CallToolResult.builder()
-                        .addTextContent("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink, action (e.g. 'source/bigquery', 'action/bigquery'); use tool 'list-modules' to discover names.")
-                        .isError(true)
-                        .build();
+                return Tool.result("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink, action (e.g. 'source/bigquery', 'action/bigquery'); use tool 'list-modules' to discover names.", true);
             }
             normalized = "module/" + parts[0] + "/" + parts[1].toLowerCase() + ".md";
         } else {
             normalized = normalizeDocPath(pathObj == null ? null : pathObj.toString());
         }
         if(normalized == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("read-docs mcp tool requires 'module' ('{type}/{name}', e.g. 'source/bigquery') or 'path' (a .md path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md')")
-                    .isError(true)
-                    .build();
+            return Tool.result("read-docs mcp tool requires 'module' ('{type}/{name}', e.g. 'source/bigquery') or 'path' (a .md path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md')", true);
         }
 
         final String resourcePath = DOCS_ROOT_PATH + normalized;
@@ -120,21 +114,12 @@ public class ReadDocsTool implements Tool {
                 final String message = moduleObj != null && !moduleObj.toString().isBlank()
                         ? "Not found module: " + moduleObj.toString().trim() + ". Use tool 'list-modules' to see available modules."
                         : "Document not found: '" + normalized + "'. Relative links resolve against the referencing document's directory (e.g. '../common/filter.md' in 'module/transform/select.md' is 'module/common/filter.md').";
-                return McpSchema.CallToolResult.builder()
-                        .addTextContent(message)
-                        .isError(true)
-                        .build();
+                return Tool.result(message, true);
             }
             final String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent(content)
-                    .isError(false)
-                    .build();
+            return Tool.result(content, false);
         } catch (Exception e) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("Failed to read document: '" + normalized + "', cause: " + e.getMessage())
-                    .isError(true)
-                    .build();
+            return Tool.result("Failed to read document: '" + normalized + "', cause: " + e.getMessage(), true);
         }
     }
 

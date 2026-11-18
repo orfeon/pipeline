@@ -7,8 +7,8 @@ import com.google.gson.JsonParser;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.util.FailureUtil;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanService;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 import java.util.Map;
@@ -52,7 +52,7 @@ public class ValidateFeatureTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Map<String, Object> arguments = request.arguments();
@@ -66,15 +66,9 @@ public class ValidateFeatureTool implements Tool {
             } else {
                 text = new GsonBuilder().setPrettyPrinting().create().toJson(result);
             }
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent(text)
-                    .isError(!ok)
-                    .build();
+            return Tool.result(text, !ok);
         } catch (final Throwable e) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("validate-feature failed: " + FailureUtil.convertThrowableMessage(e))
-                    .isError(true)
-                    .build();
+            return Tool.result("validate-feature failed: " + FailureUtil.convertThrowableMessage(e), true);
         }
     }
 

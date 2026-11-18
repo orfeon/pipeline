@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.job.JobReader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /** Recently failed jobs: Dataflow jobs and, when the server has a configured Cloud Run Job, its failed executions. */
@@ -49,13 +49,13 @@ public class ListFailedJobsTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
         final String result = JobReader.listFailedJobs(
                 GetJobTool.optionalInt(request, "hours"),
                 GetJobTool.optionalString(request, "project"),
                 GetJobTool.optionalString(request, "region"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
+        return Tool.result(result, result.startsWith("ERROR"));
     }
 
 }

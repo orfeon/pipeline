@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.job.JobReader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /** Status of a launched job, whatever the runner: a Dataflow job or a Cloud Run Job execution. */
@@ -62,7 +62,7 @@ public class GetJobTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
         final String result = JobReader.getJob(
                 optionalString(request, "job"),
@@ -70,7 +70,7 @@ public class GetJobTool implements Tool {
                 optionalString(request, "project"),
                 optionalString(request, "region"),
                 optionalInt(request, "limit"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
+        return Tool.result(result, result.startsWith("ERROR"));
     }
 
     static String optionalString(final McpSchema.CallToolRequest request, final String key) {

@@ -1,13 +1,13 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.api.PipelineService;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 @Tool.Module(
     name="run-pipeline",
-    readOnly = false, idempotent = false,
+    readOnly = false, idempotent = false, longRunning = true,
     title="Run Pipeline",
     description= """
         Run the pipeline defined in config parameter in the server process (DirectRunner), or with
@@ -75,14 +75,11 @@ public class RunPipelineTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         if(!request.arguments().containsKey("config")) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("run-pipeline mcp tool requires config parameter")
-                    .isError(true)
-                    .build();
+            return Tool.result("run-pipeline mcp tool requires config parameter", true);
         }
 
         final String config = request.arguments().get("config").toString();
@@ -92,10 +89,7 @@ public class RunPipelineTool implements Tool {
         final String args = argsValue == null ? null
                 : argsValue instanceof String s ? s : new com.google.gson.Gson().toJson(argsValue);
         final PipelineService.RunResult result = PipelineService.run(config, args, dryRun);
-        return McpSchema.CallToolResult.builder()
-                .addTextContent(result.responseText)
-                .isError(result.isError)
-                .build();
+        return Tool.result(result.responseText, result.isError);
     }
 
 }

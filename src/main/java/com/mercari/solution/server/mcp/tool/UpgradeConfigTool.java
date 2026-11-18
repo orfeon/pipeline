@@ -5,8 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.config.SchemaConfigUpgrader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 
@@ -46,14 +46,11 @@ public class UpgradeConfigTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         if(!request.arguments().containsKey("config")) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("upgrade-config mcp tool requires config parameter")
-                    .isError(true)
-                    .build();
+            return Tool.result("upgrade-config mcp tool requires config parameter", true);
         }
 
         try {
@@ -69,15 +66,9 @@ public class UpgradeConfigTool implements Tool {
             }
             responseJson.add("changes", changes);
 
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent(new GsonBuilder().setPrettyPrinting().create().toJson(responseJson))
-                    .isError(false)
-                    .build();
+            return Tool.result(new GsonBuilder().setPrettyPrinting().create().toJson(responseJson), false);
         } catch (final Throwable e) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("upgrade-config failed: " + e.getMessage())
-                    .isError(true)
-                    .build();
+            return Tool.result("upgrade-config failed: " + e.getMessage(), true);
         }
     }
 

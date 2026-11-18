@@ -1,7 +1,7 @@
 package com.mercari.solution.server.agent.tool;
 
 import com.mercari.solution.server.mcp.tool.Tool;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -26,7 +26,7 @@ public final class McpToolBridge {
             if (e.getValue() != null) args.put(e.getKey(), e.getValue());
         }
         try {
-            final McpSchema.CallToolResult result = Tool.find(tool).sync(null, new McpSchema.CallToolRequest(tool, args));
+            final McpSchema.CallToolResult result = Tool.find(tool).sync(null, Tool.request(tool, args));
             final String text = text(result);
             if (Boolean.TRUE.equals(result.isError())) {
                 return text.startsWith("ERROR") ? text : "ERROR: " + text;

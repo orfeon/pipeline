@@ -2,7 +2,7 @@ package com.mercari.solution.server.mcp.tool;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -35,7 +35,7 @@ public class LaunchPipelineToolTest {
     @Test
     public void testUnknownTargetIsAUserError() {
         final McpSchema.CallToolResult result = new LaunchPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("launch-pipeline", Map.of("config", CONFIG, "runner", "dataflow", "environment", "nowhere")));
+                Tool.request("launch-pipeline", Map.of("config", CONFIG, "runner", "dataflow", "environment", "nowhere")));
         Assertions.assertTrue(result.isError(), text(result));
         final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
         Assertions.assertEquals("error", json.get("status").getAsString());
@@ -46,7 +46,7 @@ public class LaunchPipelineToolTest {
     @Test
     public void testInvalidConfigIsReportedBeforeLaunching() {
         final McpSchema.CallToolResult result = new LaunchPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("launch-pipeline", Map.of("config", "sources: [{name: x, module: nosuchmodule}]", "runner", "dataflow",
+                Tool.request("launch-pipeline", Map.of("config", "sources: [{name: x, module: nosuchmodule}]", "runner", "dataflow",
                         "parameters", Map.of("project", "p", "region", "r"))));
         Assertions.assertTrue(result.isError(), text(result));
         final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
@@ -84,12 +84,12 @@ public class LaunchPipelineToolTest {
         // an ${args.x} without a value anywhere is refused at launch instead of reaching the job as literal text
         final String missing = config.replace("args:\n  dateFrom: \"2026-01-01\"\n", "");
         final McpSchema.CallToolResult result = new LaunchPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("launch-pipeline", Map.of("config", missing, "runner", "dataflow", "parameters", Map.of("project", "p", "region", "r"))));
+                Tool.request("launch-pipeline", Map.of("config", missing, "runner", "dataflow", "parameters", Map.of("project", "p", "region", "r"))));
         Assertions.assertTrue(result.isError(), text(result));
         Assertions.assertTrue(text(result).contains("unresolved template arguments [dateFrom]"), text(result));
         // ... and passes once the launch args supply it (the launch then fails later, on the missing template)
         final McpSchema.CallToolResult supplied = new LaunchPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("launch-pipeline", Map.of("config", missing, "runner", "dataflow",
+                Tool.request("launch-pipeline", Map.of("config", missing, "runner", "dataflow",
                         "parameters", Map.of("project", "p", "region", "r"), "args", Map.of("dateFrom", "2026-01-01"))));
         Assertions.assertFalse(text(supplied).contains("unresolved template arguments"), text(supplied));
     }
@@ -97,7 +97,7 @@ public class LaunchPipelineToolTest {
     @Test
     public void testMissingArguments() {
         final McpSchema.CallToolResult result = new LaunchPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("launch-pipeline", Map.of("config", CONFIG)));
+                Tool.request("launch-pipeline", Map.of("config", CONFIG)));
         Assertions.assertTrue(result.isError());
         Assertions.assertTrue(text(result).contains("requires config and runner"));
     }

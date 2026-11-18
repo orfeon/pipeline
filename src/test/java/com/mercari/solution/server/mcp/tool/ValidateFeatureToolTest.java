@@ -3,7 +3,7 @@ package com.mercari.solution.server.mcp.tool;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mercari.solution.server.agent.tool.FeatureValidator;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -60,7 +60,7 @@ public class ValidateFeatureToolTest {
     public void testValidateFeatureReportsViolation() {
         final ValidateFeatureTool tool = new ValidateFeatureTool();
         final McpSchema.CallToolResult result = tool.sync(null,
-                new McpSchema.CallToolRequest("validate-feature", Map.of("config", CONFIG)));
+                Tool.request("validate-feature", Map.of("config", CONFIG)));
         Assertions.assertTrue(result.isError(), text(result));
         final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
         Assertions.assertFalse(json.get("ok").getAsBoolean());
@@ -77,7 +77,7 @@ public class ValidateFeatureToolTest {
         final JsonObject parameters = config.getAsJsonArray("transforms").get(0).getAsJsonObject().getAsJsonObject("parameters");
         final ValidateFeatureTool tool = new ValidateFeatureTool();
         final McpSchema.CallToolResult result = tool.sync(null,
-                new McpSchema.CallToolRequest("validate-feature", Map.of("parameters", parameters.toString(), "format", "text")));
+                Tool.request("validate-feature", Map.of("parameters", parameters.toString(), "format", "text")));
         Assertions.assertFalse(result.isError(), text(result));
         Assertions.assertTrue(text(result).startsWith("feature plan "), text(result));
         Assertions.assertTrue(text(result).contains("windowShift"), text(result));
@@ -86,7 +86,7 @@ public class ValidateFeatureToolTest {
     @Test
     public void testMissingArguments() {
         final McpSchema.CallToolResult result = new ValidateFeatureTool().sync(null,
-                new McpSchema.CallToolRequest("validate-feature", Map.of()));
+                Tool.request("validate-feature", Map.of()));
         Assertions.assertTrue(result.isError());
     }
 

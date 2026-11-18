@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.code.CodeRepository;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 
@@ -50,28 +50,22 @@ public class FindModuleSourceTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object type = request.arguments().get("type");
         final Object name = request.arguments().get("name");
         if (type == null || name == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("find-module-source mcp tool requires type and name parameters")
-                    .isError(true)
-                    .build();
+            return Tool.result("find-module-source mcp tool requires type and name parameters", true);
         }
         final CodeRepository.ModuleType moduleType;
         try {
             moduleType = CodeRepository.ModuleType.valueOf(type.toString().trim().toLowerCase());
         } catch (final IllegalArgumentException e) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("Unknown module type: '" + type + "'. Specify one of: source, transform, sink, failure.")
-                    .isError(true)
-                    .build();
+            return Tool.result("Unknown module type: '" + type + "'. Specify one of: source, transform, sink, failure.", true);
         }
         final String result = CodeRepository.findModuleSource(moduleType, name.toString());
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        return Tool.result(result, false);
     }
 
 }

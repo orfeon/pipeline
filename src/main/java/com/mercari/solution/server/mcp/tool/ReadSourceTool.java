@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.code.CodeRepository;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 
@@ -54,21 +54,18 @@ public class ReadSourceTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object path = request.arguments().get("path");
         if (path == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("read-source mcp tool requires path parameter")
-                    .isError(true)
-                    .build();
+            return Tool.result("read-source mcp tool requires path parameter", true);
         }
         final String result = CodeRepository.read(
                 path.toString(),
                 toInteger(request.arguments().get("startLine")),
                 toInteger(request.arguments().get("endLine")));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        return Tool.result(result, false);
     }
 
     private static Integer toInteger(final Object value) {

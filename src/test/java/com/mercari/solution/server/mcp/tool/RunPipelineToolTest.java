@@ -3,7 +3,7 @@ package com.mercari.solution.server.mcp.tool;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -65,7 +65,7 @@ public class RunPipelineToolTest {
     @Test
     public void testDryRunReportsSchemasAndFeaturePlans() {
         final McpSchema.CallToolResult result = new RunPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("run-pipeline", Map.of("config", CONFIG, "dryRun", true, "args", Map.of("prefix", "f_"))));
+                Tool.request("run-pipeline", Map.of("config", CONFIG, "dryRun", true, "args", Map.of("prefix", "f_"))));
         Assertions.assertFalse(result.isError(), text(result));
         final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
         Assertions.assertEquals("ok", json.get("status").getAsString());
@@ -88,7 +88,7 @@ public class RunPipelineToolTest {
     public void testDryRunReportsErrors() {
         final String broken = CONFIG.replace("fields: [start_price]", "fields: [missing_field]");
         final McpSchema.CallToolResult result = new RunPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("run-pipeline", Map.of("config", broken, "dryRun", "true", "args", "{\"prefix\": \"f_\"}")));
+                Tool.request("run-pipeline", Map.of("config", broken, "dryRun", "true", "args", "{\"prefix\": \"f_\"}")));
         Assertions.assertTrue(result.isError(), text(result));
         final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
         Assertions.assertEquals("error", json.get("status").getAsString());
@@ -98,7 +98,7 @@ public class RunPipelineToolTest {
     @Test
     public void testMissingConfig() {
         final McpSchema.CallToolResult result = new RunPipelineTool().sync(null,
-                new McpSchema.CallToolRequest("run-pipeline", Map.of("dryRun", true)));
+                Tool.request("run-pipeline", Map.of("dryRun", true)));
         Assertions.assertTrue(result.isError());
     }
 

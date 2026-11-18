@@ -1,6 +1,6 @@
 package com.mercari.solution.server.mcp.tool;
 
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +19,7 @@ public class McpDocsToolsTest {
     public void testDescribeModule() {
         for (final String id : new String[]{"source/bigquery", "transform/select", "sink/spanner", "sink/localH2"}) {
             final McpSchema.CallToolResult result = describeModuleTool.sync(
-                    null, new McpSchema.CallToolRequest("read-docs", Map.of("module", id)));
+                    null, Tool.request("read-docs", Map.of("module", id)));
             Assertions.assertFalse(result.isError(), id + " -> " + text(result));
             Assertions.assertFalse(text(result).isBlank(), id);
         }
@@ -29,7 +29,7 @@ public class McpDocsToolsTest {
     public void testDescribeModuleInvalidId() {
         for (final String id : new String[]{"bigquery", "failure/pubsub", "source/../../secret", ""}) {
             final McpSchema.CallToolResult result = describeModuleTool.sync(
-                    null, new McpSchema.CallToolRequest("read-docs", Map.of("module", id)));
+                    null, Tool.request("read-docs", Map.of("module", id)));
             Assertions.assertTrue(result.isError(), id + " -> " + text(result));
         }
     }
@@ -37,7 +37,7 @@ public class McpDocsToolsTest {
     @Test
     public void testDescribeModuleNotFound() {
         final McpSchema.CallToolResult result = describeModuleTool.sync(
-                null, new McpSchema.CallToolRequest("read-docs", Map.of("module", "source/nosuchmodule")));
+                null, Tool.request("read-docs", Map.of("module", "source/nosuchmodule")));
         Assertions.assertTrue(result.isError());
         Assertions.assertTrue(text(result).contains("Not found module"), text(result));
     }
@@ -52,7 +52,7 @@ public class McpDocsToolsTest {
                 "module/common/filter.md",
                 "module/failure/pubsub.md"}) {
             final McpSchema.CallToolResult result = readDocsTool.sync(
-                    null, new McpSchema.CallToolRequest("read-docs", Map.of("path", path)));
+                    null, Tool.request("read-docs", Map.of("path", path)));
             Assertions.assertFalse(result.isError(), path + " -> " + text(result));
             Assertions.assertFalse(text(result).isBlank(), path);
         }
@@ -62,7 +62,7 @@ public class McpDocsToolsTest {
     public void testReadDocsRejectsInvalidPath() {
         for (final String path : new String[]{"../secrets.md", "module/index.yaml", ""}) {
             final McpSchema.CallToolResult result = readDocsTool.sync(
-                    null, new McpSchema.CallToolRequest("read-docs", Map.of("path", path)));
+                    null, Tool.request("read-docs", Map.of("path", path)));
             Assertions.assertTrue(result.isError(), path + " -> " + text(result));
         }
     }
@@ -70,7 +70,7 @@ public class McpDocsToolsTest {
     @Test
     public void testReadDocsNotFound() {
         final McpSchema.CallToolResult result = readDocsTool.sync(
-                null, new McpSchema.CallToolRequest("read-docs", Map.of("path", "no-such-doc.md")));
+                null, Tool.request("read-docs", Map.of("path", "no-such-doc.md")));
         Assertions.assertTrue(result.isError());
         Assertions.assertTrue(text(result).contains("Document not found"), text(result));
     }

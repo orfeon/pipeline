@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.code.CodeRepository;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 
@@ -44,18 +44,15 @@ public class ResolveStackTraceTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object stackTrace = request.arguments().get("stackTrace");
         if (stackTrace == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("resolve-stack-trace mcp tool requires stackTrace parameter")
-                    .isError(true)
-                    .build();
+            return Tool.result("resolve-stack-trace mcp tool requires stackTrace parameter", true);
         }
         final String result = CodeRepository.resolveStackTrace(stackTrace.toString());
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        return Tool.result(result, false);
     }
 
 }

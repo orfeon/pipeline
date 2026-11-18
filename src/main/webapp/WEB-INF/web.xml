@@ -43,7 +43,7 @@
 
     <servlet>
         <servlet-name>MPipelineMcpServer</servlet-name>
-        <servlet-class>com.mercari.solution.server.PipelineMcpStreamableServer</servlet-class>
+        <servlet-class>com.mercari.solution.server.PipelineMcpServer</servlet-class>
         <async-supported>true</async-supported>
     </servlet>
 

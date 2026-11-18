@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.job.JobReader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /** Cloud Logging entries of a job (Dataflow workers / launcher, or a Cloud Run Job execution). */
@@ -70,11 +70,11 @@ public class GetJobLogsTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
         final String job = GetJobTool.optionalString(request, "job");
         if (job == null) {
-            return McpSchema.CallToolResult.builder().addTextContent("get-job-logs mcp tool requires job parameter").isError(true).build();
+            return Tool.result("get-job-logs mcp tool requires job parameter", true);
         }
         final String result = JobReader.getJobLogs(job,
                 GetJobTool.optionalString(request, "runner"),
@@ -83,7 +83,7 @@ public class GetJobLogsTool implements Tool {
                 GetJobTool.optionalString(request, "minSeverity"),
                 GetJobTool.optionalInt(request, "limit"),
                 GetJobTool.optionalString(request, "contains"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
+        return Tool.result(result, result.startsWith("ERROR"));
     }
 
 }
