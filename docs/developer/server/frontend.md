@@ -469,7 +469,7 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 #agent-chat-messages, #agent-chat-input, #agent-mention (completion popup)
 #agent-pending: #agent-pending-summary, #agent-pending-modules, #btn-agent-accept, #btn-agent-reject
 #agent-context, #agent-context-name, #btn-agent-context-clear
-#btn-agent-send, #btn-agent-clear, #btn-agent-undo, #btn-agent-close
+#btn-agent-send, #btn-agent-clear, #btn-agent-undo
 
 ```
 
