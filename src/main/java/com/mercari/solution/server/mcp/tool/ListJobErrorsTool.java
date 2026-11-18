@@ -1,8 +1,8 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.mercari.solution.server.job.JobReader;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 /** Deduplicated error picture of a job, whatever the runner. */
@@ -57,19 +57,19 @@ public class ListJobErrorsTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
         // 'jobIdOrName' kept as an alias of 'job' for older clients
         final String job = GetJobTool.optionalString(request, "job") != null
                 ? GetJobTool.optionalString(request, "job") : GetJobTool.optionalString(request, "jobIdOrName");
         if (job == null) {
-            return McpSchema.CallToolResult.builder().addTextContent("list-job-errors mcp tool requires job parameter").isError(true).build();
+            return Tool.result("list-job-errors mcp tool requires job parameter", true);
         }
         final String result = JobReader.listJobErrors(job,
                 GetJobTool.optionalString(request, "runner"),
                 GetJobTool.optionalString(request, "project"),
                 GetJobTool.optionalString(request, "region"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
+        return Tool.result(result, result.startsWith("ERROR"));
     }
 
 }

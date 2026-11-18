@@ -4,8 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.server.api.SpecService;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.McpSchema;
 import jakarta.servlet.ServletContext;
 
 import java.util.List;
@@ -63,16 +63,13 @@ public class ListModulesTool implements Tool {
 
     @Override
     public McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request) {
 
         final Object typeValue = request.arguments().get("type");
         final String type = typeValue == null || typeValue.toString().isBlank() ? null : typeValue.toString().trim();
         if (type != null && !SECTIONS.containsKey(type)) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("Unknown module type: '" + type + "'. Specify one of " + SECTIONS.keySet() + ", or omit it to list every type.")
-                    .isError(true)
-                    .build();
+            return Tool.result("Unknown module type: '" + type + "'. Specify one of " + SECTIONS.keySet() + ", or omit it to list every type.", true);
         }
         final JsonObject modules = SpecService.ModuleIndex.getModules();
         final StringBuilder sb = new StringBuilder();
@@ -98,9 +95,9 @@ public class ListModulesTool implements Tool {
             sb.append('\n');
         }
         if (sb.isEmpty()) {
-            return McpSchema.CallToolResult.builder().addTextContent("No modules found" + (type == null ? "." : " for type '" + type + "'.")).isError(true).build();
+            return Tool.result("No modules found" + (type == null ? "." : " for type '" + type + "'."), true);
         }
-        return McpSchema.CallToolResult.builder().addTextContent(sb.toString()).isError(false).build();
+        return Tool.result(sb.toString(), false);
     }
 
     /** Kept for callers of the previous JSON-schema list ({@code /api/spec} serves the same data). */

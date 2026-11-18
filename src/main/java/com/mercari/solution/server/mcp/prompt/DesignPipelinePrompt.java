@@ -1,12 +1,13 @@
 package com.mercari.solution.server.mcp.prompt;
 
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.modern.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
 
 import java.util.List;
 
 @Prompt.Module(
     name="design-pipeline",
+    title="Design Pipeline",
     description= """
         support design data pipeline configuration.
         """
@@ -60,12 +61,14 @@ public class DesignPipelinePrompt implements Prompt {
     }
 
     public McpSchema.GetPromptResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.GetPromptRequest request) {
 
-        final McpSchema.Content content = new McpSchema.TextContent(PROMPT);
+        final McpSchema.Content content = McpSchema.TextContent.builder(PROMPT).build();
         final McpSchema.PromptMessage message = new McpSchema.PromptMessage(McpSchema.Role.ASSISTANT, content);
-        return new McpSchema.GetPromptResult("support design data pipeline configuration", List.of(message));
+        return McpSchema.GetPromptResult.builder(List.of(message))
+                .description("support design data pipeline configuration")
+                .build();
     }
 
 }

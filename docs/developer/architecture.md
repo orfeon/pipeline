@@ -149,8 +149,11 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
 
 - **REST API** — `PipelineApiServer` + `api/` services: `PipelineService`, `SchemaService`, `SpecService`,
   `LaunchService`, `ProbeService`, `AgentService` (validate config, infer schema, launch jobs).
-- **MCP** — `PipelineMcpStreamableServer` (Streamable HTTP at `/mcp`; `PipelineMcpSseServer` exists but is not
-  mapped) with `mcp/tool` (14 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
+- **MCP** — `PipelineMcpServer` (Streamable HTTP at `/mcp`, protocol 2026-07-28 only: the MCP Java SDK's
+  stateless `io.modelcontextprotocol.modern` server behind `HttpServletMcpTransport` — no handshake, no
+  sessions, `server/discover`, caching hints from `mcp/McpCaching`, streamed answers for
+  `@Tool.Module(longRunning = true)` tools; each catalog is a repository built by `Tool.repository` /
+  `Resources.repository` / `Prompt.repository`) with `mcp/tool` (14 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
   docs / source / validation / launch / job observation — user doc: `server/docs/deploy/mcp.md`),
   `mcp/resource` (`docs://` documents) and `mcp/prompt` (`design-pipeline`). `Tool.Registry` holds one
   instance per tool, shared with the agent. Runner-agnostic job observation lives in `server/job/`

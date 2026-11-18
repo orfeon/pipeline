@@ -6,13 +6,45 @@ Claude Desktop, ...) connected to it can read the module documentation, validate
 configs, launch them on Dataflow / Cloud Run, and follow and diagnose the jobs — the same loop the
 Pipeline Builder's built-in agent runs, exposed to any MCP host.
 
-- Endpoint: `https://<service>/mcp` (Streamable HTTP; `web.xml` maps `/mcp`).
-- Capabilities: 14 tools, the documentation tree as `docs://` resources, one prompt.
+- Endpoint: `https://<service>/mcp` (Streamable HTTP, protocol revision **2026-07-28**; `web.xml` maps `/mcp`).
+- Capabilities: 14 tools, the documentation tree as `docs://` resources (with a module URI template and
+  completions), one prompt.
 - The Pipeline Builder agent's tools are thin wrappers over the same implementations
   (`McpToolBridge`); an agent tool is the camelCase form of the MCP tool name (`run-pipeline` /
   `runPipeline`), so everything below applies to both.
 
+## Protocol
+
+The server speaks the 2026-07-28 revision of MCP only, which is **stateless**:
+
+- There is no `initialize` handshake and no session (`Mcp-Session-Id`). Every `POST /mcp` is a
+  self-contained request that carries the protocol version and the client's capabilities in
+  `params._meta`, so any instance of the service answers any request — no session affinity is needed
+  when Cloud Run scales out or restarts.
+- A client learns the capabilities and instructions with `server/discover`.
+- Requests carry `Mcp-Method` (and `Mcp-Name` for `tools/call`, `prompts/get`, `resources/read`) headers
+  that must agree with the body; a gateway in front of the service can route or authorize on them.
+- `GET` / `DELETE` on the endpoint answer `405`; there is no standalone server-to-client stream.
+- A client that still starts with `initialize` (protocol 2025-11-25 or older) is refused with error
+  `-32022` naming the supported version — it needs a client version that supports 2026-07-28.
+
+Caching hints (`ttlMs` / `cacheScope`): the tool, prompt and resource lists, `server/discover` (10
+minutes) and the documents themselves (1 hour) are published with scope `public` — they are bundled in
+the image, the same for every caller, and only change with a deployment. Tool results are never
+cacheable.
+
+Long-running tools (`run-pipeline`, `launch-pipeline`) answer over a response stream (`text/event-stream`):
+the connection is kept alive while they work, and a client that sent a `progressToken` gets a progress
+notification when the work starts.
+
+Browser-based clients: a request with an `Origin` header is rejected (`403`) unless the origin is listed
+in `MERCARI_PIPELINE_MCP_ALLOWED_ORIGINS` (comma-separated, e.g. `http://localhost:6274`; a port may be
+`*`). Requests without `Origin` — every non-browser client — always pass.
+
 ## Tools
+
+Tool arguments are validated against the tool's input schema before the tool runs; a mismatch comes
+back as a tool error (`isError`) the model can correct.
 
 Every tool returns text (JSON or Markdown) and carries MCP annotations: only `run-pipeline` and
 `launch-pipeline` are **not read-only** (clients may ask for confirmation before calling them); the
@@ -61,7 +93,10 @@ forces it. `project` / `region` default to the server's launch configuration.
 ## Resources and prompt
 
 - `docs://<path>` — every Markdown file of this documentation tree (`docs://module/transform/feature.md`,
-  `docs://deploy/mcp.md`, ...), for clients that browse resources rather than call tools.
+  `docs://deploy/mcp.md`, ...) as `text/markdown`, for clients that browse resources rather than call
+  tools. `resources/list` is in URI order, 100 per page.
+- resource template `docs://module/{type}/{name}.md` — a module's reference page; `completion/complete`
+  suggests the `type` values and, given a `type`, the module names.
 - prompt `design-pipeline` — instructions for designing a config from a requirement, pointing at the
   module resources and at `run-pipeline` for validation.
 
@@ -97,6 +132,9 @@ forces it. `project` / `region` default to the server's launch configuration.
    relaunching.
 
 ## Connecting a client
+
+The client must support MCP 2026-07-28 (see [Protocol](#protocol)); the same holds for a stdio bridge
+such as `mcp-remote` — use versions that implement that revision.
 
 The service is deployed with `--no-allow-unauthenticated`, so every request needs a Google identity
 token. Three ways:

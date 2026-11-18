@@ -1,9 +1,14 @@
 package com.mercari.solution.server.mcp.tool;
 
 import com.google.common.reflect.ClassPath;
-import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
-import io.modelcontextprotocol.spec.McpSchema;
+import com.mercari.solution.server.mcp.McpCaching;
+import io.modelcontextprotocol.modern.McpException;
+import io.modelcontextprotocol.modern.McpSchema;
+import io.modelcontextprotocol.modern.server.McpRequestContext;
+import io.modelcontextprotocol.modern.server.McpSyncResponse;
+import io.modelcontextprotocol.modern.server.feature.McpSyncTool;
+import io.modelcontextprotocol.modern.server.feature.McpSyncToolRepository;
+import io.modelcontextprotocol.modern.server.feature.ToolsPage;
 import jakarta.servlet.ServletContext;
 
 import java.io.IOException;
@@ -31,11 +36,55 @@ public interface Tool {
         boolean idempotent() default true;
         /** Interacts with systems outside the server (cloud APIs, launched jobs). */
         boolean openWorld() default false;
+        /**
+         * May run for minutes (a local pipeline run, a launch that waits for completion). Such a tool answers
+         * over a response stream: the transport keeps the connection alive while it works and a client that
+         * sent a progress token is told when the work starts.
+         */
+        boolean longRunning() default false;
     }
 
+    /**
+     * The tool's work. {@code ctx} is the MCP request context (protocol version, client capabilities,
+     * transport context); it is null when the in-server agent calls the tool through {@code McpToolBridge}.
+     */
     McpSchema.CallToolResult sync(
-            final McpSyncServerExchange exchange,
+            final McpRequestContext ctx,
             final McpSchema.CallToolRequest request);
+
+    /**
+     * How the MCP server answers {@code tools/call}: a plain result, or for a {@link Module#longRunning()}
+     * tool a streamed one. The protocol is stateless (2026-07-28): every call is self-contained, so a tool
+     * that needs more input from the user overrides this and returns an
+     * {@link McpSchema.InputRequiredResult} instead of calling back into the client.
+     */
+    default McpSyncResponse<McpSchema.CallToolOutcome> call(
+            final McpRequestContext ctx,
+            final McpSchema.CallToolRequest request) {
+
+        final Module properties = getClass().getAnnotation(Module.class);
+        if (properties == null || !properties.longRunning()) {
+            return McpSyncResponse.result(sync(ctx, request));
+        }
+        return McpSyncResponse.streaming(notifier -> {
+            notifier.progress(0, null, properties.name() + " started");
+            return sync(ctx, request);
+        });
+    }
+
+    /** A text result (every tool returns its JSON / Markdown as text content). */
+    static McpSchema.CallToolResult result(final String text, final boolean isError) {
+        return McpSchema.CallToolResult.builder()
+                .addContent(McpSchema.TextContent.builder(text == null ? "" : text).build())
+                .isError(isError)
+                .build();
+    }
+
+    static McpSchema.CallToolRequest request(final String name, final java.util.Map<String, Object> arguments) {
+        return McpSchema.CallToolRequest.builder(name)
+                .arguments(arguments == null ? java.util.Map.of() : arguments)
+                .build();
+    }
 
     void init(ServletContext servletContext);
 
@@ -106,18 +155,35 @@ public interface Tool {
                 .collect(Collectors.toList());
     }
 
-    /** The MCP server's tool specifications: the shared registry instances, initialised with the servlet context. */
-    static List<McpServerFeatures.SyncToolSpecification> syncTools(ServletContext servletContext) {
-        final List<McpServerFeatures.SyncToolSpecification> specifications = new java.util.ArrayList<>();
+    /**
+     * The MCP server's tool catalog: the shared registry instances, initialised with the servlet context.
+     * The catalog is fixed for the life of the server, so the list is one page in name order and
+     * cacheable by anyone ({@link McpCaching}).
+     */
+    static McpSyncToolRepository repository(final ServletContext servletContext) {
+        final java.util.Map<String, McpSyncTool> tools = new java.util.TreeMap<>();
         for (final java.util.Map.Entry<String, Tool> e : Registry.INSTANCES.entrySet()) {
             Registry.initialize(e.getKey(), e.getValue(), servletContext);
-            final Module properties = e.getValue().getClass().getAnnotation(Module.class);
-            specifications.add(McpServerFeatures.SyncToolSpecification.builder()
-                    .tool(toolSchema(properties))
-                    .callHandler(e.getValue()::sync)
-                    .build());
+            final Tool tool = e.getValue();
+            final Module properties = tool.getClass().getAnnotation(Module.class);
+            tools.put(e.getKey(), McpSyncTool.of(toolSchema(properties), (ctx, request) -> tool.call(
+                    ctx, request.arguments() != null ? request : request(request.name(), null))));
         }
-        return specifications;
+        final List<McpSchema.Tool> definitions = tools.values().stream().map(McpSyncTool::definition).toList();
+        return new McpSyncToolRepository() {
+            @Override
+            public ToolsPage list(final McpRequestContext ctx, final String cursor) {
+                if (cursor != null) {
+                    throw McpException.invalidParams("Unknown cursor: " + cursor);
+                }
+                return new ToolsPage(definitions, null, McpCaching.CATALOG_TTL_MS, McpSchema.CacheScope.PUBLIC);
+            }
+
+            @Override
+            public McpSyncTool find(final McpRequestContext ctx, final String name) {
+                return tools.get(name);
+            }
+        };
     }
 
     /**
@@ -130,11 +196,10 @@ public interface Tool {
         // outputSchema is deliberately NOT published: with an output schema the SDK requires every result to
         // carry structuredContent (validated against it) and turns a text-only result into an error. The
         // tools return their JSON as text content; the annotation's outputSchema documents that shape.
-        return McpSchema.Tool.builder()
-                .name(properties.name())
+        // The input schema IS enforced: the SDK validates a call's arguments against it before the handler runs.
+        return McpSchema.Tool.builder(properties.name(), schemaMap(properties.name(), "inputSchema", properties.inputSchema()))
                 .title(properties.title())
                 .description(properties.description())
-                .inputSchema(schemaMap(properties.name(), "inputSchema", properties.inputSchema()))
                 .annotations(McpSchema.ToolAnnotations.builder()
                         .title(properties.title())
                         .readOnlyHint(properties.readOnly())

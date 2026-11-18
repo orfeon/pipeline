@@ -3,8 +3,8 @@ package com.mercari.solution.server.mcp;
 import com.google.common.reflect.ClassPath;
 import com.mercari.solution.server.mcp.resource.DocsResources;
 import com.mercari.solution.server.mcp.tool.Tool;
-import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.spec.McpSchema;
+import com.mercari.solution.server.mcp.resource.Resources;
+import io.modelcontextprotocol.modern.McpSchema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -53,7 +53,7 @@ public class McpServerDefinitionsTest {
                     Assertions.assertTrue(props.containsKey(String.valueOf(r)), properties.name() + " requires undeclared parameter " + r);
                 }
             }
-            // the same check McpServer.build() runs (through the JSON provider on the classpath)
+            // the validator ToolsFeature checks every call against (through the JSON provider on the classpath)
             final io.modelcontextprotocol.json.schema.JsonSchemaValidator validator = java.util.ServiceLoader
                     .load(io.modelcontextprotocol.json.schema.JsonSchemaValidatorSupplier.class)
                     .findFirst().orElseThrow(() -> new AssertionError("no JsonSchemaValidatorSupplier on the classpath")).get();
@@ -65,9 +65,9 @@ public class McpServerDefinitionsTest {
 
     @Test
     public void testDocsResourcesHaveNames() throws IOException {
-        final List<McpServerFeatures.SyncResourceSpecification> resources = new DocsResources().sync(null);
+        final List<Resources.Entry> resources = new DocsResources().sync(null);
         Assertions.assertTrue(resources.size() > 20, "docs resources: " + resources.size());
-        for (final McpServerFeatures.SyncResourceSpecification r : resources) {
+        for (final Resources.Entry r : resources) {
             Assertions.assertNotNull(r.resource().name(), r.resource().uri());
             Assertions.assertFalse(r.resource().name().isBlank(), r.resource().uri());
             Assertions.assertTrue(r.resource().uri().startsWith("docs://"), r.resource().uri());
