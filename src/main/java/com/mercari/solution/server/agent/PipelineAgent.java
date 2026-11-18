@@ -69,8 +69,25 @@ public interface PipelineAgent {
         }
 
         final List<Map<String, Object>> newMessages = AgentHistory.toJson(newResponseMessages);
+        if (!endsWithAnswer(newResponseMessages)) {
+            // e.g. Gemini's MALFORMED_RESPONSE for a history it cannot continue: tell the user
+            // instead of returning nothing (the UI would silently show no reply)
+            newMessages.add(Map.of(
+                    "role", "assistant",
+                    "content", new Gson().toJson(Map.of("message", EMPTY_ANSWER_MESSAGE))));
+        }
 
         return new Gson().toJson(newMessages);
+    }
+
+    String EMPTY_ANSWER_MESSAGE = "The model returned an empty answer. This can happen when a conversation "
+            + "started with an earlier version or another model is continued. Please clear the conversation and try again.";
+
+    /** Whether the new messages end with a model answer that has text. */
+    static boolean endsWithAnswer(final List<ChatMessage> newResponseMessages) {
+        return !newResponseMessages.isEmpty()
+                && newResponseMessages.getLast() instanceof AiMessage aiMessage
+                && aiMessage.text() != null && !aiMessage.text().isBlank();
     }
 
     private static String getCanvasConfig(final JsonObject body) {

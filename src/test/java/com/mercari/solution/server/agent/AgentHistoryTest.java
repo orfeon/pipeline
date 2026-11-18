@@ -139,4 +139,17 @@ public class AgentHistoryTest {
         Assertions.assertEquals("thanks", ((UserMessage) restored.get(5)).singleText());
     }
 
+    @Test
+    public void testUnknownRoleIsSkipped() {
+        final JsonArray history = JsonParser.parseString("""
+                [
+                  {"role": "system", "content": "ignored"},
+                  {"role": "user", "content": "build it"}
+                ]
+                """).getAsJsonArray();
+        final List<ChatMessage> restored = AgentHistory.toMessages(history);
+        Assertions.assertEquals(1, restored.size());
+        Assertions.assertEquals("build it", ((UserMessage) restored.get(0)).singleText());
+    }
+
 }

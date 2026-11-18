@@ -72,25 +72,18 @@ final class AgentHistory {
                     i = end;
                 }
                 case "tool" -> {
-                    final ToolExecutionRequest request;
-                    if (hasToolCall(msg)) {
-                        final JsonObject toolCall = msg.getAsJsonObject("toolCall");
-                        request = ToolExecutionRequest.builder()
-                                .id(getString(toolCall, "id").orElseGet(() -> UUID.randomUUID().toString()))
-                                .name(getString(toolCall, "name").orElse("unknown"))
-                                .arguments("")
-                                .build();
-                    } else {
-                        // Fallback: create a tool result with a dummy request
-                        request = ToolExecutionRequest.builder()
-                                .id(UUID.randomUUID().toString())
-                                .name("unknown")
-                                .arguments("")
-                                .build();
-                    }
+                    // a result without toolCall still becomes a tool result, of a dummy request
+                    final JsonObject toolCall = hasToolCall(msg) ? msg.getAsJsonObject("toolCall") : new JsonObject();
+                    final ToolExecutionRequest request = ToolExecutionRequest.builder()
+                            .id(getString(toolCall, "id").orElseGet(() -> UUID.randomUUID().toString()))
+                            .name(getString(toolCall, "name").orElse("unknown"))
+                            .arguments("")
+                            .build();
                     messages.add(ToolExecutionResultMessage.from(request, content));
                 }
-                default -> messages.add(null);
+                // a message of any other role is not part of the conversation: a null entry would
+                // fail later, in the chat memory or the model request
+                default -> {}
             }
         }
         return messages;

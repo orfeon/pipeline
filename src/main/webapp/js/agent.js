@@ -265,19 +265,21 @@ function agentRenderMessages() {
             container.appendChild(agentCreateMessageEl('user', msg.content));
             i++;
         } else if (msg.role === 'assistant' && msg.toolCall) {
-            // Collect consecutive tool call + tool result pairs
-            const toolCalls = [];
+            // Collect the whole run of tool calls and tool results, then pair them
+            const calls = [];
+            const results = [];
             while (i < agentChatHistory.length) {
                 const curr = agentChatHistory[i];
                 if (curr.role === 'assistant' && curr.toolCall) {
-                    const toolResult = (i + 1 < agentChatHistory.length && agentChatHistory[i + 1].role === 'tool')
-                        ? agentChatHistory[i + 1] : null;
-                    toolCalls.push({ call: curr, result: toolResult });
-                    i += toolResult ? 2 : 1;
+                    calls.push(curr);
+                } else if (curr.role === 'tool') {
+                    results.push(curr);
                 } else {
                     break;
                 }
+                i++;
             }
+            const toolCalls = agentPairToolCalls(calls, results);
             container.appendChild(agentCreateToolGroupEl(toolCalls));
         } else if (msg.role === 'assistant') {
             container.appendChild(agentCreateAssistantMessageEl(agentParseAssistantContent(msg.content)));
@@ -290,6 +292,38 @@ function agentRenderMessages() {
 
     // Scroll to bottom
     container.scrollTop = container.scrollHeight;
+}
+
+/**
+ * Pairs tool calls with their results. A model turn may issue several (parallel) tool calls, in
+ * which case the history lists all the calls first and then all the results, so a result is matched
+ * by toolCall.id; calls / results without a matching id are paired in order.
+ */
+function agentPairToolCalls(calls, results) {
+    const used = results.map(function() { return false; });
+    const pairs = calls.map(function(call) {
+        const id = call.toolCall && call.toolCall.id;
+        let result = null;
+        if (id) {
+            for (let r = 0; r < results.length; r++) {
+                if (!used[r] && results[r].toolCall && results[r].toolCall.id === id) {
+                    used[r] = true;
+                    result = results[r];
+                    break;
+                }
+            }
+        }
+        return { call: call, result: result };
+    });
+    pairs.forEach(function(pair) {
+        if (pair.result) return;
+        const r = used.indexOf(false);
+        if (r >= 0) {
+            used[r] = true;
+            pair.result = results[r];
+        }
+    });
+    return pairs;
 }
 
 function agentCreateMessageEl(role, content) {

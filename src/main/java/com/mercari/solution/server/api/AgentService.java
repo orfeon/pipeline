@@ -48,6 +48,9 @@ public class AgentService {
             final GoogleGenAiChatModel.Builder builder = GoogleGenAiChatModel.builder()
                     .googleCredentials(credentials)
                     .logRequestsAndResponses(!debugLog.isEmpty())
+                    // also hand back the thought signature of a text part (see AgentHistory); the
+                    // signatures of tool calls are sent regardless
+                    .sendThinking(true)
                     .projectId(project)
                     .location(location)
                     .modelName(modelName);
