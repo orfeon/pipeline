@@ -6926,7 +6926,18 @@ public final class FeaturePlanCompiler {
         }
         // no column at all (every block failed to expand): a schema cannot be empty, and the builder's bare exception
         // would replace the diagnostics that say why — the plan is returned without a schema for them to be read
-        if (fields.isEmpty()) return null;
+        if (fields.isEmpty()) {
+            // ... and when nothing else failed, the projection dropped every column: a step that only passes its input
+            // through is not what the spec meant, and must not compile silently
+            if (!diagnostics.hasErrors()) {
+                diagnostics.error("output.empty", "output", "the spec emits no feature column: "
+                        + (spec.output.include != null ? "output.include selects none of the columns the features expand to"
+                        : !spec.output.exclude.isEmpty() ? "output.exclude drops every column the features expand to"
+                        : "the features expand to no column")
+                        + "; the output would be the input rows alone");
+            }
+            return null;
+        }
         final Schema.Builder builder = Schema.builder();
         fields.forEach(builder::withField);
         return builder.build();

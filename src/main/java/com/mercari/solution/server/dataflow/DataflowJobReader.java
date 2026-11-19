@@ -67,8 +67,7 @@ public class DataflowJobReader {
                     result.append(config).append("\n");
                 }
                 result.append("```\n");
-            } else if (job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_QUEUED
-                    || job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_PENDING) {
+            } else if (DataflowUtil.isStarting(job.getCurrentState())) {
                 result.append("\n(the job has not started yet: its pipeline parameters, including the config, appear once it leaves the ")
                         .append(job.getCurrentState().name()).append(" state)\n");
             } else {

@@ -2996,6 +2996,8 @@ output:
   An `exclude` pattern that selects no emitted column is a warning (`output.exclude.unmatched`) — the
   patterns are exact names, `<block>.*` or selectors, so `dm.*__distribution` matches nothing while
   `dm.*` or the full column name does.
+  A projection that leaves no feature column at all — `include` selecting none of the expanded columns, or `exclude`
+  dropping every one — is an error (`output.empty`): the output would be the input rows alone.
   A URI is read at assembly and its content hash recorded, so a file that changes later is still traceable.
   Several files combine as `include: {from: [gs://.../passed_decision.json, gs://.../passed_final.json], mode: union}`
   — `union` (the default) keeps every name of any file in first-appearance order, `intersection` the first

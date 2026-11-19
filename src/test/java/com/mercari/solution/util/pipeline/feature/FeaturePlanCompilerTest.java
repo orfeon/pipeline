@@ -824,6 +824,17 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(plan, "output.exclude.unmatched"), plan::describe);
     }
 
+    /** A projection that drops every column is an error, not a plan that passes its input through. */
+    @Test
+    public void testExcludeEveryColumn() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("prefix: f_", "prefix: f_\n  exclude: [\"scope:row\", \"scope:context\", \"scope:sequence\", \"scope:population\"]"));
+        Assertions.assertTrue(plan.getEmittedColumns().isEmpty(), plan::describe);
+        Assertions.assertNull(plan.getOutputSchema());
+        final List<String> errors = plan.getDiagnostics().getMessages().stream()
+                .filter(d -> d.level() == Diagnostics.Level.error).map(Diagnostics.Message::code).toList();
+        Assertions.assertEquals(List.of("output.empty"), errors, plan::describe);
+    }
+
     /** A pattern that selects nothing (a glob / regex the syntax does not have, a misspelling) is reported, per pattern. */
     @Test
     public void testExcludeUnmatchedPattern() {

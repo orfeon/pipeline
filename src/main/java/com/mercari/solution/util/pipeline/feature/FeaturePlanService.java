@@ -289,6 +289,15 @@ public final class FeaturePlanService {
      * pipeline config with a {@code transforms[].module == feature} step selected by {@code name}.
      */
     public static JsonObject validate(final JsonObject rawRequest) {
+        return validate(rawRequest, null);
+    }
+
+    /**
+     * {@code templateArgs}: the template arguments of an assembled step ({@code Module.getTemplateArgs()}), added to
+     * the request's own {@code args} — the referenced documents ({@code sources}, {@code features}, ...) are then
+     * expanded with the values the transform itself expands them with.
+     */
+    public static JsonObject validate(final JsonObject rawRequest, final Map<String, String> templateArgs) {
         final JsonObject response = new JsonObject();
         // same ${args.*} substitution as Config.load (request.args / system.args), so references such as
         // sources: gs://${args.bucket}/sources.yaml validate exactly as they run
@@ -337,6 +346,9 @@ public final class FeaturePlanService {
             for (final Map.Entry<String, JsonElement> e : request.getAsJsonObject("args").entrySet()) {
                 args.put(e.getKey(), e.getValue().isJsonPrimitive() ? e.getValue().getAsString() : e.getValue().toString());
             }
+        }
+        if (templateArgs != null) {
+            args.putAll(templateArgs);
         }
         final Schema inputSchema = parseInputSchema(request.get("inputSchema"));
         try {

@@ -29,6 +29,24 @@ public class FailureUtilTest {
     }
 
     @Test
+    public void testRootCauseMessageOfGoogleApiError() {
+        // what a rejected BigQuery query really throws: the message is the status line, the URL and the JSON body
+        final com.google.api.client.googleapis.json.GoogleJsonError details = new com.google.api.client.googleapis.json.GoogleJsonError();
+        details.setCode(400);
+        details.setMessage("Unrecognized name: d at [3:7]");
+        final com.google.api.client.googleapis.json.GoogleJsonResponseException rejected =
+                new com.google.api.client.googleapis.json.GoogleJsonResponseException(
+                        new com.google.api.client.http.HttpResponseException.Builder(400, "Bad Request", new com.google.api.client.http.HttpHeaders())
+                                .setMessage("400 Bad Request\nPOST https://bigquery.googleapis.com/bigquery/v2/projects/project/jobs\n{\n  \"code\": 400,\n  \"message\": \"Unrecognized name: d at [3:7]\"\n}"),
+                        details);
+        final RuntimeException failure = new RuntimeException("Failed to dry run query: " + QUERY + ", for projectId: project", rejected);
+        Assertions.assertEquals("GoogleJsonResponseException: Unrecognized name: d at [3:7] (HTTP 400)", FailureUtil.rootCauseMessage(failure));
+        // the whole response stays in the chain
+        final JsonObject error = FailureUtil.errorJson(failure);
+        Assertions.assertTrue(error.getAsJsonArray("causes").get(1).getAsString().contains("POST https://bigquery.googleapis.com"));
+    }
+
+    @Test
     public void testErrorJsonSeparatesReasonContextAndStackTrace() {
         final JsonObject error = FailureUtil.errorJson(queryFailure());
         // the reason alone, first

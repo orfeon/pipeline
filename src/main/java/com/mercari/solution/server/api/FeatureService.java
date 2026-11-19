@@ -93,7 +93,9 @@ public class FeatureService {
             if (!schemas.isEmpty()) {
                 request.add("inputSchema", com.mercari.solution.util.pipeline.Union.createUnionSchema(schemas).toJsonObject());
             }
-            final JsonObject result = FeaturePlanService.validate(request);
+            // with the step's own template arguments: a referenced sources / features document that uses them must
+            // expand here as it did in the assembly, or a config that assembled would be reported as a failed dry run
+            final JsonObject result = FeaturePlanService.validate(request, step.getArgs());
             final JsonObject plan = new JsonObject();
             plan.addProperty("name", step.getName());
             plan.addProperty("ok", result.has("ok") && result.get("ok").getAsBoolean());

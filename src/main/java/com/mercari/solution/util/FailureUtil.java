@@ -252,8 +252,22 @@ public class FailureUtil {
         if(said == null) {
             return root.toString();
         }
-        return said.getClass().getSimpleName() + ": " + said.getMessage().strip()
+        return said.getClass().getSimpleName() + ": " + reasonText(said)
                 + (said == root ? "" : " (caused by " + root.getClass().getName() + ")");
+    }
+
+    /**
+     * What an exception says, as the reason: its message — except for a Google API error, whose message is the
+     * status line, the request URL and the whole JSON error body over many lines (it stays in {@code causes}):
+     * the body's own {@code message} is the reason.
+     */
+    private static String reasonText(final Throwable t) {
+        if(t instanceof com.google.api.client.googleapis.json.GoogleJsonResponseException g
+                && g.getDetails() != null
+                && g.getDetails().getMessage() != null && !g.getDetails().getMessage().isBlank()) {
+            return g.getDetails().getMessage().strip() + " (HTTP " + g.getStatusCode() + ")";
+        }
+        return t.getMessage().strip();
     }
 
     /**

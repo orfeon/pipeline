@@ -115,6 +115,37 @@ public class RunPipelineToolTest {
     }
 
     @Test
+    public void testDryRunExpandsReferencedDocumentsWithTemplateArgs() {
+        // a sources document referenced from the step (here as data:) that uses a template argument: the plan report
+        // must expand it with the step's arguments as the assembly does, not fail a config that assembled
+        final String sources = """
+                sources:
+                  - name: listings
+                    eventTime: ${time_field}
+                    availability: atEventTime
+                    fields:
+                      - {name: session_id, type: string}
+                      - {name: seller_id, type: string}
+                      - {name: start_price, type: float64}
+                """;
+        final String reference = "data:" + java.util.Base64.getEncoder()
+                .encodeToString(sources.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        // the step's inline sources (parameters.sources ... up to lineage) replaced by the reference
+        final int from = CONFIG.indexOf("      sources:\n");
+        final int to = CONFIG.indexOf("      lineage:\n");
+        Assertions.assertTrue(from > 0 && to > from, CONFIG);
+        final String config = "system:\n  args:\n    time_field: session_time\n"
+                + CONFIG.substring(0, from) + "      sources: \"" + reference + "\"\n" + CONFIG.substring(to);
+        final McpSchema.CallToolResult result = new RunPipelineTool().sync(null,
+                Tool.request("run-pipeline", Map.of("config", config, "dryRun", true, "args", Map.of("prefix", "f_"))));
+        Assertions.assertFalse(result.isError(), text(result));
+        final JsonObject json = JsonParser.parseString(text(result)).getAsJsonObject();
+        Assertions.assertEquals("ok", json.get("status").getAsString());
+        final JsonObject plan = json.getAsJsonArray("featurePlans").get(0).getAsJsonObject();
+        Assertions.assertTrue(plan.get("ok").getAsBoolean(), plan::toString);
+    }
+
+    @Test
     public void testDryRunReportsErrors() {
         final String broken = CONFIG.replace("fields: [start_price]", "fields: [missing_field]");
         final McpSchema.CallToolResult result = new RunPipelineTool().sync(null,
