@@ -165,7 +165,8 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
   capability, agent names = camelCase of the MCP names.
 
 `src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the MCP
-`read-docs` tool (and the agent's `readDocs` wrapper) reads `module/<type>/<name>.md` from the classpath,
+`read-docs` tool (and the agent's `readDocs` wrapper) reads `module/<type>/<name>.md` from the classpath
+(a document over 30,000 characters by its outline and then by section — `DocSections` cuts any `.md` at its headings),
 `module/index.yaml` is the module catalog behind `list-modules` and the Builder UI, and MCP `DocsResources`
 exposes the files as `docs://` resources (read from the same classpath tree). All user-facing docs (config reference,
 `options/`, `deploy/`, `exec/`) live in this tree; `docs/` in the repo root keeps only developer docs.
