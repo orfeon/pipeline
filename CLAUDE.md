@@ -238,6 +238,9 @@ classpath) by the AI agent, MCP server, and Pipeline Builder UI:
 
 When adding or updating user-facing/module documentation, **write it here**. Keep files
 self-contained (parameters, examples) — the agent reads one file per module.
+A document over 30,000 characters is read by outline and then by section (`read-docs` `section`), cut at its
+headings: keep one level-1 heading per file, and no more than 30,000 characters of text under any heading before
+the next one — split longer text with sub-headings (`DocSectionsTest#testBundledDocuments` checks both).
 
 ### Developer docs — `docs/`
 
