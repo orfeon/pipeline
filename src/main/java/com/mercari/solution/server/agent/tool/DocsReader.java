@@ -36,14 +36,21 @@ public class DocsReader {
         config's system block) and options/README.md (pipeline options, with per-runner pages
         options/dataflow.md, options/direct.md, options/prism.md, options/flink.md, options/spark.md,
         options/portable.md, options/gcp.md, options/aws.md, options/beamsql.md). Use listModules first to discover module names.
+        A large document (over 30,000 characters) is not returned whole: the answer is its introduction and its
+        outline (every section with its id and size). Read what you need with `section` (one id, or several
+        separated by commas; a section comes with its subsections) instead of asking for the whole text;
+        `outline: true` returns the outline of any document, `full: true` the whole text whatever its size.
     """)
     public String readDocs(
             @P(name = "module", description = "Module id '{type}/{name}', e.g. 'source/bigquery' (alternative to path).", required = false) String module,
-            @P(name = "path", description = "Document path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md'.", required = false) String path) {
+            @P(name = "path", description = "Document path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md'.", required = false) String path,
+            @P(name = "section", description = "Section id(s) from the document's outline, comma separated for several. Returns those sections only.", required = false) String section,
+            @P(name = "outline", description = "true: return the outline (sections with id and size) instead of the text.", required = false) Boolean outline,
+            @P(name = "full", description = "true: return the whole text even when the document is large.", required = false) Boolean full) {
         if ((module == null || module.isBlank()) && (path == null || path.isBlank())) {
             return "ERROR: pass module ('{type}/{name}', e.g. 'transform/feature') or path (e.g. 'module/common/filter.md').";
         }
-        return McpToolBridge.call("read-docs", McpToolBridge.args("module", module, "path", path));
+        return McpToolBridge.call("read-docs", McpToolBridge.args("module", module, "path", path, "section", section, "outline", outline, "full", full));
     }
 
     public static DocsReader create() {

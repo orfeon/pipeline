@@ -127,6 +127,47 @@ public class PipelineMcpServerTest {
                 error("tools/call", Map.of("name", "no-such-tool", "arguments", Map.of()), true).code());
     }
 
+    /** read-docs over the wire: the outline / section / full arguments pass the published input schema. */
+    @Test
+    public void testReadDocsBySection() {
+        final Map<String, Object> tool = map(((List<?>) result("tools/list", Map.of()).get("tools")).stream()
+                .filter(t -> "read-docs".equals(map(t).get("name"))).findFirst().orElseThrow());
+        Assertions.assertTrue(map(map(tool.get("inputSchema")).get("properties")).keySet()
+                .containsAll(List.of("module", "path", "section", "outline", "full")), tool.toString());
+
+        // a large reference: its introduction and outline, not the whole text
+        final Map<String, Object> plain = result("tools/call", Map.of("name", "read-docs", "arguments", Map.of("module", "transform/feature")));
+        Assertions.assertNotEquals(Boolean.TRUE, plain.get("isError"), text(plain));
+        Assertions.assertTrue(text(plain).contains("## Outline") && text(plain).contains("id: `sources-contract`"), text(plain));
+        Assertions.assertTrue(text(plain).length() < 30_000, String.valueOf(text(plain).length()));
+
+        final Map<String, Object> section = result("tools/call", Map.of("name", "read-docs",
+                "arguments", Map.of("module", "transform/feature", "section", "sources-contract,availability-check")));
+        Assertions.assertNotEquals(Boolean.TRUE, section.get("isError"), text(section));
+        Assertions.assertTrue(text(section).startsWith("### Sources contract") && text(section).contains("### Availability check"), text(section));
+
+        final Map<String, Object> outline = result("tools/call", Map.of("name", "read-docs",
+                "arguments", Map.of("path", "module/common/filter.md", "outline", true)));
+        Assertions.assertNotEquals(Boolean.TRUE, outline.get("isError"), text(outline));
+        Assertions.assertTrue(text(outline).contains("## Outline"), text(outline));
+
+        final Map<String, Object> full = result("tools/call", Map.of("name", "read-docs",
+                "arguments", Map.of("module", "transform/feature", "full", true)));
+        Assertions.assertTrue(text(full).length() > 200_000, String.valueOf(text(full).length()));
+
+        // an unknown section is a tool error that carries the outline
+        final Map<String, Object> missing = result("tools/call", Map.of("name", "read-docs",
+                "arguments", Map.of("module", "transform/feature", "section", "nosuch")));
+        Assertions.assertEquals(Boolean.TRUE, missing.get("isError"));
+        Assertions.assertTrue(text(missing).contains("id: `sources-contract`"), text(missing));
+
+        // the flags are booleans on the wire
+        final Map<String, Object> invalid = result("tools/call", Map.of("name", "read-docs",
+                "arguments", Map.of("module", "transform/feature", "full", "yes")));
+        Assertions.assertEquals(Boolean.TRUE, invalid.get("isError"));
+        Assertions.assertTrue(text(invalid).startsWith("Invalid arguments"), text(invalid));
+    }
+
     @Test
     public void testLongRunningToolStreams() {
         final Map<String, Object> meta = new LinkedHashMap<>(meta());

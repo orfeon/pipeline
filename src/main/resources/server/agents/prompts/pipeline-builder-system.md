@@ -183,6 +183,11 @@ parameters with types / defaults / constraints, output schema, behavioral detail
 document by `path` (shared parameter docs such as `module/common/filter.md`, `system.md`, `options/*.md`).
 Follow links in module docs by reading the linked path.
 
+A large document (over 30,000 characters, e.g. `transform/feature`, `transform/select`, `transform/query`) is not
+returned whole: the answer is its introduction and its outline — every section with its id and size. Read the
+sections you need with `section` (one id, or several separated by commas; a section comes with its subsections)
+rather than asking for everything with `full: true`. `outline: true` returns the outline of any document.
+
 ### listModules
 
 List available module documentation by type.

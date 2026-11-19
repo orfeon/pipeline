@@ -60,7 +60,7 @@ launch and job tools are marked open-world (they talk to Google Cloud APIs).
 | tool | agent name | arguments | what it returns |
 |---|---|---|---|
 | `list-modules` | `listModules` | `type?` (source / transform / sink / action) | the module catalog (`module/index.yaml`): one line per module with description and tags |
-| `read-docs` | `readDocs` | `module` (`{type}/{name}`, e.g. `transform/feature`) **or** `path` (e.g. `module/common/filter.md`, `system.md`) | a module's full reference (parameters, examples) or any bundled document |
+| `read-docs` | `readDocs` | `module` (`{type}/{name}`, e.g. `transform/feature`) **or** `path` (e.g. `module/common/filter.md`, `system.md`); `section?` (ids from the outline, comma separated), `outline?`, `full?` | a module's reference (parameters, examples) or any bundled document: whole while it is small, otherwise its introduction and outline, then section by section (see below) |
 | `search-code` | `searchCode` | `pattern`, `pathFilter?` | regex search over the framework's Java sources (`path:line: text`) |
 | `read-source` | `readSource` | `path`, `startLine?`, `endLine?` | a slice of a source file with line numbers (500 lines max per call) |
 | `find-module-source` | `findModuleSource` | `type`, `name` | the class implementing a module |
@@ -68,6 +68,21 @@ launch and job tools are marked open-world (they talk to Google Cloud APIs).
 | `upgrade-config` | — | `config` | a config rewritten from deprecated schema notations |
 
 The source tools read `MERCARI_PIPELINE_SOURCES_PATH` (or `WEB-INF/sources` in the image).
+
+**Reading a large document.** Some references are long (`transform/feature` is about 300,000 characters), so
+`read-docs` does not return a document over 30,000 characters whole:
+
+1. A plain read (`module` or `path` alone) answers with the document's introduction and its **outline**: every
+   section with its heading, its id and its size. A document under the limit is returned whole, as before.
+2. Read what you need with `section`: one id, or several separated by commas. A section comes with its
+   subsections. The id is the heading as a slug (`### Sources contract` is `sources-contract`); when two headings
+   of a document share a slug, the id carries the parent (`parameters/examples`). The heading text is accepted too.
+   A name that matches nothing is answered with the outline.
+3. A section that is itself over the limit answers the same way one level down: its own text and the outline
+   of its subsections.
+
+`outline: true` returns the outline of any document (or, with `section`, of that section) without its text;
+`full: true` returns the whole text whatever its size.
 
 ### Validation and execution
 
@@ -136,7 +151,8 @@ appear once the job is `JOB_STATE_RUNNING`.
 
 **Design and validate a config**
 
-1. `list-modules` (optionally per type) → `read-docs module=<type>/<name>` for the modules you will use
+1. `list-modules` (optionally per type) → `read-docs module=<type>/<name>` for the modules you will use; a large
+   reference answers with its outline — read the sections you need with `section`
    (shared parameter docs such as `module/common/filter.md` by `path`).
 2. Write the config; `run-pipeline` with `dryRun: true`. Fix every error; read the diagnostics and,
    for a `feature` transform, the `featurePlans` report (availability status of each column, stages and

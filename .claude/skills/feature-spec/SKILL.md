@@ -8,7 +8,8 @@ description: Authoring, validating and running Mercari Pipeline `module: feature
 This skill is **self-contained** and meant to be copied into a project that *uses* the pipeline
 (`.claude/skills/feature-spec/` in that repository). It needs no access to the pipeline's source
 code. The full parameter reference is the module's own documentation, readable at run time through
-the pipeline server: MCP tool `read-docs` with `path: module/transform/feature.md` (also
+the pipeline server: MCP tool `read-docs` with `path: module/transform/feature.md` — the document is large, so
+the answer is its introduction and outline; read the sections you need with `section: <id>` (also
 `module/common/filter.md` for the predicate grammar, `options/dataflow.md` for Dataflow options) or
 the MCP resource `docs://module/transform/feature.md`; on GitHub it is
 `src/main/resources/server/docs/module/transform/feature.md` of the pipeline repository.
