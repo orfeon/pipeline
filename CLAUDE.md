@@ -270,6 +270,8 @@ self-contained (parameters, examples) — the agent reads one file per module.
   `mvn verify -DskipITs=false -Djib.skip=true` (single class: add `-Dit.test=SpannerIT`).
   Do NOT add a Maven profile for them — activating any profile deactivates the default dataflow profile.
 - CI: `.github/workflows/test.yml` runs `mvn test` on push/PR (JDK 21) and publishes the coverage summary/report.
+  The server's tests (`com.mercari.solution.server.**`) are compiled only under `-Pserver`: locally
+  `mvn test -Pserver -Djib.skip=true`, in CI the separate `server-test` job (server tests only).
 - Parameters that accept "text or local file path" must guard `Paths.get(text)` with try/catch —
   Windows throws `InvalidPathException` for strings with `\n`/`:` (see `Config.load`,
   `BeamSQLTransform.loadQuery`).
