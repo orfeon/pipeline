@@ -185,8 +185,12 @@ public class ReadDocsTool implements Tool {
             return Tool.result(sb.toString(), false);
         }
 
+        // a heading can hold commas itself ("### Periods, time window and leak flags"): the whole value as one
+        // heading first, a list of references otherwise
+        final String[] references = section.contains(",") && doc.findByHeading(section).size() == 1
+                ? new String[]{section} : section.split(",");
         final java.util.List<DocSections.Section> selected = new java.util.ArrayList<>();
-        for (final String reference : section.split(",")) {
+        for (final String reference : references) {
             if (reference.isBlank()) continue;
             final java.util.List<DocSections.Section> found = doc.find(reference);
             if (found.size() != 1) {
@@ -209,6 +213,12 @@ public class ReadDocsTool implements Tool {
         }
         final StringBuilder sb = new StringBuilder();
         for (final DocSections.Section s : selected) {
+            // a subsection of a section that is answered whole is already in the answer
+            boolean covered = false;
+            for (DocSections.Section p = s.parent(); p != null && !covered; p = p.parent()) {
+                covered = selected.contains(p) && !outline && (full || p.size() <= OUTLINE_THRESHOLD);
+            }
+            if (covered) continue;
             if (!sb.isEmpty()) sb.append("\n");
             final String heading = doc.body(s).lines().findFirst().orElse("");
             if (s.children().isEmpty() || !outline && (full || s.size() <= OUTLINE_THRESHOLD)) {

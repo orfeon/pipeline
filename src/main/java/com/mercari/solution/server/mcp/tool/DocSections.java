@@ -2,9 +2,11 @@ package com.mercari.solution.server.mcp.tool;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,8 +23,10 @@ import java.util.regex.Pattern;
  */
 public final class DocSections {
 
-    private static final Pattern HEADING = Pattern.compile("^(#{1,6})[ \\t]+(.+?)[ \\t]*#*[ \\t]*$");
-    private static final Pattern FENCE = Pattern.compile("^ {0,3}(```+|~~~+).*$");
+    // a closing run of #s is syntax only when a space precedes it: "## Notes ##" is "Notes", "## C#" is "C#"
+    private static final Pattern HEADING = Pattern.compile("^(#{1,6})[ \\t]+(.+?)(?:[ \\t]+#+)?[ \\t]*$");
+    private static final Pattern FENCE = Pattern.compile("^ {0,3}(`{3,}|~{3,})(.*)$");
+    private static final Pattern FRONT_MATTER_KEY = Pattern.compile("^[A-Za-z_][\\w-]*[ \\t]*:.*$");
 
     /** One section: its heading, where it sits, and its extent in the document text. */
     public static final class Section {
@@ -46,6 +50,8 @@ public final class DocSections {
         public String title() { return title; }
         public String id() { return id; }
         public List<Section> children() { return children; }
+        /** The section this one is a subsection of: the document root for a top-level section, null for the root. */
+        public Section parent() { return parent; }
         /** Characters of the section, its subsections included. */
         public int size() { return end - start; }
     }
@@ -65,7 +71,8 @@ public final class DocSections {
 
         Section current = root;
         boolean fenced = false;
-        String fence = null;
+        char fenceChar = 0;
+        int fenceLength = 0;
         boolean first = true;
         int offset = 0;
         final int bodyStart = Integer.parseInt(meta[2]);
@@ -75,15 +82,19 @@ public final class DocSections {
             final String line = text.substring(offset, lineEnd).replace("\r", "");
             if (offset >= bodyStart) {
                 final Matcher f = FENCE.matcher(line);
-                if (f.matches()) {
-                    final String marker = f.group(1).substring(0, 3);
-                    if (!fenced) {
-                        fenced = true;
-                        fence = marker;
-                    } else if (marker.equals(fence)) {
+                if (fenced) {
+                    // closed by a fence of the same character, at least as long, with nothing after it:
+                    // a shorter fence or one with an info string ("```yaml") is text of the block
+                    if (f.matches() && f.group(1).charAt(0) == fenceChar
+                            && f.group(1).length() >= fenceLength && f.group(2).isBlank()) {
                         fenced = false;
                     }
-                } else if (!fenced) {
+                } else if (f.matches() && (f.group(1).charAt(0) == '~' || f.group(2).indexOf('`') < 0)) {
+                    // (a backtick after the marker: inline code at the start of a line, not a fence)
+                    fenced = true;
+                    fenceChar = f.group(1).charAt(0);
+                    fenceLength = f.group(1).length();
+                } else {
                     final Matcher h = HEADING.matcher(line);
                     if (h.matches()) {
                         final int level = h.group(1).length();
@@ -129,7 +140,14 @@ public final class DocSections {
         if (!text.startsWith("---")) return meta;
         final int close = text.indexOf("\n---", 3);
         if (close < 0) return meta;
-        for (final String line : text.substring(3, close).split("\n")) {
+        final String[] lines = text.substring(3, close).split("\n");
+        // a document that opens with a horizontal rule has no front matter: the block has to start with a key
+        for (final String line : lines) {
+            if (line.isBlank()) continue;
+            if (!FRONT_MATTER_KEY.matcher(line.replace("\r", "")).matches()) return meta;
+            break;
+        }
+        for (final String line : lines) {
             final String l = line.replace("\r", "");
             if (l.startsWith("title:")) meta[0] = unquote(l.substring("title:".length()));
             if (l.startsWith("description:")) meta[1] = unquote(l.substring("description:".length()));
@@ -172,11 +190,13 @@ public final class DocSections {
     }
 
     private static void assignSlugs(final Section parent) {
-        final Map<String, Integer> seen = new HashMap<>();
+        final Set<String> used = new HashSet<>();
         for (final Section s : parent.children) {
             final String slug = slug(s.title);
-            final int n = seen.merge(slug, 1, Integer::sum);
-            s.slug = n == 1 ? slug : slug + "-" + n;
+            // the suffix skips what a sibling already has: "Foo", "Foo", "Foo 2" are foo, foo-2, foo-2-2
+            String unique = slug;
+            for (int n = 2; !used.add(unique); n++) unique = slug + "-" + n;
+            s.slug = unique;
             assignSlugs(s);
         }
     }
@@ -207,9 +227,19 @@ public final class DocSections {
         final String lower = ref.toLowerCase(Locale.ROOT);
         for (final Section s : sections) {
             final String path = path(s);
-            if (path.endsWith("/" + lower) || s.slug.equals(lower) || s.title.equalsIgnoreCase(ref) || s.slug.equals(slug(ref))) {
+            if (path.equals(lower) || path.endsWith("/" + lower) || s.slug.equals(lower) || s.title.equalsIgnoreCase(ref) || s.slug.equals(slug(ref))) {
                 matched.add(s);
             }
+        }
+        return matched;
+    }
+
+    /** The sections whose heading is this text (case-insensitive; a leading run of {@code #} is ignored). */
+    public List<Section> findByHeading(final String heading) {
+        final String ref = heading == null ? "" : heading.trim().replaceAll("^#+\\s*", "");
+        final List<Section> matched = new ArrayList<>();
+        for (final Section s : sections) {
+            if (s.title.equalsIgnoreCase(ref)) matched.add(s);
         }
         return matched;
     }

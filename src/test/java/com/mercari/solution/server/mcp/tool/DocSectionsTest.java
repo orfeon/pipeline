@@ -134,6 +134,62 @@ public class DocSectionsTest {
         Assertions.assertTrue(text(ReadDocsTool.read("sample.md", large, "windows-window", false, false)).contains(filler));
     }
 
+    /** Headings and references that are not what they look like at first sight. */
+    @Test
+    public void testHeadingEdges() {
+        final String edges = """
+                # Edges
+
+                ## Step
+                one
+
+                ## Step
+                two
+
+                ## Step 2
+                three
+
+                ## Using C#
+                sharp
+
+                ## Periods, time window and flags
+                periods
+
+                ````markdown
+                ```yaml
+                ## not a heading
+                ```
+                ````
+
+                ### Inner
+                inner
+                """;
+        final DocSections doc = DocSections.parse(edges);
+        // a generated suffix does not take the id of a sibling that really ends in one; a fence closes on one
+        // at least as long, so the shorter fence inside it and the heading it holds are text
+        Assertions.assertEquals(List.of("step", "step-2", "step-2-2", "using-c", "periods-time-window-and-flags", "inner"),
+                doc.sections().stream().map(DocSections.Section::id).toList());
+        Assertions.assertTrue(doc.content(doc.find("step-2-2").getFirst()).contains("three"));
+        // a trailing # is a closing sequence only after a space
+        Assertions.assertEquals("Using C#", doc.find("using-c").getFirst().title());
+        // a path is matched whatever its case, as a slug is
+        Assertions.assertEquals("inner", doc.find("Periods-Time-Window-And-Flags/Inner").getFirst().id());
+
+        // a heading that holds commas is one reference, not a list of them
+        final McpSchema.CallToolResult heading = ReadDocsTool.read("edges.md", edges, "Periods, time window and flags", false, false);
+        Assertions.assertFalse(heading.isError(), text(heading));
+        Assertions.assertTrue(text(heading).startsWith("## Periods, time window and flags"), text(heading));
+        // a section asked together with its subsection holds it once
+        final String both = text(ReadDocsTool.read("edges.md", edges, "periods-time-window-and-flags,inner,step", false, false));
+        Assertions.assertEquals(both.indexOf("### Inner"), both.lastIndexOf("### Inner"), both);
+        Assertions.assertTrue(both.contains("### Inner") && both.contains("one"), both);
+
+        // a document that opens with a horizontal rule has no front matter to skip
+        final DocSections ruled = DocSections.parse("---\n\n# Ruled\n\nIntroduction.\n\n---\n\n## First\ntext\n");
+        Assertions.assertEquals("Ruled", ruled.title());
+        Assertions.assertTrue(ruled.body(ruled.root()).contains("Introduction."), ruled.body(ruled.root()));
+    }
+
     /** Every bundled document: each section is addressable by its id, and the sections cover the text. */
     @Test
     public void testBundledDocuments() throws IOException {
