@@ -24,7 +24,8 @@ mvn clean package -DskipTests -Pdirect -Dimage="{region}-docker.pkg.dev/{project
 mvn clean package -DskipTests -Pserver -Dimage="{region}-docker.pkg.dev/{project}/{repo}/server"
 
 # Tests
-mvn test                                   # all tests
+mvn test                                   # all tests except the server's
+mvn test -Pserver -Djib.skip=true          # all tests, the server's included (see Testing Conventions)
 mvn test -Dtest=ConfigTest                 # single class
 mvn test -Dtest=ConfigTest#testMethodName  # single method
 ```
