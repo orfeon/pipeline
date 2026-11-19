@@ -104,7 +104,12 @@ public class LaunchPipelineTool implements Tool {
             return Tool.result(response.toString(), false);
         } catch (final Throwable e) {
             response.addProperty("status", "error");
-            response.addProperty("error", LaunchService.launchErrorMessage(e));
+            // the reason alone in 'error'; an unexpected failure's cause chain and stack trace in their own fields
+            final JsonObject error = LaunchService.launchError(e);
+            response.addProperty("error", error.get("message").getAsString());
+            for (final String key : new String[]{"name", "module", "causes", "stackTrace"}) {
+                if (error.has(key)) response.add(key, error.get(key));
+            }
             return Tool.result(response.toString(), true);
         }
     }

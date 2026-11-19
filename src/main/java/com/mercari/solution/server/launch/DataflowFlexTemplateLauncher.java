@@ -83,6 +83,8 @@ public class DataflowFlexTemplateLauncher implements Launcher {
                 .location(job.getLocation())
                 .createTime(Instant.ofEpochSecond(job.getCreateTime().getSeconds(), job.getCreateTime().getNanos()).toString())
                 .state(job.getCurrentState().name())
+                // a launch response carries JOB_STATE_UNKNOWN: say that it means "starting", not "lost"
+                .put("stateNote", DataflowUtil.isStarting(job.getCurrentState()) ? DataflowUtil.STARTING_NOTE : null)
                 .consoleUrl(DataflowUtil.consoleUrl(job))
                 .build();
     }

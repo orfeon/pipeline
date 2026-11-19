@@ -234,6 +234,90 @@ public class FailureUtil {
         return sb.toString();
     }
 
+    /**
+     * The reason of a failure in one line: the message of the root cause, which is what the caller has to act on
+     * (a wrapper's message is usually context — "Failed to dry run query: &lt;the whole query&gt;" — around it).
+     */
+    public static String rootCauseMessage(final Throwable e) {
+        // the deepest exception that says something: a root without a message (a bare rethrow) explains nothing
+        Throwable root = e;
+        Throwable said = null;
+        final java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for(Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            root = t;
+            if(t.getMessage() != null && !t.getMessage().isBlank()) {
+                said = t;
+            }
+        }
+        if(said == null) {
+            return root.toString();
+        }
+        return said.getClass().getSimpleName() + ": " + reasonText(said)
+                + (said == root ? "" : " (caused by " + root.getClass().getName() + ")");
+    }
+
+    /**
+     * What an exception says, as the reason: its message — except for a Google API error, whose message is the
+     * status line, the request URL and the whole JSON error body over many lines (it stays in {@code causes}):
+     * the body's own {@code message} is the reason.
+     */
+    private static String reasonText(final Throwable t) {
+        if(t instanceof com.google.api.client.googleapis.json.GoogleJsonResponseException g
+                && g.getDetails() != null
+                && g.getDetails().getMessage() != null && !g.getDetails().getMessage().isBlank()) {
+            return g.getDetails().getMessage().strip() + " (HTTP " + g.getStatusCode() + ")";
+        }
+        return t.getMessage().strip();
+    }
+
+    /**
+     * A failure as separate fields, the reason first: {@code message} (the root cause, see
+     * {@link #rootCauseMessage}), {@code causes} (the chain from the outermost exception to the root, one
+     * {@code Class: message} entry each — the context such as a query text lives here) and {@code stackTrace}.
+     * A reader that only needs to know what went wrong reads {@code message} and skips the rest.
+     */
+    public static JsonObject errorJson(final Throwable e) {
+        if(e instanceof com.mercari.solution.module.IllegalModuleException ime) {
+            return moduleErrorJson(ime);
+        }
+        return throwableJson(e);
+    }
+
+    /**
+     * A module's assembly failure: {@code name} / {@code module} of the step and {@code messages}. Validation
+     * messages are reported as they are; a failure raised by an exception (an API call of the module failing)
+     * is reported like {@link #errorJson}: its reason as the only message, {@code causes} and {@code stackTrace} apart.
+     */
+    private static JsonObject moduleErrorJson(final com.mercari.solution.module.IllegalModuleException e) {
+        final JsonObject error = e.getCause() == null ? new JsonObject() : throwableJson(e.getCause());
+        final com.google.gson.JsonArray messages = new com.google.gson.JsonArray();
+        if(e.getCause() == null) {
+            e.errorMessages.forEach(messages::add);
+            error.addProperty("message", String.join("\n", e.errorMessages));
+        } else {
+            messages.add(error.get("message").getAsString());
+        }
+        error.addProperty("name", e.name == null ? "" : e.name);
+        error.addProperty("module", e.module == null ? "pipeline" : e.module);
+        error.add("messages", messages);
+        return error;
+    }
+
+    private static JsonObject throwableJson(final Throwable e) {
+        final JsonObject error = new JsonObject();
+        error.addProperty("message", rootCauseMessage(e));
+        final com.google.gson.JsonArray causes = new com.google.gson.JsonArray();
+        final java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for(Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            causes.add(t.getMessage() == null ? t.getClass().getName() : t.getClass().getName() + ": " + t.getMessage());
+        }
+        error.add("causes", causes);
+        final java.io.StringWriter stackTrace = new java.io.StringWriter();
+        e.printStackTrace(new java.io.PrintWriter(stackTrace));
+        error.addProperty("stackTrace", stackTrace.toString());
+        return error;
+    }
+
     public static SerializableFunction<AvroWriteRequest<BadRecord>, GenericRecord> createAvroConverter(
             final String jobName, final String moduleName) {
         return request -> convertToAvro(request.getSchema(), request.getElement(), jobName, moduleName, Instant.now());

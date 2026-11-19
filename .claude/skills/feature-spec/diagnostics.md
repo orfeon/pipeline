@@ -78,6 +78,7 @@ not expand because another block failed).
 | `output.roles.baseline.notEmitted` | warning | the `baseline` role names a baseline, which is an intermediate column: derive it as a feature (`shareOfTotal`) and name that column |
 | `output.roles.time` | warning | the `time` role differs from `time.field` |
 | `output.include.unresolved` | error | `include` must be a list (a URI or `{from: [...], mode}` is resolved before compile; an unresolved form reached the compiler) |
+| `output.empty` | error | the spec emits no feature column: `include` selects none of the expanded columns, or `exclude` drops them all — the output would be the input rows alone. Narrow the patterns (the message says which side dropped them), or remove the step if no feature is wanted |
 | `output.include.empty` | error | `include` is an empty list (a screening step that passed nothing, or a broken file): remove `include` to emit every column, or list the columns to keep |
 | `output.include.unknown` | warning | listed names match no column of this plan (the list may come from another plan version) |
 | `output.include.exclude` | info | both declared: `include` is the projection, `exclude` is ignored |
@@ -243,7 +244,7 @@ not expand because another block failed).
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
-| `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
+| `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge`. One hint per block and reason, listing every such column of the block |
 | `sequence.rating.gaussian.units` | error | `method: gaussian` reads the outcome as a margin, so `sigma` (the spread of strengths) and `beta` (the noise of one outcome) are in the outcome's units and have no default: declare both (`sigma: 1, beta: 0.5` for a standardised margin; `mu` defaults to 0, a typical outcome otherwise) |
 | `sequence.rating.poisson.intercept` | hint | a `method: poisson` op without an `offset`: the rate `exp(attack − defence)` has no intercept, so at the prior every row expects a score of 1 whatever `mu` is — where a typical score is far from 1 (points, not goals), declare `offset: <column>` holding `ln` of the typical score (plus any home advantage), or a first match moves a rating by several log units in one step |
 | `sequence.fit` | error | a sequence block takes `fit: {artifact: ...}` only (a rating's state snapshot); `mode` and the other fit settings belong to population blocks |

@@ -16,9 +16,17 @@ import jakarta.servlet.ServletContext;
         The dry run is the way to iterate on a config before launching it on Dataflow / Cloud Run
         (launch-pipeline): its response holds the resolved output schema of every step ('spec.modules') and,
         for each feature transform, 'featurePlans' (the validate --expand report with stages, columns,
-        availability status, hot-key audit SQL and diagnostics).
+        availability status, hot-key audit SQL and diagnostics). That report is one text ('describe') by
+        default; featurePlanFormat 'json' returns it as structure instead ('plan': stages, columns,
+        diagnostics as {level, code, location, message}, audit) - use it to read columns or diagnostics by
+        program rather than parsing the text.
+        A dry run's 'status' is 'ok' only when the whole config assembled and every feature plan compiled
+        ('featurePlans[].ok'): launch only a config whose dry run is 'ok'. When a plan fails, 'status' is
+        'error', 'error.messages' lists the reasons per step, and 'featurePlans' / 'spec' are still returned.
         Results are returned in JSON format. If the pipeline definition has errors, the error content is
-        output in 'error' attribute. A real run returns the debug outputs in 'outputs' and 'metrics';
+        output in 'error' attribute: 'error.message' (and 'error.messages') is the reason, first; when an
+        API call failed, 'error.causes' holds the exception chain (with context such as the query text) and
+        'error.stackTrace' the stack trace. A real run returns the debug outputs in 'outputs' and 'metrics';
         it is meant for small local data, not for production-sized inputs.
         """,
     inputSchema = """
@@ -32,6 +40,11 @@ import jakarta.servlet.ServletContext;
             "dryRun": {
               "type": "boolean",
               "description": "Assemble and validate only (no execution). Default false."
+            },
+            "featurePlanFormat": {
+              "type": "string",
+              "enum": ["text", "json", "both"],
+              "description": "dryRun only: how each entry of 'featurePlans' reports the plan. 'text' (default): 'describe', the readable report. 'json': 'plan', the structured report (stages, columns, diagnostics, audit). 'both': both (the largest answer)."
             },
             "args": {
               "type": ["object", "string"],
@@ -55,7 +68,7 @@ import jakarta.servlet.ServletContext;
             },
             "featurePlans": {
               "type": "array",
-              "description": "dryRun only: per feature transform {name, ok, describe, engineErrors}"
+              "description": "dryRun only: per feature transform {name, ok, describe | plan (see featurePlanFormat), engineErrors}"
             },
             "outputs": {
               "type": "array",
@@ -88,7 +101,14 @@ public class RunPipelineTool implements Tool {
         final Object argsValue = request.arguments().get("args");
         final String args = argsValue == null ? null
                 : argsValue instanceof String s ? s : new com.google.gson.Gson().toJson(argsValue);
-        final PipelineService.RunResult result = PipelineService.run(config, args, dryRun);
+        final Object formatValue = request.arguments().get("featurePlanFormat");
+        final String featurePlanFormat = formatValue == null || formatValue.toString().isBlank() ? null : formatValue.toString();
+        if(featurePlanFormat != null && !com.mercari.solution.server.api.FeatureService.PLAN_FORMATS.contains(featurePlanFormat)) {
+            // the MCP server validates arguments against the schema; the in-server agent's bridge does not
+            return Tool.result("run-pipeline: unknown featurePlanFormat '" + featurePlanFormat + "' (available: "
+                    + com.mercari.solution.server.api.FeatureService.PLAN_FORMATS + ")", true);
+        }
+        final PipelineService.RunResult result = PipelineService.run(config, args, dryRun, featurePlanFormat);
         return Tool.result(result.responseText, result.isError);
     }
 

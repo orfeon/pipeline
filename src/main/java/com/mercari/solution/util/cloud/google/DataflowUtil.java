@@ -235,16 +235,36 @@ public class DataflowUtil {
         };
     }
 
+    /** What the states before RUNNING mean to someone who has just launched the job. */
+    public static final String STARTING_NOTE = "starting up: the launch was accepted and the job is being prepared "
+            + "(a Flex Template launcher builds the job graph first, usually about a minute); "
+            + "the state turns to JOB_STATE_RUNNING, and the job type is assigned, once it starts";
+
+    /** The states a job passes through between an accepted launch and RUNNING (UNKNOWN is what a launch response carries). */
+    public static boolean isStarting(final com.google.dataflow.v1beta3.JobState state) {
+        return state == com.google.dataflow.v1beta3.JobState.JOB_STATE_UNKNOWN
+                || state == com.google.dataflow.v1beta3.JobState.JOB_STATE_QUEUED
+                || state == com.google.dataflow.v1beta3.JobState.JOB_STATE_PENDING;
+    }
+
     public static String formatJob(final Job job) {
         final StringBuilder result = new StringBuilder();
         result.append("## Dataflow job ").append(job.getId()).append("\n");
         result.append("- name: ").append(job.getName()).append("\n");
         result.append("- project: ").append(job.getProjectId())
                 .append(", location: ").append(job.getLocation()).append("\n");
-        result.append("- type: ").append(job.getType().name()).append("\n");
+        final boolean starting = isStarting(job.getCurrentState());
+        result.append("- type: ").append(job.getType().name());
+        if(starting && job.getType() == com.google.dataflow.v1beta3.JobType.JOB_TYPE_UNKNOWN) {
+            result.append(" (not assigned yet)");
+        }
+        result.append("\n");
         result.append("- state: ").append(job.getCurrentState().name());
         if(job.hasCurrentStateTime()) {
             result.append(" (at ").append(toInstant(job.getCurrentStateTime())).append(")");
+        }
+        if(starting) {
+            result.append(" — ").append(STARTING_NOTE);
         }
         result.append("\n");
         if(job.hasCreateTime()) {

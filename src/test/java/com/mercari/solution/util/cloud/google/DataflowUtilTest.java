@@ -51,6 +51,20 @@ public class DataflowUtilTest {
     }
 
     @Test
+    public void testFormatJobMarksStartingStates() {
+        // what a job reports for the first minute after a launch reads as "starting", not as a lost job
+        final Job queued = createJob().toBuilder()
+                .setType(JobType.JOB_TYPE_UNKNOWN).setCurrentState(JobState.JOB_STATE_QUEUED).build();
+        final String result = DataflowUtil.formatJob(queued);
+        Assertions.assertTrue(result.contains("- type: JOB_TYPE_UNKNOWN (not assigned yet)"), result);
+        Assertions.assertTrue(result.contains("- state: JOB_STATE_QUEUED") && result.contains("starting up"), result);
+        Assertions.assertTrue(DataflowUtil.isStarting(JobState.JOB_STATE_UNKNOWN));
+        Assertions.assertTrue(DataflowUtil.isStarting(JobState.JOB_STATE_PENDING));
+        Assertions.assertFalse(DataflowUtil.isStarting(JobState.JOB_STATE_RUNNING));
+        Assertions.assertFalse(DataflowUtil.formatJob(createJob()).contains("starting up"));
+    }
+
+    @Test
     public void testFormatJobs() {
         final String result = DataflowUtil.formatJobs(List.of(createJob()));
         Assertions.assertTrue(result.contains("2026-07-17_22_25_11-1234567890123456789 | myjob | JOB_STATE_FAILED"), result);

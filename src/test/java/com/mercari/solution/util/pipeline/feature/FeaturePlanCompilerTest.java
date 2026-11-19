@@ -824,6 +824,17 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(plan, "output.exclude.unmatched"), plan::describe);
     }
 
+    /** A projection that drops every column is an error, not a plan that passes its input through. */
+    @Test
+    public void testExcludeEveryColumn() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("prefix: f_", "prefix: f_\n  exclude: [\"scope:row\", \"scope:context\", \"scope:sequence\", \"scope:population\"]"));
+        Assertions.assertTrue(plan.getEmittedColumns().isEmpty(), plan::describe);
+        Assertions.assertNull(plan.getOutputSchema());
+        final List<String> errors = plan.getDiagnostics().getMessages().stream()
+                .filter(d -> d.level() == Diagnostics.Level.error).map(Diagnostics.Message::code).toList();
+        Assertions.assertEquals(List.of("output.empty"), errors, plan::describe);
+    }
+
     /** A pattern that selects nothing (a glob / regex the syntax does not have, a misspelling) is reported, per pattern. */
     @Test
     public void testExcludeUnmatchedPattern() {
@@ -4338,8 +4349,11 @@ public class FeaturePlanCompilerTest {
         // the n5 window without a filter is bounded by maxEvents
         final List<String> unbounded = plan.getDiagnostics().getMessages().stream()
                 .filter(m -> m.code().equals("sequence.window.unbounded")).map(m -> m.message()).toList();
-        Assertions.assertEquals(2, unbounded.size(), plan::describe);
-        Assertions.assertTrue(unbounded.stream().allMatch(m -> m.contains("recent_n10_")), unbounded::toString);
+        // one hint for the block's columns that share the reason, naming each of them
+        Assertions.assertEquals(1, unbounded.size(), plan::describe);
+        Assertions.assertTrue(unbounded.getFirst().startsWith("2 columns keep every past row"), unbounded::toString);
+        Assertions.assertTrue(unbounded.getFirst().contains("recent_n10_top3") && unbounded.getFirst().contains("recent_n10_since_win"), unbounded::toString);
+        Assertions.assertFalse(unbounded.getFirst().contains("recent_n5_"), unbounded::toString);
         // the evaluator parses the rewritten text
         Assertions.assertDoesNotThrow(() -> com.mercari.solution.util.pipeline.Filter.parse(top3.getCoordinates().get("predicate")));
         // a condition that cannot be parsed even when quoted is a compile error, not a worker failure

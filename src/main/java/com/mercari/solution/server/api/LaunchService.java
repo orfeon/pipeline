@@ -1,6 +1,5 @@
 package com.mercari.solution.server.api;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
@@ -202,9 +201,18 @@ public class LaunchService {
         }
     }
 
-    /** The message a caller should show for a launch failure: user errors plainly, others with their cause chain. */
-    public static String launchErrorMessage(final Throwable e) {
-        return isUserError(e) ? userMessage(e) : FailureUtil.convertThrowableMessage(e);
+    /**
+     * A launch failure as fields, the reason first: {@code message} (a user error's plain message, a module's
+     * validation messages, or the root cause of anything unexpected) and, for the unexpected ones only,
+     * {@code causes} / {@code stackTrace} apart from it.
+     */
+    public static JsonObject launchError(final Throwable e) {
+        if(isUserError(e)) {
+            final JsonObject error = new JsonObject();
+            error.addProperty("message", userMessage(e));
+            return error;
+        }
+        return FailureUtil.errorJson(e);
     }
 
     /**
@@ -222,17 +230,14 @@ public class LaunchService {
         responseJson.addProperty("type", "launch");
         responseJson.addProperty("status", "error");
         responseJson.addProperty("millis", millis);
-        final JsonObject error = new JsonObject();
+        final JsonObject error = launchError(e);
         if(e instanceof IllegalModuleException ime) {
-            error.addProperty("name", ime.name == null ? "" : ime.name);
-            error.addProperty("module", ime.module == null ? module : ime.module);
-            final JsonArray messages = new JsonArray();
-            ime.errorMessages.forEach(messages::add);
-            error.add("messages", messages);
+            if(ime.module == null) {
+                error.addProperty("module", module);
+            }
         } else {
             error.addProperty("name", "");
             error.addProperty("module", module);
-            error.addProperty("message", isUserError(e) ? userMessage(e) : FailureUtil.convertThrowableMessage(e));
         }
         responseJson.add("error", error);
         return responseJson;
