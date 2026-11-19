@@ -6671,6 +6671,7 @@ public final class FeaturePlanCompiler {
         final List<OutputColumn> indicators = new ArrayList<>();
         final List<String> excludedRoles = new ArrayList<>();
         final Set<String> matchedExcludes = new HashSet<>();
+        final Map<List<String>, List<OutputColumn>> unbounded = new LinkedHashMap<>();   // (location, reason) → columns
         for (final OutputColumn c : columns) {
             if (!c.intermediate && spec.output.include == null) {
                 final List<String> matched = matchingExcludes(c);
@@ -6685,11 +6686,9 @@ public final class FeaturePlanCompiler {
             boolean lint = false;
             if (c.scope == FeatureSpec.Scope.sequence || (c.scope == FeatureSpec.Scope.population && !FitMode.isLookupToken(c.coordinates.get("fit")))) {
                 // S5: the keyed stage cannot trim the history of a key while such a column exists (worker memory)
+                // reported once per block and reason after the loop: a block's ops × fields would repeat the advice per column
                 final String reason = SequenceEvaluator.unboundedReason(c);
-                if (reason != null) {
-                    diagnostics.hint("sequence.window.unbounded", loc,
-                            c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
-                }
+                if (reason != null) unbounded.computeIfAbsent(List.of(loc, reason), k -> new ArrayList<>()).add(c);
             }
             // a column declared as the label, the training weight or the evaluation baseline (output.roles.label / weight /
             // baseline) is post-event by declaration, like a future window's: never a feature, read by the evaluation after
@@ -6758,6 +6757,21 @@ public final class FeaturePlanCompiler {
                 flag.placement = c.placement;
                 flag.coordinates.put("indicatorOf", c.coordinates.get("field"));
                 indicators.add(flag);
+            }
+        }
+        for (final Map.Entry<List<String>, List<OutputColumn>> e : unbounded.entrySet()) {
+            final List<OutputColumn> group = e.getValue();
+            final String reason = e.getKey().get(1);
+            if (group.size() == 1) {
+                final OutputColumn c = group.getFirst();
+                diagnostics.hint("sequence.window.unbounded", e.getKey().get(0),
+                        c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
+            } else {
+                final Set<String> fields = new LinkedHashSet<>();
+                for (final OutputColumn c : group) fields.addAll(c.pastInputs);
+                diagnostics.hint("sequence.window.unbounded", e.getKey().get(0),
+                        group.size() + " columns keep every past row of their key on the worker (" + reason + "): " + group.stream().map(c -> c.canonicalName).toList()
+                                + "; the retained row count is unbounded, with only their own fields " + fields + " kept that far back; give the window a maxAge to bound it");
             }
         }
         columns.addAll(indicators);
@@ -6905,11 +6919,16 @@ public final class FeaturePlanCompiler {
     }
 
     private Schema buildSchema() {
-        final Schema.Builder builder = Schema.builder();
+        final List<Schema.Field> fields = new ArrayList<>();
         for (final OutputColumn c : columns) {
             if (c.intermediate || c.fieldType == null) continue;
-            builder.withField(c.toField());
+            fields.add(c.toField());
         }
+        // no column at all (every block failed to expand): a schema cannot be empty, and the builder's bare exception
+        // would replace the diagnostics that say why — the plan is returned without a schema for them to be read
+        if (fields.isEmpty()) return null;
+        final Schema.Builder builder = Schema.builder();
+        fields.forEach(builder::withField);
         return builder.build();
     }
 

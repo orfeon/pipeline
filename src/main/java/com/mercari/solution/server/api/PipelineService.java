@@ -118,10 +118,9 @@ public class PipelineService {
             responseJson.addProperty("status", "error");
             responseJson.addProperty("millis", (endMillis - startMillis));
             {
-                final JsonObject error = new JsonObject();
+                final JsonObject error = FailureUtil.errorJson(e);
                 error.addProperty("name", "");
                 error.addProperty("module", "server");
-                error.addProperty("message", FailureUtil.convertThrowableMessage(e));
                 responseJson.add("error", error);
             }
             response.getWriter().println(responseJson);
@@ -133,6 +132,15 @@ public class PipelineService {
             final String configText,
             final String argsText,
             final boolean dryRun) {
+        return run(configText, argsText, dryRun, null);
+    }
+
+    /** {@code featurePlanFormat}: how a dry run reports the feature transforms' plans, see {@link FeatureService#describePlans}. */
+    public static RunResult run(
+            final String configText,
+            final String argsText,
+            final boolean dryRun,
+            final String featurePlanFormat) {
 
         String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
@@ -177,7 +185,7 @@ public class PipelineService {
                 responseJson.addProperty("metrics", metricsJson);
             } else {
                 // dry run: the feature transforms' validate --expand reports against the resolved input schemas
-                final JsonArray featurePlans = FeatureService.describePlans(config, outputs);
+                final JsonArray featurePlans = FeatureService.describePlans(config, outputs, featurePlanFormat);
                 if(featurePlans.size() > 0) {
                     responseJson.add("featurePlans", featurePlans);
                 }
@@ -185,8 +193,22 @@ public class PipelineService {
 
             final long endMillis = Instant.now().toEpochMilli();
 
-            responseJson.addProperty("status", "ok");
+            // a dry run is ok only when every feature plan is: a caller that reads the status alone must not
+            // launch a config one of whose plans did not compile
+            final List<String> planErrors = responseJson.has("featurePlans")
+                    ? FeatureService.planErrors(responseJson.getAsJsonArray("featurePlans")) : List.of();
+            responseJson.addProperty("status", planErrors.isEmpty() ? "ok" : "error");
             responseJson.addProperty("millis", (endMillis - startMillis));
+            if(!planErrors.isEmpty()) {
+                final JsonObject error = new JsonObject();
+                error.addProperty("message", String.join("\n", planErrors));
+                error.addProperty("name", "");
+                error.addProperty("module", "feature");
+                final JsonArray messages = new JsonArray();
+                planErrors.forEach(messages::add);
+                error.add("messages", messages);
+                responseJson.add("error", error);
+            }
 
             // deprecation warnings (schema-redesign.md Phase 5): surfaced in the validation
             // response, derived from the same analysis as the upgrade-config tool
@@ -212,23 +234,18 @@ public class PipelineService {
             specJson.add("modules", modulesArray);
             responseJson.add("spec", specJson);
 
+            if(!planErrors.isEmpty()) {
+                // the schemas and the plan reports stay in the answer: they are what the caller fixes the spec with
+                return RunResult.failure(configContent, responseJson.toString(), String.join(",", planErrors));
+            }
             return RunResult.succeed(configContent, responseJson.toString());
         } catch (final IllegalModuleException e) {
             final long endMillis = Instant.now().toEpochMilli();
             final JsonObject responseJson = new JsonObject();
             responseJson.addProperty("status", "error");
             responseJson.addProperty("millis", (endMillis - startMillis));
-            {
-                final JsonObject error = new JsonObject();
-                error.addProperty("name", e.name);
-                error.addProperty("module", e.module);
-                final JsonArray messages = new JsonArray();
-                for(final String message : e.errorMessages) {
-                    messages.add(message);
-                }
-                error.add("messages", messages);
-                responseJson.add("error", error);
-            }
+            // the reason first (error.message / messages); a failing API call's context and stack trace in error.causes / stackTrace
+            responseJson.add("error", FailureUtil.errorJson(e));
 
             return RunResult.failure(configContent, responseJson.toString(), String.join(",", e.errorMessages));
         } catch (final Throwable e) {
@@ -237,10 +254,9 @@ public class PipelineService {
             responseJson.addProperty("status", "error");
             responseJson.addProperty("millis", (endMillis - startMillis));
             {
-                final JsonObject error = new JsonObject();
+                final JsonObject error = FailureUtil.errorJson(e);
                 error.addProperty("name", "");
                 error.addProperty("module", "pipeline");
-                error.addProperty("message", FailureUtil.convertThrowableMessage(e));
                 responseJson.add("error", error);
             }
 

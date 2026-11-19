@@ -21,7 +21,15 @@ public class IllegalModuleException extends RuntimeException {
     }
 
     public IllegalModuleException(final String name, final String module, final Throwable e) {
-        this(name, module, List.of(convertThrowableMessage(e)));
+        this(name, module, List.of(convertThrowableMessage(e)), e);
+    }
+
+    /** With the failure that produced the messages kept as the cause, so a reporter can separate the reason from its stack trace. */
+    public IllegalModuleException(final String name, final String module, final List<String> errorMessages, final Throwable cause) {
+        this(name, module, errorMessages);
+        if(cause != null) {
+            initCause(cause);
+        }
     }
 
     public IllegalModuleException(final String name, final String module, final String errorMessage) {

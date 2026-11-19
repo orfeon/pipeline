@@ -71,6 +71,25 @@ public class PipelineMcpServerTest {
         Assertions.assertEquals(McpSchema.ErrorCodes.INVALID_PARAMS, error.code());
     }
 
+    /** What deploy/mcp.md lists as the body's required {@code _meta} keys for a hand-written client. */
+    @Test
+    public void testRequiredMetaKeys() {
+        for (final String key : List.of("io.modelcontextprotocol/protocolVersion", "io.modelcontextprotocol/clientCapabilities")) {
+            final McpTransportResponse.Error error = Assertions.assertInstanceOf(McpTransportResponse.Error.class, listToolsWithout(key), "without " + key);
+            Assertions.assertEquals(McpSchema.ErrorCodes.INVALID_PARAMS, error.response().error().code(), "without " + key);
+        }
+        // the client's name is optional
+        Assertions.assertInstanceOf(McpTransportResponse.Result.class, listToolsWithout("io.modelcontextprotocol/clientInfo"));
+    }
+
+    private static McpTransportResponse listToolsWithout(final String metaKey) {
+        final Map<String, Object> partial = new LinkedHashMap<>(meta());
+        partial.remove(metaKey);
+        return SERVER
+                .handleBlocking(McpTransportContext.EMPTY, new JsonRpc.JSONRPCRequest("2.0", "tools/list", "m-1", Map.of("_meta", partial)))
+                .block();
+    }
+
     @Test
     public void testToolsList() {
         final Map<String, Object> result = result("tools/list", Map.of());

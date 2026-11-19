@@ -39,6 +39,11 @@ public class DataflowJobReader {
     private static final int MAX_CONFIG_LENGTH = 8000;
 
     public static String getJob(final String jobIdOrName, final String projectArg, final String regionArg) {
+        return getJob(jobIdOrName, projectArg, regionArg, true);
+    }
+
+    /** {@code withConfig = false}: the status alone — what a caller polling for completion needs, without the config text each time. */
+    public static String getJob(final String jobIdOrName, final String projectArg, final String regionArg, final boolean withConfig) {
         try {
             final String project = resolveProject(projectArg);
             final String region = resolveRegion(regionArg);
@@ -49,6 +54,9 @@ public class DataflowJobReader {
 
             final StringBuilder result = new StringBuilder(DataflowUtil.formatJob(job));
             appendVersionSkewNote(result, job);
+            if (!withConfig) {
+                return result.toString();
+            }
 
             final String config = DataflowUtil.getPipelineOption(job, "config");
             if (config != null && !config.isBlank()) {

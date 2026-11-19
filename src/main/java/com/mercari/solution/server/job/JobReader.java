@@ -126,6 +126,18 @@ public final class JobReader {
     // ---- get-job ----
 
     public static String getJob(final String job, final String runnerArg, final String projectArg, final String regionArg, final Integer limit) {
+        return getJob(job, runnerArg, projectArg, regionArg, limit, null);
+    }
+
+    /**
+     * {@code view}: {@code status} leaves out the pipeline config a Dataflow job's answer otherwise ends with (the
+     * call to repeat while waiting for a job); {@code full} / null is the whole answer. A Cloud Run execution's
+     * answer is its status either way.
+     */
+    public static String getJob(final String job, final String runnerArg, final String projectArg, final String regionArg, final Integer limit, final String view) {
+        if (view != null && !"status".equals(view) && !"full".equals(view)) {
+            return "ERROR: unknown view '" + view + "' (available: full, status)";
+        }
         final Ref ref;
         try {
             ref = resolve(job, runnerArg, projectArg, regionArg);
@@ -133,7 +145,7 @@ public final class JobReader {
             return "ERROR: " + e.getMessage();
         }
         if (ref.runner() == Runner.dataflow) {
-            return DataflowJobReader.getJob(ref.id(), ref.project(), ref.region());
+            return DataflowJobReader.getJob(ref.id(), ref.project(), ref.region(), !"status".equals(view));
         }
         try {
             final CloudRunUtil cloudRun = CLOUD_RUN;

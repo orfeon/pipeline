@@ -24,6 +24,8 @@ The server speaks the 2026-07-28 revision of MCP only, which is **stateless**:
 - A client learns the capabilities and instructions with `server/discover`.
 - Requests carry `Mcp-Method` (and `Mcp-Name` for `tools/call`, `prompts/get`, `resources/read`) headers
   that must agree with the body; a gateway in front of the service can route or authorize on them.
+- The exact names a hand-written client needs are listed under
+  [Calling the endpoint directly](#calling-the-endpoint-directly-curl).
 - `GET` / `DELETE` on the endpoint answer `405`; there is no standalone server-to-client stream.
 - A client that still starts with `initialize` (protocol 2025-11-25 or older) is refused with error
   `-32022` naming the supported version — it needs a client version that supports 2026-07-28.
@@ -71,13 +73,35 @@ The source tools read `MERCARI_PIPELINE_SOURCES_PATH` (or `WEB-INF/sources` in t
 
 | tool | agent name | arguments | what it returns |
 |---|---|---|---|
-| `run-pipeline` | `runPipeline` | `config`, `dryRun?`, `args?` | **`dryRun: true`**: assembles the whole config (module validation, schema resolution, feature plan compilation against the real input schemas) and returns every step's resolved schema (`spec.modules`) plus `featurePlans` (the feature transforms' plans with stages, columns, availability status, hot-key audit SQL, diagnostics). **`dryRun: false`**: runs the pipeline inside the server with DirectRunner and returns `debug` sink outputs — for small test data only |
+| `run-pipeline` | `runPipeline` | `config`, `dryRun?`, `args?`, `featurePlanFormat?` (text / json / both) | **`dryRun: true`**: assembles the whole config (module validation, schema resolution, feature plan compilation against the real input schemas) and returns every step's resolved schema (`spec.modules`) plus `featurePlans` (the feature transforms' plans with stages, columns, availability status, hot-key audit SQL, diagnostics — as the text report `describe` by default, as the structured `plan` with `featurePlanFormat: json`). **`dryRun: false`**: runs the pipeline inside the server with DirectRunner and returns `debug` sink outputs — for small test data only |
 | `validate-feature` | `validateFeature` | `config` or `parameters`, `name?`, `inputSchema?`, `args?`, `format?` | a feature transform's `validate --expand` report without a full config |
 | `launch-pipeline` | `launchPipeline` | `config`, `runner` (dataflow / direct / prism / spark), `environment?`, `parameters?`, `args?` | submits the config — Dataflow Flex Template, a pre-created Cloud Run Job, a Cloud Run Worker Pool or Dataproc Serverless — and returns the job (`id`, `name`, `project`, `location`, `state`, `consoleUrl`). Launch parameters default from the config's `options`, then the server's `MERCARI_PIPELINE_LAUNCH_*` environment |
 
 Template arguments: the config refers to them as `${args.<name>}`; defaults come from the config's
 `args` / `system.args` block and `args` passed to the tool override them. A placeholder that is left
 without a value is refused before launching.
+
+Failures: `run-pipeline` answers `{"status": "error", "error": {...}}` with the reason first —
+`error.message` (and `error.messages`; `error.name` / `error.module` name the failing step). When the
+failure came from an exception (an API call of a module failing, e.g. a query the warehouse rejects),
+`error.message` is the root cause in one line, `error.causes` the exception chain from the outermost to
+the root (the context — such as the query text — is there) and `error.stackTrace` the stack trace.
+`launch-pipeline` puts the reason in `error` and, for an unexpected failure, `causes` / `stackTrace`
+next to it.
+
+A dry run is `status: ok` only when the whole config assembled **and** every feature plan compiled. If
+a plan is not ok (`featurePlans[].ok: false`), the answer is `status: error` (a tool error) with the
+reasons per step in `error.messages`, and still carries `featurePlans` (each failed entry with its
+`error` / `engineErrors` / `errors` — the error diagnostics) and `spec`. Reading `status` alone is
+therefore enough to decide whether a config may be launched.
+
+Structured feature plans: with `featurePlanFormat: json` each `featurePlans[]` entry carries `plan`
+instead of `describe` — `stages`, `columns` (name, type, status, availableAt, derivedFrom, ...),
+`diagnostics` (`{level, code, location, message}`), `audit` — the same object
+[`validate-feature`](#validation-and-execution) returns; `both` returns the two.
+
+A Dataflow launch returns `state: JOB_STATE_UNKNOWN` with a `stateNote`: the launch was accepted and
+the job is starting (see [Jobs](#jobs-dataflow-jobs-and-cloud-run-job-executions-alike)).
 
 ### Jobs (Dataflow jobs and Cloud Run Job executions alike)
 
@@ -87,11 +111,16 @@ forces it. `project` / `region` default to the server's launch configuration.
 
 | tool | agent name | what it returns |
 |---|---|---|
-| `get-job` | `getJob` | status; for Dataflow also the config the job was launched with; with `runner: direct` and no job, the latest executions of the configured Cloud Run Job |
+| `get-job` | `getJob` | status; for Dataflow also the config the job was launched with — `view: status` leaves the config out (the call to repeat while waiting); with `runner: direct` and no job, the latest executions of the configured Cloud Run Job |
 | `get-job-progress` | `getJobProgress` | why a Dataflow job is slow or not scaling: current / target workers with the autoscaler's decisions, the stage completion timeline with durations, the running fused stage (its transforms, the element counts of its inputs / outputs — few groups read but most rows already emitted means a tail of hot keys), and the feature plan's stages / keys mapped to the Dataflow stages |
 | `list-job-errors` | `listJobErrors` | the error picture: Dataflow error messages / execution conditions plus the deduplicated worker error logs (with stack traces) from Cloud Logging |
 | `get-job-logs` | `getJobLogs` | Cloud Logging entries of the job (`minSeverity`, `contains`, `limit`; latest first) — the INFO / WARNING context around an error, the feature plan report a job logs at startup, progress messages. Cloud Run container stdout carries severity DEFAULT, so for `runner: direct` any threshold below WARNING returns all lines (stderr maps to ERROR) |
 | `list-failed-jobs` | `listFailedJobs` | jobs that failed in the last `hours` (default 24): Dataflow jobs and the failed executions of the configured Cloud Run Job |
+
+For about a minute after a Flex Template launch a Dataflow job reports `JOB_STATE_UNKNOWN` (the launch
+response), then `JOB_STATE_QUEUED` / `JOB_STATE_PENDING` with type `JOB_TYPE_UNKNOWN`: the launcher is
+building the job graph. `get-job` marks these states as "starting up"; the config and the job type
+appear once the job is `JOB_STATE_RUNNING`.
 
 ## Resources and prompt
 
@@ -122,7 +151,7 @@ forces it. `project` / `region` default to the server's launch configuration.
    subset runs of pipelines with coarse-key stages such as `feature`, which DirectRunner crawls on),
    template arguments in `args`, sizing in `parameters`
    (`workerMachineType`, `numWorkers`, `maxNumWorkers`, `diskSizeGb`, `jobName`).
-2. `get-job` with the returned id / execution name until it finishes.
+2. `get-job` with the returned id / execution name until it finishes (`view: status` while polling).
 3. If it looks slow or stays on one worker: `get-job-progress`.
 
 **Diagnose a failure**
@@ -224,6 +253,51 @@ export MERCARI_PIPELINE_LAUNCH_DIRECT_JOB=<cloud run job>
 export MERCARI_PIPELINE_LAUNCH_PRISM_JOB=<cloud run job built from the prism image>   # optional
 mvn jetty:run -Pserver
 ```
+
+### Calling the endpoint directly (curl)
+
+Without an MCP client library, every `POST /mcp` must carry the following — the server reports only
+the first one that is missing, so send them all at once:
+
+| where | name | value |
+|---|---|---|
+| header | `Content-Type` | `application/json` |
+| header | `MCP-Protocol-Version` | `2026-07-28` — must equal the `_meta` protocol version |
+| header | `Mcp-Method` | the JSON-RPC `method` of the body (`tools/call`, `tools/list`, ...) |
+| header | `Mcp-Name` | only for `tools/call` / `prompts/get` (the `name` in `params`) and `resources/read` (the `uri`) |
+| body `params._meta` | `io.modelcontextprotocol/protocolVersion` | `"2026-07-28"` |
+| body `params._meta` | `io.modelcontextprotocol/clientCapabilities` | `{}` is enough |
+| body `params._meta` | `io.modelcontextprotocol/clientInfo` | optional: `{"name": "...", "version": "..."}` |
+
+A minimal tool call (through `gcloud run services proxy`, or the local server; against the service URL
+add `-H "Authorization: Bearer $(gcloud auth print-identity-token)"`):
+
+```sh
+curl -sS http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: list-modules' \
+  -d '{
+    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {
+      "name": "list-modules",
+      "arguments": {"type": "transform"},
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "curl", "version": "1"}
+      }
+    }
+  }'
+```
+
+The answer is a JSON-RPC response whose `result.content[0].text` is the tool's text (`result.isError`
+tells a tool failure from a success). `run-pipeline` and `launch-pipeline` answer as `text/event-stream`
+instead: read the `data:` lines and take the last message, which is the response. `tools/list` (header
+`Mcp-Method: tools/list`, no `Mcp-Name`, `params` holding only `_meta`) returns every tool with its
+input schema.
 
 ## Permissions and caveats
 

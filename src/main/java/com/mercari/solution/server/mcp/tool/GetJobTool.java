@@ -19,6 +19,9 @@ import jakarta.servlet.ServletContext;
         server has configured for that runner;
         returns state (RUNNING | SUCCEEDED | FAILED | CANCELLED), timings, task counts, conditions,
         log and console links. The runner is inferred from the reference; set 'runner' to force it.
+        While waiting for a job to finish, poll with view 'status': the answer is then the status alone,
+        without the config text. A Dataflow job reports JOB_STATE_UNKNOWN / QUEUED / PENDING (and type
+        JOB_TYPE_UNKNOWN) for about a minute after a launch: it is starting, not lost.
         """,
     inputSchema = """
         {
@@ -44,6 +47,11 @@ import jakarta.servlet.ServletContext;
             "limit": {
               "type": "integer",
               "description": "Cloud Run only: number of executions to list when no job is given (default 5)."
+            },
+            "view": {
+              "type": "string",
+              "enum": ["full", "status"],
+              "description": "'status': state, timing, SDK version and labels only — no pipeline config (use it when polling). 'full' (default): also the config a Dataflow job was launched with."
             }
           }
         }
@@ -69,7 +77,8 @@ public class GetJobTool implements Tool {
                 optionalString(request, "runner"),
                 optionalString(request, "project"),
                 optionalString(request, "region"),
-                optionalInt(request, "limit"));
+                optionalInt(request, "limit"),
+                optionalString(request, "view"));
         return Tool.result(result, result.startsWith("ERROR"));
     }
 

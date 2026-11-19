@@ -317,7 +317,7 @@ public class MPipeline {
                 executedModuleNames.add(moduleConfig.getName());
 
             } catch (final IllegalModuleException e) {
-                throw new IllegalModuleException(moduleConfig.getName(), moduleConfig.getModule(), e.errorMessages);
+                throw new IllegalModuleException(moduleConfig.getName(), moduleConfig.getModule(), e.errorMessages, e.getCause());
             } catch (final Throwable e) {
                 throw new IllegalModuleException(moduleConfig.getName(), moduleConfig.getModule(), e);
             }

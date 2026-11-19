@@ -19,8 +19,9 @@ public class JobTools {
             @P(name = "job", description = "Dataflow job id / exact job name, or a Cloud Run execution name; omit with runner 'direct' / 'prism' to list the latest executions.", required = false) String job,
             @P(name = "runner", description = "dataflow | direct | prism (default: inferred from the job reference)", required = false) String runner,
             @P(name = "project", description = "GCP project id. Defaults to the server's configured project.", required = false) String project,
-            @P(name = "region", description = "Region. Defaults to the server's configured region.", required = false) String region) {
-        return McpToolBridge.call("get-job", McpToolBridge.args("job", job, "runner", runner, "project", project, "region", region));
+            @P(name = "region", description = "Region. Defaults to the server's configured region.", required = false) String region,
+            @P(name = "view", description = "'status': the status alone, without the pipeline config (use it when checking a job repeatedly); 'full' (default)", required = false) String view) {
+        return McpToolBridge.call("get-job", McpToolBridge.args("job", job, "runner", runner, "project", project, "region", region, "view", view));
     }
 
     @Tool(name = "listJobErrors", value = """

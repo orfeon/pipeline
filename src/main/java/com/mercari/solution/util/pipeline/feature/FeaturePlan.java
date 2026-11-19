@@ -167,6 +167,7 @@ public class FeaturePlan implements Serializable {
         return columns.stream().filter(c -> !c.intermediate).toList();
     }
     public List<Stage> getStages() { return Collections.unmodifiableList(stages); }
+    /** Null when no column is emitted — a compile whose blocks all failed (the diagnostics say why). */
     public Schema getOutputSchema() { return outputSchema; }
     public Diagnostics getDiagnostics() { return diagnostics; }
     /** Canonical-form hash of the spec + sources (content address for fit artifacts / candidate identity). */
