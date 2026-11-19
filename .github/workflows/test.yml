@@ -60,6 +60,34 @@ jobs:
           path: target/surefire-reports/
           retention-days: 14
 
+  # The server (REST API / MCP / agent) is compiled only under the server profile, so the default-profile job
+  # above neither builds nor tests it. This job runs the server's own tests; the rest ran above.
+  server-test:
+    runs-on: ubuntu-latest
+    # a hung test would otherwise hold the runner for the 6 hour default
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # -Dtest replaces the pom's surefire <excludes>: a server test excluded there would still run here.
+      - name: Run server tests
+        run: mvn --batch-mode test -Pserver -Djib.skip=true -Djacoco.skip=true '-Dtest=com/mercari/solution/server/**'
+
+      - name: Upload surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-surefire-reports
+          path: target/surefire-reports/
+          retention-days: 14
+
   # The prism image bundles the prism release of beam.version, pinned by prism.zip.sha256: catch a
   # beam.version bump without the matching pin here rather than at the next image build.
   prism-binary-pin:
