@@ -225,6 +225,12 @@ public class DocSectionsTest {
                 Assertions.assertTrue(doc.body(s).length() <= ReadDocsTool.OUTLINE_THRESHOLD,
                         relative + ": section `" + s.id() + "` has " + doc.body(s).length() + " characters of its own text (limit "
                                 + ReadDocsTool.OUTLINE_THRESHOLD + "); split it with sub-headings");
+                // a section over the limit answers with that text and the outline of its subsections: within the limit too
+                if (!s.children().isEmpty() && s.size() > ReadDocsTool.OUTLINE_THRESHOLD) {
+                    final String part = text(ReadDocsTool.read(relative, content, s.id(), false, false));
+                    Assertions.assertTrue(part.length() <= ReadDocsTool.OUTLINE_THRESHOLD,
+                            relative + ": section `" + s.id() + "` answers with " + part.length() + " characters");
+                }
             }
             // what a plain read answers stays readable in one go
             final String answer = text(ReadDocsTool.read(relative, content, null, false, false));
