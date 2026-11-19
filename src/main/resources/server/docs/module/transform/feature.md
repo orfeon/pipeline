@@ -453,6 +453,8 @@ A **rating** is the entity's strength as its past *contests* tell it: every cont
 once, by how the result compares with what their ratings expected — so beating strong opponents counts for
 more than beating weak ones, which no per-entity aggregate of the outcome can express.
 
+#### Contests, methods and readouts (`context`, `method`, `tauPer`, `funcs`)
+
 - **`context`** names the contest (a `contexts[].name`): the rows of one group **sharing an event time** are
   one contest; **`field`** is its numeric outcome and **`order`** says which end is better — `ascending`
   (default: a rank or finishing position, smaller is better) or `descending` (a score, larger is better).
@@ -531,6 +533,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   sum and `sigma` the sum's uncertainty (never rated: both at the prior, the sum at twice it).
   Columns are `{block}_{window}_{field}_rating_{func}`,
   or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
+
+#### Snapshots, the strict past and the replay (`fit.artifact`)
+
 - **Serving from a snapshot (`fit.artifact` on the block).** A rating is a replay of every contest of its pool,
   so serving it from scratch means replaying the whole history for a handful of rows. With
   `fit: {artifact: {uri: gs://bucket/feature}}` on the block — the block's own setting: the top-level `fit.artifact`
@@ -569,6 +574,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
   a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
   applied in the order of their context key.
+
+#### Field size and the default parameters
+
 - **Field size decides what the uncertainty is worth.** The default parameters are the customary ones of these
   models, which come from games of a handful of players; in a large field both Bayesian updates still follow
   the paper to the letter, but behave differently. What one contest of `k` fresh players does to the winner's
@@ -604,6 +612,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   `1 − w · (1 − 1/k)` of their variance (`w = sigma² / (sigma² + beta²)`, 0.8 with `beta = sigma / 2`: `sigma` × 0.5
   at `k = 16`, × 0.63 at `k = 4`) and the winner's move is `w · (y − ȳ)` — the contest's spread, not the field
   size, sets it.
+
+#### Depth of a ranking (`top`, `depthScale`)
+
 - **Depth of a ranking (`top`, `depthScale`; `plackettLuce` only).** `plackettLuce` reads a contest as a sequence
   of choices — the first place out of everyone, the second out of the rest, … — and by default believes every one
   of them alike. Where the order behind the leaders is mostly noise (the contest is decided before those places
@@ -627,6 +638,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     fields still tells the stronger from the weaker; read less of it only where the lower places really are noise
     (a contest decided early, entries that stop competing or do not finish, a censored order). Compare the plain
     update with a few depths (the evaluation / screen transforms) rather than assuming the shallower one is safer.
+
+#### Per-row inputs (`offset`, `offsetUnits`, `tauBy`)
+
 - **Per-row inputs (`offset`, `tauBy`).** Two things a contest may know about a row beyond who it is:
   - **`offset: <column or baselines[].name>`** — a known shift of the row's performance, in the rating's units and
     signed like a strength (positive = expected to do better, whatever the `order`). The contest expects
@@ -671,6 +685,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
      tauBy: seller_tau,            # a row op: e.g. "seller_age_days < 90 ? 3 : 1"
      tau: 1, tauPer: P30D}
   ```
+
+#### Inconsistency and warm-up
+
 - **Inconsistency (no op of its own).** A rating keeps one `beta` for everyone; how erratic an entity is can be
   read with the existing ops as the spread of its **surprises** — the outcome against the rating's pre-contest
   expectation, in units of its own uncertainty, net of what the whole contest shared (the update itself only
@@ -717,6 +734,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   without a team) — which says how warm each pool got over the input (the state as the pool's last row read
   it: the contests the window shift still held back are not in it): a median of a few contests per player
   means the pool is still near its prior, and a team's member pools warm up at different speeds.
+
+#### Teams, components and shared members (`with`)
+
 - **Teams (`with`).** A rating gives the whole result of a row to the one entity it rates, so an entity that
   always appears in company — an agent selling for sellers, a driver in a car — is rated for the company it
   keeps: its rating is mostly theirs. `with` rates the row as a **team** instead, the block's entity together
@@ -903,6 +923,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
     condition's effect. To estimate the effect itself, fit it outside the rating (or let the downstream model read
     the condition next to the ratings) and, where the ratings should be net of it, pass the fixed coefficient times
     the condition as the `offset`.
+
+#### Rating diagnostics
+
 - Diagnostics: `sequence.rating.with` (a member that is no `entities[].name`, the block's own entity or a member
   name used twice — without a `name:` of its own —, a member named `team`, a weight that is not a numeric column, a
   shared member without a weight or under an entity's name, a member's unknown key or invalid prior, `elo` or `poisson` (attack and defence per player: no team), no `as`, `team` without `with`
@@ -1131,6 +1154,8 @@ availability lag, i.e. `fitBlock < block(eventTime + predictAt − lag)`. `fitBl
 artifact (`<planHash>/<block>.fm.avro` with the per-value counts + manifest with the fwfm `pairWeights` ranking) holds
 the whole-input model and is written and reused like the static encoding artifacts.
 
+#### Regularization (`als.reg`, `als.regScale`, `fields[].reg`)
+
 **Regularization (`als.reg`, `als.regScale`, `fields[].reg`).** Every parameter θ takes the step
 `θ += (g − λ θ) / (H + λ)`, where `H` is the curvature of the loss summed over the training rows that carry θ and λ is
 the ridge — an **absolute** amount added to that sum, not a per-row penalty as in the SGD implementations of
@@ -1169,6 +1194,8 @@ slope from it), so the factors collapse together at some λ — and below that t
 ridge with moderate `linear` keeps the main effects and only the part of the pairing that the data supports. Under
 `plackettLuce` / `softmax` the linear (when fitted) and factor ridge of every field must be > 0 (error
 `factorization.als`).
+
+#### Fit modes of a factorization (`fit.mode`)
 
 **`fit.mode`.** Under `static` (the default) every row reads the model fitted on the whole input — its own target
 included, so use it for serving and analysis, not for training rows (the plan says so, `fit.mode.static`). The two
@@ -1226,6 +1253,8 @@ means the same across folds. The fold rotation (k × k numbers, orientation only
 model, which read every fold's target; the outputs other than `embedding` never depend on it, and `fit.align: none`
 keeps the embeddings strictly out of fold (each fold then has its own orientation).
 
+#### Affinity of two sides and variance (`between`, `variance`)
+
 **`between`** — the affinity of two sides of the row, `Σ_{f ∈ left, g ∈ right} r_fg ⟨v_f, v_g⟩ u_f u_g` over the pairs
 whose both values the model knows (the sides are disjoint lists of the block's fields, each field once; the default
 name is `<name>_between`, so give a second one an `as`). Put an entity and its attributes
@@ -1280,6 +1309,8 @@ Cost and storage:
 - Info `factorization.outputs.variance`. On `embedding`, `count`, `fitBlock` or `trainRows`, `variance` is ignored
   with a warning (`factorization.outputs`).
 
+#### Numeric fields of a factorization
+
 **Numeric fields** — `{field: <name>, numeric: true, scale: zscore | none}` (a numeric type; an integer field is
 categorical unless declared so). A numeric field has **one** parameter set `(w, v)` instead of one per value, multiplied
 by the row's standardised value `u = (x − mean) / sd`: its main effect is a slope, and its pair with a categorical field,
@@ -1297,6 +1328,8 @@ not the same as filling the mean. A `pair` that includes a numeric field is the 
 reads it per unit of `u` (the slope, independent of the row's value — a row whose value is missing reads it too). `embedding` reads categorical fields only (a
 numeric field's vector is the same on every row); `count` of a numeric field counts the rows with a value. A block whose
 fields are all numeric is a quadratic form of the values (warning `factorization.fields.numeric`).
+
+#### Losses and contests (`task.loss`)
 
 **`task.loss`** — what the target is:
 
@@ -1366,6 +1399,8 @@ fields are all numeric is a quadratic form of the values (warning `factorization
 
   For a model that learns only what the main effects leave over, give it an offset that carries them and
   `linear: false` — see *Low-rank + sparse* below.
+
+#### Low-rank + sparse
 
 **Low-rank + sparse.** Three estimators of a pairing's effect, each with its own strength:
 

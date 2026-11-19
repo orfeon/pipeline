@@ -59,6 +59,7 @@ public final class DocSections {
     private final String text;
     private final String title;
     private final String description;
+    private final int titleHeadings;
     private final Section root;
     private final List<Section> sections = new ArrayList<>();
 
@@ -68,6 +69,7 @@ public final class DocSections {
         this.description = meta[1];
         this.root = new Section(null, 1, null, 0);
         String heading = null;
+        int titles = 0;
 
         Section current = root;
         boolean fenced = false;
@@ -99,6 +101,7 @@ public final class DocSections {
                     if (h.matches()) {
                         final int level = h.group(1).length();
                         if (level == 1) {
+                            titles++;
                             if (heading == null) heading = h.group(2).trim();
                         } else {
                             Section parent = current;
@@ -127,6 +130,7 @@ public final class DocSections {
             if (s.bodyEnd == 0) s.bodyEnd = s.end;
         }
         this.title = meta[0] != null ? meta[0] : heading;
+        this.titleHeadings = titles;
         assignIds();
     }
 
@@ -209,6 +213,11 @@ public final class DocSections {
     public int size() { return text.length(); }
     public String title() { return title; }
     public String description() { return description; }
+    /**
+     * How many level-1 headings the document has. The model is one: the first is the title, and a later one
+     * opens no section — its text stays in the section before it.
+     */
+    public int titleHeadings() { return titleHeadings; }
     public Section root() { return root; }
     public List<Section> sections() { return sections; }
 

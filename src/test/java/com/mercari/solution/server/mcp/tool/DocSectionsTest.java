@@ -213,8 +213,26 @@ public class DocSectionsTest {
             if (!doc.sections().isEmpty()) {
                 Assertions.assertTrue(content.endsWith(doc.body(doc.root()) + content.substring(content.length() - covered)), file.toString());
             }
-            // what a plain read answers stays readable in one go, unless a section has nothing smaller to offer
             final String relative = root.relativize(file).toString().replace('\\', '/');
+            // how the documents are written, so that reading by section works on every one of them:
+            // one title - a second level-1 heading would open no section and hide in the one before it
+            Assertions.assertEquals(1, doc.titleHeadings(), relative + ": a document has exactly one level-1 heading (the title)");
+            // and no stretch of text over the limit without a heading in it: the introduction, and every section's
+            // own text up to its first subsection, is what a read returns when the whole is too large
+            Assertions.assertTrue(doc.body(doc.root()).length() <= ReadDocsTool.OUTLINE_THRESHOLD,
+                    relative + ": the introduction is " + doc.body(doc.root()).length() + " characters; move text under a section heading");
+            for (final DocSections.Section s : doc.sections()) {
+                Assertions.assertTrue(doc.body(s).length() <= ReadDocsTool.OUTLINE_THRESHOLD,
+                        relative + ": section `" + s.id() + "` has " + doc.body(s).length() + " characters of its own text (limit "
+                                + ReadDocsTool.OUTLINE_THRESHOLD + "); split it with sub-headings");
+                // a section over the limit answers with that text and the outline of its subsections: within the limit too
+                if (!s.children().isEmpty() && s.size() > ReadDocsTool.OUTLINE_THRESHOLD) {
+                    final String part = text(ReadDocsTool.read(relative, content, s.id(), false, false));
+                    Assertions.assertTrue(part.length() <= ReadDocsTool.OUTLINE_THRESHOLD,
+                            relative + ": section `" + s.id() + "` answers with " + part.length() + " characters");
+                }
+            }
+            // what a plain read answers stays readable in one go
             final String answer = text(ReadDocsTool.read(relative, content, null, false, false));
             Assertions.assertTrue(answer.length() <= ReadDocsTool.OUTLINE_THRESHOLD, relative + ": " + answer.length());
         }
