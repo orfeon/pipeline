@@ -199,6 +199,12 @@ public class PipelineService {
                     ? FeatureService.planErrors(responseJson.getAsJsonArray("featurePlans")) : List.of();
             responseJson.addProperty("status", planErrors.isEmpty() ? "ok" : "error");
             responseJson.addProperty("millis", (endMillis - startMillis));
+            // the template args the config was assembled with (its defaults overridden by the request's args)
+            if(config.getArgs() != null && !config.getArgs().isEmpty()) {
+                final JsonObject resolvedArgs = new JsonObject();
+                new java.util.TreeMap<>(config.getArgs()).forEach(resolvedArgs::addProperty);
+                responseJson.add("args", resolvedArgs);
+            }
             if(!planErrors.isEmpty()) {
                 final JsonObject error = new JsonObject();
                 error.addProperty("message", String.join("\n", planErrors));

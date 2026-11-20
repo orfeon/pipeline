@@ -60,6 +60,7 @@ public class DataflowJobReader {
 
             final String config = DataflowUtil.getPipelineOption(job, "config");
             if (config != null && !config.isBlank()) {
+                result.append(formatTemplateArgs(config));
                 result.append("\n## Pipeline config (from job parameters)\n```yaml\n");
                 if (config.length() > MAX_CONFIG_LENGTH) {
                     result.append(config, 0, MAX_CONFIG_LENGTH).append("\n... (truncated)\n");
@@ -174,10 +175,39 @@ public class DataflowJobReader {
             byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
         }
         if (byName == null) {
+            // a job launched a moment ago (QUEUED in the Flex Template launcher) is missing from the regional
+            // list although its name is already taken: the aggregated list has it
+            try {
+                byName = DataflowUtil.findActiveJobByNameAggregated(project, region, key, NAME_SEARCH_LIMIT);
+            } catch (final Exception e) {
+                // the regional answer stands (e.g. no permission to list across regions)
+            }
+        }
+        if (byName == null) {
             return null;
         }
         // listJobs returns summary views; re-fetch with full view for pipeline options
         return DataflowUtil.getJob(project, region, byName.getId(), JobView.JOB_VIEW_ALL);
+    }
+
+    /**
+     * The template args of a job's config as their own short section: the config text below it may be cut, and
+     * the args are what a caller checks a launch against. Empty when the config declares none.
+     */
+    static String formatTemplateArgs(final String config) {
+        try {
+            final com.google.gson.JsonObject json = com.mercari.solution.config.Config
+                    .convertConfigJson(config, com.mercari.solution.config.Config.Format.unknown);
+            final java.util.Map<String, String> args = com.mercari.solution.config.Config.resolveArgs(json, null);
+            if (args.isEmpty()) {
+                return "";
+            }
+            final StringBuilder sb = new StringBuilder("\n## Template args (the values the job was launched with)\n");
+            args.forEach((name, value) -> sb.append("- ").append(name).append(": ").append(value).append("\n"));
+            return sb.toString();
+        } catch (final Throwable e) {
+            return "";
+        }
     }
 
     private static void appendVersionSkewNote(final StringBuilder result, final Job job) {
@@ -191,9 +221,11 @@ public class DataflowJobReader {
         }
     }
 
-    private static String jobNotFoundMessage(final String jobIdOrName, final String project, final String region) {
-        return String.format("Dataflow job not found: '%s' (project=%s, region=%s). "
-                        + "Specify a job id or exact job name; use listFailedJobs to discover jobs.",
+    /** The one "not found" answer of every job tool: an ERROR, like the other failures. */
+    public static String jobNotFoundMessage(final String jobIdOrName, final String project, final String region) {
+        return String.format("ERROR: Dataflow job not found: '%s' (project=%s, region=%s). "
+                        + "Specify a job id or the exact job name; a job launched a moment ago is found most reliably "
+                        + "by the id its launch returned.",
                 jobIdOrName, project, region);
     }
 

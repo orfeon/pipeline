@@ -143,6 +143,52 @@ public class DataflowUtil {
         return latest;
     }
 
+    /**
+     * A job by exact name in the project's aggregated (all regions) list of active jobs. A Flex Template job
+     * that was launched a moment ago is still QUEUED in the launcher: the regional list does not show it yet,
+     * the aggregated one does. {@code region} null accepts any region.
+     */
+    public static Job findActiveJobByNameAggregated(
+            final String project,
+            final String region,
+            final String jobName,
+            final int searchLimit) throws IOException {
+
+        final ListJobsRequest request = ListJobsRequest.newBuilder()
+                .setProjectId(project)
+                .setFilter(ListJobsRequest.Filter.ACTIVE)
+                .setPageSize(Math.min(searchLimit, 100))
+                .build();
+
+        final List<Job> jobs = new ArrayList<>();
+        try(final JobsV1Beta3Client client = JobsV1Beta3Client.create()) {
+            for(final Job job : client.aggregatedListJobs(request).iterateAll()) {
+                jobs.add(job);
+                if(jobs.size() >= searchLimit) {
+                    break;
+                }
+            }
+        }
+        return latestByName(jobs, jobName, region);
+    }
+
+    /** The most recently created of the jobs with this exact name, in {@code region} when given (a job that states no location passes). */
+    public static Job latestByName(final Iterable<Job> jobs, final String jobName, final String region) {
+        Job latest = null;
+        for(final Job job : jobs) {
+            if(!job.getName().equals(jobName)) {
+                continue;
+            }
+            if(region != null && !job.getLocation().isEmpty() && !job.getLocation().equals(region)) {
+                continue;
+            }
+            if(latest == null || job.getCreateTime().getSeconds() > latest.getCreateTime().getSeconds()) {
+                latest = job;
+            }
+        }
+        return latest;
+    }
+
     public static List<JobMessage> listJobMessages(
             final String project,
             final String region,

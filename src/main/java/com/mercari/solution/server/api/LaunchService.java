@@ -1,5 +1,7 @@
 package com.mercari.solution.server.api;
 
+import com.google.api.gax.rpc.ApiException;
+import com.google.api.gax.rpc.StatusCode;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
@@ -193,6 +195,12 @@ public class LaunchService {
                     config, parameters, launchArgs, userEmail, LaunchDefaults.get());
 
             final JsonObject job = launcher.launch(launchRequest);
+            // the template args the job runs with (config defaults overridden by the launch args): what to check a launch against
+            if(config.getArgs() != null && !config.getArgs().isEmpty()) {
+                final JsonObject resolvedArgs = new JsonObject();
+                new java.util.TreeMap<>(config.getArgs()).forEach(resolvedArgs::addProperty);
+                job.add("args", resolvedArgs);
+            }
             log(userEmail, launcher.key(), true, configContent, null);
             return job;
         } catch (final Throwable e) {
@@ -204,15 +212,40 @@ public class LaunchService {
     /**
      * A launch failure as fields, the reason first: {@code message} (a user error's plain message, a module's
      * validation messages, or the root cause of anything unexpected) and, for the unexpected ones only,
-     * {@code causes} / {@code stackTrace} apart from it.
+     * {@code causes} / {@code stackTrace} apart from it. A request the target API refused (a gRPC 4xx such as
+     * ALREADY_EXISTS) is a reason too: {@code message} and {@code code}, no trace.
      */
     public static JsonObject launchError(final Throwable e) {
+        final ApiException refused = refusedByApi(e);
+        if(refused != null) {
+            // the target API said why (ALREADY_EXISTS: there is already an active job named ...): that is the whole answer
+            final JsonObject error = new JsonObject();
+            error.addProperty("message", FailureUtil.rootCauseMessage(refused));
+            error.addProperty("code", refused.getStatusCode().getCode().name());
+            return error;
+        }
         if(isUserError(e)) {
             final JsonObject error = new JsonObject();
             error.addProperty("message", userMessage(e));
             return error;
         }
         return FailureUtil.errorJson(e);
+    }
+
+    private static final java.util.Set<StatusCode.Code> REFUSALS = java.util.EnumSet.of(
+            StatusCode.Code.ALREADY_EXISTS, StatusCode.Code.INVALID_ARGUMENT, StatusCode.Code.NOT_FOUND,
+            StatusCode.Code.PERMISSION_DENIED, StatusCode.Code.FAILED_PRECONDITION, StatusCode.Code.UNAUTHENTICATED,
+            StatusCode.Code.OUT_OF_RANGE, StatusCode.Code.RESOURCE_EXHAUSTED);
+
+    /** The gRPC API error in the chain that refuses the request as it was made (a 4xx), null when there is none. */
+    public static ApiException refusedByApi(final Throwable e) {
+        final java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for(Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            if(t instanceof ApiException api && api.getStatusCode() != null && REFUSALS.contains(api.getStatusCode().getCode())) {
+                return api;
+            }
+        }
+        return null;
     }
 
     /**

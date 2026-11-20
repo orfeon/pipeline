@@ -401,6 +401,7 @@ public class Config implements Serializable {
             try {
                 moduleArgs = resolveArgs(jsonObject, templateArgs);
                 jsonObject = substituteArgs(jsonObject, moduleArgs); // evaluated once: templated args (dates, uuids) stay consistent
+                writeResolvedArgs(jsonObject, moduleArgs);
             } catch (Throwable e) {
                 throw new IllegalModuleException("", "pipeline", e);
             }
@@ -642,6 +643,52 @@ public class Config implements Serializable {
             configText = configText.replaceAll(Pattern.quote("${args." + entry.getKey() + "}"), java.util.regex.Matcher.quoteReplacement(escaped));
         }
         return JsonUtil.fromJson(configText, JsonObject.class);
+    }
+
+    /**
+     * Writes the effective template arguments back into the config's args blocks, so that the config text kept
+     * with a job ({@link #getContent}) states the values it ran with rather than the defaults they overrode:
+     * a name declared under {@code args} / {@code system.args} is updated where it is declared, one passed at
+     * load time only is added to {@code system.args}.
+     */
+    static void writeResolvedArgs(final JsonObject configJson, final Map<String, String> resolved) {
+        if(resolved.isEmpty()) {
+            return;
+        }
+        if(configJson.has("system") && !configJson.get("system").isJsonObject()) {
+            return; // not a config this can describe: validation reports it
+        }
+        final JsonObject topArgs = configJson.has("args") && configJson.get("args").isJsonObject()
+                ? configJson.getAsJsonObject("args") : null;
+        JsonObject systemArgs = configJson.has("system") && configJson.getAsJsonObject("system").has("args")
+                && configJson.getAsJsonObject("system").get("args").isJsonObject()
+                ? configJson.getAsJsonObject("system").getAsJsonObject("args") : null;
+        for(final Map.Entry<String, String> entry : resolved.entrySet()) {
+            if(TemplateUtil.isTemplateText(entry.getValue())) {
+                // a value that still reads as a template (an escaped ${...}) would be evaluated a second time by
+                // whoever loads this content: its declaration is left as it was written
+                continue;
+            }
+            final boolean inTop = topArgs != null && topArgs.has(entry.getKey());
+            if(inTop) {
+                topArgs.addProperty(entry.getKey(), entry.getValue());
+            }
+            if(systemArgs != null && systemArgs.has(entry.getKey())) {
+                systemArgs.addProperty(entry.getKey(), entry.getValue());
+            } else if(!inTop) {
+                if(systemArgs == null) {
+                    if(!configJson.has("system")) {
+                        configJson.add("system", new JsonObject());
+                    }
+                    if(configJson.getAsJsonObject("system").has("args")) {
+                        return; // system.args is not an object: validation reports it
+                    }
+                    systemArgs = new JsonObject();
+                    configJson.getAsJsonObject("system").add("args", systemArgs);
+                }
+                systemArgs.addProperty(entry.getKey(), entry.getValue());
+            }
+        }
     }
 
     /**
