@@ -23,6 +23,8 @@ import jakarta.servlet.ServletContext;
         A dry run's 'status' is 'ok' only when the whole config assembled and every feature plan compiled
         ('featurePlans[].ok'): launch only a config whose dry run is 'ok'. When a plan fails, 'status' is
         'error', 'error.messages' lists the reasons per step, and 'featurePlans' / 'spec' are still returned.
+        'args' in the response holds the template arguments the config was assembled with (its defaults
+        overridden by the 'args' parameter).
         Results are returned in JSON format. If the pipeline definition has errors, the error content is
         output in 'error' attribute: 'error.message' (and 'error.messages') is the reason, first; when an
         API call failed, 'error.causes' holds the exception chain (with context such as the query text) and
@@ -65,6 +67,10 @@ import jakarta.servlet.ServletContext;
             "spec": {
               "type": "object",
               "description": "modules: resolved output schema per step"
+            },
+            "args": {
+              "type": "object",
+              "description": "the resolved template arguments (config defaults overridden by the request's args)"
             },
             "featurePlans": {
               "type": "array",

@@ -80,6 +80,8 @@ public class RunPipelineToolTest {
         Assertions.assertTrue(plan.get("ok").getAsBoolean(), plan::toString);
         final String describe = plan.get("describe").getAsString();
         Assertions.assertTrue(describe.contains("f_hist_all_start_price_mean"), describe); // ${args.prefix} applied
+        // ... and the answer says which args it was assembled with
+        Assertions.assertEquals("f_", JsonParser.parseString(text(result)).getAsJsonObject().getAsJsonObject("args").get("prefix").getAsString());
         Assertions.assertTrue(describe.contains("-- audit"), describe);
         Assertions.assertTrue(describe.contains("GROUP BY seller_id"), describe);
     }

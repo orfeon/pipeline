@@ -90,19 +90,27 @@ The source tools read `MERCARI_PIPELINE_SOURCES_PATH` (or `WEB-INF/sources` in t
 |---|---|---|---|
 | `run-pipeline` | `runPipeline` | `config`, `dryRun?`, `args?`, `featurePlanFormat?` (text / json / both) | **`dryRun: true`**: assembles the whole config (module validation, schema resolution, feature plan compilation against the real input schemas) and returns every step's resolved schema (`spec.modules`) plus `featurePlans` (the feature transforms' plans with stages, columns, availability status, hot-key audit SQL, diagnostics — as the text report `describe` by default, as the structured `plan` with `featurePlanFormat: json`). **`dryRun: false`**: runs the pipeline inside the server with DirectRunner and returns `debug` sink outputs — for small test data only |
 | `validate-feature` | `validateFeature` | `config` or `parameters`, `name?`, `inputSchema?`, `args?`, `format?` | a feature transform's `validate --expand` report without a full config |
-| `launch-pipeline` | `launchPipeline` | `config`, `runner` (dataflow / direct / prism / spark), `environment?`, `parameters?`, `args?` | submits the config — Dataflow Flex Template, a pre-created Cloud Run Job, a Cloud Run Worker Pool or Dataproc Serverless — and returns the job (`id`, `name`, `project`, `location`, `state`, `consoleUrl`). Launch parameters default from the config's `options`, then the server's `MERCARI_PIPELINE_LAUNCH_*` environment |
+| `launch-pipeline` | `launchPipeline` | `config`, `runner` (dataflow / direct / prism / spark), `environment?`, `parameters?`, `args?`, `debug?` | submits the config — Dataflow Flex Template, a pre-created Cloud Run Job, a Cloud Run Worker Pool or Dataproc Serverless — and returns `{status, job}`: the job is nested under `job` (`job.id`, `job.name`, `job.project`, `job.location`, `job.state`, `job.consoleUrl`, and `job.args` — the template arguments it runs with). Launch parameters default from the config's `options`, then the server's `MERCARI_PIPELINE_LAUNCH_*` environment |
 
 Template arguments: the config refers to them as `${args.<name>}`; defaults come from the config's
 `args` / `system.args` block and `args` passed to the tool override them. A placeholder that is left
-without a value is refused before launching.
+without a value is refused before launching. The values in effect can be read back: a dry run answers
+them in `args`, a launch in `job.args`, and `get-job` (view `full`) lists them under "Template args" —
+the config kept with a job states the values it was launched with, not the defaults they overrode.
 
 Failures: `run-pipeline` answers `{"status": "error", "error": {...}}` with the reason first —
 `error.message` (and `error.messages`; `error.name` / `error.module` name the failing step). When the
 failure came from an exception (an API call of a module failing, e.g. a query the warehouse rejects),
 `error.message` is the root cause in one line, `error.causes` the exception chain from the outermost to
 the root (the context — such as the query text — is there) and `error.stackTrace` the stack trace.
-`launch-pipeline` puts the reason in `error` and, for an unexpected failure, `causes` / `stackTrace`
-next to it.
+`launch-pipeline` puts the reason in `error`. A request the target refused — e.g. `ALREADY_EXISTS`, a
+job name that is still in use — is that reason and its `code`, nothing more; an unexpected failure adds
+`causes`, and its `stackTrace` only when the call passed `debug: true`.
+
+A job that is not found is a tool error (`isError`) in every job tool (`get-job`, `get-job-progress`,
+`get-job-logs`, `list-job-errors`). A Dataflow job name that the region's job list does not show — a
+job launched a moment ago and still `QUEUED` — is looked up among the project's active jobs of every
+region; the job id returned by the launch is always the most direct reference.
 
 A dry run is `status: ok` only when the whole config assembled **and** every feature plan compiled. If
 a plan is not ok (`featurePlans[].ok: false`), the answer is `status: error` (a tool error) with the

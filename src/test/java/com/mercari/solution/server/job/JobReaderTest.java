@@ -182,4 +182,27 @@ public class JobReaderTest {
         Assertions.assertFalse(LoggingUtil.createDataflowLogFilter("j1", "DEFAULT", null, null).contains("severity"));
     }
 
+    @Test
+    public void testAJobThatIsNotFoundIsAnError() {
+        // get-job, list-job-errors, get-job-logs and get-job-progress decide isError on the ERROR prefix
+        final String message = com.mercari.solution.server.dataflow.DataflowJobReader.jobNotFoundMessage("features-v2", "p", "r");
+        Assertions.assertTrue(message.startsWith("ERROR: Dataflow job not found: 'features-v2' (project=p, region=r)"), message);
+    }
+
+    @Test
+    public void testAJobIsFoundByNameAmongTheAggregatedJobs() {
+        final java.util.function.BiFunction<String, String, com.google.dataflow.v1beta3.Job.Builder> job = (id, location) ->
+                com.google.dataflow.v1beta3.Job.newBuilder().setId(id).setName("features-v2").setLocation(location);
+        final List<com.google.dataflow.v1beta3.Job> jobs = List.of(
+                job.apply("old", "asia-northeast1").setCreateTime(com.google.protobuf.Timestamp.newBuilder().setSeconds(100)).build(),
+                job.apply("new", "asia-northeast1").setCreateTime(com.google.protobuf.Timestamp.newBuilder().setSeconds(200)).build(),
+                job.apply("elsewhere", "us-central1").setCreateTime(com.google.protobuf.Timestamp.newBuilder().setSeconds(300)).build(),
+                com.google.dataflow.v1beta3.Job.newBuilder().setId("other").setName("features-v3").setLocation("asia-northeast1")
+                        .setCreateTime(com.google.protobuf.Timestamp.newBuilder().setSeconds(400)).build());
+        Assertions.assertEquals("new", com.mercari.solution.util.cloud.google.DataflowUtil.latestByName(jobs, "features-v2", "asia-northeast1").getId());
+        Assertions.assertEquals("elsewhere", com.mercari.solution.util.cloud.google.DataflowUtil.latestByName(jobs, "features-v2", null).getId());
+        Assertions.assertNull(com.mercari.solution.util.cloud.google.DataflowUtil.latestByName(jobs, "features-v2", "europe-west1"));
+        Assertions.assertNull(com.mercari.solution.util.cloud.google.DataflowUtil.latestByName(jobs, "nothing", null));
+    }
+
 }

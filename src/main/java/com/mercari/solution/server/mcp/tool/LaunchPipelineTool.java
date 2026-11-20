@@ -28,7 +28,11 @@ import jakarta.servlet.ServletContext;
         get-job / get-job-progress / get-job-logs / list-job-errors (pass the returned job id, or the execution name for Cloud Run).
         Launch parameters not given are resolved from the config's options, then the server's
         MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY> environment, then the server's own project / region.
-        Returns the job object {runner, environment, id, name, project, location, state, consoleUrl, ...}.
+        Returns {status: 'ok', job: {runner, environment, id, name, project, location, state, consoleUrl,
+        args, ...}}: the job id is 'job.id', and 'job.args' holds the template arguments the job runs with
+        (the config's defaults overridden by 'args'). A failure returns {status: 'error', error: <the reason>}
+        ('code' when the target API refused the request, e.g. ALREADY_EXISTS for a job name still in use;
+        'causes' for an unexpected failure, and its 'stackTrace' only with debug=true).
         """,
     inputSchema = """
         {
@@ -53,6 +57,10 @@ import jakarta.servlet.ServletContext;
             "args": {
               "type": ["object", "string"],
               "description": "Template arguments as a JSON object or JSON text. The config refers to them as ${args.<name>} (a bare ${name} is not substituted); values default from the config's own args block, and a placeholder left without a value is refused before launching."
+            },
+            "debug": {
+              "type": "boolean",
+              "description": "Include the stack trace of an unexpected launch failure in the answer. Default false."
             }
           },
           "required": ["config", "runner"]
@@ -63,8 +71,9 @@ import jakarta.servlet.ServletContext;
           "type": "object",
           "properties": {
             "status": { "type": "string" },
-            "job": { "type": "object" },
-            "error": { "type": "string" }
+            "job": { "type": "object", "description": "the launched job: runner, environment, id, name, project, location, state, consoleUrl, args" },
+            "error": { "type": "string", "description": "the reason of a failed launch" },
+            "code": { "type": "string", "description": "the target API's status code when it refused the request (ALREADY_EXISTS, ...)" }
           },
           "required": ["status"]
         }
@@ -104,10 +113,14 @@ public class LaunchPipelineTool implements Tool {
             return Tool.result(response.toString(), false);
         } catch (final Throwable e) {
             response.addProperty("status", "error");
-            // the reason alone in 'error'; an unexpected failure's cause chain and stack trace in their own fields
+            // the reason alone in 'error'; an unexpected failure's cause chain in its own field, its stack trace on request
             final JsonObject error = LaunchService.launchError(e);
             response.addProperty("error", error.get("message").getAsString());
-            for (final String key : new String[]{"name", "module", "causes", "stackTrace"}) {
+            final Object debug = request.arguments().get("debug");
+            if (debug == null || !Boolean.parseBoolean(debug.toString())) {
+                error.remove("stackTrace"); // most of a failure's text, and of no use to a caller that reads the reason
+            }
+            for (final String key : new String[]{"code", "name", "module", "causes", "stackTrace"}) {
                 if (error.has(key)) response.add(key, error.get(key));
             }
             return Tool.result(response.toString(), true);

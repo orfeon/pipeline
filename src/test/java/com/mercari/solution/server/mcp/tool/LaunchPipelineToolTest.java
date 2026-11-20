@@ -102,4 +102,32 @@ public class LaunchPipelineToolTest {
         Assertions.assertTrue(text(result).contains("requires config and runner"));
     }
 
+    @Test
+    public void testARequestTheApiRefusedIsAReasonWithoutATrace() {
+        // ALREADY_EXISTS (a job name still in use) arrives as a gRPC ApiException, possibly wrapped
+        final com.google.api.gax.rpc.ApiException refused = com.google.api.gax.rpc.ApiExceptionFactory.createException(
+                new RuntimeException("ALREADY_EXISTS: (abc): There is already an active job named features-v2."),
+                com.google.api.gax.grpc.GrpcStatusCode.of(io.grpc.Status.Code.ALREADY_EXISTS), false);
+        for (final Throwable e : new Throwable[]{refused, new RuntimeException("launch failed", refused)}) {
+            final JsonObject error = com.mercari.solution.server.api.LaunchService.launchError(e);
+            Assertions.assertEquals("ALREADY_EXISTS", error.get("code").getAsString(), error::toString);
+            Assertions.assertTrue(error.get("message").getAsString().contains("There is already an active job named features-v2"), error::toString);
+            Assertions.assertFalse(error.has("stackTrace"), error::toString);
+            Assertions.assertFalse(error.has("causes"), error::toString);
+            Assertions.assertTrue(error.toString().length() < 400, error::toString);
+        }
+        // a failure of the service itself is not the caller's to fix: it keeps its diagnosis
+        final com.google.api.gax.rpc.ApiException internal = com.google.api.gax.rpc.ApiExceptionFactory.createException(
+                new RuntimeException("INTERNAL: boom"), com.google.api.gax.grpc.GrpcStatusCode.of(io.grpc.Status.Code.INTERNAL), false);
+        Assertions.assertNull(com.mercari.solution.server.api.LaunchService.refusedByApi(internal));
+        Assertions.assertTrue(com.mercari.solution.server.api.LaunchService.launchError(internal).has("stackTrace"));
+    }
+
+    @Test
+    public void testTheDescriptionStatesTheShapeOfTheAnswer() {
+        final String description = LaunchPipelineTool.class.getAnnotation(Tool.Module.class).description();
+        Assertions.assertTrue(description.contains("job.id"), description);
+        Assertions.assertFalse(description.contains("Returns the job object"), description);
+    }
+
 }

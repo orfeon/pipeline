@@ -229,7 +229,7 @@ public final class JobReader {
                 final String region = DataflowJobReader.resolveRegion(ref.region());
                 final com.google.dataflow.v1beta3.Job dataflowJob = DataflowJobReader.resolve(ref.id(), project, region);
                 if (dataflowJob == null) {
-                    return "ERROR: Dataflow job not found: '" + ref.id() + "' (project=" + project + ", region=" + region + ")";
+                    return DataflowJobReader.jobNotFoundMessage(ref.id(), project, region);
                 }
                 filter = LoggingUtil.createDataflowLogFilter(dataflowJob.getId(), severity, null, contains);
                 title = "Dataflow job " + dataflowJob.getId() + " (" + dataflowJob.getName() + ")";
@@ -357,7 +357,7 @@ public final class JobReader {
             final String region = DataflowJobReader.resolveRegion(ref.region());
             final com.google.dataflow.v1beta3.Job dataflowJob = DataflowJobReader.resolve(ref.id(), project, region);
             if (dataflowJob == null) {
-                return "ERROR: Dataflow job not found: '" + ref.id() + "' (project=" + project + ", region=" + region + ")";
+                return DataflowJobReader.jobNotFoundMessage(ref.id(), project, region);
             }
             com.google.dataflow.v1beta3.JobMetrics metrics = null;
             List<com.google.dataflow.v1beta3.AutoscalingEvent> events = List.of();
