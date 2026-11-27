@@ -1,5 +1,6 @@
 package com.mercari.solution.server;
 
+import com.google.gson.JsonObject;
 import com.mercari.solution.server.api.AgentService;
 import com.mercari.solution.server.api.FeatureService;
 import com.mercari.solution.server.api.LaunchService;
@@ -11,9 +12,13 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.*;
+import java.util.Set;
 
 
 public class PipelineApiServer extends HttpServlet {
+
+    /** Routes that run pipelines, launch jobs or drive the agent: guarded by {@link ApiRequestGuard}. */
+    private static final Set<String> STATE_CHANGING_PATHS = Set.of("/pipeline", "/launch", "/agent", "/feature");
 
     @Override
     public void init() {
@@ -53,6 +58,18 @@ public class PipelineApiServer extends HttpServlet {
             response.setContentType("application/json");
             response.getWriter().println("{\"status\":\"error\",\"error\":\"unknown api path; use /api/spec, /api/pipeline, /api/launch, /api/agent or /api/feature\"}");
             return;
+        }
+        if (STATE_CHANGING_PATHS.contains(path)) {
+            final String reason = ApiRequestGuard.rejectReason(
+                    request.getMethod(), request.getContentType(), request.getHeader("Sec-Fetch-Site"));
+            if (reason != null) {
+                response.setStatus(ApiRequestGuard.status(request.getMethod()));
+                final JsonObject error = new JsonObject();
+                error.addProperty("status", "error");
+                error.addProperty("error", reason);
+                response.getWriter().println(error);
+                return;
+            }
         }
         switch (path) {
             case "/spec" -> SpecService.serve(request, response);

@@ -377,9 +377,17 @@ public final class JobReader {
             if (config != null && config.contains("feature")) {
                 try {
                     final JsonObject request = com.mercari.solution.config.Config.convertConfigJson(config, com.mercari.solution.config.Config.Format.unknown);
-                    final JsonObject result = com.mercari.solution.util.pipeline.feature.FeaturePlanService.validate(request);
-                    if (result.has("plan") && result.getAsJsonObject("plan").has("stages")) {
-                        planStages = result.getAsJsonObject("plan").getAsJsonArray("stages");
+                    // compiling the plan substitutes the config's args, evaluating any template among them; the job's
+                    // config was written by whoever launched it, so templated args are not evaluated here
+                    final boolean templatedArgs = com.mercari.solution.config.Config.declaredArgs(request).values().stream()
+                            .anyMatch(com.mercari.solution.util.TemplateUtil::containsTemplateSyntax);
+                    if (templatedArgs) {
+                        warnings += "(feature plan not compiled: the job's config has templated args, which are not evaluated for a job read back from Dataflow)\n";
+                    } else {
+                        final JsonObject result = com.mercari.solution.util.pipeline.feature.FeaturePlanService.validate(request);
+                        if (result.has("plan") && result.getAsJsonObject("plan").has("stages")) {
+                            planStages = result.getAsJsonObject("plan").getAsJsonArray("stages");
+                        }
                     }
                 } catch (final Exception e) {
                     warnings += "(feature plan not compiled: " + e.getMessage() + ")\n";

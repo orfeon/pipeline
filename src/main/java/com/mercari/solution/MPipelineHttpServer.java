@@ -7,6 +7,7 @@ import com.mercari.solution.config.Config;
 import com.mercari.solution.config.Options;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -180,16 +181,27 @@ public class MPipelineHttpServer {
                 body = null;
             }
 
-            final Map<String, String> templateArgs = baseTemplateArgs();
+            // args supplied by the request: Pub/Sub push attributes, then ?args.* query parameters
+            final Map<String, String> requestArgs = new HashMap<>();
 
             // Pub/Sub push envelope: message.data becomes the body, attributes become args
-            body = unwrapPubSubPush(body, templateArgs);
+            body = unwrapPubSubPush(body, requestArgs);
 
             for(final Map.Entry<String, String> entry : queryParams.entrySet()) {
                 if(entry.getKey().startsWith("args.")) {
-                    templateArgs.put(entry.getKey().substring("args.".length()), entry.getValue());
+                    requestArgs.put(entry.getKey().substring("args.".length()), entry.getValue());
                 }
             }
+
+            final String templateArg = templateSyntaxArg(requestArgs);
+            if(templateArg != null) {
+                respondJson(exchange, 400, errorJson("INVALID",
+                        "request arg '" + templateArg + "' must be a plain value: template syntax (${...}, <#...>) is not accepted in request args"));
+                return;
+            }
+
+            final Map<String, String> templateArgs = baseTemplateArgs();
+            templateArgs.putAll(requestArgs);
 
             // config and data resolution: with a config fixed at deploy time (or given by the
             // config query param), the body is the request source data; otherwise it is the config
@@ -214,8 +226,11 @@ public class MPipelineHttpServer {
                 return;
             }
 
-            final String runContext = queryParams.getOrDefault("context", context);
-            final Config.Format runFormat = queryParams.containsKey("format")
+            // a config fixed at deploy time is parsed the way it was deployed: letting the caller pick the parser
+            // (or the context) would let them force a parse error that echoes the config's contents
+            final boolean callerChoosesParsing = fixedConfigParam == null;
+            final String runContext = callerChoosesParsing ? queryParams.getOrDefault("context", context) : context;
+            final Config.Format runFormat = callerChoosesParsing && queryParams.containsKey("format")
                     ? Config.Format.valueOf(queryParams.get("format"))
                     : format;
 
@@ -256,6 +271,22 @@ public class MPipelineHttpServer {
         } finally {
             running.release();
         }
+    }
+
+    /**
+     * The name of the first request arg whose value holds template syntax, or null. Request args are data: they
+     * override the config's args and are spliced into its text, which FreeMarker then evaluates with the
+     * {@code utils} functions (access tokens, secrets, outbound HTTP) — a templated value would let any caller of
+     * /run, or any publisher to the pushed topic, run those with the service's identity.
+     */
+    static String templateSyntaxArg(final Map<String, String> requestArgs) {
+        for(final Map.Entry<String, String> entry : requestArgs.entrySet()) {
+            if(TemplateUtil.containsTemplateSyntax(entry.getKey())
+                    || TemplateUtil.containsTemplateSyntax(entry.getValue())) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     private Map<String, String> baseTemplateArgs() {

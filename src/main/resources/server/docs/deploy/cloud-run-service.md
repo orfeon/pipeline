@@ -82,14 +82,15 @@ service account's permissions — see [Security](#security).
 
 | input | meaning |
 | --- | --- |
-| query `args.xxx={value}` | template args filling `${args.xxx}` placeholders (same as the CLI's `--args.xxx`) |
+| query `args.xxx={value}` | template args filling `${args.xxx}` placeholders (same as the CLI's `--args.xxx`). Plain values only: a name or value holding template syntax (`${...}`, `#{...}`, `<#...>`, `[#...]`) is refused with `400` |
 | query `config={resource}` | config to run (only honored without a fixed config) |
-| query `context`, `format` | optional overrides of the config context / format |
+| query `context`, `format` | optional overrides of the config context / format (only honored without a fixed config) |
 | request body | **data** for the [request source module](../module/source/request.md) when a config is fixed (or given via `?config=`); otherwise the **config text** itself |
 
 A [Pub/Sub push](https://cloud.google.com/pubsub/docs/push) envelope is unwrapped
 transparently: `message.data` (base64) becomes the effective body and `message.attributes`
 become template args, so a push subscription pointing at `/run` drives the pipeline directly.
+Attributes follow the same plain-value rule as `args.*` query parameters.
 
 Response (the HTTP status mirrors the pipeline result — `200` on `DONE`, `500` on failure,
 `400` for config/body errors, `429` while another run occupies the instance):
@@ -120,7 +121,11 @@ curl -X POST "https://{service}.run.app/run?args.targetDate=2026-08-19" \
   callers (Cloud Scheduler / Pub/Sub push service accounts, users). The endpoint runs
   pipelines with the service's service account.
 * Prefer the **fixed config** deployment: the endpoint then only accepts data and template
-  args for a predefined pipeline, never an arbitrary config.
+  args for a predefined pipeline, never an arbitrary config. Request args are taken as plain
+  values (never evaluated as templates), and the caller cannot change how the config is parsed.
+* Request args still override any arg of the fixed config and are spliced into its text as they
+  are. Do not place an arg a caller sets inside SQL text or a resource path unless the value is
+  safe there; validate it in the pipeline (e.g. a `filter`) or keep such args fixed in the config.
 * Without a fixed config, anyone allowed to invoke the service can execute any config with
   the service account's permissions — restrict invoker bindings accordingly.
 

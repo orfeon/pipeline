@@ -31,6 +31,45 @@ public class TemplateUtilTest {
     }
 
     @Test
+    public void testNewBuiltinIsDisabled() {
+        // ?new would instantiate freemarker.template.utility.Execute and run an OS command
+        final String text = "<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"echo hacked\")}";
+        final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
+                () -> TemplateUtil.executeStrictTemplate(text, new HashMap<>()));
+        Assertions.assertFalse(String.valueOf(e.getMessage()).contains("hacked\n"));
+        Assertions.assertThrows(RuntimeException.class,
+                () -> TemplateUtil.executeStrictTemplate("${\"freemarker.template.utility.ObjectConstructor\"?new()(\"java.lang.ProcessBuilder\", \"id\")}", new HashMap<>()));
+    }
+
+    @Test
+    public void testStaticsAllowList() {
+        Assertions.assertEquals("1",
+                TemplateUtil.executeStrictTemplate("${statics[\"java.lang.Math\"].min(1, 2)}", new HashMap<>()));
+        Assertions.assertEquals("2026-01-02",
+                TemplateUtil.executeStrictTemplate("${statics[\"java.time.LocalDate\"].of(2026, 1, 2).toString()}", new HashMap<>()));
+        // classes off the allow-list (process environment, files, runtime) are refused
+        for(final String className : new String[]{"java.lang.System", "java.lang.Runtime", "java.nio.file.Files", "java.lang.Class"}) {
+            Assertions.assertThrows(RuntimeException.class,
+                    () -> TemplateUtil.executeStrictTemplate("${statics[\"" + className + "\"].toString()}", new HashMap<>()),
+                    className);
+        }
+    }
+
+    @Test
+    public void testContainsTemplateSyntax() {
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("${utils.gcp.accessToken()}"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("x#{1}"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("<#assign a=1>"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("</#if>"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("<@m/>"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("[#assign a=1]"));
+        Assertions.assertTrue(TemplateUtil.containsTemplateSyntax("[=a]"));
+        Assertions.assertFalse(TemplateUtil.containsTemplateSyntax("2026-08-19"));
+        Assertions.assertFalse(TemplateUtil.containsTemplateSyntax("a < b and c > d, $5, {x}, #tag, [1, 2]"));
+        Assertions.assertFalse(TemplateUtil.containsTemplateSyntax(null));
+    }
+
+    @Test
     public void testContainsInputTemplate() {
         Assertions.assertTrue(TemplateUtil.containsInputTemplate("gs://bucket/${input.table}/data"));
         Assertions.assertTrue(TemplateUtil.containsInputTemplate("${ input.tag }"));

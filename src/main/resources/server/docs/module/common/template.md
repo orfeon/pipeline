@@ -44,8 +44,14 @@ Consult each module's documentation for which of its parameters accept templates
 - **`context.timestamp`** — the element's event timestamp (available in modules that bind context
   variables, e.g. files sink paths).
 - **`utils.*`** — built-in function namespaces, available in every template (see below).
-- **`statics`** — access to Java static methods, e.g.
-  `${statics["java.lang.Math"].min(field1, field2)}`.
+- **`statics`** — access to Java static methods of an allow-listed set of classes, e.g.
+  `${statics["java.lang.Math"].min(field1, field2)}`. Allowed: `java.lang.Math`, `java.lang.StrictMath`,
+  the boxed primitives (`java.lang.Integer`, `Long`, `Double`, `Float`, `Short`, `Byte`, `Boolean`,
+  `Character`), `java.lang.String`, `java.math.BigDecimal`, `java.math.BigInteger`, `java.util.Objects`,
+  `java.util.UUID`, and `java.time.Instant`, `LocalDate`, `LocalDateTime`, `LocalTime`, `OffsetDateTime`,
+  `ZonedDateTime`, `ZoneId`, `ZoneOffset`, `Duration`, `Period`, `java.time.format.DateTimeFormatter`,
+  `java.time.temporal.ChronoUnit`. Any other class is refused.
+- The `?new` and `?api` built-ins are disabled: template text cannot instantiate classes.
 - Legacy aliases `__StringUtils` / `__DateTimeUtils` exist in some modules; prefer `utils.string`
   and `utils.datetime`.
 

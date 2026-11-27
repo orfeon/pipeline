@@ -531,12 +531,14 @@ public class Config implements Serializable {
             final String configText,
             final Format format) {
 
+        // the config text itself is kept out of these messages: they reach logs and API / HTTP error responses,
+        // and a config can hold credentials written inline (a JDBC password, static cloud keys)
         switch (format) {
             case yaml -> {
                 try {
                     return parseYaml(configText);
                 } catch (final Throwable e) {
-                    final String errorMessage = "Failed to parse config yaml error: " + e.getMessage() + ", yaml: " + configText;
+                    final String errorMessage = "Failed to parse config yaml error: " + e.getMessage();
                     LOG.error(errorMessage);
                     throw new IllegalModuleException("", "pipeline", List.of(errorMessage));
                 }
@@ -545,7 +547,7 @@ public class Config implements Serializable {
                 try {
                     return JsonUtil.fromJson(configText, JsonObject.class);
                 } catch (final Throwable e) {
-                    final String errorMessage = "Failed to parse config json error: " + e.getMessage() + ", json: " + configText;
+                    final String errorMessage = "Failed to parse config json error: " + e.getMessage();
                     LOG.error(errorMessage);
                     throw new IllegalModuleException("", "pipeline", List.of(errorMessage));
                 }
@@ -557,13 +559,13 @@ public class Config implements Serializable {
                     try {
                         return parseYaml(configText);
                     } catch (final Throwable ee) {
-                        final String errorMessage = "Failed to parse config: " + configText;
+                        final String errorMessage = "Failed to parse config (neither json nor yaml)";
                         LOG.error(errorMessage);
                         // not json: report the yaml error (e.g. duplicate key), not the json syntax error
                         throw new IllegalModuleException(errorMessage, ee);
                     }
                 } catch (final Throwable e) {
-                    final String errorMessage = "Failed to parse config json: " + configText;
+                    final String errorMessage = "Failed to parse config json";
                     LOG.error(errorMessage);
                     throw new IllegalModuleException(errorMessage, e);
                 }
@@ -698,6 +700,42 @@ public class Config implements Serializable {
      * arguments ({@code ${<name>}} inside module templates such as a BigQuery query).
      */
     public static Map<String, String> resolveArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
+        final Map<String, String> args = declaredArgs(configJson);
+
+        if(paramsArgs != null && !paramsArgs.isEmpty()) {
+            args.putAll(paramsArgs);
+        }
+
+        final Map<String, String> resolved = new LinkedHashMap<>();
+        if(args.isEmpty()) {
+            return resolved;
+        }
+
+        final Map<String,String> values = new LinkedHashMap<>();
+        for(final Map.Entry<String,String> entry : args.entrySet()) {
+            final String value;
+            if(TemplateUtil.isTemplateText(entry.getValue())) {
+                String entryValue = entry.getValue();
+                for(final Map.Entry<String, String> ventry : values.entrySet()) {
+                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), java.util.regex.Matcher.quoteReplacement(ventry.getValue()));
+                }
+                value = TemplateUtil.executeStrictTemplate(entryValue, values);
+            } else {
+                value = entry.getValue();
+            }
+            values.put("${args." + entry.getKey() + "}", value);
+            resolved.put(entry.getKey(), value);
+        }
+        return resolved;
+    }
+
+    /**
+     * The template arguments a config declares ({@code system.args} merged with the deprecated top-level
+     * {@code args}, top-level entries overriding), as written: nothing is evaluated. For showing or checking the
+     * args of a config the server did not author (e.g. one read back from a job), where evaluating its templates
+     * would run someone else's template text with the server's identity.
+     */
+    public static Map<String, String> declaredArgs(final JsonObject configJson) {
         // system.args and the (deprecated) top-level args are merged, top-level entries overriding
         final JsonObject argsJsonObject = new JsonObject();
         if(configJson.has("system") && configJson.get("system").isJsonObject()
@@ -726,32 +764,7 @@ public class Config implements Serializable {
                 args.put(entry.getKey(), entry.getValue().toString());
             }
         }
-
-        if(paramsArgs != null && !paramsArgs.isEmpty()) {
-            args.putAll(paramsArgs);
-        }
-
-        final Map<String, String> resolved = new LinkedHashMap<>();
-        if(args.isEmpty()) {
-            return resolved;
-        }
-
-        final Map<String,String> values = new LinkedHashMap<>();
-        for(final Map.Entry<String,String> entry : args.entrySet()) {
-            final String value;
-            if(TemplateUtil.isTemplateText(entry.getValue())) {
-                String entryValue = entry.getValue();
-                for(final Map.Entry<String, String> ventry : values.entrySet()) {
-                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), java.util.regex.Matcher.quoteReplacement(ventry.getValue()));
-                }
-                value = TemplateUtil.executeStrictTemplate(entryValue, values);
-            } else {
-                value = entry.getValue();
-            }
-            values.put("${args." + entry.getKey() + "}", value);
-            resolved.put(entry.getKey(), value);
-        }
-        return resolved;
+        return args;
     }
 
     private static Map<String, Map<String, String>> filterConfigArgs(final String[] args) {

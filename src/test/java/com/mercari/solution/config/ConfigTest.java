@@ -304,4 +304,32 @@ public class ConfigTest {
         Assertions.assertFalse(outputSpannerParameters.get("createTable").getAsBoolean());
     }
 
+    @Test
+    public void testParseErrorDoesNotEchoConfigText() {
+        // a YAML config parsed as JSON fails; the error must not carry the config (it can hold credentials)
+        final String yaml = """
+                sources:
+                  - name: input
+                    module: jdbc
+                    parameters:
+                      password: secret-value-123
+                """;
+        final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
+                () -> Config.convertConfigJson(yaml, Config.Format.json));
+        Assertions.assertFalse(String.valueOf(e.getMessage()).contains("secret-value-123"), e.getMessage());
+    }
+
+    @Test
+    public void testDeclaredArgsAreNotEvaluated() {
+        final JsonObject json = Config.convertConfigJson("""
+                {"system": {"args": {"a": "plain", "t": "${utils.string.uuid()}"}}, "args": {"b": 1}}
+                """, Config.Format.json);
+        final Map<String, String> args = Config.declaredArgs(json);
+        Assertions.assertEquals("plain", args.get("a"));
+        Assertions.assertEquals("${utils.string.uuid()}", args.get("t"));
+        Assertions.assertEquals("1", args.get("b"));
+        // resolveArgs still evaluates them
+        Assertions.assertNotEquals("${utils.string.uuid()}", Config.resolveArgs(json, null).get("t"));
+    }
+
 }

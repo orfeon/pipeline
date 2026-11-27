@@ -45,9 +45,7 @@ public class DiagnosisNotifier {
         final String slackWebhook = System.getenv(ENV_SLACK_WEBHOOK);
         if (slackWebhook != null && !slackWebhook.isBlank()) {
             try {
-                final JsonObject payload = new JsonObject();
-                payload.addProperty("text", buildSlackText(record));
-                post(slackWebhook.trim(), payload.toString());
+                post("slack", slackWebhook.trim(), buildSlackPayload(record).toString());
             } catch (final Throwable e) {
                 LOG.error("Failed to notify Slack for job: " + event.jobId(), e);
             }
@@ -56,7 +54,7 @@ public class DiagnosisNotifier {
         final String webhook = System.getenv(ENV_WEBHOOK);
         if (webhook != null && !webhook.isBlank()) {
             try {
-                post(webhook.trim(), record.toString());
+                post("webhook", webhook.trim(), record.toString());
             } catch (final Throwable e) {
                 LOG.error("Failed to notify webhook for job: " + event.jobId(), e);
             }
@@ -132,6 +130,19 @@ public class DiagnosisNotifier {
         return wrapped;
     }
 
+    /**
+     * The Slack message. Link and media unfurling are turned off: the text carries model output derived from job
+     * logs, which can hold attacker-supplied text, and an unfurled URL is fetched by Slack without anyone clicking
+     * it — a prompt-injected diagnosis could otherwise send what the agent read to a URL of the attacker's choice.
+     */
+    static JsonObject buildSlackPayload(final JsonObject record) {
+        final JsonObject payload = new JsonObject();
+        payload.addProperty("text", buildSlackText(record));
+        payload.addProperty("unfurl_links", false);
+        payload.addProperty("unfurl_media", false);
+        return payload;
+    }
+
     static String buildSlackText(final JsonObject record) {
         final StringBuilder text = new StringBuilder();
         text.append(":rotating_light: Dataflow job failed: `").append(getString(record, "jobId")).append("`");
@@ -175,7 +186,8 @@ public class DiagnosisNotifier {
         return text.toString();
     }
 
-    private static void post(final String url, final String body) throws Exception {
+    /** {@code label} names the destination in logs: a webhook URL is itself the credential, so it is never logged. */
+    private static void post(final String label, final String url, final String body) throws Exception {
         final HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(10))
@@ -187,8 +199,8 @@ public class DiagnosisNotifier {
                 .build()
                 .send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() >= 300) {
-            LOG.warn("Notification endpoint {} returned status {}: {}",
-                    url, response.statusCode(), response.body());
+            LOG.warn("Notification endpoint ({}) returned status {}: {}",
+                    label, response.statusCode(), response.body());
         }
     }
 

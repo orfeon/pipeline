@@ -193,12 +193,16 @@ public class DataflowJobReader {
     /**
      * The template args of a job's config as their own short section: the config text below it may be cut, and
      * the args are what a caller checks a launch against. Empty when the config declares none.
+     * <p>
+     * The values are listed as the job's config holds them and are never evaluated: whoever launched the job wrote
+     * that text, and evaluating its templates here would run it with the server's identity (access tokens,
+     * secrets). A config launched through this server already holds its resolved values.
      */
     static String formatTemplateArgs(final String config) {
         try {
             final com.google.gson.JsonObject json = com.mercari.solution.config.Config
                     .convertConfigJson(config, com.mercari.solution.config.Config.Format.unknown);
-            final java.util.Map<String, String> args = com.mercari.solution.config.Config.resolveArgs(json, null);
+            final java.util.Map<String, String> args = com.mercari.solution.config.Config.declaredArgs(json);
             if (args.isEmpty()) {
                 return "";
             }

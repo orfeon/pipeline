@@ -266,7 +266,8 @@ claude mcp add --transport http mercari-pipeline https://<service>.run.app/mcp \
 ### Local server (`mvn jetty:run -Pserver`)
 
 For development, run the server from the repository (no authentication) and register
-`http://localhost:8080/mcp` as above:
+`http://localhost:8080/mcp` as above. It listens on `127.0.0.1` only, because anyone who can reach it runs
+pipelines with your credentials; pass `-Djetty.http.host=0.0.0.0` only on a network you trust:
 
 ```sh
 gcloud auth application-default login   # credentials the launch / job tools use

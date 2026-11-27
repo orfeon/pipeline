@@ -467,6 +467,7 @@ public class MicrobatchQuery {
 
     static Template createTemplate(final String template) {
         final Configuration templateConfig = new Configuration(Configuration.VERSION_2_3_30);
+        com.mercari.solution.util.TemplateUtil.harden(templateConfig);
         templateConfig.setNumberFormat("computer");
         try {
             return new Template("config", new StringReader(template), templateConfig);

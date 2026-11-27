@@ -112,9 +112,9 @@ Build and run it locally as follows, then open `http://localhost:8080/` in your 
 # Build and push the server container image
 mvn clean package -DskipTests -Pserver -Dimage="{region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server"
 
-# Run locally
+# Run locally (published on loopback only: the local server has no authentication and runs with your credentials)
 docker run \
-  -p "8080:8080" \
+  -p "127.0.0.1:8080:8080" \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
   -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server
