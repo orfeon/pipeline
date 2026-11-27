@@ -113,6 +113,14 @@ The pipeline images themselves (not the server) read `MPIPELINE_CONFIG`,
 
 The diagnosis tools additionally need the roles listed in [diagnosis.md](diagnosis.md#3-configure-the-server).
 
+## Calling the REST API
+
+`/api/pipeline`, `/api/launch`, `/api/agent` and `/api/feature` run pipelines, launch jobs or drive the agent
+with the server's credentials, so they accept only `POST` requests with `Content-Type: application/json`, and
+refuse requests a browser marks as cross-site (`Sec-Fetch-Site: cross-site` / `same-site`). This keeps a web page
+on another site from driving them through your browser (cross-site request forgery). The Builder UI already
+sends such requests; a script calling the API must send `Content-Type: application/json` too.
+
 ## Connecting an MCP client
 
 The MCP surface (tools, resources, prompt, recommended workflows) and the client setup — Cloud Run

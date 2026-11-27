@@ -397,6 +397,9 @@
         <packaging>war</packaging>
         <jib.image>jetty:${jetty.version}-jdk21</jib.image>
         <jib.appRoot>/var/lib/jetty/webapps/ROOT</jib.appRoot>
+        <!-- mvn jetty:run listens on loopback only: the local server has no authentication and runs pipelines with
+             the developer's credentials. Override with -Djetty.http.host=0.0.0.0 to expose it deliberately. -->
+        <jetty.http.host>127.0.0.1</jetty.http.host>
       </properties>
       <dependencies>
         <dependency>
@@ -475,6 +478,9 @@
             <artifactId>jetty-ee11-maven-plugin</artifactId>
             <version>${jetty.version}</version>
             <configuration>
+              <httpConnector>
+                <host>${jetty.http.host}</host>
+              </httpConnector>
               <webApp>
                 <resourceBases>
                   <resourceBase>src/main/webapp</resourceBase>

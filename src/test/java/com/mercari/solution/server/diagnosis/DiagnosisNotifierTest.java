@@ -62,4 +62,13 @@ public class DiagnosisNotifierTest {
         Assertions.assertTrue(noDiagnosis.contains("No automated diagnosis available"), noDiagnosis);
     }
 
+    @Test
+    public void testSlackPayloadDisablesUnfurling() {
+        final JsonObject payload = DiagnosisNotifier.buildSlackPayload(
+                DiagnosisNotifier.buildRecord(EVENT, null, "{\"summary\":\"see https://example.com/x.png\"}"));
+        Assertions.assertTrue(payload.get("text").getAsString().contains("https://example.com/x.png"));
+        Assertions.assertFalse(payload.get("unfurl_links").getAsBoolean());
+        Assertions.assertFalse(payload.get("unfurl_media").getAsBoolean());
+    }
+
 }

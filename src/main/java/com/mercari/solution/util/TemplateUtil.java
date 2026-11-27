@@ -3,7 +3,8 @@ package com.mercari.solution.util;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.text.template.*;
 import freemarker.core.Environment;
-import freemarker.ext.beans.BeansWrapper;
+import freemarker.core.TemplateClassResolver;
+import freemarker.ext.beans.BeansWrapperBuilder;
 import freemarker.template.*;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.commons.csv.CSVRecord;
@@ -26,13 +27,62 @@ public class TemplateUtil {
             "json", new JsonFunctions()
     );
 
+    /**
+     * The classes whose static members {@code statics["<class>"]} may reach in a template. Everything else is
+     * refused: an unrestricted static model reaches {@code java.lang.System}, {@code java.lang.Runtime},
+     * {@code java.nio.file.Files} and friends, which lets anyone who can supply template text (a config, a
+     * template arg) read the process environment and files or run commands.
+     */
+    static final Set<String> ALLOWED_STATIC_CLASSES = Set.of(
+            "java.lang.Math",
+            "java.lang.StrictMath",
+            "java.lang.Integer",
+            "java.lang.Long",
+            "java.lang.Double",
+            "java.lang.Float",
+            "java.lang.Short",
+            "java.lang.Byte",
+            "java.lang.Boolean",
+            "java.lang.Character",
+            "java.lang.String",
+            "java.math.BigDecimal",
+            "java.math.BigInteger",
+            "java.util.Objects",
+            "java.util.UUID",
+            "java.time.Instant",
+            "java.time.LocalDate",
+            "java.time.LocalDateTime",
+            "java.time.LocalTime",
+            "java.time.OffsetDateTime",
+            "java.time.ZonedDateTime",
+            "java.time.ZoneId",
+            "java.time.ZoneOffset",
+            "java.time.Duration",
+            "java.time.Period",
+            "java.time.format.DateTimeFormatter",
+            "java.time.temporal.ChronoUnit");
+
+    private static final TemplateHashModel STATICS = new AllowedStaticModels(
+            new BeansWrapperBuilder(Configuration.VERSION_2_3_34).build().getStaticModels());
+
+    /**
+     * Closes the FreeMarker features that turn template text into code execution: {@code ?new} (which
+     * instantiates any {@code TemplateModel} class, e.g. {@code freemarker.template.utility.Execute}) and
+     * {@code ?api}. Every {@link Configuration} that evaluates text a user wrote goes through here.
+     */
+    public static void harden(final Configuration templateConfig) {
+        templateConfig.setNewBuiltinClassResolver(TemplateClassResolver.ALLOWS_NOTHING_RESOLVER);
+        templateConfig.setAPIBuiltinEnabled(false);
+    }
+
     public static Template createSafeTemplate(final String name, final String template) {
 
         final Configuration templateConfig = new Configuration(Configuration.VERSION_2_3_34);
+        harden(templateConfig);
         templateConfig.setNumberFormat("computer");
         templateConfig.setTemplateExceptionHandler(new ImputeSameVariablesTemplateExceptionHandler());
         templateConfig.setLogTemplateExceptions(false);
-        templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setSharedVariable("statics", STATICS);
         templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         try {
             templateConfig.setSharedVariable("utils", UTILS);
@@ -44,8 +94,9 @@ public class TemplateUtil {
 
     public static Template createStrictTemplate(final String name, final String template) {
         final Configuration templateConfig = new Configuration(Configuration.VERSION_2_3_34);
+        harden(templateConfig);
         templateConfig.setNumberFormat("computer");
-        templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setSharedVariable("statics", STATICS);
         templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         //templateConfig.setObjectWrapper(new CSVWrapper(Configuration.VERSION_2_3_30));
         try {
@@ -83,6 +134,22 @@ public class TemplateUtil {
             return false;
         }
         return text.contains("${") && text.contains("}");
+    }
+
+    // FreeMarker interpolations (${...}, #{...}, [=...]) and directive / macro tags in angle- or square-bracket syntax
+    private static final java.util.regex.Pattern TEMPLATE_SYNTAX_PATTERN =
+            java.util.regex.Pattern.compile("\\$\\{|#\\{|\\[=|</?[#@]|\\[/?[#@]");
+
+    /**
+     * True when the text holds anything FreeMarker would evaluate. Values a caller supplies as plain data (e.g. the
+     * template args of an HTTP request) must not, because they are spliced into config text that is evaluated as a
+     * template — at load time and again by modules' per-record templates.
+     */
+    public static boolean containsTemplateSyntax(final String text) {
+        if(text == null) {
+            return false;
+        }
+        return TEMPLATE_SYNTAX_PATTERN.matcher(text).find();
     }
 
     // Pipeline-assembly-time template expressions over the reserved `input` namespace,
@@ -142,6 +209,31 @@ public class TemplateUtil {
     public static void setFunctions(final Map<String, Object> values, final String prefix) {
         values.put(prefix + "StringUtils", new StringFunctions());
         values.put(prefix + "DateTimeUtils", new DateTimeFunctions());
+    }
+
+    /** {@code statics} restricted to {@link #ALLOWED_STATIC_CLASSES}. */
+    static final class AllowedStaticModels implements TemplateHashModel {
+
+        private final TemplateHashModel delegate;
+
+        AllowedStaticModels(final TemplateHashModel delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public TemplateModel get(final String key) throws TemplateModelException {
+            if(!ALLOWED_STATIC_CLASSES.contains(key)) {
+                throw new TemplateModelException("statics[\"" + key + "\"] is not allowed. Allowed classes: "
+                        + ALLOWED_STATIC_CLASSES.stream().sorted().collect(Collectors.joining(", ")));
+            }
+            return delegate.get(key);
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return false;
+        }
+
     }
 
     static class ImputeSameVariablesTemplateExceptionHandler implements TemplateExceptionHandler {
